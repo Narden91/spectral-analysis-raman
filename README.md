@@ -6,9 +6,6 @@ Python pipeline for extracellular-vesicle Raman spectroscopy across three indepe
 |---|---|---|
 | EDA | `uv run scripts/run_eda.py` | `output_EDA/` |
 | Spectral plots and QC | `uv run scripts/run_spectral_plots.py` | `Output_plot/qc/`, `Output_plot/spectral_plots/` |
-| ML | `uv run scripts/run_ml_pipeline.py` or `uv run -m src.main` | `output_ML/` |
-
-All ML splitting is subject-level. Measurements, slides, maps, and pixels may become training or analysis items only after the subject split is fixed.
 
 ## Data Model
 
@@ -49,9 +46,7 @@ uv run -m src.data_preparation.reorganize
 
 Default data roots:
 
-- `data_raw/`: original Renishaw exports
-- `data_cleaned/`: cleaned copy and curated clinical files
-- `data/`: reorganized canonical dataset
+- `data/`: canonical dataset
 
 ## Run The Pipelines
 
@@ -74,21 +69,7 @@ uv run scripts/run_spectral_plots.py --outdir Output_plot
 
 The figures written under `Output_plot/spectral_plots/` are post-preprocessing waveforms produced after the Raman preprocessing pipeline, not raw spectra.
 
-ML:
 
-```bash
-uv run scripts/run_ml_pipeline.py
-uv run scripts/run_ml_pipeline.py --config config/ml.yaml
-uv run scripts/run_ml_pipeline.py --max-subjects 20
-uv run scripts/run_ml_pipeline.py --force-reprocess
-```
-
-
-Analyze saved outputs:
-
-```bash
-uv run scripts/analyze_ml_results.py --input output_ML --output doc/Analysis_ML --no-pdf
-```
 
 `doc/Analysis_*` directories are generated artifacts and are not part of the maintained documentation set.
 
@@ -131,30 +112,18 @@ done
 `config/settings.yaml` is the shared base config. Track configs use `_extends: settings.yaml` and are the single source of truth for track-owned sections:
 
 - `config/eda.yaml`
-- `config/ml.yaml`
 - `config/plots.yaml`
 
 Current defaults to note:
 
 - `config/eda.yaml` owns `run.ranges`: `["1300", "2850", "both"]`.
-- `config/ml.yaml` is the publication-oriented ML config. It uses balanced accuracy for method selection, keeps a holdout lockbox, and leaves holdout scoring disabled unless explicitly enabled.
 - EDA preprocessing order is: dead/anomalous screen → cosmic-ray detection → optional cosmic-ray suppression → spectral quality filter → edge trim → baseline correction → isolated spike repair → optional smoothing → vector normalization.
 - Cosmic-ray detection always runs; suppression is controlled by `preprocessing.cosmic_ray.enabled`.
 - Additive capabilities (all off by default): region weighting/exclusion, pixel-cluster interpretation, QC-cluster analysis, region-influence robustness, figure gating via `analysis.figures`, and ML latent-structure reporting.
-- ML applies the fold-local per-wavenumber spectral scaler only to raw-channel learned transforms such as spectral PCA. Engineered Raman features are computed from physically preprocessed, unscaled subject-mean spectra, then scaled fold-locally at the feature level inside CV/holdout.
 - `output.keep_preprocessing_artifacts` controls whether per-area preprocessing artifacts are kept in `output_EDA/processed/preprocessing_artifacts`.
 - `output.keep_whole_spectra_cache` controls whether the paired-area whole-spectrum cache is saved in `output_EDA/processed/whole_spectra`.
 
-## Maintained Docs
 
-- `doc/eda_pipeline.md`: EDA workflow and outputs
-- `doc/eda_methods.md`: EDA method reference (PCA, QC, robustness, MFA, CCA)
-- `doc/plots_command.md`: plot command reference and output map
-- `plots.md`: spectral plot catalog and output layout
-- `doc/ml_pipeline.md`: ML workflow
-- `doc/whole_spectra_concatenation.md`: whole-spectrum fusion notes
-- `doc/clinical_mismatch_handling.md`: clinical/data-label reconciliation
-- `doc/bands_frequencies.md`: curated Raman band windows and caveats
 
 ## Scientific Caveats
 

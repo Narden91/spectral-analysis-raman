@@ -6,7 +6,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from src.metadata.parser import parse_filename, parse_raw_filename
+from src.metadata.parser import parse_filename
 from src import config, resolve_project_path
 
 logger = logging.getLogger(__name__)
@@ -111,121 +111,6 @@ def _deduplicate_measurements(
     return pd.concat(renumbered, ignore_index=True)
 
 
-def build_raw_file_index(data_dir: str | Path = None) -> pd.DataFrame:
-    """
-    Crawl `data_raw/` and index all Renishaw .txt measurement files.
-
-    Applies the Redone override rule: for any (subject_id, slide_number)
-    pair where Redone measurement files exist, the original (parent-level)
-    files for that pair are discarded and only the Redone files are kept.
-
-    Returns
-    -------
-    pd.DataFrame
-        Structured index of raw measurement files with columns including
-        subject_id, slide_number, measurement_number, spectral_range,
-        is_redone, is_control, sex, filepath.
-    """
-    if data_dir is None:
-        data_dir = resolve_project_path(config["data"].get("raw_dir", "data_raw"))
-
-    data_dir = Path(data_dir)
-    ext = config["data"]["file_extension"].lower()
-
-    # Warn about empty subject/slide folders (no files at all)
-    for subdir in data_dir.rglob("*"):
-        if subdir.is_dir() and not any(subdir.iterdir()):
-            logger.warning("Skipping empty folder: %s", subdir)
-
-    all_records: list[dict] = []
-
-    for file_path in data_dir.rglob(f"*{ext}"):
-        # Skip hidden files and test measurement directories
-        if file_path.name.startswith("."):
-            continue
-        if "test measurements" in [p.lower() for p in file_path.parts]:
-            continue
-
-        # .wdf.txt files are valid Renishaw text exports (the .wdf in the stem
-        # is an export artifact, not a binary wrapper).  Strip the .wdf from
-        # the stem before passing to the parser so field extraction works.
-        # Actual binary files (.wdf extension, no .txt) are never matched by
-        # the rglob("*.txt") pattern above, so no explicit skip is needed.
-
-        # Skip typo duplicates: the real pattern is "1300cm-1-1.txt" where
-        # "-1" appears twice at the tail (once in "cm-1" and once as the suffix).
-        if re.search(r"\d+cm-1-\d+\.txt$", file_path.name):
-            logger.debug("Skipping duplicate typo file: %s", file_path.name)
-            continue
-
-        metadata = parse_raw_filename(file_path)
-
-        if "subject_id" not in metadata or "slide_number" not in metadata:
-            logger.warning("Skipping (missing subject/slide): %s", file_path)
-            continue
-        if metadata.get("spectral_range") is None:
-            logger.warning("Skipping (no spectral range): %s", file_path)
-            continue
-        if metadata.get("measurement_number") is None:
-            logger.warning("Skipping (no measurement number): %s", file_path)
-            continue
-
-        all_records.append(metadata)
-
-    if not all_records:
-        logger.warning("No raw measurement files found in %s", data_dir)
-        return pd.DataFrame()
-
-    df = pd.DataFrame(all_records)
-
-    if "spectral_range" in df.columns:
-        df = df.rename(columns={"spectral_range": "spectral_range_cm-1"})
-
-    # Enforce str type at the IO boundary.
-    if "subject_id" in df.columns:
-        df["subject_id"] = df["subject_id"].astype(str)
-    if "slide_number" in df.columns:
-        df["slide_number"] = df["slide_number"].astype(str)
-
-    df = _deduplicate_measurements(df, sort_cols=["filepath"])
-
-    # --- Redone override ---
-    # For each (subject_id, slide_number) that has at least one Redone file,
-    # discard all non-Redone files for that pair.
-    # Drop rows where subject_id or slide_number resolved to 'nan' after str cast;
-    # they cannot form valid (subject, slide) pairs for the override logic.
-    _nan_rows = (df["subject_id"] == "nan") | (df["slide_number"] == "nan")
-    if _nan_rows.any():
-        logger.warning(
-            "Dropping %d record(s) with NaN subject_id or slide_number: %s",
-            int(_nan_rows.sum()),
-            df.loc[_nan_rows, "filepath"].tolist()[:5],
-        )
-        df = df[~_nan_rows].reset_index(drop=True)
-
-    redone_pairs = set(
-        df.loc[df["is_redone"], ["subject_id", "slide_number"]]
-        .itertuples(index=False, name=None)
-    )
-    if redone_pairs:
-        logger.info(
-            "Applying Redone override for %d (subject, slide) pairs: %s",
-            len(redone_pairs),
-            redone_pairs,
-        )
-        keep_mask = df.apply(
-            lambda r: (r["subject_id"], r["slide_number"]) not in redone_pairs
-            or r["is_redone"],
-            axis=1,
-        )
-        df = df[keep_mask].reset_index(drop=True)
-
-    logger.info(
-        "Raw index: %d files, %d subjects",
-        len(df),
-        df["subject_id"].nunique(),
-    )
-    return df
 
 
 def build_file_index(
