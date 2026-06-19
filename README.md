@@ -4,7 +4,7 @@ Python pipeline for extracellular-vesicle Raman spectroscopy across three indepe
 
 | Track | Entry point | Main output |
 |---|---|---|
-| EDA | `uv run scripts/run_eda.py` | `output_EDA/` |
+| EDA | `uv run scripts/run_eda.py` | `Results_control_vs_disease/` or `Results_intra_disease/` |
 | Spectral plots and QC | `uv run scripts/run_spectral_plots.py` | `Output_plot/qc/`, `Output_plot/spectral_plots/` |
 
 ## Data Model
@@ -54,6 +54,11 @@ uv run scripts/run_eda.py --range both
 uv run scripts/run_eda.py --range 1300 --max-subjects 10
 ```
 
+When `--range both` is selected, the EDA runner executes the ordinary PCA path
+and then the subject-level Biological PCA layer once. Biological PCA outputs are
+written under the active EDA result root in `biological_pca/`; there is no
+separate Biological PCA command.
+
 Spectral comparison and QC plots:
 
 ```bash
@@ -80,7 +85,7 @@ uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range 2850
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both
 ```
 
-Output root: `output_EDA_disease_vs_control/`
+Output root: `Results_control_vs_disease/`
 
 **Disease-only** (intra-disease Spearman clinical correlations enabled; requires `data/clinical_data_clean.csv`):
 
@@ -90,7 +95,7 @@ uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range 2850
 uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range both
 ```
 
-Output root: `output_EDA_disease_only/`
+Output root: `Results_intra_disease/`
 
 To run both modes back-to-back for all ranges:
 
@@ -115,8 +120,8 @@ Current defaults to note:
 - EDA preprocessing order is: dead/anomalous screen → cosmic-ray detection → optional cosmic-ray suppression → spectral quality filter → edge trim → baseline correction → isolated spike repair → optional smoothing → vector normalization.
 - Cosmic-ray detection always runs; suppression is controlled by `preprocessing.cosmic_ray.enabled`.
 - Additive capabilities (all off by default): region weighting/exclusion, pixel-cluster interpretation, QC-cluster analysis, region-influence robustness, figure gating via `analysis.figures`, and ML latent-structure reporting.
-- `output.keep_preprocessing_artifacts` controls whether per-area preprocessing artifacts are kept in `output_EDA/processed/preprocessing_artifacts`.
-- `output.keep_whole_spectra_cache` controls whether the paired-area whole-spectrum cache is saved in `output_EDA/processed/whole_spectra`.
+- `output.keep_preprocessing_artifacts` controls whether per-area preprocessing artifacts are kept in the active EDA root under `processed/preprocessing_artifacts`.
+- `output.keep_whole_spectra_cache` controls whether the paired-area whole-spectrum cache is saved in the active EDA root under `processed/whole_spectra`.
 
 
 
@@ -125,4 +130,4 @@ Current defaults to note:
 - Inter-subject variance can reflect biology, SEC fraction, concentration, column batch or age, lipoprotein contamination, and sample volume.
 - Sex imbalance can produce pooled effects that do not hold in sex-stratified results.
 - QC flags indicate reliability concerns, not automatic exclusion rules.
-- EDA is exploratory. Do not interpret unsupervised structure as diagnostic classification evidence; use the ML track for supervised questions.
+- EDA is exploratory. Do not interpret unsupervised structure as diagnostic classification evidence; this repository does not perform diagnostic classification or prediction.

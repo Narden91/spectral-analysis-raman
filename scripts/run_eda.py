@@ -34,6 +34,72 @@ from src.analysis.run_eda import run_eda
 logger = logging.getLogger(__name__)
 
 
+def _set_analysis_output_root() -> None:
+    """Route all EDA-owned outputs to the selected analysis family."""
+    subject_group = config.get("data", {}).get("subject_group")
+    if subject_group == "disease_only":
+        config.setdefault("output", {})["eda_root"] = "Results_intra_disease"
+    else:
+        config.setdefault("output", {})["eda_root"] = "Results_control_vs_disease"
+
+
+def _requested_ranges(cli_range: str | None) -> list[str]:
+    """Normalize requested ranges so `both` expands to the full fused analysis."""
+    if cli_range is not None:
+        ranges = [cli_range]
+    else:
+        ranges = [str(r) for r in config.get("run", {}).get("ranges", ["1300"])]
+    if "both" in ranges:
+        return ["1300", "2850", "both"]
+    return ranges
+
+
+def _validate_ranges(ranges: list[str]) -> None:
+    for spectral_range in ranges:
+        if spectral_range not in _VALID_RANGES:
+            raise ValueError(
+                f"Invalid spectral range '{spectral_range}'. Valid options: {sorted(_VALID_RANGES)}"
+            )
+
+
+def _write_cross_range_outputs(ranges: list[str]) -> None:
+    single_ranges = [r for r in ranges if r != "both"]
+    if len(single_ranges) < 1:
+        return
+
+    eda_base = _output_dir("eda_subdir")
+
+    def _make_phase_dir_fn(r: str):
+        def _fn(key: str) -> Path:
+            return get_eda_phase_dir(r, _PHASE_DIRS[key])
+
+        return _fn
+
+    phase_dir_fns = {r: _make_phase_dir_fn(r) for r in single_ranges}
+    report_dir = eda_base / "cross_range_report"
+    write_cross_range_report(
+        ranges=single_ranges,
+        phase_dir_fns=phase_dir_fns,
+        output_base=eda_base,
+        out_dir=report_dir,
+    )
+
+    run_inventory(
+        eda_base=eda_base,
+        output_dir=eda_base / "analysis_inventory",
+    )
+
+
+def _should_run_biological_pca(ranges: list[str], skip_biological_pca: bool) -> bool:
+    biological_cfg = config.get("biological_pca", {})
+    has_required_blocks = {"1300", "2850"}.issubset(set(ranges))
+    return (
+        bool(biological_cfg.get("enabled", True))
+        and not skip_biological_pca
+        and has_required_blocks
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run full Raman EDA pipeline")
     parser.add_argument(
@@ -76,26 +142,11 @@ def _main() -> None:
     setup_logging()
     args = _parse_args()
 
-    subject_group = config.get("data", {}).get("subject_group")
-    if subject_group == "disease_only":
-        config.setdefault("output", {})["eda_root"] = "Results_intra_disease"
-    else:
-        config.setdefault("output", {})["eda_root"] = "Results_control_vs_disease"
-
-    if args.range is not None:
-        ranges = [args.range]
-    else:
-        ranges = [str(r) for r in config.get("run", {}).get("ranges", ["1300"])]
-
-    if "both" in ranges:
-        ranges = ["1300", "2850", "both"]
+    _set_analysis_output_root()
+    ranges = _requested_ranges(args.range)
 
     try:
-        for r in ranges:
-            if r not in _VALID_RANGES:
-                raise ValueError(
-                    f"Invalid spectral range '{r}'. Valid options: {sorted(_VALID_RANGES)}"
-                )
+        _validate_ranges(ranges)
 
         for spectral_range in ranges:
             run_eda(
@@ -104,36 +155,8 @@ def _main() -> None:
                 max_subjects=args.max_subjects,
             )
 
-        single_ranges = [r for r in ranges if r != "both"]
-        if len(single_ranges) >= 1:
-            eda_base = _output_dir("eda_subdir")
-
-            def _make_phase_dir_fn(r: str):
-                def _fn(key: str) -> Path:
-                    return get_eda_phase_dir(r, _PHASE_DIRS[key])
-
-                return _fn
-
-            phase_dir_fns = {r: _make_phase_dir_fn(r) for r in single_ranges}
-            report_dir = eda_base / "cross_range_report"
-            write_cross_range_report(
-                ranges=single_ranges,
-                phase_dir_fns=phase_dir_fns,
-                output_base=eda_base,
-                out_dir=report_dir,
-            )
-
-            run_inventory(
-                eda_base=eda_base,
-                output_dir=eda_base / "analysis_inventory",
-            )
-
-        biological_cfg = config.get("biological_pca", {})
-        if (
-            bool(biological_cfg.get("enabled", True))
-            and not args.skip_biological_pca
-            and {"1300", "2850"}.issubset(set(ranges))
-        ):
+        _write_cross_range_outputs(ranges)
+        if _should_run_biological_pca(ranges, args.skip_biological_pca):
             run_biological_pca(max_subjects=args.max_subjects)
     except (ValueError, RuntimeError) as exc:
         logger.error("%s", exc)
