@@ -101,10 +101,11 @@ whole_spectra:
 # Subject-level Biological PCA layer
 # ---------------------------------------------------------------------------
 biological_pca:
+  enabled: true
   n_components: 5
   aggregation: "median"
   scale: false
-  output_root: "outputs/biological_pca"
+  output_subdir: "biological_pca"
   models:
     PCA_1330:
       spectral_blocks: ["1300"]

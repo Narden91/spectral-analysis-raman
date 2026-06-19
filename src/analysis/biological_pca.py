@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
 
-from src import config, resolve_project_path
+from src import _output_dir, config, resolve_project_path
 from src.analysis.statistics import run_pca
 from src.io.file_crawler import build_file_index
 from src.io.txt_reader import read_txt_spectrum
@@ -810,7 +810,11 @@ def run_biological_pca(
 ) -> Path:
     cfg = config if cfg is None else cfg
     bp_cfg = _biological_cfg(cfg)
-    out = Path(output_dir) if output_dir is not None else Path(bp_cfg.get("output_root", "outputs/biological_pca"))
+    if output_dir is None:
+        subdir = str(bp_cfg.get("output_subdir", "biological_pca"))
+        out = _output_dir("eda_subdir") / subdir
+    else:
+        out = Path(output_dir)
     if not out.is_absolute():
         out = resolve_project_path(out)
     assert out is not None

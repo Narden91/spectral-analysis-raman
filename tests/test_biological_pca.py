@@ -11,10 +11,12 @@ from src.analysis.biological_pca import (
     build_subject_biochemical_features,
     compute_band_contributions,
     fit_biological_pca_models,
+    run_biological_pca,
     select_subjects,
     validate_biological_pca_config,
     validate_outputs,
 )
+import src.analysis.biological_pca as biological_pca
 
 
 def _cfg() -> dict:
@@ -207,3 +209,21 @@ def test_fit_outputs_have_unique_subject_rows_and_feature_columns() -> None:
     assert "1300__1240.0" in inputs.subject_spectra.columns
     assert "2850__2840.0" in inputs.subject_spectra.columns
     assert not features["subject_id"].duplicated().any()
+
+
+def test_default_output_is_relative_to_active_eda_root(monkeypatch, tmp_path) -> None:
+    cfg = _cfg()
+    cfg["biological_pca"]["output_subdir"] = "biological_pca"
+    expected_root = tmp_path / "Results_control_vs_disease"
+    inputs = _inputs()
+    results = fit_biological_pca_models(inputs, cfg=cfg)
+    features = build_subject_biochemical_features(results)
+
+    monkeypatch.setattr(biological_pca, "_output_dir", lambda key: expected_root)
+    monkeypatch.setattr(biological_pca, "build_subject_inputs", lambda max_subjects=None, cfg=None: inputs)
+    monkeypatch.setattr(biological_pca, "fit_biological_pca_models", lambda inputs, cfg=None: results)
+    monkeypatch.setattr(biological_pca, "build_subject_biochemical_features", lambda results: features)
+
+    out = run_biological_pca(cfg=cfg)
+    assert out == expected_root / "biological_pca"
+    assert (out / "subject_biochemical_pca_features.csv").exists()

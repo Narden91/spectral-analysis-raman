@@ -24,7 +24,7 @@ assert _spec.loader is not None
 _spec.loader.exec_module(_cli_util)
 _cli_util.apply_config_override("config/eda.yaml", ROOT)
 
-from src import setup_logging
+from src import config, setup_logging
 from src.analysis.biological_pca import run_biological_pca
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,12 @@ def _parse_args() -> argparse.Namespace:
 def _main() -> None:
     setup_logging()
     args = _parse_args()
+    subject_group = config.get("data", {}).get("subject_group")
+    if args.output_dir is None:
+        if subject_group == "disease_only":
+            config.setdefault("output", {})["eda_root"] = "Results_intra_disease"
+        else:
+            config.setdefault("output", {})["eda_root"] = "Results_control_vs_disease"
     try:
         output_dir = run_biological_pca(output_dir=args.output_dir, max_subjects=args.max_subjects)
         logger.info("Completed Biological PCA: %s", output_dir)

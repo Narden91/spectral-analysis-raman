@@ -27,6 +27,7 @@ _cli_util.apply_config_override("config/eda.yaml", ROOT)
 from src import config, get_eda_phase_dir, setup_logging, _output_dir
 from src.analysis._single_range import _PHASE_DIRS, _VALID_RANGES
 from src.analysis.analysis_inventory import run_inventory
+from src.analysis.biological_pca import run_biological_pca
 from src.analysis.cross_range_report import write_cross_range_report
 from src.analysis.run_eda import run_eda
 
@@ -62,6 +63,11 @@ def _parse_args() -> argparse.Namespace:
         help="Path to config YAML (overrides config/eda.yaml). "
         "Relative paths are resolved from the project root. "
         "Supports _extends: <base.yaml> for inheritance.",
+    )
+    parser.add_argument(
+        "--skip-biological-pca",
+        action="store_true",
+        help="Skip the subject-level Biological PCA layer.",
     )
     return parser.parse_args()
 
@@ -121,6 +127,14 @@ def _main() -> None:
                 eda_base=eda_base,
                 output_dir=eda_base / "analysis_inventory",
             )
+
+        biological_cfg = config.get("biological_pca", {})
+        if (
+            bool(biological_cfg.get("enabled", True))
+            and not args.skip_biological_pca
+            and {"1300", "2850"}.issubset(set(ranges))
+        ):
+            run_biological_pca(max_subjects=args.max_subjects)
     except (ValueError, RuntimeError) as exc:
         logger.error("%s", exc)
         sys.exit(1)
