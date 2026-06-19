@@ -96,3 +96,63 @@ whole_spectra:
   correlation:
     method: "spearman"  # str: correlation method ("spearman", "pearson", ...)
     n_bootstrap: 200  # int: bootstrap replicates for confidence intervals
+
+# ---------------------------------------------------------------------------
+# Subject-level Biological PCA layer
+# ---------------------------------------------------------------------------
+biological_pca:
+  n_components: 5
+  aggregation: "median"
+  scale: false
+  output_root: "outputs/biological_pca"
+  models:
+    PCA_1330:
+      spectral_blocks: ["1300"]
+      window: [1240, 1470]
+      bands:
+        - amide_iii_1260
+        - ch2_bend_1300
+        - ch2_scissor_1450
+    PCA_2850:
+      spectral_blocks: ["2850"]
+      window: [2840, 2975]
+      bands:
+        - ch2_sym_stretch_2850
+        - ch2_asym_stretch_2885
+        - ch3_sym_stretch_2930
+        - ch3_asym_stretch_2960
+    PCA_whole:
+      spectral_blocks: ["1300", "2850"]
+      window: "full"
+      bands:
+        - phenylalanine_1004
+        - dna_po2_sym_1090
+        - c_c_skeletal_1127
+        - amide_iii_1260
+        - ch2_bend_1300
+        - ch2_scissor_1450
+        - carboxylate_1580
+        - amide_i_1655
+        - ch2_sym_stretch_2850
+        - ch2_asym_stretch_2885
+        - ch3_sym_stretch_2930
+        - ch3_asym_stretch_2960
+        - oh_nh_stretch_3060
+  biochemical_classes:
+    lipid:
+      - ch2_bend_1300
+      - ch2_scissor_1450
+      - ch2_sym_stretch_2850
+      - ch2_asym_stretch_2885
+    protein:
+      - phenylalanine_1004
+      - amide_iii_1260
+      - amide_i_1655
+      - ch3_sym_stretch_2930
+      - ch3_asym_stretch_2960
+    nucleic_acid:
+      - dna_po2_sym_1090
+    mixed:
+      - c_c_skeletal_1127
+      - carboxylate_1580
+      - oh_nh_stretch_3060

@@ -22,6 +22,7 @@ plan*
 
 data/
 Output_plot*/
+outputs/
 Results_*/
 catboost_info/
 .agent/
