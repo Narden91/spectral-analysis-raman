@@ -193,3 +193,37 @@ def summarize_significant_targets(
             }
         )
     return pd.DataFrame(rows)
+
+
+def run_intra_disease_pca(
+    mean_spectra: np.ndarray,
+    n_components: int = 10,
+    random_state: int = 42,
+) -> dict:
+    """Run PCA specifically on disease-only subjects.
+    
+    Parameters
+    ----------
+    mean_spectra : np.ndarray
+        2D array (n_disease_subjects, n_wavenumbers) of subject means.
+    n_components : int
+        Number of principal components to compute.
+    random_state : int
+        Random seed.
+        
+    Returns
+    -------
+    dict
+        PCA results containing 'scores', 'loadings', 'explained_variance_ratio', etc.
+    """
+    from src.analysis.statistics import run_pca
+    
+    if mean_spectra.size == 0:
+        return {}
+        
+    return run_pca(
+        mean_spectra,
+        n_components=min(n_components, mean_spectra.shape[0] - 1),
+        random_state=random_state,
+        scale=False,
+    )

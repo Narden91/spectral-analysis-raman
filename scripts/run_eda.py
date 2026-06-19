@@ -16,7 +16,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location("_raman_cli_util", ROOT / "src" / "cli_util.py")
+_spec = importlib.util.spec_from_file_location(
+    "_raman_cli_util", ROOT / "src" / "cli_util.py"
+)
 _cli_util = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
 _spec.loader.exec_module(_cli_util)
@@ -58,8 +60,8 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Path to config YAML (overrides config/eda.yaml). "
-             "Relative paths are resolved from the project root. "
-             "Supports _extends: <base.yaml> for inheritance.",
+        "Relative paths are resolved from the project root. "
+        "Supports _extends: <base.yaml> for inheritance.",
     )
     return parser.parse_args()
 
@@ -67,6 +69,12 @@ def _parse_args() -> argparse.Namespace:
 def _main() -> None:
     setup_logging()
     args = _parse_args()
+
+    subject_group = config.get("data", {}).get("subject_group")
+    if subject_group == "disease_only":
+        config.setdefault("output", {})["eda_root"] = "Results_intra_disease"
+    else:
+        config.setdefault("output", {})["eda_root"] = "Results_control_vs_disease"
 
     if args.range is not None:
         ranges = [args.range]

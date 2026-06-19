@@ -21,11 +21,8 @@ coverage.xml
 plan*
 
 data/
-output_EDA*/
 Output_plot*/
-output_ML*/
-output_DL*/
-outputs*/
+Results_*/
 catboost_info/
 .agent/
 .github/
@@ -43,7 +40,7 @@ doc/ml_results_report/report*
 !doc/ml_results_report/build_report.py
 presentation/
 CLAUDE.md
-
+doc/Test_A
 
 # Latex auxiliary files
 *.aux

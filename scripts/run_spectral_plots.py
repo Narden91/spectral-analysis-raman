@@ -9,7 +9,9 @@ import logging
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location("_raman_cli_util", ROOT / "src" / "cli_util.py")
+_spec = importlib.util.spec_from_file_location(
+    "_raman_cli_util", ROOT / "src" / "cli_util.py"
+)
 _cli_util = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
 _spec.loader.exec_module(_cli_util)

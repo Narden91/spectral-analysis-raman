@@ -358,6 +358,25 @@ def _run_single_range_eda(
             logger.info("--skip-preprocess has no additional effect for single-range EDA")
         groups = raw_groups
 
+        _log_phase("PHASE 0.5: Preprocessing Consistency Checks (PCS)")
+        try:
+            from src.analysis.pcs import run_pcs_validation
+            from src.analysis.spectral_loader import load_subject_spectra
+            from src.preprocessing.pipeline import preprocess_spectra
+            
+            sample_sid = list(group_ids.values())[0][0] if group_ids and list(group_ids.values())[0] else None
+            if sample_sid:
+                w_raw, r_pix = load_subject_spectra(df_index, sample_sid, spectral_range)
+                if r_pix.size > 0:
+                    p_pix, w_proc = preprocess_spectra(r_pix, w_raw, region=spectral_range)
+                    pcs_metrics = run_pcs_validation(r_pix, p_pix, w_raw, w_proc)
+                    if not pcs_metrics.get("passed", False):
+                        logger.error("PCS validation FAILED! Preprocessing distorts chemical signal. Metrics: %s", pcs_metrics)
+                    else:
+                        logger.info("PCS validation PASSED successfully.")
+        except Exception as exc:
+            logger.warning("PCS validation could not be completed: %s", exc)
+
     result_both = None
     if spectral_range == "both":
         from src.analysis._whole_spectra_runner import _run_whole_spectra_eda
@@ -434,14 +453,24 @@ def _run_single_range_eda(
             else all_spectra
         )
 
-        pca_result = run_pca(
-            pca_input,
-            n_components=min(
-                int(config.get("analysis", {}).get("pca_n_components", 10)),
-                pca_input.shape[0] - 1,
-            ),
-            scale=False,
+        n_comps = min(
+            int(config.get("analysis", {}).get("pca_n_components", 10)),
+            pca_input.shape[0] - 1,
         )
+        
+        if subject_group == "disease_only":
+            from src.analysis.intra_disease import run_intra_disease_pca
+            pca_result = run_intra_disease_pca(
+                pca_input,
+                n_components=n_comps,
+                random_state=42,
+            )
+        else:
+            pca_result = run_pca(
+                pca_input,
+                n_components=n_comps,
+                scale=False,
+            )
 
         fig, _ = plot_pca_scores(
             pca_result["scores"],
@@ -656,7 +685,6 @@ def _run_single_range_eda(
         )
         if intra_disease_cfg.get("enabled", False):
             _log_phase("PHASE 8: Intra-disease clinical correlations")
-            intra_dir = phase_dir("intra_disease")
             try:
                 intra_csv = intra_disease_cfg.get("clinical_csv", "data/clinical_data_clean.csv")
                 intra_clinical_df = load_clinical_data(intra_csv, data_index=df_index, write_curated=False)
@@ -666,6 +694,7 @@ def _run_single_range_eda(
                 if spectra_id.size == 0:
                     logger.warning("Intra-disease analysis: no disease subjects with cached spectra, skipping")
                 else:
+                    intra_dir = phase_dir("intra_disease")
                     corr_df = compute_intra_disease_correlations(spectra_id, wn_id, clin_aligned)
                     for target, grp in corr_df.groupby("target"):
                         grp.to_csv(
