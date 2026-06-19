@@ -384,8 +384,8 @@ def _run_whole_spectra_eda(
 
     if split_index is not None:
         subject_spectra = {
-            str(subject_id): spectrum
-            for subject_id, spectrum in zip(all_sids, all_spectra)
+            f"{subject_id}_spot{idx}": spectrum
+            for idx, (subject_id, spectrum) in enumerate(zip(all_sids, all_spectra))
         }
         regional_variance_df = regional_snv_residual_variance(subject_spectra, split_index)
         regional_variance_df.insert(1, "group", all_labels)

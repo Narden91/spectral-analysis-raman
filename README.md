@@ -41,7 +41,7 @@ uv pip install -e .
 
 Default data roots:
 
-- `data/`: canonical dataset
+- `data/`: dataset
 
 ## Run The Pipelines
 

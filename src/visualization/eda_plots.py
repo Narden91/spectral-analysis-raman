@@ -135,7 +135,7 @@ def plot_pca_scores(
     group_names: Optional[dict] = None,
     loadings: Optional[np.ndarray] = None,
     wavenumbers: Optional[np.ndarray] = None,
-    top_n_features: int = 3,
+    top_n_features: int = 5,
 ) -> tuple[plt.Figure, plt.Axes]:
     """Plot a 2D PCA score view colored by group label. Optional biplot loadings."""
     fig, ax = plt.subplots(figsize=(9, 7))
@@ -178,6 +178,7 @@ def plot_pca_scores(
             scale_x = (x_range * 0.4) / max_loading
             scale_y = (y_range * 0.4) / max_loading
             
+            texts = []
             for idx in top_indices:
                 x_val = loading_x[idx] * scale_x
                 y_val = loading_y[idx] * scale_y
@@ -191,11 +192,18 @@ def plot_pca_scores(
                 )
                 
                 # Add wavenumber label
-                ax.text(
-                    x_val * 1.1, y_val * 1.1, 
+                t = ax.text(
+                    x_val * 1.05, y_val * 1.05, 
                     f"{wn:.0f}", 
                     color="darkred", fontsize=9, ha='center', va='center'
                 )
+                texts.append(t)
+            
+            try:
+                from adjustText import adjust_text
+                adjust_text(texts, ax=ax, force_points=0.2, force_text=0.2, arrowprops=dict(arrowstyle="-", color='red', alpha=0.4))
+            except ImportError:
+                pass
 
     _finalize_axis(
         ax,
