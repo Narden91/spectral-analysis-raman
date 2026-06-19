@@ -25,8 +25,8 @@ POINT_EDGE_COLOR = "#334155"
 SUBJECT_SCATTER_SIZE = 45
 
 # Explicit pastel palettes with strong separation between warm/cool families.
-# These replace the previous blue/cyan pairing, which was too close in UMAP and
-# score plots. The hues stay colorblind-aware while remaining easy to separate
+# These replace the previous blue/cyan pairing, which was too close in score
+# plots. The hues stay colorblind-aware while remaining easy to separate
 # on white backgrounds.
 CONDITION_COLORS = {
     "disease": pastelize_color("#D55E00", retain=0.74),
@@ -60,7 +60,6 @@ DISPLAY_LABELS: dict[str, str] = {
     "gender": "Gender",
     "condition": "Condition",
     "is_control": "Condition",
-    "hdbscan_cluster": "HDBSCAN cluster",
     "subject_id": "Subject",
     "moca_baseline_total": "MoCA baseline",
     "moca_3_months_total": "MoCA 3m",
@@ -96,13 +95,6 @@ def category_sort_key(color_col: str, category: object) -> tuple[object, ...]:
         order = {"female": 0, "male": 1, "unknown": 2}
         return (order.get(normalized, 99), normalized)
 
-    if col == "hdbscan_cluster":
-        try:
-            cluster_id = int(category)
-        except (TypeError, ValueError):
-            return (99, normalized)
-        return (1 if cluster_id == -1 else 0, cluster_id)
-
     group_order = {
         "female_disease": 0,
         "female_control": 1,
@@ -118,13 +110,6 @@ def category_sort_key(color_col: str, category: object) -> tuple[object, ...]:
 def format_category_label(color_col: str, category: object) -> str:
     col = str(color_col).strip().lower()
     normalized = _normalize_category(category)
-
-    if col == "hdbscan_cluster":
-        try:
-            cluster_id = int(float(str(category)))
-        except (TypeError, ValueError):
-            return str(category)
-        return "Noise" if cluster_id == -1 else f"Cluster {cluster_id}"
 
     if normalized in GROUP_LABELS:
         return GROUP_LABELS[normalized]
@@ -150,17 +135,6 @@ def get_discrete_palette(color_col: str, categories: list[object] | np.ndarray) 
             category: GENDER_COLORS.get(_normalize_category(category), _UNKNOWN_COLOR)
             for category in categories_list
         }
-
-    if col == "hdbscan_cluster":
-        palette: dict[object, str] = {}
-        for category in categories_list:
-            try:
-                cluster_id = int(float(str(category)))
-            except (TypeError, ValueError):
-                palette[category] = _UNKNOWN_COLOR
-                continue
-            palette[category] = "#C5CBD3" if cluster_id == -1 else CLUSTER_COLORS[cluster_id % len(CLUSTER_COLORS)]
-        return palette
 
     normalized_categories = {_normalize_category(category) for category in categories_list}
     if normalized_categories and normalized_categories.issubset(GROUP_COLORS.keys()):

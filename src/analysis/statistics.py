@@ -23,35 +23,6 @@ logger = logging.getLogger(__name__)
 REGION_BOUNDS = CANONICAL_REGION_BOUNDS
 
 
-def hedges_g(
-    mean_a: np.ndarray,
-    mean_b: np.ndarray,
-    pooled_std: np.ndarray,
-    n_a: int,
-    n_b: int,
-    df: int | None = None,
-) -> np.ndarray:
-    """Compute Hedges' g (small-sample unbiased effect size).
-
-    Applies the standard correction factor J = 1 - 3 / (4*df - 1)
-    where df defaults to n_a + n_b - 2, to remove positive bias in Cohen's d
-    when sample sizes are small (relevant for N~tens per group).
-
-    Parameters
-    ----------
-    mean_a, mean_b, pooled_std : np.ndarray
-        1D arrays of per-wavenumber statistics (vectorised path) or scalars.
-    """
-    pooled_std = np.asarray(pooled_std, dtype=float)
-    mean_a = np.asarray(mean_a, dtype=float)
-    mean_b = np.asarray(mean_b, dtype=float)
-    valid = (pooled_std > 0) & np.isfinite(pooled_std)
-    result = np.full_like(pooled_std, np.nan, dtype=float)
-    if df is None:
-        df = max(n_a + n_b - 2, 1)
-    j = 1.0 - 3.0 / (4.0 * max(df, 1) - 1.0)
-    result[valid] = ((mean_a - mean_b) / pooled_std * j)[valid]
-    return result
 
 
 def cohens_d(left: np.ndarray, right: np.ndarray) -> float:
@@ -247,81 +218,6 @@ def summarize_group_centroid_distances(
 
 
 
-def summarize_whole_spectra_range_contributions(
-    wavenumbers: np.ndarray,
-    groups: dict[str, np.ndarray],
-) -> pd.DataFrame:
-    """Summarize how much each spectral region contributes to group contrasts.
-
-    Kept for backward compatibility with the original whole-spectrum EDA outputs.
-    """
-    if not groups:
-        return pd.DataFrame()
-
-    empty = pd.DataFrame(
-        columns=[
-            "contrast",
-            "range",
-            "integrated_abs_difference",
-            "signed_difference",
-            "mean_abs_difference",
-            "share_of_total_difference",
-        ]
-    )
-
-    try:
-        split_index = infer_concatenated_range_split_index(wavenumbers)
-    except ValueError as exc:
-        logger.warning("Skipping whole-spectra range contribution summary: %s", exc)
-        return empty
-
-    ranges = {
-        "fingerprint_1300": slice(0, split_index),
-        "ch_stretch_2850": slice(split_index, len(wavenumbers)),
-    }
-
-    contrasts: list[tuple[str, np.ndarray, np.ndarray]] = []
-    for gender in ("female", "male"):
-        disease_key = f"{gender}_disease"
-        control_key = f"{gender}_control"
-        if disease_key in groups and control_key in groups:
-            contrasts.append((gender, groups[disease_key], groups[control_key]))
-
-    disease_keys = [key for key in groups if "disease" in key]
-    control_keys = [key for key in groups if "control" in key]
-    if disease_keys and control_keys:
-        contrasts.append(
-            (
-                "combined",
-                np.vstack([groups[key] for key in disease_keys]),
-                np.vstack([groups[key] for key in control_keys]),
-            )
-        )
-
-    rows = []
-    for contrast_name, disease_spectra, control_spectra in contrasts:  # contrast_name is "female"/"male"/"combined"
-        mean_difference = np.nanmean(disease_spectra, axis=0) - np.nanmean(control_spectra, axis=0)
-        total_abs_difference = float(np.sum(np.abs(mean_difference)))
-
-        for range_name, range_slice in ranges.items():
-            region_difference = mean_difference[range_slice]
-            integrated_abs_difference = float(np.sum(np.abs(region_difference)))
-            rows.append(
-                {
-                    "contrast": contrast_name,
-                    "range": range_name,
-                    "integrated_abs_difference": integrated_abs_difference,
-                    "signed_difference": float(np.sum(region_difference)),
-                    "mean_abs_difference": float(np.mean(np.abs(region_difference))),
-                    "share_of_total_difference": (
-                        integrated_abs_difference / total_abs_difference
-                        if total_abs_difference > 0
-                        else np.nan
-                    ),
-                }
-            )
-
-    return pd.DataFrame(rows)
 
 
 

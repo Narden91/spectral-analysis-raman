@@ -161,8 +161,7 @@ def _base_metadata(feature_id: str, split_index: int | None = None) -> dict[str,
         return _band_metadata(feature_id, row)
     if feature_id.startswith("ratio_ratio_"):
         return _ratio_metadata(feature_id, row)
-    if feature_id.startswith("chlipid_"):
-        return _ch_state_metadata(feature_id, row)
+
     if feature_id == "cov_sex_binary":
         row.update(
             {
@@ -380,28 +379,7 @@ def _ratio_metadata(feature_id: str, row: dict[str, object]) -> dict[str, object
     return row
 
 
-def _ch_state_metadata(feature_id: str, row: dict[str, object]) -> dict[str, object]:
-    body = feature_id.removeprefix("chlipid_")
-    labels = {
-        "ch_entropy": "CH lipid-state entropy",
-        "ch_max_share": "Dominant CH lipid-state share",
-        "ch_max_cluster": "Dominant CH lipid-state cluster",
-        "ch_noise_dist": "CH lipid-state distance/noise",
-    }
-    match = re.match(r"ch_prop_(\d+)$", body)
-    label = f"CH lipid-state cluster {match.group(1)} proportion" if match else labels.get(body, body.replace("_", " "))
-    row.update(
-        {
-            "display_name": label,
-            "short_label": label,
-            "track": "chlipid",
-            "region": "ch_stretch",
-            "biological_assignment": "Unsupervised CH-stretch lipid-state feature",
-            "fold_local": True,
-            "interpretation_note": "Fold-local UMAP/KMeans feature; cluster IDs are not globally comparable across folds.",
-        }
-    )
-    return row
+
 
 
 def _split_region_metric(body: str) -> tuple[str, str]:

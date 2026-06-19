@@ -137,7 +137,6 @@ done
 Current defaults to note:
 
 - `config/eda.yaml` owns `run.ranges`: `["1300", "2850", "both"]`.
-- EDA advanced phases are enabled in the current configs; disable `analysis.advanced.pixel_umap`, `subject_umap`, or `cluster_interpretation` for faster runs.
 - `config/ml.yaml` is the publication-oriented ML config. It uses balanced accuracy for method selection, keeps a holdout lockbox, and leaves holdout scoring disabled unless explicitly enabled.
 - EDA preprocessing order is: dead/anomalous screen → cosmic-ray detection → optional cosmic-ray suppression → spectral quality filter → edge trim → baseline correction → isolated spike repair → optional smoothing → vector normalization.
 - Cosmic-ray detection always runs; suppression is controlled by `preprocessing.cosmic_ray.enabled`.
@@ -149,7 +148,7 @@ Current defaults to note:
 ## Maintained Docs
 
 - `doc/eda_pipeline.md`: EDA workflow and outputs
-- `doc/eda_methods.md`: EDA method reference (PCA, UMAP, HDBSCAN, QC, robustness, MFA, CCA)
+- `doc/eda_methods.md`: EDA method reference (PCA, QC, robustness, MFA, CCA)
 - `doc/plots_command.md`: plot command reference and output map
 - `plots.md`: spectral plot catalog and output layout
 - `doc/ml_pipeline.md`: ML workflow

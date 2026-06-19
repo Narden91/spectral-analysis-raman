@@ -117,6 +117,17 @@ def parse_raw_filename(filepath: str | Path) -> dict[str, Any]:
 
     match = _RAW_STEM_RE.match(stem)
     if match is None:
+        match_reorg = _REORG_STEM_RE.match(stem)
+        if match_reorg:
+            try:
+                metadata["subject_id"] = clean_subject_id(match_reorg.group("subject_id"))
+                metadata["slide_number"] = match_reorg.group("slide")
+                metadata["spectral_range"] = float(match_reorg.group("range"))
+                metadata["measurement_number"] = int(match_reorg.group("meas"))
+                return metadata
+            except (ValueError, AttributeError) as exc:
+                logger.warning("Failed to parse reorganized filename '%s': %s", path.name, exc)
+                return metadata
         logger.warning("Raw filename does not match expected schema: %s", path.name)
         return metadata
 

@@ -71,9 +71,6 @@ class AreaStore:
         """List of CH-stretch pixel arrays (one per area)."""
         return self._ch_pixels
 
-    @property
-    def has_ch_pixels(self) -> bool:
-        return any(arr.size > 0 for arr in self._ch_pixels) if self._ch_pixels else False
 
     def add(
         self,
@@ -106,10 +103,6 @@ class AreaStore:
     def __len__(self) -> int:
         return len(self._rows)
 
-    def get_ch_pixels_for_subject(self, subject_id: str) -> list[np.ndarray]:
-        """Return CH-stretch pixel arrays for all areas of a given subject."""
-        indices = [i for i, r in enumerate(self._rows) if str(r["subject_id"]) == str(subject_id)]
-        return [self._ch_pixels[i] for i in indices if i < len(self._ch_pixels)]
 
     def to_dataframe(self) -> pd.DataFrame:
         """Return a DataFrame with one row per area.

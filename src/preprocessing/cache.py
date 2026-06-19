@@ -2,7 +2,7 @@
 
 Writes one artifact per (subject_id, slide, measurement, range) area to
 ``data_preprocessed/<range_label>/<subject_id>/<area_id>.npz`` so every EDA
-analysis (PCA, univariate, subject UMAP, intra-disease correlation) loads the
+analysis (PCA, univariate, intra-disease correlation) loads the
 same corrected, retained pixels instead of recomputing or mixing raw/SNV
 paths.
 

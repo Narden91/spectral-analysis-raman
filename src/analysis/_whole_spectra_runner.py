@@ -101,8 +101,6 @@ def _run_whole_spectra_eda(
     band_intensity_df = pd.DataFrame()
     ratio_df = pd.DataFrame()
     ratio_test_df = pd.DataFrame()
-    effect_budget = None
-    regional_interaction_results: dict[str, pd.DataFrame] = {}
     cross_region_correlations: dict[str, pd.DataFrame] = {}
     regional_variance_df = pd.DataFrame()
 
@@ -258,10 +256,6 @@ def _run_whole_spectra_eda(
     _log_phase("PHASE 4: Whole-spectrum global drivers")
 
     drivers_dir = get_whole_spectra_phase_dir("global_drivers")
-    stats_combined = None
-    regions_df = pd.DataFrame()
-    disease_keys = [key for key in groups if "disease" in key]
-    control_keys = [key for key in groups if "control" in key]
 
     if not band_intensity_df.empty:
         band_intensity_export = band_intensity_df.copy()

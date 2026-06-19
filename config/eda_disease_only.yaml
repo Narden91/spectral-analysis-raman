@@ -10,11 +10,11 @@ output:
   eda_root: "output_EDA_disease_only"
 
 data:
-  clinical_csv: "data/clinical_data_clean.csv"
+  clinical_csv: "data/clinical_data.csv"
   subject_group: "disease_only"
 
 analysis:
   advanced:
     intra_disease:
       enabled: true
-      clinical_csv: "data/clinical_data_clean.csv"
+      clinical_csv: "data/clinical_data.csv"

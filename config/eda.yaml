@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 # Inherits all defaults from settings.yaml.  Only EDA-relevant sections are
 # listed here — edit this file for EDA experiments without touching ML/DL
-# settings.  Create a copy (e.g. config/eda_umap_off.yaml) with
+# settings.  Create a copy (e.g. config/eda_custom.yaml) with
 #   _extends: eda.yaml
 # to override specific keys for a particular experiment.
 # ---------------------------------------------------------------------------
@@ -44,7 +44,7 @@ analysis:
     emit_cluster_mean_spectra: true  # bool: plot mean spectra per cluster
   region_weighting:
     enabled: false  # bool: apply region masks/weights
-    apply_to: ["pca", "subject_umap", "robustness"]  # list[str]: affected analyses ["pca", "subject_umap", "robustness"]
+    apply_to: ["pca", "robustness"]  # list[str]: affected analyses ["pca", "robustness"]
     exclude_windows: []  # list[list[float]]: [[start_cm, end_cm], ...] to exclude
     downweight_windows: []  # list[list[float]]: [[start_cm, end_cm, factor], ...]
     # Suspect CH-stretch window examples:
@@ -52,29 +52,14 @@ analysis:
     # downweight_windows: [[2655, 2685, 0.25]]
   advanced:
     dimred:
-      umap_n_neighbors: 15  # int: UMAP neighbor count
-      umap_min_dist: 0.1  # float: UMAP minimum distance, 0 < min_dist < 1
-      umap_metric: "cosine"  # str: UMAP distance metric
       tsne_perplexity: 30  # float: t-SNE perplexity, typically 5-50
       tsne_n_iter: 1000  # int: t-SNE optimization iterations
-    subject_umap:
-      enabled: true  # bool: run subject-level UMAP
-      n_permutations: 200  # int: permutation-test iterations
-      umap_metric: "cosine"  # str: distance metric for subject UMAP
-      longitudinal_min_pairs: 20  # int: minimum subject pairs for longitudinal tests
-    umap_overlays:
-      discrete: ["condition", "gender", "hdbscan_cluster"]  # list[str]: categorical overlay columns
-      continuous: ["moca_baseline_total", "moca_3_months_total", "delta_moca", "age_years"]  # list[str]: numeric overlay columns
-    cluster_interpretation:
-      enabled: true  # bool: interpret subject-level HDBSCAN clusters (driver wavenumbers, mean spectra)
-      n_permutations: 200  # int: permutation iterations for cluster stability
-      top_k_wavenumbers: 20  # int: top driver wavenumbers per cluster
+
     intra_disease:
       enabled: false  # bool: per-wavenumber Spearman correlations vs clinical targets, disease subjects only
-      clinical_csv: "data/clinical_data_clean.csv"  # str: disease-only curated clinical CSV
+      clinical_csv: "data/clinical_data.csv"  # str: disease-only curated clinical CSV
     robustness:
       enabled: false  # bool: compare baseline vs region-masked analyses
-      run_subject_umap: true  # bool: include subject UMAP in robustness comparison
       suspect_windows: [[2655, 2685]]  # list[list[float]]: regions to downweight/exclude
       downweight_factor: 0.0  # float: 0 = exclude window, >0 = residual weight
     cross_range_report:

@@ -1,5 +1,4 @@
 import logging
-import re
 import shutil
 from pathlib import Path
 
@@ -7,7 +6,7 @@ import pandas as pd
 
 from src.io.file_crawler import build_raw_file_index
 from src.metadata.parser import clean_subject_id
-from src import setup_logging, config, _output_dir
+from src import setup_logging, config
 
 logger = logging.getLogger(__name__)
 

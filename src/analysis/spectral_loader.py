@@ -182,29 +182,6 @@ def _load_subject_spectra_from_index(
     return wavenumbers, np.vstack(all_spectra)
 
 
-def compute_subject_mean_spectrum(
-    df_index: pd.DataFrame,
-    subject_id: str,
-    spectral_range: str = "1300",
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Compute the mean spectrum for a subject across all its measurements.
-
-    For `spectral_range="both"`, the subject mean is computed from paired-area
-    whole-spectrum vectors and weighted directly by `n_valid_pixels` across all
-    surviving paired areas for the subject.
-
-    Returns
-    -------
-    wavenumbers : np.ndarray
-    mean_spectrum : np.ndarray
-        1D array (n_wavenumbers,).
-    """
-    return _compute_subject_mean_spectrum_from_index(
-        _normalized_index(df_index),
-        subject_id,
-        spectral_range,
-    )
 
 
 def _compute_subject_mean_spectrum_from_index(

@@ -80,6 +80,150 @@ def _apply_ml_spectral_scaler(
     return train_scaled, test_scaled, info
 
 
+
+def _compile_pca_track(
+    train_subject, test_subject, train_vectors_scaled, test_vectors_scaled, 
+    resolved_split, variance_threshold, random_state
+) -> tuple:
+    pca_model = fit_region_pca(
+        train_vectors_scaled,
+        variance_threshold=variance_threshold,
+        split_index=resolved_split,
+        random_state=random_state,
+    )
+    pca_train = pca_model["train_scores"]
+    pca_test = transform_region_pca(pca_model, test_vectors_scaled)
+    pca_feature_names = _pca_feature_names(pca_model)
+    track_train = _make_named_block_df(train_subject["subject_id"], pca_train, pca_feature_names)
+    track_test = _make_named_block_df(test_subject["subject_id"], pca_test, pca_feature_names)
+    return track_train, track_test, pca_model
+
+def _compile_peak_tracks(
+    train_subject, test_subject, train_vectors, test_vectors, 
+    resolved_split, include_relative_features, 
+    relative_train_vectors, relative_test_vectors, relative_wavenumbers, relative_eps, relative_cfg
+) -> tuple:
+    import numpy as np
+    import pandas as pd
+    from src import config
+    
+    peak_cfg = config.get("peaks", {})
+    peak_indices = detect_training_peaks(
+        np.mean(train_vectors, axis=0),
+        prominence_percentile=float(peak_cfg.get("prominence_percentile", 75)),
+        min_distance=int(peak_cfg.get("min_distance", 15)),
+        canonical_bin_width=int(peak_cfg.get("canonical_bin_width", 5)),
+    )
+    peak_labels = [f"peak_{int(idx)}" for idx in peak_indices.tolist()]
+    
+    peak_train = extract_peak_features(
+        train_vectors, peak_indices, peak_labels=peak_labels,
+        peak_window=int(peak_cfg.get("peak_window", 5)), n_top_for_ratios=int(peak_cfg.get("n_top_for_ratios", 6))
+    )
+    peak_test = extract_peak_features(
+        test_vectors, peak_indices, peak_labels=peak_labels,
+        peak_window=int(peak_cfg.get("peak_window", 5)), n_top_for_ratios=int(peak_cfg.get("n_top_for_ratios", 6))
+    )
+    
+    track_b_train = _with_subject_id(train_subject["subject_id"], peak_train, "peak")
+    track_b_test = _with_subject_id(test_subject["subject_id"], peak_test, "peak")
+    
+    rel_train = pd.DataFrame()
+    rel_test = pd.DataFrame()
+    relative_reference_peak_idx = None
+    
+    if include_relative_features and relative_train_vectors is not None and relative_test_vectors is not None:
+        relative_reference_peak_idx = _resolve_reference_peak_idx(
+            peak_indices,
+            reference_wavenumber=float(relative_cfg.get("reference_peak_wavenumber", 2850.0)),
+            n_channels=train_vectors.shape[1],
+            split_index=resolved_split,
+            tolerance_channels=int(relative_cfg.get("reference_tolerance_channels", 20)),
+        )
+        relpeak_train = extract_relative_peak_features(
+            relative_train_vectors, peak_indices, peak_labels=peak_labels,
+            peak_window=int(peak_cfg.get("peak_window", 5)),
+            reference_idx=relative_reference_peak_idx,
+            wavenumbers=relative_wavenumbers, eps=relative_eps,
+        )
+        relpeak_test = extract_relative_peak_features(
+            relative_test_vectors, peak_indices, peak_labels=peak_labels,
+            peak_window=int(peak_cfg.get("peak_window", 5)),
+            reference_idx=relative_reference_peak_idx,
+            wavenumbers=relative_wavenumbers, eps=relative_eps,
+        )
+        rel_train = _with_subject_id(train_subject["subject_id"], relpeak_train, "relpeak")
+        rel_test = _with_subject_id(test_subject["subject_id"], relpeak_test, "relpeak")
+        
+    return track_b_train, track_b_test, rel_train, rel_test, peak_indices, peak_labels, relative_reference_peak_idx
+
+def _compile_stat_track(
+    train_subject, test_subject, train_vectors, test_vectors, split_index, static
+) -> tuple:
+    if "track_c" in static:
+        track_c_all = static["track_c"]
+        train_ids = set(train_subject["subject_id"].astype(str).tolist())
+        test_ids = set(test_subject["subject_id"].astype(str).tolist())
+        track_train = track_c_all[track_c_all["subject_id"].isin(train_ids)].copy()
+        track_test = track_c_all[track_c_all["subject_id"].isin(test_ids)].copy()
+    else:
+        stat_train = extract_statistical_features(train_vectors, split_index=split_index)
+        stat_test = extract_statistical_features(test_vectors, split_index=split_index)
+        track_train = _with_subject_id(train_subject["subject_id"], stat_train, "stat")
+        track_test = _with_subject_id(test_subject["subject_id"], stat_test, "stat")
+    return track_train, track_test
+
+def _compile_clinical_track(
+    train_subject, test_subject, train_area_df, test_area_df, clinical_df, static
+) -> tuple:
+    if "track_e" in static:
+        track_e_all = static["track_e"]
+        train_ids = set(train_subject["subject_id"].astype(str).tolist())
+        test_ids = set(test_subject["subject_id"].astype(str).tolist())
+        clinical_train = track_e_all[track_e_all["subject_id"].isin(train_ids)].copy()
+        clinical_test = track_e_all[track_e_all["subject_id"].isin(test_ids)].copy()
+    else:
+        clinical_train = build_clinical_feature_block(train_area_df, clinical_df=clinical_df)
+        clinical_test = build_clinical_feature_block(test_area_df, clinical_df=clinical_df)
+    return _prefix_columns(clinical_train, "clin"), _prefix_columns(clinical_test, "clin")
+
+def _compile_eda_bands_track(
+    train_subject, test_subject, train_vectors, test_vectors, split_index
+) -> tuple:
+    import pandas as pd
+    band_train = extract_band_features(train_vectors, split_index=split_index)
+    band_test = extract_band_features(test_vectors, split_index=split_index)
+    ratio_train = extract_ratio_features(train_vectors, split_index=split_index)
+    ratio_test = extract_ratio_features(test_vectors, split_index=split_index)
+    
+    t_band = _with_subject_id(train_subject["subject_id"], band_train, "band") if not band_train.empty else pd.DataFrame()
+    te_band = _with_subject_id(test_subject["subject_id"], band_test, "band") if not band_train.empty else pd.DataFrame()
+    t_ratio = _with_subject_id(train_subject["subject_id"], ratio_train, "ratio") if not ratio_train.empty else pd.DataFrame()
+    te_ratio = _with_subject_id(test_subject["subject_id"], ratio_test, "ratio") if not ratio_train.empty else pd.DataFrame()
+    
+    return t_band, te_band, t_ratio, te_ratio
+
+def _add_sex_interactions(train_compiled, test_compiled, train_numeric, test_numeric):
+    import numpy as np
+    sex_col = "cov_sex_binary"
+    if sex_col in train_numeric.columns and sex_col in test_numeric.columns:
+        sex_train_vals = train_numeric[sex_col].to_numpy(dtype=float)
+        sex_test_vals = test_numeric[sex_col].to_numpy(dtype=float)
+        feature_cols = [c for c in train_numeric.columns if c != sex_col]
+        
+        train_inter = train_numeric[feature_cols].to_numpy(dtype=float) * sex_train_vals[:, np.newaxis]
+        test_inter = test_numeric[feature_cols].to_numpy(dtype=float) * sex_test_vals[:, np.newaxis]
+        inter_names = [f"{c}_x_sex" for c in feature_cols]
+        
+        train_inter_df = _make_block_df(train_compiled["subject_id"], train_inter, "inter")
+        train_inter_df.columns = ["subject_id"] + inter_names
+        test_inter_df = _make_block_df(test_compiled["subject_id"], test_inter, "inter")
+        test_inter_df.columns = ["subject_id"] + inter_names
+        
+        train_compiled = train_compiled.merge(train_inter_df, on="subject_id", how="left")
+        test_compiled = test_compiled.merge(test_inter_df, on="subject_id", how="left")
+    return train_compiled, test_compiled
+
 def compile_feature_matrices(
     train_area_df: pd.DataFrame,
     test_area_df: pd.DataFrame,
@@ -97,32 +241,10 @@ def compile_feature_matrices(
     include_sex_interactions: bool = False,
     include_relative_features: bool = False,
 ) -> dict:
-    """Compile Tracks A-F into aligned train/test subject-level feature matrices.
+    import numpy as np
+    import pandas as pd
+    from src import config
 
-    Track A: per-region PCA (fit only on training subjects; uses train-fit
-             spectral-channel scaling when ``ml_spectral_scaler`` is enabled)
-    Track B: peak features (peaks detected from training cohort mean only)
-    Track C: statistical spectral features
-    Track D: heterogeneity features using training-detected peaks
-    Track E: clinical covariates (age, sex; off by default)
-    Track F: EDA-guided band and ratio features
-    Track G: CH-stretch lipid-state features (UMAP + MiniBatchKMeans)
-    sex_binary: default covariate from spectral metadata
-
-    Engineering principle: Tracks B-F and G are derived from physically
-    preprocessed, unscaled subject-mean spectra.  Only channel-space learned
-    transforms (Track A PCA) use the optional fold-local spectral-channel
-    scaler configured via ``ml_spectral_scaler``.  The final mixed feature
-    matrix is scaled fold-locally by a feature-level StandardScaler inside the
-    CV/holdout loop.
-
-    Parameters
-    ----------
-    precomputed_static_tracks
-        Optional dict with ``track_c`` and/or ``track_e`` DataFrames
-        precomputed for the full cohort. When provided, those tracks are
-        looked up by subject_id instead of recomputed per fold.
-    """
     _validate_area_df(train_area_df, "train_area_df")
     _validate_area_df(test_area_df, "test_area_df")
     if require_disjoint_subjects:
@@ -130,210 +252,92 @@ def compile_feature_matrices(
 
     train_subject = aggregate_subject_vectors(train_area_df)
     test_subject = aggregate_subject_vectors(test_area_df)
-
     train_vectors = np.vstack(list(train_subject["mean_vector"].to_numpy()))
     test_vectors = np.vstack(list(test_subject["mean_vector"].to_numpy()))
 
-    # Spectral-channel scaling is fit on training subjects and applied only to
-    # channel-space learned transforms (e.g. spectral PCA).  Engineered Raman
-    # features below use the physically preprocessed, unscaled subject vectors.
-    train_vectors_scaled, test_vectors_scaled, scaler_info = _apply_ml_spectral_scaler(
-        train_vectors, test_vectors
-    )
-
+    train_vectors_scaled, test_vectors_scaled, scaler_info = _apply_ml_spectral_scaler(train_vectors, test_vectors)
     resolved_split = infer_split_index(split_index=split_index, n_features=train_vectors.shape[1])
+    
     relative_cfg = config.get("relative_features", {})
     relative_basis_requested = str(relative_cfg.get("basis", "baseline_corrected"))
     relative_eps = float(relative_cfg.get("eps", 1.0e-9))
-    relative_reference_peak_idx: int | None = None
-    relative_basis_used: str | None = None
-    relative_train_vectors: np.ndarray | None = None
-    relative_test_vectors: np.ndarray | None = None
-    relative_wavenumbers: np.ndarray | None = None
-
+    
+    relative_train_vectors, relative_test_vectors, relative_basis_used, relative_wavenumbers = None, None, None, None
     if include_relative_features:
         relative_train_vectors, relative_test_vectors, relative_basis_used = _resolve_relative_basis(
-            train_subject,
-            test_subject,
-            train_vectors,
-            test_vectors,
-            basis=relative_basis_requested,
+            train_subject, test_subject, train_vectors, test_vectors, basis=relative_basis_requested,
         )
-        relative_wavenumbers = _resolve_feature_wavenumbers(
-            n_features=train_vectors.shape[1],
-            split_index=resolved_split,
-        )
+        relative_wavenumbers = _resolve_feature_wavenumbers(n_features=train_vectors.shape[1], split_index=resolved_split)
 
-    # Track A: spectral PCA is a channel-space learned transform -> use scaled vectors.
-    pca_model = fit_region_pca(
-        train_vectors_scaled,
-        variance_threshold=variance_threshold,
-        split_index=resolved_split,
-        random_state=random_state,
+    track_a_train, track_a_test, pca_model = _compile_pca_track(
+        train_subject, test_subject, train_vectors_scaled, test_vectors_scaled, resolved_split, variance_threshold, random_state
     )
-    pca_train = pca_model["train_scores"]
-    pca_test = transform_region_pca(pca_model, test_vectors_scaled)
-
-    peak_cfg = config.get("peaks", {})
-    peak_indices = detect_training_peaks(
-        np.mean(train_vectors, axis=0),
-        prominence_percentile=float(peak_cfg.get("prominence_percentile", 75)),
-        min_distance=int(peak_cfg.get("min_distance", 15)),
-        canonical_bin_width=int(peak_cfg.get("canonical_bin_width", 5)),
+    
+    track_b_train, track_b_test, rel_train, rel_test, peak_indices, peak_labels, relative_reference_peak_idx = _compile_peak_tracks(
+        train_subject, test_subject, train_vectors, test_vectors, resolved_split, include_relative_features,
+        relative_train_vectors, relative_test_vectors, relative_wavenumbers, relative_eps, relative_cfg
     )
-    peak_labels = [f"peak_{int(idx)}" for idx in peak_indices.tolist()]
-    peak_train = extract_peak_features(
-        train_vectors,
-        peak_indices,
-        peak_labels=peak_labels,
-        peak_window=int(peak_cfg.get("peak_window", 5)),
-        n_top_for_ratios=int(peak_cfg.get("n_top_for_ratios", 6)),
-    )
-    peak_test = extract_peak_features(
-        test_vectors,
-        peak_indices,
-        peak_labels=peak_labels,
-        peak_window=int(peak_cfg.get("peak_window", 5)),
-        n_top_for_ratios=int(peak_cfg.get("n_top_for_ratios", 6)),
-    )
-    if include_relative_features and relative_train_vectors is not None and relative_test_vectors is not None:
-        relative_reference_peak_idx = _resolve_reference_peak_idx(
-            peak_indices,
-            reference_wavenumber=float(relative_cfg.get("reference_peak_wavenumber", 2850.0)),
-            n_channels=train_vectors.shape[1],
-            split_index=resolved_split,
-            tolerance_channels=int(relative_cfg.get("reference_tolerance_channels", 20)),
-        )
-        relpeak_train = extract_relative_peak_features(
-            relative_train_vectors,
-            peak_indices,
-            peak_labels=peak_labels,
-            peak_window=int(peak_cfg.get("peak_window", 5)),
-            reference_idx=relative_reference_peak_idx,
-            wavenumbers=relative_wavenumbers,
-            eps=relative_eps,
-        )
-        relpeak_test = extract_relative_peak_features(
-            relative_test_vectors,
-            peak_indices,
-            peak_labels=peak_labels,
-            peak_window=int(peak_cfg.get("peak_window", 5)),
-            reference_idx=relative_reference_peak_idx,
-            wavenumbers=relative_wavenumbers,
-            eps=relative_eps,
-        )
-    else:
-        relpeak_train = pd.DataFrame(index=np.arange(train_vectors.shape[0]))
-        relpeak_test = pd.DataFrame(index=np.arange(test_vectors.shape[0]))
-
-    pca_feature_names = _pca_feature_names(pca_model)
-    track_a_train = _make_named_block_df(train_subject["subject_id"], pca_train, pca_feature_names)
-    track_a_test = _make_named_block_df(test_subject["subject_id"], pca_test, pca_feature_names)
-
-    track_b_train = _with_subject_id(train_subject["subject_id"], peak_train, "peak")
-    track_b_test = _with_subject_id(test_subject["subject_id"], peak_test, "peak")
 
     train_tracks = [track_a_train, track_b_train]
     test_tracks = [track_a_test, track_b_test]
-    if include_relative_features and not relpeak_train.empty:
-        train_tracks.append(_with_subject_id(train_subject["subject_id"], relpeak_train, "relpeak"))
-        test_tracks.append(_with_subject_id(test_subject["subject_id"], relpeak_test, "relpeak"))
+    
+    if not rel_train.empty:
+        train_tracks.append(rel_train)
+        test_tracks.append(rel_test)
 
-    # Track C — use precomputed if available, else compute on-the-fly
-    static = precomputed_static_tracks or {}
-    if "track_c" in static:
-        track_c_all = static["track_c"]
-        train_ids = set(train_subject["subject_id"].astype(str).tolist())
-        test_ids = set(test_subject["subject_id"].astype(str).tolist())
-        track_c_train = track_c_all[track_c_all["subject_id"].isin(train_ids)].copy()
-        track_c_test = track_c_all[track_c_all["subject_id"].isin(test_ids)].copy()
-    else:
-        stat_train = extract_statistical_features(train_vectors, split_index=int(pca_model["split_index"]))
-        stat_test = extract_statistical_features(test_vectors, split_index=int(pca_model["split_index"]))
-        track_c_train = _with_subject_id(train_subject["subject_id"], stat_train, "stat")
-        track_c_test = _with_subject_id(test_subject["subject_id"], stat_test, "stat")
-
+    track_c_train, track_c_test = _compile_stat_track(
+        train_subject, test_subject, train_vectors, test_vectors, int(pca_model["split_index"]), precomputed_static_tracks or {}
+    )
     train_tracks.append(track_c_train)
     test_tracks.append(track_c_test)
 
     if include_heterogeneity:
         hetero_cfg = config.get("heterogeneity", {})
-        hetero_train = extract_heterogeneity_features(
-            train_area_df,
-            peak_indices=peak_indices,
-            n_targeted_peaks=int(hetero_cfg.get("n_targeted_peaks", 5)),
-        )
-        hetero_test = extract_heterogeneity_features(
-            test_area_df,
-            peak_indices=peak_indices,
-            n_targeted_peaks=int(hetero_cfg.get("n_targeted_peaks", 5)),
-        )
+        hetero_train = extract_heterogeneity_features(train_area_df, peak_indices=peak_indices, n_targeted_peaks=int(hetero_cfg.get("n_targeted_peaks", 5)))
+        hetero_test = extract_heterogeneity_features(test_area_df, peak_indices=peak_indices, n_targeted_peaks=int(hetero_cfg.get("n_targeted_peaks", 5)))
         train_tracks.append(_prefix_columns(hetero_train, "hetero"))
         test_tracks.append(_prefix_columns(hetero_test, "hetero"))
 
     if include_clinical:
-        if "track_e" in static:
-            track_e_all = static["track_e"]
-            train_ids = set(train_subject["subject_id"].astype(str).tolist())
-            test_ids = set(test_subject["subject_id"].astype(str).tolist())
-            clinical_train = track_e_all[track_e_all["subject_id"].isin(train_ids)].copy()
-            clinical_test = track_e_all[track_e_all["subject_id"].isin(test_ids)].copy()
-        else:
-            clinical_train = build_clinical_feature_block(train_area_df, clinical_df=clinical_df)
-            clinical_test = build_clinical_feature_block(test_area_df, clinical_df=clinical_df)
-        train_tracks.append(_prefix_columns(clinical_train, "clin"))
-        test_tracks.append(_prefix_columns(clinical_test, "clin"))
+        clin_train, clin_test = _compile_clinical_track(
+            train_subject, test_subject, train_area_df, test_area_df, clinical_df, precomputed_static_tracks or {}
+        )
+        train_tracks.append(clin_train)
+        test_tracks.append(clin_test)
 
-    # Track F — EDA-guided band and ratio features (fit-free, from subject means)
     if include_eda_bands:
-        band_train = extract_band_features(train_vectors, split_index=int(pca_model["split_index"]))
-        band_test = extract_band_features(test_vectors, split_index=int(pca_model["split_index"]))
-        if not band_train.empty:
-            train_tracks.append(_with_subject_id(train_subject["subject_id"], band_train, "band"))
-            test_tracks.append(_with_subject_id(test_subject["subject_id"], band_test, "band"))
-        ratio_train = extract_ratio_features(train_vectors, split_index=int(pca_model["split_index"]))
-        ratio_test = extract_ratio_features(test_vectors, split_index=int(pca_model["split_index"]))
-        if not ratio_train.empty:
-            train_tracks.append(_with_subject_id(train_subject["subject_id"], ratio_train, "ratio"))
-            test_tracks.append(_with_subject_id(test_subject["subject_id"], ratio_test, "ratio"))
+        b_train, b_test, r_train, r_test = _compile_eda_bands_track(
+            train_subject, test_subject, train_vectors, test_vectors, int(pca_model["split_index"])
+        )
+        for tr in [b_train, r_train]:
+            if not tr.empty:
+                train_tracks.append(tr)
+        for tr in [b_test, r_test]:
+            if not tr.empty:
+                test_tracks.append(tr)
 
     if include_relative_features and relative_train_vectors is not None and relative_test_vectors is not None:
-        bandfrac_train = extract_band_fraction_features(
-            relative_train_vectors,
-            split_index=int(pca_model["split_index"]),
-            eps=relative_eps,
-        )
-        bandfrac_test = extract_band_fraction_features(
-            relative_test_vectors,
-            split_index=int(pca_model["split_index"]),
-            eps=relative_eps,
-        )
-        if not bandfrac_train.empty:
-            train_tracks.append(_with_subject_id(train_subject["subject_id"], bandfrac_train, "bandfrac"))
-            test_tracks.append(_with_subject_id(test_subject["subject_id"], bandfrac_test, "bandfrac"))
+        bf_train = extract_band_fraction_features(relative_train_vectors, split_index=int(pca_model["split_index"]), eps=relative_eps)
+        bf_test = extract_band_fraction_features(relative_test_vectors, split_index=int(pca_model["split_index"]), eps=relative_eps)
+        if not bf_train.empty:
+            train_tracks.append(_with_subject_id(train_subject["subject_id"], bf_train, "bandfrac"))
+            test_tracks.append(_with_subject_id(test_subject["subject_id"], bf_test, "bandfrac"))
 
-    # Track G — CH-stretch lipid-state features (train-only UMAP + KMeans)
-    track_g_audit: dict = {}
+    track_g_audit = {}
     if include_ch_lipid_state:
-        train_subj_ids = train_subject["subject_id"].astype(str).tolist()
-        test_subj_ids = test_subject["subject_id"].astype(str).tolist()
-        track_g_area_df = pd.concat([train_area_df, test_area_df], ignore_index=True, sort=False)
         g_train, g_test, track_g_audit = extract_ch_lipid_state_features(
-            track_g_area_df,
-            train_subject_ids=train_subj_ids,
-            test_subject_ids=test_subj_ids,
+            pd.concat([train_area_df, test_area_df], ignore_index=True, sort=False),
+            train_subject_ids=train_subject["subject_id"].astype(str).tolist(),
+            test_subject_ids=test_subject["subject_id"].astype(str).tolist(),
             random_state=random_state,
         )
         if not g_train.empty:
             train_tracks.append(_prefix_columns(g_train, "chlipid"))
             test_tracks.append(_prefix_columns(g_test, "chlipid"))
 
-    # sex_binary covariate (from spectral metadata, always fit-free)
     if include_sex_covariate:
-        sex_train = extract_sex_covariate_block(train_area_df)
-        sex_test = extract_sex_covariate_block(test_area_df)
-        train_tracks.append(_prefix_columns(sex_train, "cov"))
-        test_tracks.append(_prefix_columns(sex_test, "cov"))
+        train_tracks.append(_prefix_columns(extract_sex_covariate_block(train_area_df), "cov"))
+        test_tracks.append(_prefix_columns(extract_sex_covariate_block(test_area_df), "cov"))
 
     train_compiled = _merge_tracks(train_subject["subject_id"], train_tracks)
     test_compiled = _merge_tracks(test_subject["subject_id"], test_tracks)
@@ -346,27 +350,12 @@ def compile_feature_matrices(
     _log_nan_features("test", test_numeric)
 
     if include_sex_interactions and include_sex_covariate:
-        sex_col = "cov_sex_binary"
-        if sex_col in train_numeric.columns and sex_col in test_numeric.columns:
-            sex_train_vals = train_numeric[sex_col].to_numpy(dtype=float)
-            sex_test_vals = test_numeric[sex_col].to_numpy(dtype=float)
-            feature_cols = [c for c in train_numeric.columns if c not in {sex_col}]
-            train_inter = train_numeric[feature_cols].to_numpy(dtype=float) * sex_train_vals[:, np.newaxis]
-            test_inter = test_numeric[feature_cols].to_numpy(dtype=float) * sex_test_vals[:, np.newaxis]
-            inter_names = [f"{c}_x_sex" for c in feature_cols]
-            train_inter_df = _make_block_df(train_compiled["subject_id"], train_inter, "inter")
-            train_inter_df.columns = ["subject_id"] + inter_names
-            test_inter_df = _make_block_df(test_compiled["subject_id"], test_inter, "inter")
-            test_inter_df.columns = ["subject_id"] + inter_names
-            train_compiled = train_compiled.merge(train_inter_df, on="subject_id", how="left")
-            test_compiled = test_compiled.merge(test_inter_df, on="subject_id", how="left")
+        train_compiled, test_compiled = _add_sex_interactions(train_compiled, test_compiled, train_numeric, test_numeric)
 
-    train_numeric = train_compiled.drop(columns=["subject_id"])
-    test_numeric = test_compiled.drop(columns=["subject_id"])
-
-    x_train = train_numeric.to_numpy(dtype=float)
-    x_test = test_numeric.to_numpy(dtype=float)
+    x_train = train_compiled.drop(columns=["subject_id"]).to_numpy(dtype=float)
+    x_test = test_compiled.drop(columns=["subject_id"]).to_numpy(dtype=float)
     feature_names = train_compiled.drop(columns=["subject_id"]).columns.tolist()
+    
     _assert_no_acquisition_count_features(feature_names)
     assert_no_identifier_leakage(feature_names, x_train, x_test)
 
@@ -396,7 +385,6 @@ def compile_feature_matrices(
             "spectral_scaler": scaler_info,
         },
     }
-
 
 def aggregate_subject_vectors(area_df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate area-level spectra to one slide-aware mean vector per subject."""

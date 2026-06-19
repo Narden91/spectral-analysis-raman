@@ -20,11 +20,11 @@ experiment:
 # Data
 # ---------------------------------------------------------------------------
 data:
-  root_dir: "data"              # str: reorganized canonical dataset read by EDA/ML/DL
+  root_dir: "data/raw"              # str: reorganized canonical dataset read by EDA/ML/DL
   preprocessed_dir: "data_preprocessed"  # str: deterministic per-area preprocessing cache
   raw_dir: "data_raw"           # str: original Renishaw exports (reorganize step only)
   cleaned_dir: "data_cleaned"   # str: intermediate cleaned copy (reorganize step only)
-  clinical_csv: "data/clinical_data_clean.csv"  # str: curated disease-only clinical data (single source of truth)
+  clinical_csv: "data/clinical_data.csv"  # str: curated disease-only clinical data (single source of truth)
   curated_clinical_csv: "data_cleaned/clinical/clinical_data_curated.csv"  # str: reconciled subject table written by load_clinical_data
   subject_metadata_csv: "data_cleaned/clinical/subject_metadata.csv"  # str: per-subject metadata output
   clinical_audit_csv: "data_cleaned/clinical/clinical_mismatch_audit.csv"  # str: mismatch audit log

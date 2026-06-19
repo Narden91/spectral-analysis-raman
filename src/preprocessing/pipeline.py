@@ -341,19 +341,6 @@ def compute_qc_metrics(spectra: np.ndarray) -> pd.DataFrame:
     return _compute_qc_metrics(np.asarray(spectra, dtype=float))
 
 
-def screen_dead_pixels(
-    spectra: np.ndarray,
-    min_spectral_std: Optional[float] = None,
-    saturation_value: Optional[float] = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    metrics_df = compute_qc_metrics(np.asarray(spectra, dtype=float))
-    filtered, valid_mask, _ = _apply_initial_qc(
-        np.asarray(spectra, dtype=float),
-        metrics_df,
-        min_spectral_std=min_spectral_std,
-        saturation_value=saturation_value,
-    )
-    return filtered, valid_mask
 
 
 def _local_cosmic_detection(
@@ -454,36 +441,6 @@ def _suppress_cosmic_spikes(
     return arr
 
 
-def suppress_cosmic_rays(
-    spectra: np.ndarray,
-    enabled: Optional[bool] = None,
-    z_threshold: Optional[float] = None,
-    window: Optional[int] = None,
-    pixel_coords: np.ndarray | None = None,
-) -> np.ndarray:
-    """Public convenience wrapper: detect and optionally suppress cosmic rays.
-
-    This function preserves the historical API.  It does **not** record metrics;
-    callers that need detection statistics should use ``_detect_cosmic_spikes``
-    directly.
-    """
-    cr_cfg = dict(_pre_cfg().get("cosmic_ray", {}))
-    use_filter = bool(enabled if enabled is not None else cr_cfg.get("enabled", False))
-    if not use_filter or spectra.size == 0:
-        return np.asarray(spectra, dtype=float)
-
-    if z_threshold is not None:
-        cr_cfg["z_threshold"] = float(z_threshold)
-    if window is not None:
-        cr_cfg["window"] = int(window)
-    if pixel_coords is not None:
-        cr_cfg["method"] = "spatial"
-
-    spike_mask, replacement = _detect_cosmic_spikes(spectra, pixel_coords, cr_cfg)
-    filtered = _suppress_cosmic_spikes(spectra, spike_mask, replacement)
-    if np.any(spike_mask):
-        logger.debug("Cosmic-ray suppression replaced %d channels", int(spike_mask.sum()))
-    return filtered
 
 
 def correct_baseline(
@@ -548,27 +505,6 @@ def correct_baseline(
     return corrected
 
 
-def repair_isolated_spikes(
-    spectra: np.ndarray,
-    z_threshold: float = 8.0,
-    window: int = 5,
-    max_corrected_fraction: float = 0.02,
-) -> np.ndarray:
-    """Repair isolated cosmic-ray-like spikes via Whitaker-Hayes modified Z-score.
-
-    Computes the modified Z-score on the discrete first difference of each
-    spectrum (Whitaker & Hayes, 2018): flagged channels are replaced by the
-    local mean over `window`. Per-spectrum repair is skipped if the flagged
-    fraction exceeds `max_corrected_fraction`, to avoid smearing real signal
-    on legitimately noisy spectra. Deterministic and subject-independent.
-    """
-    repaired, _ = repair_isolated_spikes_with_mask(
-        spectra,
-        z_threshold=z_threshold,
-        window=window,
-        max_corrected_fraction=max_corrected_fraction,
-    )
-    return repaired
 
 
 def repair_isolated_spikes_with_mask(
@@ -788,14 +724,6 @@ def spectral_quality_mask(
     return mask, stats
 
 
-def apply_spectral_quality_filter(
-    spectra: np.ndarray,
-    **kwargs,
-) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
-    if spectra.size == 0:
-        return spectra, np.array([], dtype=bool), {"anchor_index": -1.0, "area_threshold": 0.0}
-    mask, stats = spectral_quality_mask(spectra, **kwargs)
-    return spectra[mask], mask, stats
 
 
 def _resolve_preview_trim_slice(

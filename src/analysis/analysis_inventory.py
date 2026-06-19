@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -74,35 +73,12 @@ _INVENTORY_TEMPLATE: list[dict] = [
         "primary_question": "What is the global linear structure of the cohort?",
         "artifact_examples": "pca_scores_pc1_pc2.png, pca_variance_{range}.csv",
         "scientific_value": "High — subject-level global structure and variance decomposition.",
-        "overlap_with": "subject_umap",
+        "overlap_with": "",
         "recommended_status": "keep_main",
         "manuscript_recommendation": "main",
         "notes": "Include scree plot and loading interpretation table.",
     },
-    {
-        "analysis_name": "subject_umap",
-        "track": "EDA",
-        "phase": "06_manifold_subject",
-        "primary_question": "What latent structure exists at subject level?",
-        "artifact_examples": "subject_umap_embedding_{range}.csv, cluster_mean_spectra_{range}.png",
-        "scientific_value": "High — exploratory latent grouping at the inferential unit.",
-        "overlap_with": "pca",
-        "recommended_status": "keep_main",
-        "manuscript_recommendation": "main",
-        "notes": "Explicitly exploratory; do not label clusters as disease/control classes.",
-    },
-    {
-        "analysis_name": "cluster_mean_spectra",
-        "track": "EDA",
-        "phase": "07_cluster_interpretation",
-        "primary_question": "What does each latent cluster look like spectrally?",
-        "artifact_examples": "cluster_mean_spectra_{range}.csv",
-        "scientific_value": "High — interprets latent groups discovered by UMAP/HDBSCAN.",
-        "overlap_with": "group_mean_spectra",
-        "recommended_status": "keep_main",
-        "manuscript_recommendation": "main",
-        "notes": "Essential for interpreting subject clusters.",
-    },
+
     {
         "analysis_name": "region_influence",
         "track": "EDA",
@@ -122,7 +98,7 @@ _INVENTORY_TEMPLATE: list[dict] = [
         "primary_question": "Which engineered features drive supervised classification?",
         "artifact_examples": "feature_importance.csv, top_features_spectrum.png",
         "scientific_value": "High — connects latent structure to supervised performance.",
-        "overlap_with": "umap_axis_correlations",
+        "overlap_with": "",
         "recommended_status": "keep_main",
         "manuscript_recommendation": "main",
         "notes": "Interpret in terms of spectral regions / feature families.",
@@ -139,18 +115,7 @@ _INVENTORY_TEMPLATE: list[dict] = [
         "manuscript_recommendation": "supplement",
         "notes": "Use to argue which spectral structures matter.",
     },
-    {
-        "analysis_name": "ch_lipid_state",
-        "track": "ML",
-        "phase": "archive",
-        "primary_question": "Do CH-stretch lipid-state latent features contribute to classification?",
-        "artifact_examples": "archive/ch_lipid_state_audit.csv",
-        "scientific_value": "High — links EDA-style pixel clustering to ML interpretability.",
-        "overlap_with": "pixel_umap, feature_importance",
-        "recommended_status": "keep_main",
-        "manuscript_recommendation": "main",
-        "notes": "Report alongside pixel UMAP cluster interpretation.",
-    },
+
 ]
 
 

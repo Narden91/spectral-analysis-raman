@@ -22,10 +22,7 @@ COHORT_GROUP_COUNTS_TEMPLATE = "cohort_{range}_group_counts.csv"
 COHORT_CLINICAL_MISSINGNESS_TEMPLATE = "cohort_{range}_clinical_missingness.csv"
 PCA_TOP_WAVENUMBERS_TEMPLATE = "pca_top_wavenumbers_per_pc_{range}.csv"
 PCA_VARIANCE_TEMPLATE = "pca_variance_{range}.csv"
-SUBJECT_UMAP_EMBEDDING_TEMPLATE = "subject_umap_embedding_{range}.csv"
-SUBJECT_UMAP_PURITY_TEMPLATE = "subject_umap_purity_{range}.csv"
-CLUSTER_PROFILES_TEMPLATE = "cluster_profiles_{range}.csv"
-CLUSTER_DRIVERS_TEMPLATE = "cluster_driver_wavenumbers_{range}.csv"
+
 MFA_BLOCK_CONTRIBUTIONS = "mfa_block_contributions.csv"
 
 # ---------------------------------------------------------------------------
@@ -42,8 +39,6 @@ _CAVEATS = """\
 >   always be accompanied by sex-stratified comparisons.
 > * QC flags indicate measurement reliability concerns; flagged areas are
 >   retained unless otherwise noted but should be interpreted cautiously.
-> * UMAP axes are nonlinear — Spearman correlations with UMAP coordinates
->   are exploratory visualisation aids, not confirmatory tests.
 > * All p-values / FDR q-values are nominal; replication in independent
 >   cohorts is required before any clinical interpretation.
 """
@@ -106,38 +101,20 @@ def _overview_section(ranges: list[str], output_base: Path) -> str:
         lines.append(f"- **Disease**: {int(disease)} | **Control**: {int(control)}")
         lines.append("- **Gender breakdown**: " + "; ".join(gender_lines))
 
-        # Paired MoCA from subject UMAP embedding (most reliable if available)
-        embedding_path = (
-            output_base
-            / _range_label(r)
-            / "06_manifold_subject"
-            / SUBJECT_UMAP_EMBEDDING_TEMPLATE.format(range=r)
-        )
-        emb_df = _optional(embedding_path)
-        if emb_df is not None:
-            required = ["moca_baseline_total", "moca_3_months_total"]
-            if all(c in emb_df.columns for c in required):
-                paired = emb_df.dropna(subset=required)
-                n_paired = len(paired)
-                lines.append(f"- **Paired MoCA** (baseline + 3-month): {n_paired} subjects")
-            else:
-                lines.append("- **Paired MoCA**: columns missing in embedding CSV")
-        else:
-            # Fallback to clinical missingness summary
-            missingness = _optional(descriptive_dir / COHORT_CLINICAL_MISSINGNESS_TEMPLATE.format(range=r))
-            if missingness is not None:
-                moca_baseline = missingness[missingness["column"] == "moca_baseline_total"]
-                moca_3m = missingness[missingness["column"] == "moca_3_months_total"]
-                if not moca_baseline.empty and not moca_3m.empty:
-                    avail_base = (1.0 - float(moca_baseline.iloc[0]["missing_rate"])) * 100
-                    avail_3m = (1.0 - float(moca_3m.iloc[0]["missing_rate"])) * 100
-                    lines.append(
-                        f"- **MoCA availability**: baseline {avail_base:.0f}%, 3-month {avail_3m:.0f}%"
-                    )
-                else:
-                    lines.append("- **MoCA availability**: not reported")
+        missingness = _optional(descriptive_dir / COHORT_CLINICAL_MISSINGNESS_TEMPLATE.format(range=r))
+        if missingness is not None:
+            moca_baseline = missingness[missingness["column"] == "moca_baseline_total"]
+            moca_3m = missingness[missingness["column"] == "moca_3_months_total"]
+            if not moca_baseline.empty and not moca_3m.empty:
+                avail_base = (1.0 - float(moca_baseline.iloc[0]["missing_rate"])) * 100
+                avail_3m = (1.0 - float(moca_3m.iloc[0]["missing_rate"])) * 100
+                lines.append(
+                    f"- **MoCA availability**: baseline {avail_base:.0f}%, 3-month {avail_3m:.0f}%"
+                )
             else:
                 lines.append("- **MoCA availability**: not reported")
+        else:
+            lines.append("- **MoCA availability**: not reported")
 
     return "\n".join(lines) + "\n"
 
@@ -166,49 +143,7 @@ def _pca_section(phase_dir_fn, spectral_range: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _subject_umap_section(phase_dir_fn, spectral_range: str) -> str:
-    subj_dir = phase_dir_fn("manifold_subject")
-    purity_df = _optional(subj_dir / SUBJECT_UMAP_PURITY_TEMPLATE.format(range=spectral_range))
-    if purity_df is None:
-        return ""
 
-    lines = [f"### Subject UMAP — {spectral_range} cm⁻¹\n"]
-    for _, row in purity_df.iterrows():
-        target = row["target"]
-        ami = float(row["ami"]) if pd.notna(row["ami"]) else np.nan
-        pval = float(row["p_value"]) if pd.notna(row["p_value"]) else np.nan
-        lines.append(
-            f"- **{target}**: AMI = {ami:.3f}, p = {pval:.3f}"
-        )
-    return "\n".join(lines) + "\n"
-
-
-def _cluster_section(phase_dir_fn, spectral_range: str) -> str:
-    clust_dir = phase_dir_fn("cluster_interpretation")
-    profile_df = _optional(clust_dir / CLUSTER_PROFILES_TEMPLATE.format(range=spectral_range))
-    driver_df = _optional(clust_dir / CLUSTER_DRIVERS_TEMPLATE.format(range=spectral_range))
-    if profile_df is None:
-        return ""
-
-    lines = [f"### Cluster interpretation — {spectral_range} cm⁻¹\n"]
-    for _, row in profile_df.iterrows():
-        lines.append(
-            f"- **Cluster {int(row['cluster'])}**: "
-            f"n={int(row['n_subjects'])}, "
-            f"{int(row['n_disease'])} disease / {int(row['n_control'])} control, "
-            f"{row['pct_female']:.0f}% female."
-        )
-
-    if driver_df is not None:
-        sig_drivers = driver_df[driver_df["significant"] == True]  # noqa: E712
-        for cid, grp in sig_drivers.groupby("cluster"):
-            top_waves = grp.nsmallest(5, "fdr_q")["wavenumber"]
-            waves_str = ", ".join(f"{w:.1f}" for w in top_waves)
-            lines.append(
-                f"  → Cluster {int(cid)} top significant drivers: {waves_str} cm⁻¹"
-            )
-
-    return "\n".join(lines) + "\n"
 
 
 def _mfa_section(both_dir: Path) -> str:
@@ -250,27 +185,6 @@ def _range_label(spectral_range: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def collect_range_summaries(
-    ranges: list[str],
-    phase_dir_fn,
-    output_base: Path,
-) -> dict[str, dict]:
-    """Read per-range Phase B/C/D CSV artefacts and return a nested dict.
-
-    Parameters
-    ----------
-    ranges : list[str]
-        e.g. ``['1300', '2850']``
-    phase_dir_fn : callable
-        Callable(phase_key) → Path, scoped to the current spectral range.
-        Should be called as ``phase_dir_fn(range, phase_key)``.
-    output_base : Path
-        Root EDA output directory (contains ``ch_stretch_2850/`` etc.).
-    """
-    summary: dict[str, dict] = {}
-    for r in ranges:
-        summary[r] = {"range": r}
-    return summary
 
 
 def render_narrative_md(
@@ -301,8 +215,7 @@ def render_narrative_md(
         phase_dir_fn = phase_dir_fns[r]
         sections.append(f"## Range {r} cm⁻¹\n")
         sections.append(_pca_section(phase_dir_fn, r))
-        sections.append(_subject_umap_section(phase_dir_fn, r))
-        sections.append(_cluster_section(phase_dir_fn, r))
+
 
     both_dir = output_base / "whole_spectra"
     if both_dir.exists():

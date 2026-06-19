@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 #!/usr/bin/env python3
 """Independent script wrapper for spectral comparison and QC plots."""
 

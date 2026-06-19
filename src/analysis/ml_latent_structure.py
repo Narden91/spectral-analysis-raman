@@ -7,10 +7,8 @@ feature-extraction comparison branch.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -228,29 +226,3 @@ def generate_latent_structure_ml_report(
     return report_text
 
 
-def compare_region_masked_ml_features(
-    baseline_feature_matrix: pd.DataFrame,
-    region_weighting: dict,
-    wavenumbers: np.ndarray,
-    out_path: Path | str | None = None,
-) -> pd.DataFrame:
-    """Stub for optional region-masked ML feature-extraction comparison.
-
-    This function documents the expected interface without mutating baseline
-    matrices.  A full implementation would rerun ``compile_feature_matrices``
-    on a region-masked spectra archive.
-    """
-    logger.info(
-        "Region-masked ML feature comparison stub called with windows=%s",
-        region_weighting.get("exclude_windows") or region_weighting.get("downweight_windows"),
-    )
-    summary = pd.DataFrame(
-        {
-            "branch": ["baseline", "region_masked"],
-            "n_features": [baseline_feature_matrix.shape[1], baseline_feature_matrix.shape[1]],
-            "note": ["Default feature extraction", "Region-masked branch not executed in this pass"],
-        }
-    )
-    if out_path is not None:
-        summary.to_csv(out_path, index=False)
-    return summary

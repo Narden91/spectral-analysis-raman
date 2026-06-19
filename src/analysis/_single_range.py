@@ -46,13 +46,6 @@ from src.analysis.statistics import (
     compare_band_intensities_between_groups,
     test_normality,
 )
-from src.analysis.manifold_subject import run_subject_umap, get_longitudinal_pairs
-from src.analysis.cluster_interpretation import (
-    profile_clusters,
-    cluster_mean_spectra,
-    cluster_driver_wavenumbers,
-    umap_axis_correlations,
-)
 from src.analysis.robustness import run_region_robustness, write_region_influence_report
 from src.analysis.intra_disease import (
     build_disease_subject_mean_matrix,
@@ -62,17 +55,13 @@ from src.analysis.intra_disease import (
 from src.preprocessing.pipeline import preprocess_spectra, apply_region_weights
 from src.visualization.eda_plots import (
     GROUP_COLORS,
-    plot_group_mean_spectra,
-    plot_cluster_mean_spectra,
-    plot_cluster_mean_spectra_faceted,
     plot_pca_scores,
     plot_pca_loadings,
     plot_scree,
     plot_band_boxplots,
+    plot_group_mean_spectra,
+    plot_difference_spectra,
     plot_variance_decomposition,
-    plot_umap_scatter,
-    plot_longitudinal_trajectories,
-    plot_umap_axis_top,
     plot_correlation_spectrum,
 )
 from src.visualization.advanced_plots import plot_all_bands_raincloud
@@ -105,22 +94,7 @@ def _figure_flag(key: str, default: bool = True) -> bool:
     return bool(config.get("analysis", {}).get("figures", {}).get(key, default))
 
 
-def _require_subject_umap_artifacts(
-    manifold_subject_dir: Path,
-    spectral_range: str,
-) -> tuple[Path, Path, Path]:
-    embedding_path = manifold_subject_dir / f"subject_umap_embedding_{spectral_range}.csv"
-    mean_spectra_path = manifold_subject_dir / f"subject_mean_spectra_{spectral_range}.csv"
-    wavenumbers_path = manifold_subject_dir / f"subject_umap_wavenumbers_{spectral_range}.csv"
-    missing = [path for path in (embedding_path, mean_spectra_path) if not path.exists()]
-    if missing:
-        missing_names = ", ".join(path.name for path in missing)
-        raise RuntimeError(
-            "Cluster interpretation is enabled but subject UMAP artifacts are missing "
-            f"({missing_names}). Enable subject_umap.enabled or run the subject UMAP phase "
-            "before cluster_interpretation."
-        )
-    return embedding_path, mean_spectra_path, wavenumbers_path
+
 
 
 def _estimate_variance_decomposition(
@@ -228,8 +202,7 @@ _PHASE_DIRS = {
     "pca": "03_pca",
     "band": "04_band_analysis",
     "variance": "05_variance_decomposition",
-    "manifold_subject": "06_manifold_subject",
-    "cluster_interpretation": "07_cluster_interpretation",
+
     "intra_disease": "08_intra_disease",
 }
 
@@ -716,77 +689,7 @@ def _run_single_range_eda(
             except Exception as exc:
                 logger.warning("Intra-disease correlation phase failed: %s", exc)
 
-    subj_umap_cfg = (
-        config.get("analysis", {}).get("advanced", {}).get("subject_umap", {})
-    )
-    emb_df: pd.DataFrame | None = None
-    if subj_umap_cfg.get("enabled", False):
-        _log_phase("PHASE 6: Subject-level UMAP + clinical overlays")
-        subj_dir = phase_dir("manifold_subject")
-        try:
-            subj_result = run_subject_umap(
-                df_index,
-                spectral_range,
-                clinical_df,
-                region_weighting=rw_cfg if "subject_umap" in apply_to else None,
-            )
-            emb_df = subj_result["embedding"]
-            emb_df.to_csv(
-                subj_dir / f"subject_umap_embedding_{spectral_range}.csv", index=False
-            )
-            subj_result["purity"].to_csv(
-                subj_dir / f"subject_umap_purity_{spectral_range}.csv", index=False
-            )
-            subj_result["mean_spectra"].to_csv(
-                subj_dir / f"subject_mean_spectra_{spectral_range}.csv", index=False
-            )
-            if subj_result.get("wavenumbers") is not None and subj_result["wavenumbers"].size > 0:
-                pd.DataFrame({"wavenumber": subj_result["wavenumbers"]}).to_csv(
-                    subj_dir / f"subject_umap_wavenumbers_{spectral_range}.csv", index=False
-                )
 
-            overlay_cfg = (
-                config.get("analysis", {}).get("advanced", {}).get("umap_overlays", {})
-            )
-            discrete_cols = overlay_cfg.get("discrete", ["condition", "gender", "hdbscan_cluster"])
-            continuous_cols = overlay_cfg.get(
-                "continuous",
-                ["moca_baseline_total", "moca_3_months_total", "delta_moca", "age_years"],
-            )
-
-            for col in discrete_cols:
-                if col not in emb_df.columns:
-                    continue
-                fig, _ = plot_umap_scatter(
-                    emb_df,
-                    color_col=col,
-                    title=f"Subject UMAP — {col} ({range_title})",
-                )
-                _save_fig(fig, f"umap_{col}.png", subj_dir)
-
-            for col in continuous_cols:
-                if col not in emb_df.columns:
-                    continue
-                fig, _ = plot_umap_scatter(
-                    emb_df,
-                    color_col=col,
-                    title=f"Subject UMAP — {col} ({range_title})",
-                    continuous=True,
-                )
-                _save_fig(fig, f"umap_{col}.png", subj_dir)
-
-            min_pairs = int(subj_umap_cfg.get("longitudinal_min_pairs", 20))
-            paired_df = get_longitudinal_pairs(emb_df, min_pairs=min_pairs)
-            if paired_df is not None:
-                fig, _ = plot_longitudinal_trajectories(
-                    paired_df,
-                    n_paired=len(paired_df),
-                    title=f"Longitudinal MoCA Trajectories ({range_title})",
-                )
-                _save_fig(fig, "longitudinal_trajectories.png", subj_dir)
-
-        except Exception as exc:
-            logger.warning("Subject UMAP phase failed: %s", exc, exc_info=True)
 
     robust_cfg = config.get("analysis", {}).get("advanced", {}).get("robustness", {})
     if spectral_range != "both" and robust_cfg.get("enabled", False):
@@ -807,27 +710,11 @@ def _run_single_range_eda(
             }
             rs = int(config.get("analysis", {}).get("random_state", 42))
 
-            weighted_subject_emb = None
-            if (
-                robust_cfg.get("run_subject_umap", True)
-                and emb_df is not None
-                and not emb_df.empty
-            ):
-                weighted_subject_emb = run_subject_umap(
-                    df_index,
-                    spectral_range,
-                    clinical_df,
-                    region_weighting=robust_rw,
-                    random_state=rs,
-                )["embedding"]
-
             rob_result = run_region_robustness(
                 all_spectra,
                 wavenumbers,
                 all_labels,
                 region_weighting=robust_rw,
-                subject_embedding_df=emb_df,
-                weighted_subject_embedding_df=weighted_subject_emb,
                 random_state=rs,
                 n_components=min(3, all_spectra.shape[0] - 1),
             )
@@ -837,95 +724,16 @@ def _run_single_range_eda(
             rob_result["loading_shift"].to_csv(
                 robust_dir / f"pca_loading_shift_{spectral_range}.csv", index=False
             )
-            if "pixel_umap_comparison" in rob_result:
-                rob_result["pixel_umap_comparison"].to_csv(
-                    robust_dir / f"robustness_pixel_umap_{spectral_range}.csv", index=False
-                )
-            if "subject_umap_comparison" in rob_result:
-                rob_result["subject_umap_comparison"].to_csv(
-                    robust_dir / f"robustness_subject_umap_{spectral_range}.csv", index=False
-                )
-
             write_region_influence_report(
                 rob_result["pca_comparison"]["summary"],
                 rob_result["loading_shift"],
                 suspect_windows,
                 robust_dir / f"region_influence_{spectral_range}.md",
-                pixel_umap_comparison=rob_result.get("pixel_umap_comparison"),
-                subject_umap_comparison=rob_result.get("subject_umap_comparison"),
             )
         except Exception as exc:
             logger.warning("Region robustness phase failed: %s", exc, exc_info=True)
 
-    clust_cfg = (
-        config.get("analysis", {}).get("advanced", {}).get("cluster_interpretation", {})
-    )
-    if clust_cfg.get("enabled", False):
-        _log_phase("PHASE 7: Cluster interpretation")
-        clust_dir = phase_dir("cluster_interpretation")
-        try:
-            emb_path, ms_path, wn_path = _require_subject_umap_artifacts(
-                phase_dir("manifold_subject"),
-                spectral_range,
-            )
-            emb_df_d = pd.read_csv(emb_path)
-            ms_df_d = pd.read_csv(ms_path)
 
-            if wn_path.exists():
-                wn_subj = pd.read_csv(wn_path)["wavenumber"].to_numpy()
-            else:
-                logger.warning("Subject UMAP wavenumber axis not found — falling back to trimmed axis")
-                wn_subj = wavenumbers
-
-            profile_df = profile_clusters(emb_df_d)
-            profile_df.to_csv(clust_dir / f"cluster_profiles_{spectral_range}.csv", index=False)
-
-            cluster_ms = cluster_mean_spectra(ms_df_d, emb_df_d, wn_subj)
-            cluster_ms.to_csv(clust_dir / f"cluster_mean_spectra_{spectral_range}.csv", index=False)
-
-            if _figure_flag("emit_cluster_mean_spectra", default=True):
-                cluster_groups = {
-                    str(int(row["cluster"])): row.iloc[1:].to_numpy(dtype=float).reshape(1, -1)
-                    for _, row in cluster_ms.iterrows()
-                }
-                fig, _ = plot_cluster_mean_spectra(
-                    wn_subj,
-                    cluster_groups,
-                    title=f"Mean Raman Spectra of Latent Subject Clusters Identified via UMAP + HDBSCAN ({range_title})",
-                    show_ci=False,
-                )
-                _save_fig(fig, f"cluster_mean_spectra_{spectral_range}.png", clust_dir)
-
-                fig_faceted, _ = plot_cluster_mean_spectra_faceted(
-                    wn_subj,
-                    cluster_groups,
-                    title=f"Faceted Mean Raman Spectra of Latent Subject Clusters ({range_title})",
-                )
-                _save_fig(fig_faceted, f"cluster_mean_spectra_faceted_{spectral_range}.png", clust_dir)
-
-            n_perm_d = int(clust_cfg.get("n_permutations", 200))
-            driver_df = cluster_driver_wavenumbers(
-                ms_df_d, emb_df_d, wn_subj, n_perm=n_perm_d
-            )
-            driver_df.to_csv(clust_dir / f"cluster_driver_wavenumbers_{spectral_range}.csv", index=False)
-
-            corr_df = umap_axis_correlations(ms_df_d, emb_df_d, wn_subj)
-            corr_df.to_csv(clust_dir / f"umap_axis_correlations_{spectral_range}.csv", index=False)
-
-            top_k_d = int(clust_cfg.get("top_k_wavenumbers", 20))
-            for axis in ("UMAP1", "UMAP2"):
-                fig, _ = plot_umap_axis_top(
-                    corr_df,
-                    axis=axis,
-                    top_k=top_k_d,
-                    title=f"Wavenumber↔{axis} correlation ({range_title})",
-                )
-                _save_fig(fig, f"umap_axis_top_{axis.lower()}_{spectral_range}.png", clust_dir)
-
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            logger.warning("Cluster interpretation phase failed: %s", exc)
 
     _log_phase("EDA COMPLETE")
     eda_base = _output_dir("eda_subdir")

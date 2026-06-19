@@ -21,10 +21,6 @@ coverage.xml
 plan*
 
 data/
-data copy/
-data_raw/
-data_cleaned/
-data_preprocessed/
 output_EDA*/
 Output_plot*/
 output_ML*/

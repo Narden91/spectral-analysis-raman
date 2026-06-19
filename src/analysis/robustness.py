@@ -1,23 +1,19 @@
 """Region-influence robustness analysis for Raman EDA.
 
-Compares baseline and region-weighted/excluded PCA, pixel UMAP, and subject
-UMAP outputs to determine whether suspicious spectral regions drive the
-latent-structure story.
+Compares baseline and region-weighted/excluded PCA outputs to determine
+whether suspicious spectral regions drive the latent-structure story.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
-from scipy import stats as scipy_stats
-from sklearn.metrics import adjusted_mutual_info_score, adjusted_rand_score
 
 from src.analysis._reporting import dataframe_to_markdown
-from src.analysis.statistics import run_pca, rank_wavenumbers_per_pc
+from src.analysis.statistics import run_pca
 from src.preprocessing.pipeline import apply_region_weights
 
 logger = logging.getLogger(__name__)
@@ -155,69 +151,7 @@ def compute_loading_shift(
     return pd.DataFrame(rows)
 
 
-def compare_umap_cluster_robustness(
-    baseline_embedding_df: pd.DataFrame,
-    weighted_embedding_df: pd.DataFrame,
-    target_cols: list[str] | None = None,
-) -> pd.DataFrame:
-    """Compare baseline vs weighted UMAP cluster structure.
 
-    Returns
-    -------
-    pd.DataFrame
-        Columns: ``metric``, ``before``, ``after``.
-    """
-    target_cols = target_cols or ["condition", "gender", "subject_id"]
-    base_clusters = baseline_embedding_df["hdbscan_cluster"].to_numpy()
-    weight_clusters = weighted_embedding_df["hdbscan_cluster"].to_numpy()
-
-    n_base_clusters = int(len({c for c in np.unique(base_clusters) if c != -1}))
-    n_weight_clusters = int(len({c for c in np.unique(weight_clusters) if c != -1}))
-
-    noise_before = float((base_clusters == -1).mean())
-    noise_after = float((weight_clusters == -1).mean())
-
-    ami_rows = []
-    for col in target_cols:
-        if col not in baseline_embedding_df.columns or col not in weighted_embedding_df.columns:
-            continue
-        base_valid = base_clusters != -1
-        weight_valid = weight_clusters != -1
-        ami_before = (
-            adjusted_mutual_info_score(
-                baseline_embedding_df.loc[base_valid, col].to_numpy(),
-                base_clusters[base_valid],
-            )
-            if base_valid.sum() > 0
-            else np.nan
-        )
-        ami_after = (
-            adjusted_mutual_info_score(
-                weighted_embedding_df.loc[weight_valid, col].to_numpy(),
-                weight_clusters[weight_valid],
-            )
-            if weight_valid.sum() > 0
-            else np.nan
-        )
-        ami_rows.append(
-            {
-                "metric": f"ami_{col}",
-                "before": ami_before,
-                "after": ami_after,
-            }
-        )
-
-    ari = np.nan
-    if len(base_clusters) == len(weight_clusters):
-        ari = adjusted_rand_score(base_clusters, weight_clusters)
-
-    rows = [
-        {"metric": "n_clusters", "before": n_base_clusters, "after": n_weight_clusters},
-        {"metric": "noise_fraction", "before": noise_before, "after": noise_after},
-        {"metric": "ari_between_clusterings", "before": ari, "after": np.nan},
-        *ami_rows,
-    ]
-    return pd.DataFrame(rows)
 
 
 def run_region_robustness(
@@ -225,10 +159,6 @@ def run_region_robustness(
     wavenumbers: np.ndarray,
     labels: np.ndarray,
     region_weighting: dict,
-    pixel_embedding_df: pd.DataFrame | None = None,
-    subject_embedding_df: pd.DataFrame | None = None,
-    weighted_pixel_embedding_df: pd.DataFrame | None = None,
-    weighted_subject_embedding_df: pd.DataFrame | None = None,
     random_state: int = 42,
     n_components: int = 3,
 ) -> dict:
@@ -244,14 +174,6 @@ def run_region_robustness(
         Group/condition labels aligned with ``baseline_spectra``.
     region_weighting : dict
         Region-weighting config for ``apply_region_weights``.
-    pixel_embedding_df : pd.DataFrame or None
-        Baseline pixel UMAP embedding.
-    subject_embedding_df : pd.DataFrame or None
-        Baseline subject UMAP embedding.
-    weighted_pixel_embedding_df : pd.DataFrame or None
-        Pixel UMAP embedding recomputed after applying ``region_weighting``.
-    weighted_subject_embedding_df : pd.DataFrame or None
-        Subject UMAP embedding recomputed after applying ``region_weighting``.
     random_state : int
         RNG seed.
     n_components : int
@@ -260,9 +182,7 @@ def run_region_robustness(
     Returns
     -------
     dict
-        ``pca_comparison``, ``loading_shift``, ``pixel_umap_comparison``,
-        ``subject_umap_comparison`` (when both baseline and weighted inputs
-        are provided).
+        ``pca_comparison``, ``loading_shift``.
     """
     weighted_spectra = apply_region_weights(baseline_spectra, wavenumbers, region_weighting)
 
@@ -284,17 +204,7 @@ def run_region_robustness(
         "loading_shift": loading_shift,
     }
 
-    if pixel_embedding_df is not None and not pixel_embedding_df.empty and weighted_pixel_embedding_df is not None and not weighted_pixel_embedding_df.empty:
-        result["pixel_umap_comparison"] = compare_umap_cluster_robustness(
-            pixel_embedding_df,
-            weighted_pixel_embedding_df,
-        )
 
-    if subject_embedding_df is not None and not subject_embedding_df.empty and weighted_subject_embedding_df is not None and not weighted_subject_embedding_df.empty:
-        result["subject_umap_comparison"] = compare_umap_cluster_robustness(
-            subject_embedding_df,
-            weighted_subject_embedding_df,
-        )
 
     return result
 
@@ -304,8 +214,6 @@ def write_region_influence_report(
     loading_shift: pd.DataFrame,
     suspect_windows: list[list[float]],
     out_path: str | Path,
-    pixel_umap_comparison: pd.DataFrame | None = None,
-    subject_umap_comparison: pd.DataFrame | None = None,
 ) -> None:
     """Write a concise region-influence markdown report."""
     out_path = Path(out_path)
@@ -315,20 +223,7 @@ def write_region_influence_report(
             return False
         return bool((pca_summary["loading_correlation"] < 0.9).any())
 
-    def _structure_changed() -> bool:
-        if pixel_umap_comparison is None or pixel_umap_comparison.empty:
-            return False
-        n_before = pixel_umap_comparison.loc[
-            pixel_umap_comparison["metric"] == "n_clusters", "before"
-        ]
-        n_after = pixel_umap_comparison.loc[
-            pixel_umap_comparison["metric"] == "n_clusters", "after"
-        ]
-        if n_before.empty or n_after.empty:
-            return False
-        return int(n_before.iloc[0]) != int(n_after.iloc[0])
-
-    if _loading_changed() or _structure_changed():
+    if _loading_changed():
         recommendation = "The suspect region materially influences results: report as sensitivity limitation or exclude/downweight."
     else:
         recommendation = "Main structural conclusions are robust to the tested window."
@@ -348,25 +243,7 @@ def write_region_influence_report(
         "",
     ]
 
-    if pixel_umap_comparison is not None:
-        lines.extend(
-            [
-                "## Pixel UMAP/clustering robustness",
-                "",
-                dataframe_to_markdown(pixel_umap_comparison),
-                "",
-            ]
-        )
 
-    if subject_umap_comparison is not None:
-        lines.extend(
-            [
-                "## Subject UMAP/clustering robustness",
-                "",
-                dataframe_to_markdown(subject_umap_comparison),
-                "",
-            ]
-        )
 
     lines.extend(
         [
