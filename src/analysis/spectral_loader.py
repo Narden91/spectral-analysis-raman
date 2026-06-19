@@ -194,7 +194,45 @@ def _compute_subject_mean_spectrum_from_index(
         return _average_area_vectors(wavenumbers, area_vectors, weights)
 
     region_key = resolve_region_key(spectral_range)
-    return load_subject_mean(str(subject_id), region_key)
+    range_val = float(spectral_range)
+    mask = (df_index["subject_id"] == subject_id) & (
+        df_index["spectral_range_cm-1"] == range_val
+    )
+    subject_rows = df_index[mask]
+    
+    if subject_rows.empty:
+        return np.array([]), np.array([])
+        
+    from src.preprocessing.cache import build_area_cache
+    from src.preprocessing.pipeline import retention_guard_config
+    
+    all_spectra = []
+    wavenumbers = None
+    
+    for _, row in subject_rows.iterrows():
+        cached = build_area_cache(
+            filepath=row["filepath"],
+            subject_id=str(subject_id),
+            slide_number=str(row["slide_number"]),
+            area_id=str(row["area_id"]),
+            region=region_key,
+        )
+        if cached.spectra.size > 0:
+            if wavenumbers is None:
+                wavenumbers = cached.wavenumbers
+            elif not wave_axes_compatible(wavenumbers, cached.wavenumbers):
+                raise ValueError(f"Wavenumber axis mismatch in area {row['area_id']} for subject {subject_id}")
+            all_spectra.append(cached.spectra)
+            
+    if not all_spectra or wavenumbers is None:
+        return np.array([]), np.array([])
+        
+    pixels = np.vstack(all_spectra)
+    guards = retention_guard_config()
+    if pixels.shape[0] < guards["min_pixels_per_subject"]:
+        return wavenumbers, np.array([])
+        
+    return wavenumbers, np.nanmean(pixels, axis=0)
 
 
 def _concatenate_region_wavenumbers(area_result: dict[str, np.ndarray]) -> np.ndarray:
@@ -589,7 +627,7 @@ def build_group_matrix(
         max_subjects=max_subjects,
     )
 
-    logger.info(
+    logger.debug(
         "Building group matrix: gender=%s, control=%s, range=%s, n_subjects=%d",
         gender,
         is_control,

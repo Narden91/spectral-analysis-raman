@@ -1,9 +1,3 @@
-from src.visualization.classification_plots import (
-	plot_spectrum_highlights,
-	plot_top_feature_boxplots,
-)
+"""Visualization package."""
 
-__all__ = [
-	"plot_spectrum_highlights",
-	"plot_top_feature_boxplots",
-]
+__all__ = []

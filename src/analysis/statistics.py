@@ -101,7 +101,7 @@ def test_normality(data: np.ndarray, alpha: float = 0.05) -> dict:
     is_normal = p_values > alpha
     fraction = np.nanmean(is_normal[test_idx])
 
-    logger.info(
+    logger.debug(
         "Normality test (%d/%d features): %.1f%% are normal (alpha=%.3f)",
         len(test_idx),
         n_features,

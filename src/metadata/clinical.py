@@ -167,7 +167,7 @@ def resolve_curated_clinical_paths() -> dict[str, Path]:
 def load_clinical_data(
     clinical_csv: str | Path | None = None,
     data_index: pd.DataFrame | None = None,
-    write_curated: bool = True,
+    write_curated: bool = False,
 ) -> pd.DataFrame:
     """Load and normalize clinical metadata into a subject-level canonical table."""
     path = resolve_clinical_csv_path(clinical_csv)

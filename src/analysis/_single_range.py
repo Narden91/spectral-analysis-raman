@@ -81,7 +81,7 @@ def _save_fig(fig: matplotlib.figure.Figure, name: str, out_dir: Path):
     path = out_dir / name
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Saved: %s", path)
+    logger.debug("Saved: %s", path)
 
 
 def _log_phase(title: str) -> None:
@@ -298,7 +298,7 @@ def _run_single_range_eda(
             if spectra is None or spectra.size == 0:
                 logger.warning("No data for group %s, skipping", key)
                 continue
-            logger.info(
+            logger.debug(
                 "  %s: %d subjects × %d wavenumbers",
                 key,
                 spectra.shape[0],
@@ -324,7 +324,7 @@ def _run_single_range_eda(
                     f"Wavenumber axis mismatch for group '{key}': "
                     f"expected {len(wavenumbers)} wavenumbers, got {len(wave)}."
                 )
-            logger.info(
+            logger.debug(
                 "  %s: %d subjects × %d wavenumbers",
                 key,
                 spectra.shape[0],
@@ -393,7 +393,7 @@ def _run_single_range_eda(
         desc_out = phase_dir("descriptive")
         desc_csv = desc_out / f"descriptive_stats_{spectral_range}.csv"
         desc_df.to_csv(desc_csv, index=False)
-        logger.info("Descriptive stats:\n%s", desc_df.to_string(index=False))
+        logger.debug("Descriptive stats:\n%s", desc_df.to_string(index=False))
 
         _log_phase("PHASE 2: Visualization — Group comparisons")
 
@@ -534,7 +534,7 @@ def _run_single_range_eda(
         )
         interp_df.to_csv(pca_dir / f"pca_loading_interpretation_{spectral_range}.csv", index=False)
 
-        logger.info(
+        logger.debug(
             "Saved PCA loadings CSV (%d wavenumbers × %d PCs)",
             len(wavenumbers),
             loadings_matrix.shape[0],
@@ -569,7 +569,7 @@ def _run_single_range_eda(
                     _save_fig(fig, "band_boxplots.png", band_dir)
 
                 if _figure_flag("emit_band_rainclouds", default=True):
-                    logger.info("  Generating Raincloud distributions...")
+                    logger.debug("  Generating Raincloud distributions...")
                     fig_rc, _ = plot_all_bands_raincloud(
                         all_bands[band_cols],
                         np.array(band_labels),
@@ -645,7 +645,7 @@ def _run_single_range_eda(
 
         for key, spectra in groups.items():
             norm = test_normality(spectra)
-            logger.info(
+            logger.debug(
                 "  %s: %.1f%% of wavenumbers pass normality (Shapiro-Wilk, alpha=0.05)",
                 key,
                 norm["fraction_normal"] * 100,
