@@ -37,12 +37,7 @@ Install:
 uv pip install -e .
 ```
 
-Prepare data:
 
-```bash
-uv run -m src.data_preparation.clean_raw_data --force
-uv run -m src.data_preparation.reorganize
-```
 
 Default data roots:
 
