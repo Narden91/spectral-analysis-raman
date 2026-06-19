@@ -202,8 +202,7 @@ _PHASE_DIRS = {
     "pca": "03_pca",
     "band": "04_band_analysis",
     "variance": "05_variance_decomposition",
-
-    "intra_disease": "08_intra_disease",
+    "intra_disease": "06_intra_disease",
 }
 
 def _run_single_range_eda(
@@ -684,7 +683,7 @@ def _run_single_range_eda(
             config.get("analysis", {}).get("advanced", {}).get("intra_disease", {})
         )
         if intra_disease_cfg.get("enabled", False):
-            _log_phase("PHASE 8: Intra-disease clinical correlations")
+            _log_phase("PHASE 6: Intra-disease clinical correlations")
             try:
                 intra_csv = intra_disease_cfg.get("clinical_csv", "data/clinical_data_clean.csv")
                 intra_clinical_df = load_clinical_data(intra_csv, data_index=df_index, write_curated=False)
@@ -722,8 +721,8 @@ def _run_single_range_eda(
 
     robust_cfg = config.get("analysis", {}).get("advanced", {}).get("robustness", {})
     if spectral_range != "both" and robust_cfg.get("enabled", False):
-        _log_phase("PHASE 6b: Region-influence robustness")
-        robust_dir = get_eda_phase_dir(spectral_range, "10b_region_robustness")
+        _log_phase("PHASE 7b: Region-influence robustness")
+        robust_dir = get_eda_phase_dir(spectral_range, "07b_region_robustness")
         try:
             suspect_windows = robust_cfg.get("suspect_windows", [])
             downweight_factor = float(robust_cfg.get("downweight_factor", 0.0))
