@@ -1,0 +1,20 @@
+# ---------------------------------------------------------------------------
+# Disease-only EDA run — clinical correlation analysis against the curated
+# clean clinical CSV. Condition/diagnosis labels are context here, not the
+# grouping variable; intra-disease analysis restricts to disease subjects
+# by construction (see src/analysis/intra_disease.py).
+# ---------------------------------------------------------------------------
+_extends: eda.yaml
+
+output:
+  eda_root: "output_EDA_disease_only"
+
+data:
+  clinical_csv: "data/clinical_data_clean.csv"
+  subject_group: "disease_only"
+
+analysis:
+  advanced:
+    intra_disease:
+      enabled: true
+      clinical_csv: "data/clinical_data_clean.csv"

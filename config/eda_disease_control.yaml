@@ -1,0 +1,14 @@
+# ---------------------------------------------------------------------------
+# Disease vs. control EDA run — primary grouping is folder condition
+# (disease/control), as in the default eda.yaml track. Intra-disease
+# clinical correlation analysis is off (controls have no clinical targets).
+# ---------------------------------------------------------------------------
+_extends: eda.yaml
+
+output:
+  eda_root: "output_EDA_disease_vs_control"
+
+analysis:
+  advanced:
+    intra_disease:
+      enabled: false

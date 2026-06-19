@@ -1,0 +1,35 @@
+[project]
+name = "eda-raman"
+version = "0.1.0"
+description = "Raman spectroscopy EDA/ML/DL analysis pipeline for EV characterization"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dash>=4.0.0",
+    "ipykernel>=7.2.0",
+    "jupyter>=1.1.1",
+    "markdown>=3.5",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.2",
+    "pandas>=3.0.1",
+    "pybaselines>=1.2.1",
+    "pyyaml>=6.0.3",
+    "rich>=14.2.0",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
+    "catboost>=1.2.0",
+    "shap>=0.46.0",
+    "umap-learn>=0.5.7",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = [
+    "ignore:Tensorflow not installed; ParametricUMAP will be unavailable:ImportWarning:umap",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

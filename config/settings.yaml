@@ -1,0 +1,175 @@
+# ---------------------------------------------------------------------------
+# Shared base configuration
+# ---------------------------------------------------------------------------
+# This file contains only cross-track defaults. Track-specific sections live in
+# config/eda.yaml, config/ml.yaml, config/dl.yaml, and config/plots.yaml.
+
+# ---------------------------------------------------------------------------
+# Experiment tracking - controls multi-run iteration
+# ---------------------------------------------------------------------------
+experiment:
+  # Number of independent pipeline runs to execute.
+  # int >= 1: 1 -> single run (output root), >1 -> run_001/, run_002/, ...
+  n_runs: 1
+
+  # Seed for run 0. Run i uses base_seed + i.
+  # int: override with --base-seed on the CLI.
+  base_seed: 42
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+data:
+  root_dir: "data"              # str: reorganized canonical dataset read by EDA/ML/DL
+  preprocessed_dir: "data_preprocessed"  # str: deterministic per-area preprocessing cache
+  raw_dir: "data_raw"           # str: original Renishaw exports (reorganize step only)
+  cleaned_dir: "data_cleaned"   # str: intermediate cleaned copy (reorganize step only)
+  clinical_csv: "data/clinical_data_clean.csv"  # str: curated disease-only clinical data (single source of truth)
+  curated_clinical_csv: "data_cleaned/clinical/clinical_data_curated.csv"  # str: reconciled subject table written by load_clinical_data
+  subject_metadata_csv: "data_cleaned/clinical/subject_metadata.csv"  # str: per-subject metadata output
+  clinical_audit_csv: "data_cleaned/clinical/clinical_mismatch_audit.csv"  # str: mismatch audit log
+  missing_clinical_subjects_csv: "data_cleaned/clinical/subjects_missing_clinical.csv"  # str: subjects without clinical data
+  file_extension: ".txt"        # str: spectrum file suffix
+
+# ---------------------------------------------------------------------------
+# Preprocessing
+# ---------------------------------------------------------------------------
+preprocessing:
+  dead_pixel:
+    # Minimum per-pixel spectral standard deviation to consider a pixel alive.
+    min_spectral_std: 1.0  # float: counts / arbitrary intensity units
+    saturation_value: 65000  # int: detector/saturation ceiling
+  outlier_detection:
+    enabled: true  # bool: enable global outlier flagging
+    threshold_factor: 3.0  # float: IQR-style multiplier
+  cosmic_ray:
+    enabled: true  # bool: enable cosmic-ray suppression
+    method: "spatial"  # str: algorithm name (e.g. "spatial")
+    n_neighbors: 8  # int: neighboring pixels used for comparison
+    z_threshold: 8.0  # float: z-score threshold for spike detection
+    window: 2  # int: half-width of the local window
+  # Global fallback defaults used when no range-specific value is set.
+  baseline:
+    method: "arpls"  # str: baseline algorithm ("arpls", "snip", ...)
+    lam: 1000000.0  # float: arPLS roughness penalty (larger = smoother)
+    p: 0.01  # float: arPLS asymmetry weight, 0 < p < 1
+    snip:
+      max_half_window: 50  # int: max half-window for SNIP
+      decreasing: true  # bool: true if window decreases during iterations
+      smooth_half_window: 3  # int: Savitzky-Golay half-window for SNIP smoothing
+  smoothing:
+    enabled: false  # bool: enable Savitzky-Golay smoothing
+    method: "savgol"  # str: smoother name
+    window_length: 7  # int: full window length, must be odd and >= polyorder+1
+    polyorder: 2  # int: polynomial order
+  # Edge trimming: number of points to remove at each end of the spectrum.
+  edge_trim:
+    trim: 10  # int: points to drop at each spectrum edge
+    edge_trim_cm: 15.0  # float: cm^-1 alternative edge width
+  interpolation:
+    target_spacing: 1.0  # float: target cm^-1 spacing after interpolation
+    method: "cubic"  # str: interpolation kind ("cubic", "linear", ...)
+  # Whitaker-Hayes isolated-spike repair, applied post-baseline / pre-normalization.
+  # Deterministic and subject-independent (modified Z-score on the discrete difference).
+  spike_repair:
+    enabled: true  # bool: enable isolated-spike repair
+    z_threshold: 8.0  # float: modified Z-score threshold for spike flagging
+    window: 5  # int: local window width used for spike replacement
+    max_corrected_fraction: 0.02  # float: abort per-spectrum repair above this flagged fraction
+  retention:
+    min_pixels_per_area: 4  # int: drop a file/measurement if fewer pixels survive QC
+    min_pixels_per_subject: 10  # int: drop a subject-range if fewer pixels survive QC
+  cache:
+    enabled: false  # bool: persist/read the deterministic data_preprocessed/ cache
+    version: 2  # int: bump to force-invalidate every cached area
+  quality_filter:
+    spectral_quality:
+      enabled: true  # bool: enable spectral quality gating
+      snr_threshold: 5.0  # float: minimum signal-to-noise ratio
+      peak_window: 5  # int: half-width in channels for peak search
+      noise_channels: 20  # int: trailing channels used to estimate noise
+      min_area_percentile: 10  # int: percentile threshold for area-level retention
+      # Compute SNR/area on a virtual edge-trimmed preview so edge artifacts
+      # that will later be removed cannot drive rejection.
+      use_trim_aware_preview: true  # bool
+      # Fixed wavenumber windows (cm^-1) used to anchor the SNR peak search.
+      # Deterministic: the anchor never depends on subject/batch content.
+      # Falls back to peak detection only if no window overlaps the axis.
+      anchor_windows:
+        fingerprint: [[995.0, 1015.0], [1435.0, 1470.0], [1630.0, 1680.0]]
+        ch_stretch: [[2840.0, 2975.0]]
+    coffee_ring:
+      enabled: true  # bool: enable coffee-ring artifact filter
+      intensity_ratio_threshold: 2.0  # float: intensity ratio threshold
+      min_surviving_pixels: 4  # int: minimum pixels to keep an area
+  # Region-specific overrides take precedence over global defaults.
+  ranges:
+    fingerprint:
+      baseline:
+        method: "arpls"  # str: baseline algorithm
+        lam: 1000000.0  # float: arPLS roughness penalty
+        p: 0.01  # float: arPLS asymmetry weight
+        arpls:
+          lam: 1000000.0  # float: arPLS roughness penalty
+          ratio: 0.001  # float: convergence ratio threshold
+          max_iter: 100  # int: maximum iterations
+      smoothing:
+        enabled: false  # bool: enable smoothing in fingerprint region
+        window_length: 7  # int: Savitzky-Golay window
+        polyorder: 2  # int: polynomial order
+    ch_stretch:
+      baseline:
+        method: "arpls"  # str: baseline algorithm
+        lam: 1000000.0  # float: arPLS roughness penalty
+        arpls:
+          lam: 1000000.0  # float: arPLS roughness penalty
+          ratio: 0.001  # float: convergence ratio threshold
+          max_iter: 100  # int: maximum iterations
+      smoothing:
+        enabled: false  # bool: enable smoothing in CH-stretch region
+        window_length: 9  # int: Savitzky-Golay window
+        polyorder: 2  # int: polynomial order
+  # Normalization modes used by the preprocessing orchestrator.
+  normalization:
+    method: "snv"  # str: default normalization ("vector", "snv", "none", ...)
+    default_mode: "eda"  # str: selected mode key ("eda", "cross", "ml")
+    modes:
+      eda: "snv"  # str: normalization for EDA track
+      cross: "none"  # str: normalization for cross-range fusion
+      ml: "robust"  # str: normalization for ML track
+  artifacts:
+    save_qc_tables: true  # bool: write per-area QC tables
+    save_stage_arrays: false  # bool: save intermediate per-stage spectra
+    stage_arrays: ["raw", "cosmic_corrected", "baseline", "baseline_corrected", "spike_repaired", "smoothed", "normalized"]  # list[str]: stages to persist if enabled
+    format: "npz"  # str: file format for saved arrays
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+output:
+  # Preferred roots per pipeline track.
+  eda_root: "output_EDA"  # str: EDA output directory
+  ml_root: "output_ML"  # str: ML output directory
+  dl_root: "output_DL"  # str: DL output directory
+
+  # Whether to persist per-area preprocessing artifacts (QC tables + manifests)
+  # under output_EDA/processed/preprocessing_artifacts.
+  # bool: false reduces disk use when only aggregate outputs are needed.
+  keep_preprocessing_artifacts: false
+
+  # Whether to persist the paired-area whole-spectrum cache under
+  # output_EDA/processed/whole_spectra.
+  # bool: false keeps whole-spectrum intermediates in-memory only.
+  keep_whole_spectra_cache: false
+
+  # Legacy shared root kept only as a fallback for older code paths.
+  project_name: "outputs"  # str: fallback output directory name
+
+  # Subdirectory names relative to eda_root.
+  eda_subdir: ""  # str: main EDA subdirectory (empty = eda_root itself)
+
+  # Human-readable subdirectory names per spectral range.
+  range_labels:
+    "1300": "fingerprint_1300"  # str: label for fingerprint region
+    "2850": "ch_stretch_2850"  # str: label for CH-stretch region
+    "both": "whole_spectra"  # str: label for concatenated range

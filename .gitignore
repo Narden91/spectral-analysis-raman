@@ -1,0 +1,67 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Test and linter caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+htmlcov/
+coverage.xml
+
+# Virtual environments
+.venv
+
+plan*
+
+data/
+data copy/
+data_raw/
+data_cleaned/
+data_preprocessed/
+output_EDA*/
+Output_plot*/
+output_ML*/
+output_DL*/
+outputs*/
+catboost_info/
+.agent/
+.github/
+.claude/
+notebook/
+doc/Analysis_*
+legacy_results/
+doc/manuscript*
+doc/manuscript/build/
+doc/manuscript/figures/*
+doc/ml_results_report/figures/*
+doc/ml_results_report/tables/*
+doc/ml_results_report/report*
+
+!doc/ml_results_report/build_report.py
+presentation/
+CLAUDE.md
+
+
+# Latex auxiliary files
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.xml    
+*.blg
+*.bbl
+*.bcf
+*.acn
+*.acr
