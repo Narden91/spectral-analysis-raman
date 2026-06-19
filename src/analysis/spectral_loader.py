@@ -184,14 +184,15 @@ def _load_subject_spectra_from_index(
 
 
 
-def _compute_subject_mean_spectrum_from_index(
+def _compute_area_median_spectra_from_index(
     df_index: pd.DataFrame,
     subject_id: str,
     spectral_range: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     if spectral_range == "both":
         wavenumbers, area_vectors, weights = _load_subject_paired_area_vectors_from_index(df_index, subject_id)
-        return _average_area_vectors(wavenumbers, area_vectors, weights)
+        # Instead of averaging the area vectors, we just return them!
+        return wavenumbers, area_vectors
 
     region_key = resolve_region_key(spectral_range)
     range_val = float(spectral_range)
@@ -206,8 +207,9 @@ def _compute_subject_mean_spectrum_from_index(
     from src.preprocessing.cache import build_area_cache
     from src.preprocessing.pipeline import retention_guard_config
     
-    all_spectra = []
+    all_area_medians = []
     wavenumbers = None
+    total_valid_pixels = 0
     
     for _, row in subject_rows.iterrows():
         cached = build_area_cache(
@@ -222,17 +224,20 @@ def _compute_subject_mean_spectrum_from_index(
                 wavenumbers = cached.wavenumbers
             elif not wave_axes_compatible(wavenumbers, cached.wavenumbers):
                 raise ValueError(f"Wavenumber axis mismatch in area {row['area_id']} for subject {subject_id}")
-            all_spectra.append(cached.spectra)
+            # Compute median for the spot
+            area_median = np.nanmedian(cached.spectra, axis=0)
+            all_area_medians.append(area_median)
+            total_valid_pixels += cached.spectra.shape[0]
             
-    if not all_spectra or wavenumbers is None:
+    if not all_area_medians or wavenumbers is None:
         return np.array([]), np.array([])
         
-    pixels = np.vstack(all_spectra)
+    area_matrix = np.vstack(all_area_medians)
     guards = retention_guard_config()
-    if pixels.shape[0] < guards["min_pixels_per_subject"]:
+    if total_valid_pixels < guards["min_pixels_per_subject"]:
         return wavenumbers, np.array([])
         
-    return wavenumbers, np.nanmean(pixels, axis=0)
+    return wavenumbers, area_matrix
 
 
 def _concatenate_region_wavenumbers(area_result: dict[str, np.ndarray]) -> np.ndarray:
@@ -463,10 +468,9 @@ def _whole_spectra_subject_matrix_from_store(
         area_vectors = np.vstack(
             [np.asarray(vector, dtype=float) for vector in subject_rows["area_mean"].to_numpy()]
         )
-        weights = subject_rows["n_valid_pixels"].to_numpy(dtype=float)
-        _, mean_spectrum = _average_area_vectors(store.wavenumbers, area_vectors, weights)
-        mean_spectra.append(mean_spectrum)
-        valid_subjects.append(subject_id)
+        # We append the area_vectors matrix directly (n_areas, n_wavenumbers)
+        mean_spectra.append(area_vectors)
+        valid_subjects.extend([subject_id] * area_vectors.shape[0])
 
     if not mean_spectra:
         return np.array([]), np.empty((0, 0)), []
@@ -644,7 +648,7 @@ def build_group_matrix(
         )
 
     def _load_one(sid: str) -> tuple[str, np.ndarray, np.ndarray]:
-        w, ms = _compute_subject_mean_spectrum_from_index(df_index, sid, spectral_range)
+        w, ms = _compute_area_median_spectra_from_index(df_index, sid, spectral_range)
         return sid, w, ms
 
     mean_spectra: list[np.ndarray] = []
@@ -662,7 +666,7 @@ def build_group_matrix(
                     f"Wavenumber axis mismatch while building group matrix for subject '{sid}'"
                 )
             mean_spectra.append(mean_spec)
-            valid_subjects.append(sid)
+            valid_subjects.extend([sid] * mean_spec.shape[0])
             if wavenumbers is None:
                 wavenumbers = wave
 

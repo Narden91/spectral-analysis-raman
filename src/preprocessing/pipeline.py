@@ -78,8 +78,15 @@ def _resolve_region_key(wavenumbers: np.ndarray, region: Optional[str]) -> str:
     )
 
 
-def _normalization_method(method: Optional[str], mode: Optional[str]) -> str:
+def _normalization_method(method: Optional[str], mode: Optional[str], region_key: Optional[str] = None) -> str:
     nm_cfg = _pre_cfg().get("normalization", {})
+    if region_key is not None:
+        range_nm_cfg = _range_cfg(region_key).get("normalization", {})
+        if "method" in range_nm_cfg:
+            if mode == "cross":
+                return "none"
+            return str(range_nm_cfg["method"]).strip().lower()
+
     mode_map = {
         "eda": "vector",
         "cross": "none",
@@ -96,7 +103,7 @@ def _normalization_method(method: Optional[str], mode: Optional[str]) -> str:
 def _validate_preprocessing_config(region_key: str) -> None:
     pre_cfg = _pre_cfg()
     nm_cfg = pre_cfg.get("normalization", {})
-    norm_method = _normalization_method(nm_cfg.get("method"), None)
+    norm_method = _normalization_method(nm_cfg.get("method"), None, region_key)
     allowed = {"none", "area", "snv", "vector", "minmax", "robust"}
     if norm_method not in allowed:
         raise ValueError(f"Unknown normalization method in config: {norm_method}")
@@ -801,8 +808,9 @@ def normalize_spectra(
     spectra: np.ndarray,
     method: Optional[str] = None,
     mode: Optional[str] = None,
+    region: Optional[str] = None,
 ) -> np.ndarray:
-    chosen_method = _normalization_method(method, mode)
+    chosen_method = _normalization_method(method, mode, region)
     if chosen_method == "none":
         return np.asarray(spectra, dtype=float)
     arr = np.asarray(spectra, dtype=float)
@@ -1122,7 +1130,7 @@ def run_preprocessing(
     metrics_df, flags_df = _flag_outliers(metrics_df, flags_df)
 
     if normalize and result.size > 0:
-        result = normalize_spectra(result, mode=norm_for)
+        result = normalize_spectra(result, mode=norm_for, region=region_key)
         if keep_stages:
             stage_arrays["normalized"] = result.copy()
 
@@ -1138,7 +1146,7 @@ def run_preprocessing(
             "n_input": int(original_count),
             "n_retained": int(retained_mask.sum()),
             "quality_stats": quality_stats,
-            "normalization_method": _normalization_method(None, norm_for),
+            "normalization_method": _normalization_method(None, norm_for, region_key),
             "cosmic_suppression_enabled": cosmic_suppress_enabled,
             "isolated_spike_repair_enabled": bool(spike_cfg.get("enabled", True)),
         },

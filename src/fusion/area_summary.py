@@ -26,7 +26,7 @@ def summarize_area_pixels(concatenated_pixels: np.ndarray) -> dict[str, np.ndarr
         }
 
     return {
-        "area_mean": np.nanmean(concatenated_pixels, axis=0),
+        "area_mean": np.nanmedian(concatenated_pixels, axis=0),
         "area_std": np.nanstd(concatenated_pixels, axis=0),
         "n_valid_pixels": n_valid,
     }

@@ -114,9 +114,11 @@ preprocessing:
           ratio: 0.001  # float: convergence ratio threshold
           max_iter: 100  # int: maximum iterations
       smoothing:
-        enabled: false  # bool: enable smoothing in fingerprint region
+        enabled: true  # bool: enable smoothing in fingerprint region
         window_length: 7  # int: Savitzky-Golay window
         polyorder: 2  # int: polynomial order
+      normalization:
+        method: "snv"  # str: normalization method for fingerprint
     ch_stretch:
       baseline:
         method: "arpls"  # str: baseline algorithm
@@ -126,9 +128,11 @@ preprocessing:
           ratio: 0.001  # float: convergence ratio threshold
           max_iter: 100  # int: maximum iterations
       smoothing:
-        enabled: false  # bool: enable smoothing in CH-stretch region
+        enabled: true  # bool: enable smoothing in CH-stretch region
         window_length: 9  # int: Savitzky-Golay window
         polyorder: 2  # int: polynomial order
+      normalization:
+        method: "area"  # str: normalization method for CH-stretch
   # Normalization modes used by the preprocessing orchestrator.
   normalization:
     method: "snv"  # str: default normalization ("vector", "snv", "none", ...)
