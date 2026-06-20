@@ -433,6 +433,66 @@ def plot_individual_region(
     return fig, ax
 
 
+def plot_individual_by_gender_region(
+    wavenumbers: np.ndarray,
+    groups: dict[tuple[str, str], np.ndarray],
+    region: str,
+    plot_cfg: dict,
+) -> tuple[plt.Figure, np.ndarray]:
+    """2×2 grid of individual spectra for (control/disease) × (female/male)."""
+    order: list[tuple[str, str]] = [
+        ("control", "female"),
+        ("disease", "female"),
+        ("control", "male"),
+        ("disease", "male"),
+    ]
+    line_alpha = float(plot_cfg.get("modes", {}).get("individual", {}).get("line_alpha", 0.25))
+    mean_linewidth = float(plot_cfg.get("modes", {}).get("individual", {}).get("mean_linewidth", 2.5))
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 8), sharex=True, sharey=False)
+    axes_flat = axes.flatten()
+
+    for i, cohort in enumerate(order):
+        ax = axes_flat[i]
+        condition, gender = cohort
+        spectra = groups.get(cohort)
+        color = COHORT_COLORS.get(cohort, "#444444")
+        label = _cohort_name(condition, gender)
+
+        if spectra is None or np.asarray(spectra).size == 0:
+            ax.text(0.5, 0.5, f"No data\n{label}", ha="center", va="center", transform=ax.transAxes, fontsize=10)
+            ax.set_axis_off()
+            continue
+
+        spectra = np.asarray(spectra, dtype=float)
+        for row in spectra:
+            ax.plot(wavenumbers, row, color=color, linewidth=0.6, alpha=line_alpha)
+        mean_spectrum = _mean_signal(spectra)
+        ax.plot(
+            wavenumbers,
+            mean_spectrum,
+            color=color,
+            linewidth=mean_linewidth,
+            label=f"{label} mean (n={spectra.shape[0]})",
+        )
+        _set_spectrum_limits(ax, [wavenumbers], [spectra, mean_spectrum], top_pad=0.18)
+        _annotate_peaks(ax, wavenumbers, mean_spectrum, wavenumbers, color, plot_cfg.get("peak_detection", {}))
+        _finalize_axis(ax, title=label)
+        handles, labels_ax = ax.get_legend_handles_labels()
+        ax.legend(handles, labels_ax, loc="upper right", fontsize=8, frameon=False)
+
+    for ax in axes_flat:
+        ax.set_xlabel("Raman Shift (cm$^{-1}$)", fontsize=10)
+
+    fig.suptitle(
+        f"Preprocessed spectra: individual by group — {_region_title(region)}",
+        fontsize=14,
+        y=1.01,
+    )
+    fig.tight_layout()
+    return fig, axes_flat
+
+
 def plot_global_comparison(
     region_axes: dict[str, np.ndarray],
     series: list[dict[str, object]],

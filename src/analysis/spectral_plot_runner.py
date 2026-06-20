@@ -26,6 +26,7 @@ from src.visualization.spectral_summary_plots import (
     plot_gender_condition_region,
     plot_global_comparison,
     plot_individual_region,
+    plot_individual_by_gender_region,
     plot_qc_metric_distribution,
     plot_region_mean_spectrum,
     plot_whole_spectra_per_cohort,
@@ -468,6 +469,17 @@ def _write_spectral_plots(
                     plot_cfg,
                 )
                 _save_fig(fig, plot_root / "individual" / f"{condition.capitalize()}_{region}.png")
+
+        for region, payload in single_range_data.items():
+            if not payload["groups"]:
+                continue
+            fig, _ = plot_individual_by_gender_region(
+                payload["wavenumbers"],
+                payload["groups"],
+                region,
+                plot_cfg,
+            )
+            _save_fig(fig, plot_root / "individual" / f"by_gender_{region}.png")
 
     if not bool(plot_cfg.get("global", True)):
         return
