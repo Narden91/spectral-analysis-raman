@@ -76,6 +76,12 @@ def _write_cohort_outputs(results: dict[str, dict]) -> None:
     cohort_summary = results[single_ranges[0]].get("cohort_summary")
     if cohort_summary:
         save_cohort_summary(cohort_summary, cohort_dir, prefix="cohort")
+        if not cohort_summary["incomplete_subjects"].empty:
+            logger.warning(
+                "Detected %d incomplete subjects (< expected files). See %s",
+                len(cohort_summary["incomplete_subjects"]),
+                cohort_dir / "cohort_incomplete_subjects.csv",
+            )
 
     desc_frames: list[pd.DataFrame] = []
     for spectral_range in single_ranges:

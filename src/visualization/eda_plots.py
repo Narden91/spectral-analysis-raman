@@ -1,6 +1,8 @@
 """Visualization helpers for Raman spectroscopy EDA."""
 
 from typing import Optional
+import logging
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -23,6 +25,7 @@ from src.visualization.theme import (
 
 set_gallery_theme()
 
+logging.getLogger("adjustText").setLevel(logging.ERROR)
 
 
 def plot_group_mean_spectra(
@@ -161,49 +164,51 @@ def plot_pca_scores(
         )
 
     if loadings is not None and wavenumbers is not None:
-        # Get score ranges to scale the loading vectors appropriately
-        x_range = scores[:, pc_x].max() - scores[:, pc_x].min()
-        y_range = scores[:, pc_y].max() - scores[:, pc_y].min()
-        
-        loading_x = loadings[pc_x]
-        loading_y = loadings[pc_y]
-        
-        # Determine the most influential features (highest magnitude)
-        magnitude = np.sqrt(loading_x**2 + loading_y**2)
-        top_indices = np.argsort(magnitude)[-top_n_features:]
-        
-        # Scale arrows to fit nicely within the plot (about 40% of range)
-        max_loading = magnitude.max()
-        if max_loading > 0:
-            scale_x = (x_range * 0.4) / max_loading
-            scale_y = (y_range * 0.4) / max_loading
-            
-            texts = []
-            for idx in top_indices:
-                x_val = loading_x[idx] * scale_x
-                y_val = loading_y[idx] * scale_y
-                wn = wavenumbers[idx]
-                
-                # Draw the arrow
-                ax.arrow(
-                    0, 0, x_val, y_val, 
-                    color="red", alpha=0.6, width=0.005 * min(x_range, y_range), 
-                    head_width=0.03 * min(x_range, y_range)
-                )
-                
-                # Add wavenumber label
-                t = ax.text(
-                    x_val * 1.05, y_val * 1.05, 
-                    f"{wn:.0f}", 
-                    color="darkred", fontsize=9, ha='center', va='center'
-                )
-                texts.append(t)
-            
-            try:
-                from adjustText import adjust_text
-                adjust_text(texts, ax=ax, force_points=0.2, force_text=0.2, arrowprops=dict(arrowstyle="-", color='red', alpha=0.4))
-            except ImportError:
-                pass
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            # Get score ranges to scale the loading vectors appropriately
+            x_range = scores[:, pc_x].max() - scores[:, pc_x].min()
+            y_range = scores[:, pc_y].max() - scores[:, pc_y].min()
+
+            loading_x = loadings[pc_x]
+            loading_y = loadings[pc_y]
+
+            # Determine the most influential features (highest magnitude)
+            magnitude = np.sqrt(loading_x**2 + loading_y**2)
+            top_indices = np.argsort(magnitude)[-top_n_features:]
+
+            # Scale arrows to fit nicely within the plot (about 40% of range)
+            max_loading = magnitude.max()
+            if max_loading > 0:
+                scale_x = (x_range * 0.4) / max_loading
+                scale_y = (y_range * 0.4) / max_loading
+
+                texts = []
+                for idx in top_indices:
+                    x_val = loading_x[idx] * scale_x
+                    y_val = loading_y[idx] * scale_y
+                    wn = wavenumbers[idx]
+
+                    # Draw the arrow
+                    ax.arrow(
+                        0, 0, x_val, y_val,
+                        color="red", alpha=0.6, width=0.005 * min(x_range, y_range),
+                        head_width=0.03 * min(x_range, y_range)
+                    )
+
+                    # Add wavenumber label
+                    t = ax.text(
+                        x_val * 1.05, y_val * 1.05,
+                        f"{wn:.0f}",
+                        color="darkred", fontsize=9, ha='center', va='center'
+                    )
+                    texts.append(t)
+
+                try:
+                    from adjustText import adjust_text
+                    adjust_text(texts, ax=ax, force_points=0.2, force_text=0.2, arrowprops=dict(arrowstyle="-", color='red', alpha=0.4))
+                except ImportError:
+                    pass
 
     _finalize_axis(
         ax,

@@ -85,9 +85,7 @@ def _save_fig(fig: matplotlib.figure.Figure, name: str, out_dir: Path):
 
 
 def _log_phase(title: str) -> None:
-    logger.info("=" * 60)
     logger.info("%s", title)
-    logger.info("=" * 60)
 
 
 def _figure_flag(key: str, default: bool = True) -> bool:
@@ -252,11 +250,7 @@ def _run_single_range_eda(
             "Cohort group counts:\n%s",
             cohort_summary["group_counts"].to_string(index=False),
         )
-    if not cohort_summary["incomplete_subjects"].empty:
-        logger.warning(
-            "Detected %d incomplete subjects (< expected files). See 00_cohort/cohort_incomplete_subjects.csv",
-            len(cohort_summary["incomplete_subjects"]),
-        )
+
 
     _log_phase(f"PHASE 0: Loading and aggregating spectra (range={spectral_range} cm-1)")
 
