@@ -54,31 +54,48 @@ This pipeline utilizes a **Hybrid Aggregation** strategy:
 
 ## 3. Pipeline Stages
 
-The pipeline acts independently on raw pixel arrays, ensuring no pixel bleeds artifacts into its neighbors during early stages.
+The pipeline acts independently on raw pixel arrays, ensuring no pixel bleeds artifacts into its neighbors during early stages. The orchestrator sequentially applies the following steps:
 
-### Stage 1: Quality Control & Cosmic Ray Removal
-- **Method**: Spatial Median Detection (Z-score based) or local outlier factor (LOF) on neighboring pixels.
-- **Rationale**: Cosmic rays are highly localized in both spectral width and spatial dimensions. By comparing a pixel to its physical neighbors on the 5x5 map, cosmic rays can be robustly identified and repaired (or the pixel excluded) without distorting sharp natural Raman peaks.
+### Stage 1: Quality Control & Dead/Anomalous Pixel Screening
+- **Method**: Standard deviation screening and saturation check.
+- **Rationale**: Pixels with very low variability (dead pixels, $\text{std} < 1.0$) or detector saturation ($> 65000$) are excluded early to avoid injecting unphysical signals.
 
-### Stage 2: Baseline Correction
-- **Method**: Asymmetric Least Squares (AsLS) or Asymmetrically Reweighted Penalized Least Squares (arPLS).
-- **Rationale**: Biological fluorescence manifests as a broad, varying baseline. Polynomial fitting often over-fits or introduces oscillations (Runge's phenomenon), particularly in the narrow CH-stretch region. Penalty-based methods (arPLS) estimate the baseline cleanly without high-order polynomial distortion.
+### Stage 2: Cosmic Ray Detection and Suppression
+- **Method**: Spatial/Neighbor Median Detection (Z-score based) with Local Median fallback when spatial coordinates are unavailable.
+- **Rationale**: Cosmic rays hit the CCD detector as sharp, highly localized intensity spikes. Comparing each pixel's spectrum to its physical neighbors on the grid map identifies these anomalies robustly so they can be repaired (replaced with local medians) or flagged for exclusion.
 
-### Stage 3: Smoothing
-- **Method**: Savitzky-Golay filter (Window: 7-9, Polynomial Order: 2).
-- **Rationale**: Mitigates high-frequency sensor noise. We restrict the window size to prevent "oversmoothing," which would artificially merge adjacent biochemical peaks (e.g., Amide I and lipid bands) and degrade the biological resolution.
+### Stage 3: Spectral Quality Filtering
+- **Method**: Deterministic Signal-to-Noise Ratio (SNR) and Area-based gating.
+- **Rationale**: Low-quality spectra (e.g. from areas with poor cell contact or focus) are discarded if their SNR falls below 5.0 (calculated on a deterministic anchor window) or if their total area falls in the bottom 10th percentile. This is calculated on a virtual edge-trimmed preview to prevent edge spectrometer artifacts from driving rejections.
 
-### Stage 4: Normalization (Region-Specific)
+### Stage 4: Edge Trimming
+- **Method**: Spectral boundary trimming (10 channels or 15.0 cm⁻¹ alternative).
+- **Rationale**: Speeds and margins of the spectrometer CCD arrays are prone to border noise and artifact corruption. Trimming the ends ensures subsequent baseline fits are stable.
 
-Different regions carry different physical meaning, requiring disparate normalization strategies.
+### Stage 5: Baseline Correction
+- **Method**: Asymmetrically Reweighted Penalized Least Squares (arPLS), Asymmetric Least Squares (AsLS), or Statistics-sensitive Non-linear Iterative Peak-clipping (SNIP).
+- **Rationale**: Biological fluorescence creates a large, slow-varying baseline. arPLS estimates this background smoothly without polynomial oscillations (Runge's phenomenon). Negative intensity values resulting from slight baseline overshoots are clipped to 0.0, and the fraction of clipped channels is tracked.
 
-#### Fingerprint Region (1300 cm⁻¹ approx)
-- **Method**: Standard Normal Variate (SNV) or Vector (L2) Normalization.
-- **Rationale**: The fingerprint region contains a complex superposition of proteins, lipids, and nucleic acids. SNV removes multiplicative scatter effects (e.g., sample surface roughness) while preserving relative peak heights.
+### Stage 6: Isolated Spike Repair
+- **Method**: Whitaker-Hayes Z-score check on discrete differences.
+- **Rationale**: Sharp, single-channel instrument spikes are flagged and replaced by local neighborhood means if the overall corrected fraction is small ($< 2\%$).
 
-#### High-Wavenumber CH-Stretch Region (2850 cm⁻¹ approx)
-- **Method**: Area Normalization (Integration to 1).
-- **Rationale**: The CH-stretch band (dominated by lipids and proteins) acts as an excellent internal standard for total biomass. Area normalization explicitly frames this region as a proportional density metric, aligning perfectly with standard literature practices for CH-band analysis.
+### Stage 7: Smoothing
+- **Method**: Savitzky-Golay filter (Window: 7-9 channels, Polynomial Order: 2).
+- **Rationale**: Minimizes high-frequency sensor noise. Restricting the window prevents "oversmoothing" that would artificially merge separate adjacent peaks.
+
+### Stage 8: Interpolation
+- **Method**: Resampling to a uniform grid (default 1.0 cm⁻¹ spacing) using cubic or linear interpolation.
+- **Rationale**: Combines spectra onto a shared wavenumber coordinate system for aggregations and joint matrix operations.
+
+### Stage 9: Outlier Detection
+- **Method**: Total-area outlier check using Median Absolute Deviation (MAD > 3.0).
+- **Rationale**: Identifies anomalous scans as warnings for downstream inspection rather than immediate hard exclusions.
+
+### Stage 10: Normalization (Region-Specific)
+Different spectral regions carry distinct physical meaning, requiring customized normalization strategies:
+- **Fingerprint Region (1300 cm⁻¹)**: Standard Normal Variate (SNV) or L2 Vector Normalization. This removes multiplicative scatter from sample surface roughness while preserving relative peak heights.
+- **High-Wavenumber CH-Stretch Region (2850 cm⁻¹)**: Area Normalization (Integration to 1.0). Frames the region as a proportional density metric, aligning with biomass/lipid-to-protein literature conventions.
 
 ## 4. Execution Flow
 

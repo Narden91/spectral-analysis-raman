@@ -1,211 +1,164 @@
 # Raman Spectroscopy Analysis Pipeline
 
-Python pipeline for extracellular-vesicle Raman spectroscopy across three independent tracks:
+A professional, high-performance Python pipeline for extracellular-vesicle (EV) Raman spectroscopy analysis. This repository implements data ingestion, robust multi-stage preprocessing, statistical group comparisons, clinical correlations, and a strict subject-level **Biological PCA** interpretation layer.
 
-| Track | Entry point | Main output |
-|---|---|---|
-| EDA | `uv run scripts/run_eda.py` | `Results_control_vs_disease/` or `Results_intra_disease/` |
-| Spectral plots and QC | `uv run scripts/run_spectral_plots.py` | `Output_plot/qc/`, `Output_plot/spectral_plots/` |
+---
 
-## Data Model
+## 🚀 Key Features
 
-Canonical hierarchy:
+*   **Robust Preprocessing**: Custom multi-stage pipeline including cosmic-ray removal, arPLS/AsLS/SNIP baseline correction, Savitzky-Golay smoothing, edge-trimming, and region-specific normalization.
+*   **Hierarchical Data Model**: Natively handles nested structures: $\text{Subject} \rightarrow \text{Sample (Slide)} \rightarrow \text{Spot (Area)} \rightarrow \text{Pixels}$.
+*   **Subject-Level Biological PCA**: Aggregates spectral data at the subject level to avoid pseudoreplication, projecting fingerprint (1300 cm⁻¹), CH-stretch (2850 cm⁻¹), and concatenated whole-spectrum spaces.
+*   **Clinical Correlation**: Computes non-parametric Spearman correlations between spectral features and clinical endpoints (e.g., MoCA baseline scores) for disease-only cohorts.
+*   **Rich Visualizations**: Generates publication-ready scree plots, score pairgrids, loading summaries, group-mean waveforms, and individual QC grids.
+*   **Data Integrity & Validation**: Fully manifest-driven data storage using Parquet for tabular metadata, NPZ for dense arrays, and JSON for schema/config snapshots.
 
+---
+
+## 📋 Pipeline Tracks
+
+The analysis pipeline is organized into three primary operational tracks:
+
+| Track | Entry Point / Script | Primary Outputs |
+| :--- | :--- | :--- |
+| **1. Data Store Management** | `uv run scripts/manage_data_store.py` | `data/parsed/` and `data/preprocessed/` stores |
+| **2. Exploratory Data Analysis** | `uv run scripts/run_eda.py` | `Results_control_vs_disease/` or `Results_intra_disease/` |
+| **3. Spectral Plotting & QC** | `uv run scripts/run_spectral_plots.py` | `Output_plot/qc/` and `Output_plot/spectral_plots/` |
+
+---
+
+## 🗂️ Data Model & Directory Layout
+
+### Hierarchical Data Structure
+Spectroscopic measurements are modeled using a strict physical hierarchy:
 ```text
-Subject -> sample_XX -> measurement -> range {1300, 2850} -> pixels
+Subject (e.g. S01)
+ └── Sample/Slide (e.g. sample_01)
+      └── Spot/Area (e.g. area_1)
+           └── Pixels (e.g. 5x5 grid = 25 spectra)
 ```
 
-## Data Sources
-
-The analysis stack now supports three explicit source levels:
-
-- `raw_text`: original Renishaw `.txt` spectra plus `data/clinical_data.csv`
-- `parsed`: materialized metadata and spectra before scientific preprocessing
-- `preprocessed`: materialized metadata and spectra after the preprocessing pipeline
-
-Default source: `preprocessed`.
-
-Generated stores use:
-
-- Parquet for canonical tables
-- NPZ for dense NumPy arrays
-- JSON for manifests
-- CSV only as optional inspection mirrors
-
-Materialized layout:
+### Materialized Data Store Layout
+To separate crawler ingestion from downstream scientific analysis, data stores are version-controlled and cached under `data/`:
 
 ```text
 data/
-  raw/
-  clinical_data.csv
-  parsed/
-    manifest.json
-    file_index.parquet
-    clinical_subjects.parquet
-    area_metadata.parquet
-    spectra_1300.npz
-    spectra_2850.npz
-    area_summaries_1300.npz
-    area_summaries_2850.npz
-    whole_area_store.npz
-    cohort/
-      control_vs_disease/
-      disease_only/
-  preprocessed/
-    ...
+├── raw/                         # Raw Renishaw .txt exports
+├── clinical_data.csv            # Original subject clinical metadata
+├── parsed/                      # Ingested, validated raw metadata & spectra
+│   ├── manifest.json            # Read/write integrity manifest
+│   ├── file_index.parquet       # Indexed raw txt paths & parameters
+│   ├── clinical_subjects.parquet# Parsed subject clinical fields
+│   ├── area_metadata.parquet    # Slide and spot spatial coordinates
+│   ├── spectra_1300.npz         # Dense raw spectra in Fingerprint region
+│   ├── spectra_2850.npz         # Dense raw spectra in CH-Stretch region
+│   └── cohort/                  # Materialized cohort subset tables
+│       ├── control_vs_disease/  # Subject listings for case-control
+│       └── disease_only/        # Subject listings for intra-disease
+└── preprocessed/                # Post-preprocessing metadata & spectra
+    └── ...                      # Mirror structure of parsed/ (preprocessed)
 ```
 
-The ingestion source of truth is:
+---
 
-- `src/metadata/parser.py`
-- `src/io/file_crawler.py`
-- `src/io/txt_reader.py`
+## 🛠️ Setup & Installation
 
-Acquisition-mode tokens (`SS`, `FP`) in source filenames are matched for backward compatibility but are not returned or persisted as metadata.
+### Prerequisites
+*   Python **>= 3.12**
+*   Project dependencies are declared in `pyproject.toml`.
+*   [uv](https://github.com/astral-sh/uv) is highly recommended for fast environment setup and execution.
 
-## Setup
-
-Requirements:
-
-- Python >= 3.12
-- Dependencies declared in `pyproject.toml`
-- `uv` recommended
-
-Install:
+### Installation
+Clone the repository and install the pipeline in editable mode:
 
 ```bash
+# Clone the repository
+git clone https://github.com/your-username/spectral-analysis-raman.git
+cd spectral-analysis-raman
+
+# Create virtual environment and install dependencies
+uv venv
 uv pip install -e .
 ```
 
+---
 
+## ⚙️ Running the Pipeline
 
-Default data roots:
-
-- `data/`: dataset
-
-To manage generated stores:
+### 1. Building the Data Stores
+Before running analyses, crawl the raw text data to build and validate the structured binary caches:
 
 ```bash
+# Build the parsed data cache
 uv run scripts/manage_data_store.py build --source parsed
+
+# Apply the preprocessing pipeline and cache the preprocessed cache
 uv run scripts/manage_data_store.py build --source preprocessed
-uv run scripts/manage_data_store.py validate --source parsed
+
+# Validate cache integrity and check config matches
 uv run scripts/manage_data_store.py validate --source preprocessed
+
+# Display information on the cached data stores
 uv run scripts/manage_data_store.py info --source preprocessed
-uv run scripts/manage_data_store.py clean --source parsed
 ```
 
-## Run The Pipelines
+### 2. Running the Exploratory Data Analysis (EDA)
+The EDA script executes statistical checks and principal component analyses. It supports case-control comparison and disease-only clinical correlation modes.
 
-EDA:
-
+#### Mode A: Case vs. Control (Default case)
+Compares healthy controls against disease subjects.
 ```bash
-uv run scripts/run_eda.py --range 1300
-uv run scripts/run_eda.py --range 2850
-uv run scripts/run_eda.py --range both
-uv run scripts/run_eda.py --range 1300 --max-subjects 10
-```
-
-When `--range both` is selected, the EDA runner executes the ordinary PCA path
-and then the subject-level Biological PCA layer once. Canonical Biological PCA
-outputs are written into the range-local result folders:
-
-- `01_fingerprint_1300/06_biological_pca/`
-- `02_ch_stretch_2850/06_biological_pca/`
-- `03_whole_spectrum_1300_plus_2850/04_biological_pca/`
-
-There is no separate Biological PCA command, and new runs do not generate a
-root-level `biological_pca/` directory.
-
-Biological PCA is reported with exactly three components: PC1, PC2, and PC3.
-Canonical figures per model are:
-
-- `scores_pc1_pc2.png`
-- `scores_pc1_pc3.png`
-- `scores_pc2_pc3.png`
-- `scores_pc_pairgrid.png`
-- `loadings_pc1_pc2_pc3.png`
-- `loading_regions_pc1_pc2_pc3.png`
-
-Spectral comparison and QC plots:
-
-```bash
-uv run scripts/run_spectral_plots.py
-uv run scripts/run_spectral_plots.py --max-subjects 20
-uv run scripts/run_spectral_plots.py --outdir Output_plot
-```
-
-The figures written under `Output_plot/spectral_plots/` are post-preprocessing waveforms produced after the Raman preprocessing pipeline, not raw spectra.
-
-
-
-`doc/Analysis_*` directories are generated artifacts and are not part of the maintained documentation set.
-
-## Disease-Only vs. Disease-vs-Control EDA
-
-Two separate config files select the analysis mode. Each writes to its own output root so results never overwrite each other.
-
-**Disease vs. control** (default grouping, intra-disease correlation off):
-
-```bash
+# Analyze fingerprint region
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range 1300
+
+# Analyze CH-stretch region
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range 2850
+
+# Fused analysis (combines fingerprint & CH-stretch + Subject Biological PCA)
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both
 ```
+*   **Output Directory**: `Results_control_vs_disease/`
 
-Output root: `Results_control_vs_disease/`
-
-**Disease-only** (intra-disease Spearman clinical correlations enabled; requires `data/clinical_data_clean.csv`):
-
+#### Mode B: Disease-Only Cohort (Clinical Correlations)
+Restricts analysis to disease subjects to correlate spectral bands with clinical parameters (requires `data/clinical_data.csv`).
 ```bash
-uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range 1300
-uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range 2850
 uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range both
 ```
+*   **Output Directory**: `Results_intra_disease/`
 
-Output root: `Results_intra_disease/`
-
-To run both modes back-to-back for all ranges:
+### 3. Spectral Plotting & QC Visualization
+Generate post-preprocessing waveforms and individual scan layouts for diagnostic audit:
 
 ```bash
-for CFG in config/eda_disease_control.yaml config/eda_disease_only.yaml; do
-  for RANGE in 1300 2850 both; do
-    uv run scripts/run_eda.py --config $CFG --range $RANGE
-  done
-done
+# Generate group spectral plots
+uv run scripts/run_spectral_plots.py
+
+# Restrict plots to a smaller test cohort size
+uv run scripts/run_spectral_plots.py --max-subjects 20 --outdir Output_plot
 ```
 
-## Configuration
+---
 
-`config/settings.yaml` is the shared base config. Track configs use `_extends: settings.yaml` and are the single source of truth for track-owned sections:
+## 🧪 Subject-Level Biological PCA Rules
 
-- `config/eda.yaml`
-- `config/plots.yaml`
+To prevent **pseudoreplication** (treating multiple pixels from the same subject as independent statistical observations), the pipeline enforces a strict subject-level aggregation step prior to primary PCA projection.
 
-Current defaults to note:
+1.  **Model Layouts**:
+    *   `PCA_1330`: Fingerprint region (1300 cm⁻¹ range).
+    *   `PCA_2850`: CH-stretch region (2850 cm⁻¹ range).
+    *   `PCA_whole`: Unweighted concatenation of fingerprint and CH-stretch medians.
+2.  **Naming Convention**: Loading columns and indices are prefixed with their region (e.g. `1300__1240.0` or `2850__2840.0`) to avoid coordinate collisions.
+3.  **Components**: Exactly 3 components (PC1, PC2, PC3) are computed and exported.
+4.  **Figures Generated**:
+    *   `scores_pc1_pc2.png`, `scores_pc1_pc3.png`, `scores_pc2_pc3.png`
+    *   `scores_pc_pairgrid.png`
+    *   `scree_plot.png`
+    *   `loadings_pc1_pc2_pc3.png`, `loading_regions_pc1_pc2_pc3.png`
 
-- `data.source`: active source, one of `raw_text`, `parsed`, `preprocessed`
-- `data.auto_build`: auto-build missing derived stores
-- `data.require_valid_manifest`: enforce manifest validation
-- `data.stale_manifest_policy`: default `error`; stale stores do not rebuild silently
-- `data.write_csv_mirrors`: optional human-readable table copies beside Parquet
-- Use `--source ...` on supported scripts to override the config for a run
+---
 
-- During startup, analysis prints the active data source, path, formats, manifest hash, counts, and whether the source was loaded or built.
-- Normal analysis no longer writes `Results_*/00_cohort/`; cohort tables are generated into `data/parsed/cohort/` and `data/preprocessed/cohort/`.
-- Each analysis output root now includes `run_manifest.json`, `data_manifest_snapshot.json`, and `config_snapshot.yaml`.
+## 🔬 Scientific Caveats & Guidance
 
-- `config/eda.yaml` owns `run.ranges`: `["1300", "2850", "both"]`.
-- EDA preprocessing order is: dead/anomalous screen → cosmic-ray detection → optional cosmic-ray suppression → spectral quality filter → edge trim → baseline correction → isolated spike repair → optional smoothing → vector normalization.
-- Cosmic-ray detection always runs; suppression is controlled by `preprocessing.cosmic_ray.enabled`.
-- Additive capabilities (all off by default): region weighting/exclusion, pixel-cluster interpretation, QC-cluster analysis, region-influence robustness, figure gating via `analysis.figures`, and ML latent-structure reporting.
-- `output.keep_preprocessing_artifacts` controls whether per-area preprocessing artifacts are kept in the active EDA root under `processed/preprocessing_artifacts`.
-- `output.keep_whole_spectra_cache` controls whether the paired-area whole-spectrum cache is saved in the active EDA root under `processed/whole_spectra`.
-
-
-
-## Scientific Caveats
-
-- Inter-subject variance can reflect biology, SEC fraction, concentration, column batch or age, lipoprotein contamination, and sample volume.
-- Sex imbalance can produce pooled effects that do not hold in sex-stratified results.
-- QC flags indicate reliability concerns, not automatic exclusion rules.
-- EDA is exploratory. Do not interpret unsupervised structure as diagnostic classification evidence; this repository does not perform diagnostic classification or prediction.
+*   **No Diagnostic Claims**: The pipeline is strictly intended for unsupervised exploratory data analysis (EDA). The outputs must not be interpreted as diagnostic, predictive, or biomarker classification evidence.
+*   **Variance Confounders**: Keep in mind that variance in EV spectral signals may be influenced by technical factors (SEC fraction, sample concentration, column age, and sample volume) in addition to genuine biology.
+*   **Stratification Guardrails**: Severe imbalances in sex distribution between cohorts can produce misleading pooled effects. Stratify findings where possible.
