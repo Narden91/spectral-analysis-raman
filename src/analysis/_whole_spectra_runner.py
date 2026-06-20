@@ -20,11 +20,7 @@ from src.analysis._single_range import (
     _log_phase,
     _save_fig,
 )
-from src.analysis.joint_dr import (
-    cca_between_regions,
-    joint_pca_mfa,
-    regional_pca_scores,
-)
+from src.analysis.joint_dr import joint_pca_mfa
 from src.analysis.statistics import (
     run_pca,
     summarize_group_centroid_distances,
@@ -39,7 +35,6 @@ from src.analysis.whole_spectra import (
 )
 from src.visualization.eda_plots import (
     plot_band_boxplots,
-    plot_cca_scatter,
     plot_correlation_matrix,
     plot_group_distance_heatmap,
     plot_mfa_scree,
@@ -93,8 +88,6 @@ def _run_whole_spectra_eda(
     split_index = whole_spectra_split_index(wavenumbers)
     pca_result = None
     mfa_result = None
-    regional_pca_result: dict[str, dict[str, object]] = {}
-    cca_result = None
     relational_bands: dict[str, tuple[float, float]] = {}
     fingerprint_bands: dict[str, tuple[float, float]] = {}
     ch_bands: dict[str, tuple[float, float]] = {}
@@ -176,82 +169,49 @@ def _run_whole_spectra_eda(
     pca_variance_df.to_csv(structure_dir / "pca_variance_whole.csv", index=False)
 
     if split_index is not None:
-        mfa_result = joint_pca_mfa(all_spectra, split_index, structure_components)
-        fig, _ = plot_pca_scores(
-            mfa_result["scores"],
-            all_labels,
-            mfa_result["explained_variance_ratio"],
-            title=f"Whole-Spectrum MFA ({range_title})",
+        emit_mfa = bool(
+            config.get("analysis", {}).get("whole_spectra", {}).get("emit_mfa", False)
         )
-        _save_fig(fig, "mfa_scores_pc1_pc2.png", structure_dir)
-
-        fig, _ = plot_mfa_scree(
-            mfa_result["explained_variance_ratio"],
-            mfa_result["block_contributions"],
-            title=f"Whole-Spectrum MFA Scree ({range_title})",
-        )
-        _save_fig(fig, "mfa_scree.png", structure_dir)
-
-        mfa_scores_df = pd.DataFrame(
-            mfa_result["scores"],
-            columns=[f"PC{i + 1}" for i in range(mfa_result["scores"].shape[1])],
-        )
-        mfa_scores_df["group"] = all_labels
-        mfa_scores_df["subject_id"] = all_sids
-        mfa_scores_df.to_csv(structure_dir / "mfa_scores.csv", index=False)
-
-        pd.DataFrame(
-            {
-                "component": np.arange(1, len(mfa_result["explained_variance_ratio"]) + 1),
-                "explained_variance_ratio": mfa_result["explained_variance_ratio"],
-                "cumulative_variance": mfa_result["cumulative_variance"],
-            }
-        ).to_csv(structure_dir / "mfa_variance.csv", index=False)
-        mfa_result["block_contributions"].to_csv(
-            structure_dir / "mfa_block_contributions.csv",
-            index=False,
-        )
-
-        fingerprint_pca, ch_pca = regional_pca_scores(
-            all_spectra,
-            split_index,
-            structure_components,
-        )
-        regional_pca_result = {
-            "fingerprint": fingerprint_pca,
-            "ch_stretch": ch_pca,
-        }
-        for region_name, result in regional_pca_result.items():
-            scores_df = pd.DataFrame(
-                result["scores"],
-                columns=[f"PC{i + 1}" for i in range(result["scores"].shape[1])],
+        if emit_mfa:
+            mfa_dir = get_whole_spectra_phase_dir("exploratory_multiblock") / "MFA"
+            mfa_dir.mkdir(parents=True, exist_ok=True)
+            mfa_result = joint_pca_mfa(all_spectra, split_index, structure_components)
+            fig, _ = plot_pca_scores(
+                mfa_result["scores"],
+                all_labels,
+                mfa_result["explained_variance_ratio"],
+                title=f"Whole-Spectrum MFA ({range_title})",
             )
-            scores_df["group"] = all_labels
-            scores_df["subject_id"] = all_sids
-            scores_df.to_csv(
-                structure_dir / f"regional_pca_scores_{region_name}.csv",
+            _save_fig(fig, "mfa_scores_pc1_pc2.png", mfa_dir)
+
+            fig, _ = plot_mfa_scree(
+                mfa_result["explained_variance_ratio"],
+                mfa_result["block_contributions"],
+                title=f"Whole-Spectrum MFA Scree ({range_title})",
+            )
+            _save_fig(fig, "mfa_scree.png", mfa_dir)
+
+            mfa_scores_df = pd.DataFrame(
+                mfa_result["scores"],
+                columns=[f"PC{i + 1}" for i in range(mfa_result["scores"].shape[1])],
+            )
+            mfa_scores_df["group"] = all_labels
+            mfa_scores_df["subject_id"] = all_sids
+            mfa_scores_df.to_csv(mfa_dir / "mfa_scores.csv", index=False)
+
+            pd.DataFrame(
+                {
+                    "component": np.arange(1, len(mfa_result["explained_variance_ratio"]) + 1),
+                    "explained_variance_ratio": mfa_result["explained_variance_ratio"],
+                    "cumulative_variance": mfa_result["cumulative_variance"],
+                }
+            ).to_csv(mfa_dir / "mfa_variance.csv", index=False)
+            mfa_result["block_contributions"].to_csv(
+                mfa_dir / "mfa_block_contributions.csv",
                 index=False,
             )
-
-        cca_result = cca_between_regions(
-            fingerprint_pca["scores"],
-            ch_pca["scores"],
-            n_components=min(3, fingerprint_pca["scores"].shape[1], ch_pca["scores"].shape[1]),
-        )
-        pd.DataFrame(
-            {
-                "component": np.arange(1, len(cca_result["correlations"]) + 1),
-                "correlation": cca_result["correlations"],
-            }
-        ).to_csv(structure_dir / "cca_correlations.csv", index=False)
-        fig, _ = plot_cca_scatter(
-            cca_result["fingerprint_scores"],
-            cca_result["ch_scores"],
-            all_labels,
-            cca_result["correlations"],
-            title=f"CCA Between Regions ({range_title})",
-        )
-        _save_fig(fig, "cca_scatter.png", structure_dir)
+        else:
+            logger.debug("MFA output disabled by analysis.whole_spectra.emit_mfa")
 
     _log_phase("PHASE 4: Whole-spectrum global drivers")
 
@@ -411,8 +371,6 @@ def _run_whole_spectra_eda(
         "wavenumbers": wavenumbers,
         "pca_result": pca_result,
         "mfa_result": mfa_result,
-        "regional_pca_result": regional_pca_result,
-        "cca_result": cca_result,
         "group_ids": group_ids,
         "variance_summary": variance_df,
         "band_intensities": band_intensity_df,

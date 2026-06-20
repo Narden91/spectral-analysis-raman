@@ -62,9 +62,8 @@ analysis:
       enabled: false  # bool: compare baseline vs region-masked analyses
       suspect_windows: [[2655, 2685]]  # list[list[float]]: regions to downweight/exclude
       downweight_factor: 0.0  # float: 0 = exclude window, >0 = residual weight
-    cross_range_report:
-      enabled: true  # bool: generate fingerprint + CH-stretch joint report
-      emit_html: true  # bool: also emit HTML version
+  whole_spectra:
+    emit_mfa: false  # bool: write MFA to whole_spectra/exploratory_multiblock/MFA/
 
 # ---------------------------------------------------------------------------
 # Whole-spectra band definitions (Movasaghi et al. 2007 + lab curation)
@@ -106,6 +105,9 @@ biological_pca:
   aggregation: "median"
   scale: false
   output_subdir: "biological_pca"
+  pc3_variance_threshold: 0.05
+  figures:
+    emit_convex_hull: false
   models:
     PCA_1330:
       spectral_blocks: ["1300"]

@@ -35,7 +35,7 @@ from src.analysis.spectral_loader import (
     load_subject_spectra,
     wave_axes_compatible,
 )
-from src.analysis.cohort import build_cohort_summary, save_cohort_summary
+from src.analysis.cohort import build_cohort_summary
 from src.io.file_crawler import build_file_index, disambiguate_subject_ids
 from src.metadata.clinical import load_clinical_data, merge_index_with_clinical
 from src.analysis.statistics import (
@@ -197,12 +197,12 @@ def _estimate_variance_decomposition(
 
 
 _PHASE_DIRS = {
-    "descriptive": "01_descriptive_statistics",
-    "group_comp": "02_group_comparisons",
-    "pca": "03_pca",
-    "band": "04_band_analysis",
-    "variance": "05_variance_decomposition",
-    "intra_disease": "06_intra_disease",
+    # "descriptive": "01_descriptive_statistics",
+    "group_comp": "01_group_comparisons",
+    "pca": "02_pca",
+    "band": "03_band_analysis",
+    "variance": "04_variance_decomposition",
+    "intra_disease": "05_intra_disease",
 }
 
 def _run_single_range_eda(
@@ -246,13 +246,7 @@ def _run_single_range_eda(
             "expected_files_per_subject", 12
         ),
     )
-    cohort_dir = phase_dir("descriptive")
-    cohort_paths = save_cohort_summary(
-        cohort_summary,
-        cohort_dir,
-        prefix=f"cohort_{spectral_range}",
-    )
-    logger.info("Saved cohort summaries to %s", cohort_dir)
+    logger.info("Cohort summary built for range %s", spectral_range)
     if not cohort_summary["group_counts"].empty:
         logger.info(
             "Cohort group counts:\n%s",
@@ -260,9 +254,8 @@ def _run_single_range_eda(
         )
     if not cohort_summary["incomplete_subjects"].empty:
         logger.warning(
-            "Detected %d incomplete subjects (< expected files). See %s",
+            "Detected %d incomplete subjects (< expected files). See 00_cohort/cohort_incomplete_subjects.csv",
             len(cohort_summary["incomplete_subjects"]),
-            cohort_paths["incomplete_subjects"],
         )
 
     _log_phase(f"PHASE 0: Loading and aggregating spectra (range={spectral_range} cm-1)")
@@ -392,27 +385,6 @@ def _run_single_range_eda(
     apply_to = set(rw_cfg.get("apply_to", []) if rw_cfg.get("enabled", False) else [])
 
     if spectral_range != "both":
-        _log_phase("PHASE 1: Descriptive statistics")
-
-        desc_rows = []
-        for key, spectra in groups.items():
-            desc_rows.append(
-                {
-                    "group": key,
-                    "n_subjects": spectra.shape[0],
-                    "mean_intensity": np.nanmean(spectra),
-                    "std_intensity": np.nanstd(spectra),
-                    "min_intensity": np.nanmin(spectra),
-                    "max_intensity": np.nanmax(spectra),
-                    "median_intensity": np.nanmedian(spectra),
-                }
-            )
-        desc_df = pd.DataFrame(desc_rows)
-        desc_out = phase_dir("descriptive")
-        desc_csv = desc_out / f"descriptive_stats_{spectral_range}.csv"
-        desc_df.to_csv(desc_csv, index=False)
-        logger.debug("Descriptive stats:\n%s", desc_df.to_string(index=False))
-
         _log_phase("PHASE 2: Visualization — Group comparisons")
 
         gc_dir = phase_dir("group_comp")
@@ -439,7 +411,7 @@ def _run_single_range_eda(
                     )
                     _save_fig(fig, f"difference_spectrum_{gender}.png", gc_dir)
 
-        _log_phase("PHASE 3: PCA")
+        _log_phase("PHASE 3: Exploratory/QC PCA (area-level)")
 
         all_spectra = np.vstack(list(groups.values()))
         all_labels = np.concatenate([np.full(v.shape[0], k) for k, v in groups.items()])
@@ -778,6 +750,7 @@ def _run_single_range_eda(
         "wavenumbers": wavenumbers,
         "pca_result": pca_result,
         "group_ids": group_ids,
+        "cohort_summary": cohort_summary,
     }
 
 

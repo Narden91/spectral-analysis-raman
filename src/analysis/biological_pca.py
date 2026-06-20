@@ -16,12 +16,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
+from scipy.spatial import ConvexHull
 
 from src import _output_dir, config, resolve_project_path
 from src.analysis.statistics import run_pca
 from src.io.file_crawler import build_file_index
 from src.io.txt_reader import read_txt_spectrum
 from src.preprocessing.pipeline import run_preprocessing
+from src.visualization.eda_plots import plot_scree
+from src.visualization.theme import GROUP_COLORS, GROUP_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +322,13 @@ def build_subject_inputs(max_subjects: int | None = None, cfg: dict | None = Non
     )
 
     axes = {block: _common_axis(area_axes[block], block) for block in BLOCKS}
+    subject_clinical = (
+        df_index[["subject_id", "is_control", "gender"]]
+        .copy()
+        .assign(subject_id=lambda df: df["subject_id"].astype(str))
+        .drop_duplicates("subject_id")
+        .set_index("subject_id")
+    )
     included_subjects = []
     for subject_id in subjects:
         has_both = all(
@@ -371,9 +381,16 @@ def build_subject_inputs(max_subjects: int | None = None, cfg: dict | None = Non
             )
             for shift, value in zip(axes[block], median):
                 feature_values[f"{block}__{float(shift):.1f}"] = float(value)
+        is_control = bool(subject_clinical.loc[subject_id, "is_control"])
+        gender = str(subject_clinical.loc[subject_id, "gender"]).lower()
+        if gender not in {"female", "male"}:
+            gender = "unknown"
         subject_rows.append(
             {
                 "subject_id": subject_id,
+                "condition": "control" if is_control else "disease",
+                "gender": gender,
+                "group": f"{gender}_{'control' if is_control else 'disease'}",
                 "n_samples": len(subject_samples),
                 "n_spots": len(subject_spots),
                 "n_pixels": subject_pixels,
@@ -440,7 +457,11 @@ def _scores_frame(
     subject_spectra: pd.DataFrame,
 ) -> pd.DataFrame:
     pc_cols = {f"PC{i + 1}": scores[:, i] for i in range(scores.shape[1])}
-    counts = subject_spectra[["subject_id", "n_samples", "n_spots", "n_pixels"]].copy()
+    merge_cols = ["subject_id", "n_samples", "n_spots", "n_pixels"]
+    for col in ("condition", "gender", "group"):
+        if col in subject_spectra.columns:
+            merge_cols.append(col)
+    counts = subject_spectra[merge_cols].copy()
     df = pd.DataFrame({"subject_id": subjects, **pc_cols})
     df["region_model"] = model_name
     return df.merge(counts, on="subject_id", how="left")
@@ -691,7 +712,7 @@ def validate_outputs(
     cfg = config if cfg is None else cfg
     validate_unique_subject_rows(features, "subject_biochemical_pca_features.csv")
     for result in results:
-        validate_unique_subject_rows(result.scores, f"{result.name}/scores_subject_level.csv")
+        validate_unique_subject_rows(result.scores, f"{result.name}/scores.csv")
         if result.name == "PCA_whole":
             if "spectral_block" not in result.loadings.columns:
                 raise ValueError("PCA_whole loadings must include spectral_block")
@@ -732,36 +753,315 @@ def build_subject_biochemical_features(results: list[ModelResult]) -> pd.DataFra
     return features
 
 
+def _explained_variance_pct(result: ModelResult, pc: str) -> float:
+    row = result.explained_variance[result.explained_variance["PC"] == pc]
+    if row.empty:
+        return 0.0
+    return float(row["explained_variance_ratio"].iloc[0]) * 100
+
+
 def _plot_scores(result: ModelResult, output_dir: Path) -> None:
     if not {"PC1", "PC2"}.issubset(result.scores.columns):
         return
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.scatter(result.scores["PC1"], result.scores["PC2"], s=22, color="#2f6f73", alpha=0.85)
-    ax.set_xlabel("PC1")
-    ax.set_ylabel("PC2")
+    group_col = result.scores.get("group")
+    emit_hull = bool(
+        config.get("biological_pca", {}).get("figures", {}).get("emit_convex_hull", False)
+    )
+    if group_col is not None and not group_col.isna().all():
+        for grp in sorted(group_col.dropna().unique()):
+            mask = group_col == grp
+            color = GROUP_COLORS.get(grp, "#6B7280")
+            label = GROUP_LABELS.get(grp, grp)
+            ax.scatter(
+                result.scores.loc[mask, "PC1"],
+                result.scores.loc[mask, "PC2"],
+                s=45,
+                color=color,
+                alpha=0.85,
+                edgecolors="#334155",
+                linewidth=0.55,
+                label=label,
+            )
+            if emit_hull and mask.sum() >= 3:
+                pts = result.scores.loc[mask, ["PC1", "PC2"]].to_numpy(dtype=float)
+                try:
+                    hull = ConvexHull(pts)
+                    hull_pts = pts[hull.vertices]
+                    ax.fill(hull_pts[:, 0], hull_pts[:, 1], color=color, alpha=0.12)
+                except Exception:
+                    pass
+        ax.legend(fontsize=9)
+    else:
+        ax.scatter(
+            result.scores["PC1"],
+            result.scores["PC2"],
+            s=45,
+            color="#2f6f73",
+            alpha=0.85,
+        )
+    ax.set_xlabel(f"PC1 ({_explained_variance_pct(result, 'PC1'):.1f}%)")
+    ax.set_ylabel(f"PC2 ({_explained_variance_pct(result, 'PC2'):.1f}%)")
     ax.set_title(f"{result.name} subject scores")
     fig.tight_layout()
     fig.savefig(output_dir / "scores_pc1_pc2.png", dpi=200)
     plt.close(fig)
 
 
-def _plot_loadings(result: ModelResult, output_dir: Path) -> None:
-    fig, ax = plt.subplots(figsize=(8, 4))
-    if result.name == "PCA_whole":
-        for block, group in result.loadings.groupby("spectral_block", sort=False):
-            ax.plot(group["raman_shift"], group["PC1_loading"], label=f"{block} PC1")
-    else:
-        ax.plot(result.loadings["raman_shift"], result.loadings["PC1_loading"], label="PC1")
-    ax.set_xlabel("Raman shift (cm-1)")
-    ax.set_ylabel("Loading")
-    ax.set_title(f"{result.name} PC1 loadings")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "loadings_pc1.png", dpi=200)
+def _plot_scree(result: ModelResult, output_dir: Path) -> None:
+    ratios = result.explained_variance["explained_variance_ratio"].to_numpy()
+    fig, _ = plot_scree(ratios, title=f"{result.name} scree plot")
+    fig.savefig(output_dir / "scree_plot.png", dpi=200)
     plt.close(fig)
 
 
-def _write_outputs(staging_dir: Path, inputs: SubjectInputs, results: list[ModelResult], features: pd.DataFrame) -> list[Path]:
+def _plot_loadings(result: ModelResult, output_dir: Path, pcs: list[str] | None = None) -> None:
+    if pcs is None:
+        pcs = ["PC1", "PC2"]
+    available = [pc for pc in pcs if f"{pc}_loading" in result.loadings.columns]
+    if not available:
+        return
+    colors = ["#264653", "#2A9D8F", "#E76F51"]
+    if result.name == "PCA_whole":
+        fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=False)
+        for ax, block in zip(axes, ["1300", "2850"]):
+            block_df = result.loadings[result.loadings["spectral_block"].astype(str) == block]
+            for i, pc in enumerate(available):
+                ax.plot(
+                    block_df["raman_shift"],
+                    block_df[f"{pc}_loading"],
+                    color=colors[i % len(colors)],
+                    label=f"{block}__{pc}",
+                )
+            ax.axhline(0, color="black", linestyle="--", linewidth=0.5)
+            ax.set_xlabel("Raman shift (cm-1)")
+            ax.set_ylabel("Loading")
+            ax.set_title(f"{result.name} {block} loadings")
+            ax.legend(fontsize=9)
+    else:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        for i, pc in enumerate(available):
+            ax.plot(
+                result.loadings["raman_shift"],
+                result.loadings[f"{pc}_loading"],
+                color=colors[i % len(colors)],
+                label=pc,
+            )
+        ax.axhline(0, color="black", linestyle="--", linewidth=0.5)
+        ax.set_xlabel("Raman shift (cm-1)")
+        ax.set_ylabel("Loading")
+        ax.set_title(f"{result.name} loadings")
+        ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(output_dir / "loadings_pc1_pc2.png", dpi=200)
+    plt.close(fig)
+
+
+def _plot_band_contributions(
+    result: ModelResult, output_dir: Path, pcs: list[str] | None = None
+) -> None:
+    if pcs is None:
+        pcs = ["PC1", "PC2"]
+    df = result.band_contributions[
+        result.band_contributions["PC"].isin(pcs)
+        & result.band_contributions["relative_absolute_contribution"].notna()
+    ]
+    if df.empty:
+        return
+    pivot = (
+        df.pivot(index="band_name", columns="PC", values="relative_absolute_contribution")
+        .fillna(0)
+        .reindex(columns=pcs, fill_value=0)
+    )
+    order = pivot.sum(axis=1).sort_values(ascending=True).index
+    pivot = pivot.loc[order]
+    class_map = dict(zip(df["band_name"], df["biochemical_class"]))
+    class_colors = {
+        "lipid": "#E69F00",
+        "protein": "#0072B2",
+        "nucleic_acid": "#009E73",
+        "mixed": "#6D597A",
+    }
+    fig, ax = plt.subplots(figsize=(8, max(4, 0.35 * len(pivot))))
+    y = np.arange(len(pivot))
+    height = 0.35
+    for i, pc in enumerate(pcs):
+        if pc not in pivot.columns:
+            continue
+        offset = (i - 0.5) * height
+        colors = [class_colors.get(class_map.get(b, "mixed"), "#6D597A") for b in pivot.index]
+        ax.barh(
+            y + offset,
+            pivot[pc],
+            height,
+            label=pc,
+            color=colors,
+            alpha=0.85,
+            edgecolor="#334155",
+            linewidth=0.3,
+        )
+    ax.set_yticks(y)
+    ax.set_yticklabels(pivot.index, fontsize=9)
+    ax.set_xlabel("Relative absolute contribution")
+    ax.set_title(f"{result.name} band contributions")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(output_dir / "band_contributions_pc1_pc2.png", dpi=200)
+    plt.close(fig)
+
+
+def _plot_biochemical_summary(result: ModelResult, output_dir: Path) -> None:
+    df = result.biochemical_summary[result.biochemical_summary["PC"].isin(["PC1", "PC2"])]
+    if df.empty:
+        return
+    class_cols = ["lipid", "protein", "nucleic_acid", "mixed"]
+    pivot = df.set_index("PC")[class_cols].fillna(0)
+    class_colors = {
+        "lipid": "#E69F00",
+        "protein": "#0072B2",
+        "nucleic_acid": "#009E73",
+        "mixed": "#6D597A",
+    }
+    fig, ax = plt.subplots(figsize=(6, 4))
+    bottom = np.zeros(len(pivot))
+    for cls in class_cols:
+        vals = pivot[cls].to_numpy()
+        if not vals.any():
+            continue
+        ax.bar(
+            pivot.index,
+            vals,
+            bottom=bottom,
+            label=cls,
+            color=class_colors[cls],
+            alpha=0.85,
+            edgecolor="#334155",
+            linewidth=0.3,
+        )
+        bottom += vals
+    ax.set_ylabel("Relative contribution")
+    ax.set_title(f"{result.name} biochemical class summary")
+    ax.set_ylim(0, 1)
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(output_dir / "biochemical_summary_pc1_pc2.png", dpi=200)
+    plt.close(fig)
+
+
+def _write_interpretation_md(
+    result: ModelResult, output_dir: Path, pc3_threshold: float = 0.05
+) -> None:
+    ev = result.explained_variance.set_index("PC")
+    pcs = ["PC1", "PC2"]
+    pc3_ratio = ev.loc["PC3", "explained_variance_ratio"] if "PC3" in ev.index else 0.0
+    include_pc3 = pc3_ratio >= pc3_threshold
+    if include_pc3:
+        pcs.append("PC3")
+
+    lines = [
+        f"# {result.name} — Conservative Interpretation",
+        "",
+        "Input: subject median spectra (one median spectrum per subject per spectral region).",
+        "",
+        "| PC | Explained variance | Dominant class | Top bands | Interpretation |",
+        "|---|---|---|---|---|",
+    ]
+    for pc in pcs:
+        if pc not in ev.index:
+            continue
+        pct = ev.loc[pc, "explained_variance_ratio"] * 100
+        summary_row = result.biochemical_summary[result.biochemical_summary["PC"] == pc]
+        dominant = (
+            summary_row["dominant_biochemical_class"].iloc[0]
+            if not summary_row.empty
+            else None
+        )
+        sentence = (
+            summary_row["interpretation_sentence"].iloc[0]
+            if not summary_row.empty
+            else ""
+        )
+        top_bands = (
+            result.band_contributions[
+                (result.band_contributions["PC"] == pc)
+                & result.band_contributions["relative_absolute_contribution"].notna()
+            ]
+            .sort_values("relative_absolute_contribution", ascending=False)
+            .head(5)
+        )
+        band_list = ", ".join(
+            f"{row['band_name']} ({row['relative_absolute_contribution'] * 100:.1f}%)"
+            for _, row in top_bands.iterrows()
+        )
+        lines.append(
+            f"| {pc} | {pct:.1f}% | {dominant or 'N/A'} | {band_list} | {sentence} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Caveats",
+            "",
+            "This interpretation is exploratory and descriptive only. It does not support "
+            "diagnosis, prediction, causal inference, or use as a clinical indicator.",
+        ]
+    )
+    text = "\n".join(lines)
+    lower = text.lower()
+    if any(phrase in lower for phrase in FORBIDDEN_INTERPRETATION_PHRASES):
+        raise ValueError(f"Forbidden interpretation wording in {result.name} markdown")
+    (output_dir / "conservative_interpretation.md").write_text(text, encoding="utf-8")
+
+
+def _build_pca_comparison_summary(results: list[ModelResult]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for result in results:
+        ev = result.explained_variance.set_index("PC")
+        for pc in ["PC1", "PC2"]:
+            if pc not in ev.index:
+                continue
+            pct = ev.loc[pc, "explained_variance_ratio"] * 100
+            summary_row = result.biochemical_summary[result.biochemical_summary["PC"] == pc]
+            dominant = (
+                summary_row["dominant_biochemical_class"].iloc[0]
+                if not summary_row.empty
+                else None
+            )
+            sentence = (
+                summary_row["interpretation_sentence"].iloc[0]
+                if not summary_row.empty
+                else ""
+            )
+            top_bands = (
+                result.band_contributions[
+                    (result.band_contributions["PC"] == pc)
+                    & result.band_contributions["relative_absolute_contribution"].notna()
+                ]
+                .sort_values("relative_absolute_contribution", ascending=False)
+                .head(3)["band_name"]
+                .tolist()
+            )
+            rows.append(
+                {
+                    "model": result.name,
+                    "PC": pc,
+                    "explained_variance_pct": pct,
+                    "dominant_class": dominant,
+                    "top_band_1": top_bands[0] if len(top_bands) > 0 else None,
+                    "top_band_2": top_bands[1] if len(top_bands) > 1 else None,
+                    "top_band_3": top_bands[2] if len(top_bands) > 2 else None,
+                    "interpretation_sentence": sentence,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _write_outputs(
+    staging_dir: Path,
+    inputs: SubjectInputs,
+    results: list[ModelResult],
+    features: pd.DataFrame,
+) -> list[Path]:
     written: list[Path] = []
     tables = {
         "subject_spectra.csv": inputs.subject_spectra,
@@ -774,22 +1074,63 @@ def _write_outputs(staging_dir: Path, inputs: SubjectInputs, results: list[Model
         df.to_csv(path, index=False)
         written.append(Path(filename))
 
+    pc3_threshold = float(
+        config.get("biological_pca", {}).get("pc3_variance_threshold", 0.05)
+    )
+
     for result in results:
         model_dir = staging_dir / result.name
         model_dir.mkdir(parents=True, exist_ok=True)
         model_tables = {
-            "scores_subject_level.csv": result.scores,
+            "scores.csv": result.scores,
             "loadings.csv": result.loadings,
             "explained_variance.csv": result.explained_variance,
             "band_contributions.csv": result.band_contributions,
-            "biochemical_pc_summary.csv": result.biochemical_summary,
+            "biochemical_summary.csv": result.biochemical_summary,
         }
         for filename, df in model_tables.items():
             df.to_csv(model_dir / filename, index=False)
             written.append(Path(result.name) / filename)
+
+        pcs = ["PC1", "PC2"]
+        ev = result.explained_variance.set_index("PC")
+        pc3_ratio = ev.loc["PC3", "explained_variance_ratio"] if "PC3" in ev.index else 0.0
+        if pc3_ratio >= pc3_threshold:
+            pcs.append("PC3")
+            logger.info(
+                "%s PC3 retained (%.1f%% variance)",
+                result.name,
+                pc3_ratio * 100,
+            )
+        else:
+            logger.info(
+                "%s PC3 not retained (%.1f%% variance < threshold %.0f%%)",
+                result.name,
+                pc3_ratio * 100,
+                pc3_threshold * 100,
+            )
+
         _plot_scores(result, model_dir)
-        _plot_loadings(result, model_dir)
-        written.extend([Path(result.name) / "scores_pc1_pc2.png", Path(result.name) / "loadings_pc1.png"])
+        _plot_scree(result, model_dir)
+        _plot_loadings(result, model_dir, pcs=pcs)
+        _plot_band_contributions(result, model_dir, pcs=pcs)
+        _plot_biochemical_summary(result, model_dir)
+        _write_interpretation_md(result, model_dir, pc3_threshold=pc3_threshold)
+        written.extend(
+            [
+                Path(result.name) / "scores_pc1_pc2.png",
+                Path(result.name) / "scree_plot.png",
+                Path(result.name) / "loadings_pc1_pc2.png",
+                Path(result.name) / "band_contributions_pc1_pc2.png",
+                Path(result.name) / "biochemical_summary_pc1_pc2.png",
+                Path(result.name) / "conservative_interpretation.md",
+            ]
+        )
+
+    comparison = _build_pca_comparison_summary(results)
+    comparison.to_csv(staging_dir / "pca_comparison_summary.csv", index=False)
+    written.append(Path("pca_comparison_summary.csv"))
+
     return written
 
 

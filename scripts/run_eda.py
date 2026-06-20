@@ -15,6 +15,8 @@ import logging
 import sys
 from pathlib import Path
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
     "_raman_cli_util", ROOT / "src" / "cli_util.py"
@@ -24,11 +26,12 @@ assert _spec.loader is not None
 _spec.loader.exec_module(_cli_util)
 _cli_util.apply_config_override("config/eda.yaml", ROOT)
 
-from src import config, get_eda_phase_dir, setup_logging, _output_dir
-from src.analysis._single_range import _PHASE_DIRS, _VALID_RANGES
-from src.analysis.analysis_inventory import run_inventory
+from src import config, setup_logging, _output_dir
+import pandas as pd
+
+from src.analysis._single_range import _VALID_RANGES
 from src.analysis.biological_pca import run_biological_pca
-from src.analysis.cross_range_report import write_cross_range_report
+from src.analysis.cohort import save_cohort_summary
 from src.analysis.run_eda import run_eda
 
 logger = logging.getLogger(__name__)
@@ -62,32 +65,44 @@ def _validate_ranges(ranges: list[str]) -> None:
             )
 
 
-def _write_cross_range_outputs(ranges: list[str]) -> None:
-    single_ranges = [r for r in ranges if r != "both"]
+def _write_cohort_outputs(results: dict[str, dict]) -> None:
+    single_ranges = [r for r in results if r != "both"]
     if len(single_ranges) < 1:
         return
 
     eda_base = _output_dir("eda_subdir")
+    cohort_dir = eda_base / "00_cohort"
 
-    def _make_phase_dir_fn(r: str):
-        def _fn(key: str) -> Path:
-            return get_eda_phase_dir(r, _PHASE_DIRS[key])
+    cohort_summary = results[single_ranges[0]].get("cohort_summary")
+    if cohort_summary:
+        save_cohort_summary(cohort_summary, cohort_dir, prefix="cohort")
 
-        return _fn
+    desc_frames: list[pd.DataFrame] = []
+    for spectral_range in single_ranges:
+        groups = results[spectral_range].get("groups")
+        if not groups:
+            continue
+        rows = []
+        for key, spectra in groups.items():
+            rows.append(
+                {
+                    "group": key,
+                    "n_subjects": spectra.shape[0],
+                    "mean_intensity": np.nanmean(spectra),
+                    "std_intensity": np.nanstd(spectra),
+                    "min_intensity": np.nanmin(spectra),
+                    "max_intensity": np.nanmax(spectra),
+                    "median_intensity": np.nanmedian(spectra),
+                }
+            )
+        desc_df = pd.DataFrame(rows)
+        desc_df["range"] = spectral_range
+        desc_frames.append(desc_df)
 
-    phase_dir_fns = {r: _make_phase_dir_fn(r) for r in single_ranges}
-    report_dir = eda_base / "cross_range_report"
-    write_cross_range_report(
-        ranges=single_ranges,
-        phase_dir_fns=phase_dir_fns,
-        output_base=eda_base,
-        out_dir=report_dir,
-    )
-
-    run_inventory(
-        eda_base=eda_base,
-        output_dir=eda_base / "analysis_inventory",
-    )
+    if desc_frames:
+        pd.concat(desc_frames, ignore_index=True).to_csv(
+            cohort_dir / "descriptive_stats_all_ranges.csv", index=False
+        )
 
 
 def _should_run_biological_pca(ranges: list[str], skip_biological_pca: bool) -> bool:
@@ -148,14 +163,15 @@ def _main() -> None:
     try:
         _validate_ranges(ranges)
 
+        results: dict[str, dict] = {}
         for spectral_range in ranges:
-            run_eda(
+            results[spectral_range] = run_eda(
                 spectral_range=spectral_range,
                 skip_preprocess=args.skip_preprocess,
                 max_subjects=args.max_subjects,
             )
 
-        _write_cross_range_outputs(ranges)
+        _write_cohort_outputs(results)
         if _should_run_biological_pca(ranges, args.skip_biological_pca):
             run_biological_pca(max_subjects=args.max_subjects)
     except (ValueError, RuntimeError) as exc:
