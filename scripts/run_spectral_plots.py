@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
@@ -17,8 +18,10 @@ assert _spec.loader is not None
 _spec.loader.exec_module(_cli_util)
 _cli_util.apply_config_override("config/plots.yaml", ROOT)
 
-from src import setup_logging
+from src import config, setup_logging
 from src.analysis.spectral_plot_runner import _parse_args, run_spectral_plots
+from src.data_preparation import data_source_summary, resolve_data_source, write_analysis_provenance
+from src.terminal_output import print_kv_table
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +29,15 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     setup_logging()
     args = _parse_args()
+    data_source = resolve_data_source(config, source_override=args.source)
+    print_kv_table("Active Data Source", data_source_summary(data_source))
     outputs = run_spectral_plots(outdir=args.outdir, max_subjects=args.max_subjects)
+    write_analysis_provenance(
+        outputs["base_output_dir"],
+        data_source,
+        config,
+        command=" ".join(sys.argv),
+    )
     logger.info("QC plots: %s", outputs["qc_dir"])
     logger.info("Spectral plots: %s", outputs["spectral_plot_dir"])
 

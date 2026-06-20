@@ -16,10 +16,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from src import config, get_output_root, whole_spectra_split_index
+from src.data_preparation.loaders import load_clinical_subjects, load_file_index
 from src.analysis.spectral_loader import build_group_matrix, build_whole_spectra_group_matrices
 from src.constants import CANONICAL_REGION_CHANNELS
-from src.io.file_crawler import build_file_index, disambiguate_subject_ids
-from src.metadata.clinical import load_clinical_data, merge_index_with_clinical
+from src.metadata.clinical import merge_index_with_clinical
 from src.visualization.spectral_summary_plots import (
     plot_cohort_mean_spectra_grid,
     plot_condition_region,
@@ -63,6 +63,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default=None, help="Path to config YAML (overrides config/plots.yaml)")
     parser.add_argument("--max-subjects", type=int, default=None, help="Limit subjects per cohort")
     parser.add_argument("--outdir", type=str, default=None, help="Override base output directory")
+    parser.add_argument("--source", type=str, default=None, help="Override data.source with one of: raw_text, parsed, preprocessed")
     return parser.parse_args()
 
 
@@ -114,8 +115,8 @@ def _save_fig(fig: matplotlib.figure.Figure, path: Path) -> None:
 
 
 def _load_index() -> pd.DataFrame:
-    df_index = disambiguate_subject_ids(build_file_index(measurement="all"))
-    clinical = load_clinical_data(data_index=df_index)
+    df_index = load_file_index()
+    clinical = load_clinical_subjects()
     merged = merge_index_with_clinical(df_index, clinical)
     if "gender" in merged.columns:
         merged["gender"] = merged["gender"].astype(str).str.strip().str.lower()

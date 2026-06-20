@@ -19,6 +19,11 @@ import numpy as np
 import pandas as pd
 
 
+from src.data_preparation.loaders import (
+    load_area_summaries,
+    load_whole_area_store,
+)
+from src.data_preparation.store import get_active_data_source
 from src.io.file_crawler import disambiguate_subject_ids
 from src.io.txt_reader import read_txt_spectrum
 from src.preprocessing.cache import load_subject_mean
@@ -40,6 +45,26 @@ def _get_io_workers() -> int:
 
 def _normalized_index(df_index: pd.DataFrame) -> pd.DataFrame:
     return disambiguate_subject_ids(df_index)
+
+
+def _active_source_name() -> str:
+    active = get_active_data_source()
+    if active is None:
+        return str(_cfg.get("data", {}).get("source", "preprocessed"))
+    return active.source_name
+
+
+def _using_raw_text_source() -> bool:
+    return _active_source_name() == "raw_text"
+
+
+def _wavenumbers_from_feature_names(feature_names: np.ndarray) -> np.ndarray:
+    text = np.asarray(feature_names).astype(str)
+    if text.size == 0:
+        return np.array([], dtype=float)
+    if "__" in text[0]:
+        return np.asarray([float(name.split("__", 1)[1]) for name in text], dtype=float)
+    return np.asarray([float(name) for name in text], dtype=float)
 
 
 def wave_axes_compatible(reference: np.ndarray, candidate: np.ndarray) -> bool:
@@ -144,6 +169,17 @@ def _load_subject_spectra_from_index(
     subject_id: str,
     spectral_range: str,
 ) -> tuple[np.ndarray, np.ndarray]:
+    if not _using_raw_text_source():
+        payload = load_area_summaries(None, spectral_range)
+        if payload["area_summary"].size == 0:
+            return np.array([]), np.array([])
+        subject_mask = payload["subject_ids"].astype(str) == str(subject_id)
+        if not subject_mask.any():
+            return np.array([]), np.array([])
+        feature_names = np.asarray(payload["feature_names"]).astype(str)
+        wavenumbers = np.asarray([float(name) for name in feature_names], dtype=float)
+        return wavenumbers, np.asarray(payload["area_summary"][subject_mask], dtype=float)
+
     range_val = float(spectral_range)
     mask = (df_index["subject_id"] == subject_id) & (
         df_index["spectral_range_cm-1"] == range_val
@@ -189,6 +225,19 @@ def _compute_area_median_spectra_from_index(
     subject_id: str,
     spectral_range: str,
 ) -> tuple[np.ndarray, np.ndarray]:
+    if not _using_raw_text_source():
+        if spectral_range == "both":
+            wavenumbers, area_vectors, _ = _load_subject_paired_area_vectors_from_index(df_index, subject_id)
+            return wavenumbers, area_vectors
+
+        payload = load_area_summaries(None, spectral_range)
+        subject_mask = payload["subject_ids"].astype(str) == str(subject_id)
+        if not subject_mask.any():
+            return np.array([]), np.array([])
+        feature_names = np.asarray(payload["feature_names"]).astype(str)
+        wavenumbers = np.asarray([float(name) for name in feature_names], dtype=float)
+        return wavenumbers, np.asarray(payload["area_summary"][subject_mask], dtype=float)
+
     if spectral_range == "both":
         wavenumbers, area_vectors, weights = _load_subject_paired_area_vectors_from_index(df_index, subject_id)
         # Instead of averaging the area vectors, we just return them!
@@ -277,6 +326,16 @@ def _load_subject_paired_area_vectors_from_index(
     *,
     persist_artifacts: bool | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if not _using_raw_text_source():
+        payload = load_whole_area_store()
+        subject_mask = payload["subject_ids"].astype(str) == str(subject_id)
+        if not subject_mask.any():
+            return np.array([]), np.empty((0, 0)), np.array([])
+        wavenumbers = _wavenumbers_from_feature_names(payload["feature_names"])
+        area_vectors = np.asarray(payload["values"][subject_mask], dtype=float)
+        weights = np.ones(area_vectors.shape[0], dtype=float)
+        return wavenumbers, area_vectors, weights
+
     subject_rows = df_index[df_index["subject_id"] == subject_id]
     if subject_rows.empty:
         return np.array([]), np.empty((0, 0)), np.array([])
@@ -521,6 +580,28 @@ def build_whole_spectra_group_matrices(
     slice subject means per group from that shared store.
     """
     df_index = _normalized_index(df_index)
+    if not _using_raw_text_source():
+        payload = load_whole_area_store()
+        if payload["values"].size == 0:
+            return np.array([]), {}, {group_key: [] for group_key in group_filters}
+        wavenumbers = _wavenumbers_from_feature_names(payload["feature_names"])
+        group_matrices: dict[str, np.ndarray] = {}
+        group_ids: dict[str, list[str]] = {}
+        for group_key, filters in group_filters.items():
+            subject_ids = _select_subject_ids(
+                df_index,
+                gender=filters.get("gender"),
+                is_control=filters.get("is_control"),
+                spectral_range="both",
+                max_subjects=max_subjects,
+            )
+            mask = np.isin(payload["subject_ids"].astype(str), np.asarray(subject_ids, dtype=str))
+            group_ids[group_key] = payload["subject_ids"][mask].astype(str).tolist()
+            if not mask.any():
+                continue
+            group_matrices[group_key] = np.asarray(payload["values"][mask], dtype=float)
+        return wavenumbers, group_matrices, group_ids
+
     group_subjects: dict[str, list[str]] = {}
     ordered_subjects: list[str] = []
     seen_subjects: set[str] = set()
@@ -638,6 +719,21 @@ def build_group_matrix(
         spectral_range,
         len(subjects),
     )
+
+    if not _using_raw_text_source() and spectral_range != "both":
+        payload = load_area_summaries(None, spectral_range)
+        if payload["area_summary"].size == 0:
+            return np.array([]), np.empty((0, 0)), []
+        feature_names = np.asarray(payload["feature_names"]).astype(str)
+        wavenumbers = np.asarray([float(name) for name in feature_names], dtype=float)
+        mask = np.isin(payload["subject_ids"].astype(str), np.asarray(subjects, dtype=str))
+        if not mask.any():
+            return np.array([]), np.empty((0, 0)), []
+        return (
+            wavenumbers,
+            np.asarray(payload["area_summary"][mask], dtype=float),
+            payload["subject_ids"][mask].astype(str).tolist(),
+        )
 
     if spectral_range == "both":
         return _build_group_matrix_for_both_range(

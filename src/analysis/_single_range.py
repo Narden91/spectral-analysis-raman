@@ -35,9 +35,10 @@ from src.analysis.spectral_loader import (
     load_subject_spectra,
     wave_axes_compatible,
 )
+from src.data_preparation.loaders import load_clinical_subjects, load_file_index
+from src.data_preparation.store import get_active_data_source
 from src.analysis.cohort import build_cohort_summary
-from src.io.file_crawler import build_file_index, disambiguate_subject_ids
-from src.metadata.clinical import load_clinical_data, merge_index_with_clinical
+from src.metadata.clinical import merge_index_with_clinical
 from src.analysis.statistics import (
     run_pca,
     rank_wavenumbers_per_pc,
@@ -127,7 +128,7 @@ def _estimate_variance_decomposition(
     # Total variance (mean over wavenumbers of the per-wavenumber variance)
     total_var = np.nanmean(np.nanvar(all_mat, axis=0, ddof=0))
 
-    if total_var == 0:
+    if not np.isfinite(total_var) or total_var == 0:
         return (np.nan, 0.0, 0.0)
 
     # Between-group variance  (weighted by group size)
@@ -170,10 +171,17 @@ def _estimate_variance_decomposition(
             if raw_pix.size == 0 or raw_pix.shape[0] < 2:
                 continue
             proc_pix, _ = preprocess_spectra(raw_pix, wave, region=spectral_range)  # same pipeline as groups
-            pix_vars.append(np.nanmean(np.nanvar(proc_pix, axis=0)))
+            if proc_pix.size == 0 or proc_pix.shape[0] < 2:
+                continue
+            pix_var = np.nanmean(np.nanvar(proc_pix, axis=0))
+            if not np.isfinite(pix_var):
+                continue
+            pix_vars.append(float(pix_var))
             pix_counts.append(proc_pix.shape[0])
         if pix_vars:
             raw_noise_var = np.mean(pix_vars) / np.mean(pix_counts)
+            if not np.isfinite(raw_noise_var):
+                raw_noise_var = 0.0
             if raw_noise_var > inter_subject_var:
                 logger.warning(
                     "Estimated measurement noise variance (%.2e) exceeds inter-subject variance (%.2e). "
@@ -213,7 +221,7 @@ def _run_single_range_eda(
     def phase_dir(key: str) -> Path:
         return get_eda_phase_dir(spectral_range, _PHASE_DIRS[key])
 
-    df_index = disambiguate_subject_ids(build_file_index(measurement="all"))
+    df_index = load_file_index()
     if df_index.empty:
         raise RuntimeError(
             "No measurement files found. Is the data directory correct?"
@@ -236,7 +244,7 @@ def _run_single_range_eda(
             n_before - n_after,
         )
 
-    clinical_df = load_clinical_data(data_index=df_index)
+    clinical_df = load_clinical_subjects()
     df_merged = merge_index_with_clinical(df_index, clinical_df)
     cohort_summary = build_cohort_summary(
         df_merged,
@@ -345,23 +353,30 @@ def _run_single_range_eda(
         groups = raw_groups
 
         _log_phase("PHASE 0.5: Preprocessing Consistency Checks (PCS)")
-        try:
-            from src.analysis.pcs import run_pcs_validation
-            from src.analysis.spectral_loader import load_subject_spectra
-            from src.preprocessing.pipeline import preprocess_spectra
-            
-            sample_sid = list(group_ids.values())[0][0] if group_ids and list(group_ids.values())[0] else None
-            if sample_sid:
-                w_raw, r_pix = load_subject_spectra(df_index, sample_sid, spectral_range)
-                if r_pix.size > 0:
-                    p_pix, w_proc = preprocess_spectra(r_pix, w_raw, region=spectral_range)
-                    pcs_metrics = run_pcs_validation(r_pix, p_pix, w_raw, w_proc)
-                    if not pcs_metrics.get("passed", False):
-                        logger.error("PCS validation FAILED! Preprocessing distorts chemical signal. Metrics: %s", pcs_metrics)
-                    else:
-                        logger.info("PCS validation PASSED successfully.")
-        except Exception as exc:
-            logger.warning("PCS validation could not be completed: %s", exc)
+        active_source = get_active_data_source()
+        if active_source is not None and active_source.source_name != "raw_text":
+            logger.info(
+                "Skipping PCS validation for source=%s because it requires raw pixel reloads",
+                active_source.source_name,
+            )
+        else:
+            try:
+                from src.analysis.pcs import run_pcs_validation
+                from src.analysis.spectral_loader import load_subject_spectra
+                from src.preprocessing.pipeline import preprocess_spectra
+
+                sample_sid = list(group_ids.values())[0][0] if group_ids and list(group_ids.values())[0] else None
+                if sample_sid:
+                    w_raw, r_pix = load_subject_spectra(df_index, sample_sid, spectral_range)
+                    if r_pix.size > 0:
+                        p_pix, w_proc = preprocess_spectra(r_pix, w_raw, region=spectral_range)
+                        pcs_metrics = run_pcs_validation(r_pix, p_pix, w_raw, w_proc)
+                        if not pcs_metrics.get("passed", False):
+                            logger.error("PCS validation FAILED! Preprocessing distorts chemical signal. Metrics: %s", pcs_metrics)
+                        else:
+                            logger.info("PCS validation PASSED successfully.")
+            except Exception as exc:
+                logger.warning("PCS validation could not be completed: %s", exc)
 
     result_both = None
     if spectral_range == "both":
@@ -652,7 +667,7 @@ def _run_single_range_eda(
             _log_phase("PHASE 6: Intra-disease clinical correlations")
             try:
                 intra_csv = intra_disease_cfg.get("clinical_csv", "data/clinical_data_clean.csv")
-                intra_clinical_df = load_clinical_data(intra_csv, data_index=df_index, write_curated=False)
+                intra_clinical_df = clinical_df if not clinical_df.empty else load_clinical_subjects()
                 wn_id, spectra_id, clin_aligned = build_disease_subject_mean_matrix(
                     df_index, intra_clinical_df, spectral_range
                 )

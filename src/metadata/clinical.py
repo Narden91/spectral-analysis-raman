@@ -104,6 +104,8 @@ def resolve_clinical_csv_path(explicit_path: str | Path | None = None) -> Path |
             candidates.append(resolved)
 
     cfg_path = config.get("data", {}).get("clinical_csv")
+    if not cfg_path:
+        cfg_path = config.get("data", {}).get("clinical_data_path")
     if cfg_path:
         path = Path(cfg_path)
         candidates.append(path)

@@ -140,7 +140,10 @@ def build_file_index(
         Structured index of measurement files.
     """
     if data_dir is None:
-        data_dir = resolve_project_path(config["data"]["root_dir"])
+        data_cfg = config.get("data", {})
+        data_dir = resolve_project_path(
+            data_cfg.get("raw_text_dir", data_cfg.get("root_dir", "data/raw"))
+        )
 
     data_dir = Path(data_dir)
     ext = config["data"]["file_extension"].lower()

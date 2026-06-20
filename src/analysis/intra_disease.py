@@ -18,6 +18,8 @@ import pandas as pd
 from scipy import stats as scipy_stats
 
 from src.analysis.statistics import fdr_correction
+from src.data_preparation.loaders import load_area_summaries
+from src.data_preparation.store import get_active_data_source
 from src.preprocessing.cache import load_subject_mean
 from src.preprocessing.pipeline import resolve_region_key
 
@@ -59,6 +61,33 @@ def build_disease_subject_mean_matrix(
         Clinical rows aligned row-wise with ``mean_spectra``, indexed by
         ``subject_id``.
     """
+    active_source = get_active_data_source()
+    if active_source is not None and active_source.source_name != "raw_text":
+        payload = load_area_summaries(None, spectral_range)
+        disease_subjects = (
+            df_index.loc[~df_index["is_control"].astype(bool), "subject_id"].astype(str).unique().tolist()
+        )
+        rows: list[np.ndarray] = []
+        kept_subjects: list[str] = []
+        wavenumbers = np.asarray([float(name) for name in payload["feature_names"].astype(str)], dtype=float)
+        for sid in disease_subjects:
+            mask = payload["subject_ids"].astype(str) == str(sid)
+            if not mask.any():
+                continue
+            rows.append(np.nanmedian(np.asarray(payload["area_summary"][mask], dtype=float), axis=0))
+            kept_subjects.append(str(sid))
+        if not rows:
+            return np.array([]), np.empty((0, 0)), pd.DataFrame()
+        mean_spectra = np.vstack(rows)
+        clinical = clinical_df.copy()
+        clinical["subject_id"] = clinical["subject_id"].astype(str)
+        clinical_aligned = (
+            pd.DataFrame({"subject_id": kept_subjects})
+            .merge(clinical, on="subject_id", how="left")
+            .set_index("subject_id")
+        )
+        return wavenumbers, mean_spectra, clinical_aligned
+
     region_key = resolve_region_key(spectral_range)
     disease_subjects = (
         df_index.loc[~df_index["is_control"].astype(bool), "subject_id"].unique().tolist()

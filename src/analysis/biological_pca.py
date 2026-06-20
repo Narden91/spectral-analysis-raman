@@ -20,6 +20,12 @@ from scipy.spatial import ConvexHull
 
 from src import _output_dir, config, resolve_project_path
 from src.analysis.statistics import run_pca
+from src.data_preparation.loaders import (
+    load_area_summaries,
+    load_clinical_subjects,
+    load_file_index,
+)
+from src.data_preparation.store import get_active_data_source
 from src.io.file_crawler import build_file_index
 from src.io.txt_reader import read_txt_spectrum
 from src.preprocessing.pipeline import run_preprocessing
@@ -268,6 +274,9 @@ def build_subject_inputs(max_subjects: int | None = None, cfg: dict | None = Non
     """Preprocess retained spectra and aggregate one median spectrum per subject and block."""
     cfg = config if cfg is None else cfg
     validate_biological_pca_config(cfg)
+    active_source = get_active_data_source()
+    if active_source is not None and active_source.source_name != "raw_text":
+        return _build_subject_inputs_from_materialized_store(max_subjects=max_subjects)
     df_index = build_file_index(measurement="all")
     if df_index.empty:
         raise ValueError("No Raman input files were found")
@@ -405,6 +414,113 @@ def build_subject_inputs(max_subjects: int | None = None, cfg: dict | None = Non
         subject_spectra=subject_spectra,
         subject_region_counts=subject_region_counts,
         input_provenance=input_provenance,
+        axes=axes,
+        matrices=matrix_arrays,
+        subjects=included_subjects,
+    )
+
+
+def _build_subject_inputs_from_materialized_store(max_subjects: int | None = None) -> SubjectInputs:
+    df_index = load_file_index()
+    clinical = load_clinical_subjects()
+    subjects = select_subjects(df_index["subject_id"], max_subjects=max_subjects)
+    df_index = df_index[df_index["subject_id"].astype(str).isin(subjects)].copy()
+    clinical = clinical[clinical["subject_id"].astype(str).isin(subjects)].copy()
+
+    payloads = {
+        "1300": load_area_summaries(None, "1300"),
+        "2850": load_area_summaries(None, "2850"),
+    }
+    axes = {
+        block: np.asarray([float(name) for name in payloads[block]["feature_names"].astype(str)], dtype=float)
+        for block in BLOCKS
+    }
+
+    included_subjects: list[str] = []
+    matrices: dict[str, list[np.ndarray]] = {"1300": [], "2850": []}
+    region_rows: list[dict[str, object]] = []
+    subject_rows: list[dict[str, object]] = []
+
+    for subject_id in subjects:
+        has_all_blocks = all(
+            np.any(payloads[block]["subject_ids"].astype(str) == str(subject_id))
+            for block in BLOCKS
+        )
+        if not has_all_blocks:
+            continue
+        included_subjects.append(str(subject_id))
+
+    for subject_id in included_subjects:
+        feature_values: dict[str, float] = {}
+        subject_samples: set[str] = set()
+        subject_areas: set[str] = set()
+        subject_pixels = 0
+        clinical_row = clinical.loc[clinical["subject_id"].astype(str) == str(subject_id)]
+        if clinical_row.empty:
+            is_control = False
+            gender = "unknown"
+        else:
+            is_control = bool(clinical_row["is_control"].iloc[0]) if "is_control" in clinical_row.columns else False
+            gender = str(clinical_row["gender"].iloc[0]).lower() if "gender" in clinical_row.columns else "unknown"
+
+        for block in BLOCKS:
+            mask = payloads[block]["subject_ids"].astype(str) == str(subject_id)
+            block_matrix = np.asarray(payloads[block]["area_summary"][mask], dtype=float)
+            block_area_ids = payloads[block]["area_ids"][mask].astype(str)
+            block_measurement_ids = payloads[block]["measurement_ids"][mask].astype(str)
+            median = np.nanmedian(block_matrix, axis=0)
+            matrices[block].append(median)
+            subject_samples.update(block_measurement_ids.tolist())
+            subject_areas.update(block_area_ids.tolist())
+            subject_pixels += int(block_matrix.shape[0])
+            region_rows.append(
+                {
+                    "subject_id": str(subject_id),
+                    "spectral_range": block,
+                    "n_samples": len(block_measurement_ids),
+                    "n_spots": len(block_area_ids),
+                    "n_pixels": int(block_matrix.shape[0]),
+                    "n_retained_pixels": int(block_matrix.shape[0]),
+                }
+            )
+            for shift, value in zip(axes[block], median):
+                feature_values[f"{block}__{float(shift):.1f}"] = float(value)
+
+        subject_rows.append(
+            {
+                "subject_id": str(subject_id),
+                "condition": "control" if is_control else "disease",
+                "gender": gender,
+                "group": f"{gender}_{'control' if is_control else 'disease'}",
+                "n_samples": len(subject_samples),
+                "n_spots": len(subject_areas),
+                "n_pixels": subject_pixels,
+                **feature_values,
+            }
+        )
+
+    matrix_arrays = {block: np.vstack(rows) if rows else np.empty((0, 0)) for block, rows in matrices.items()}
+    input_provenance = df_index[
+        ["subject_id", "slide_number", "area_id", "measurement_id", "filepath", "spectral_range_cm-1"]
+    ].rename(
+        columns={
+            "slide_number": "sample_id",
+            "area_id": "spot_id",
+            "measurement_id": "pixel_id",
+            "filepath": "filepath",
+            "spectral_range_cm-1": "spectral_range",
+        }
+    ).copy()
+    input_provenance["x_coord"] = np.nan
+    input_provenance["y_coord"] = np.nan
+    input_provenance["retained_after_qc"] = True
+
+    return SubjectInputs(
+        subject_spectra=pd.DataFrame(subject_rows),
+        subject_region_counts=pd.DataFrame(region_rows),
+        input_provenance=input_provenance[
+            ["subject_id", "sample_id", "spot_id", "pixel_id", "x_coord", "y_coord", "spectral_range", "filepath", "retained_after_qc"]
+        ],
         axes=axes,
         matrices=matrix_arrays,
         subjects=included_subjects,

@@ -13,7 +13,30 @@ Raman spectra from biological tissues are highly heterogeneous and contain multi
 
 Because these artifacts differ systematically between spectral regions—especially between the fingerprint region (400-1800 cm⁻¹) and the high-wavenumber CH-stretch region (2800-3000 cm⁻¹)—they **cannot** be treated with a single global pipeline. They are processed separately using tailored algorithms.
 
-## 2. Data Structure & Aggregation Strategy
+## 2. Data Sources, Structure & Aggregation Strategy
+
+The repository now separates ingestion from analysis through three explicit
+source levels:
+
+- `raw_text`: crawl `data/raw` and `data/clinical_data.csv`
+- `parsed`: materialized raw metadata and spectra
+- `preprocessed`: materialized post-pipeline spectra and cohort tables
+
+`parsed` replaces the older idea of an "unpreprocessed" output folder. The goal
+is to crawl raw text once, validate it, and reuse deterministic materialized
+stores across analyses.
+
+Canonical generated assets:
+
+- `file_index.parquet`
+- `clinical_subjects.parquet`
+- `area_metadata.parquet`
+- `spectra_1300.npz`, `spectra_2850.npz`
+- `area_summaries_1300.npz`, `area_summaries_2850.npz`
+- `whole_area_store.npz`
+- `manifest.json`
+- `cohort/control_vs_disease/*.parquet`
+- `cohort/disease_only/*.parquet`
 
 The data exhibits an intrinsically nested hierarchical structure:
 `Subject -> Slide -> Spot (Area) -> Pixels`
@@ -59,9 +82,24 @@ Different regions carry different physical meaning, requiring disparate normaliz
 
 ## 4. Execution Flow
 
-1. Raw `.txt` hypercubes are loaded.
+1. Raw `.txt` hypercubes are loaded when building the `parsed` store.
 2. Spectra are split into the two regions.
-3. The `src/preprocessing/pipeline.py` orchestrator sequentially applies the stages (QC -> Baseline -> Smooth -> Normalize) configured via `config/settings.yaml`.
+3. The `src/preprocessing/pipeline.py` orchestrator sequentially applies the stages (QC -> Baseline -> Smooth -> Normalize) configured via `config/settings.yaml` when building the `preprocessed` store.
 4. Artifacts and outliers are masked.
 5. The pixel spectra are collapsed to area medians via `src/fusion/area_summary.py`.
-6. PCA and EDA plots are generated dynamically from these aggregated spot medians.
+6. Cohort tables are materialized under the active generated store.
+7. EDA, spectral plots, and Biological PCA load from the selected source instead of regenerating cohort tables under `Results_*/00_cohort`.
+
+## 5. Manifest And Validation
+
+Each generated store writes a `manifest.json` with:
+
+- store type (`parsed` or `preprocessed`)
+- source path and source manifest hash
+- input file signatures
+- generated file signatures
+- preprocessing and materialization config hashes
+- record counts
+
+Derived stores are validated before use. Stale manifests fail by default and
+are rebuilt only through an explicit force build command.

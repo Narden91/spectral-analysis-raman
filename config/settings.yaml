@@ -20,11 +20,19 @@ experiment:
 # Data
 # ---------------------------------------------------------------------------
 data:
-  root_dir: "data/raw"              # str: reorganized canonical dataset read by EDA/ML/DL
-  preprocessed_dir: "data_preprocessed"  # str: deterministic per-area preprocessing cache
+  source: "preprocessed"        # str: one of {"raw_text", "parsed", "preprocessed"}
+  auto_build: true              # bool: build missing derived stores at load time
+  raw_text_dir: "data/raw"      # str: original canonical spectra tree
+  clinical_data_path: "data/clinical_data.csv"  # str: source clinical CSV
+  parsed_dir: "data/parsed"     # str: validated materialized store before preprocessing
+  preprocessed_dir: "data/preprocessed"  # str: materialized store after preprocessing
+  write_csv_mirrors: true       # bool: emit CSV mirrors beside parquet tables for inspection
+  require_valid_manifest: true  # bool: reject missing or invalid manifests for derived stores
+  stale_manifest_policy: "error"  # str: "error" or "rebuild"
+  root_dir: "data/raw"              # str: legacy alias for reorganized canonical dataset
   raw_dir: "data_raw"           # str: original Renishaw exports (reorganize step only)
   cleaned_dir: "data_cleaned"   # str: intermediate cleaned copy (reorganize step only)
-  clinical_csv: "data/clinical_data.csv"  # str: curated disease-only clinical data (single source of truth)
+  clinical_csv: "data/clinical_data.csv"  # str: legacy alias for source clinical CSV
   curated_clinical_csv: "data_cleaned/clinical/clinical_data_curated.csv"  # str: reconciled subject table written by load_clinical_data
   subject_metadata_csv: "data_cleaned/clinical/subject_metadata.csv"  # str: per-subject metadata output
   clinical_audit_csv: "data_cleaned/clinical/clinical_mismatch_audit.csv"  # str: mismatch audit log
@@ -171,6 +179,7 @@ output:
 
   # Subdirectory names relative to eda_root.
   eda_subdir: ""  # str: main EDA subdirectory (empty = eda_root itself)
+  processed_subdir: "processed"  # str: analysis-owned processed artifacts subdirectory
 
   # Human-readable subdirectory names per spectral range.
   range_labels:

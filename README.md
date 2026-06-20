@@ -15,6 +15,46 @@ Canonical hierarchy:
 Subject -> sample_XX -> measurement -> range {1300, 2850} -> pixels
 ```
 
+## Data Sources
+
+The analysis stack now supports three explicit source levels:
+
+- `raw_text`: original Renishaw `.txt` spectra plus `data/clinical_data.csv`
+- `parsed`: materialized metadata and spectra before scientific preprocessing
+- `preprocessed`: materialized metadata and spectra after the preprocessing pipeline
+
+Default source: `preprocessed`.
+
+Generated stores use:
+
+- Parquet for canonical tables
+- NPZ for dense NumPy arrays
+- JSON for manifests
+- CSV only as optional inspection mirrors
+
+Materialized layout:
+
+```text
+data/
+  raw/
+  clinical_data.csv
+  parsed/
+    manifest.json
+    file_index.parquet
+    clinical_subjects.parquet
+    area_metadata.parquet
+    spectra_1300.npz
+    spectra_2850.npz
+    area_summaries_1300.npz
+    area_summaries_2850.npz
+    whole_area_store.npz
+    cohort/
+      control_vs_disease/
+      disease_only/
+  preprocessed/
+    ...
+```
+
 The ingestion source of truth is:
 
 - `src/metadata/parser.py`
@@ -42,6 +82,17 @@ uv pip install -e .
 Default data roots:
 
 - `data/`: dataset
+
+To manage generated stores:
+
+```bash
+uv run scripts/manage_data_store.py build --source parsed
+uv run scripts/manage_data_store.py build --source preprocessed
+uv run scripts/manage_data_store.py validate --source parsed
+uv run scripts/manage_data_store.py validate --source preprocessed
+uv run scripts/manage_data_store.py info --source preprocessed
+uv run scripts/manage_data_store.py clean --source parsed
+```
 
 ## Run The Pipelines
 
@@ -115,6 +166,17 @@ done
 - `config/plots.yaml`
 
 Current defaults to note:
+
+- `data.source`: active source, one of `raw_text`, `parsed`, `preprocessed`
+- `data.auto_build`: auto-build missing derived stores
+- `data.require_valid_manifest`: enforce manifest validation
+- `data.stale_manifest_policy`: default `error`; stale stores do not rebuild silently
+- `data.write_csv_mirrors`: optional human-readable table copies beside Parquet
+- Use `--source ...` on supported scripts to override the config for a run
+
+- During startup, analysis prints the active data source, path, formats, manifest hash, counts, and whether the source was loaded or built.
+- Normal analysis no longer writes `Results_*/00_cohort/`; cohort tables are generated into `data/parsed/cohort/` and `data/preprocessed/cohort/`.
+- Each analysis output root now includes `run_manifest.json`, `data_manifest_snapshot.json`, and `config_snapshot.yaml`.
 
 - `config/eda.yaml` owns `run.ranges`: `["1300", "2850", "both"]`.
 - EDA preprocessing order is: dead/anomalous screen → cosmic-ray detection → optional cosmic-ray suppression → spectral quality filter → edge trim → baseline correction → isolated spike repair → optional smoothing → vector normalization.
