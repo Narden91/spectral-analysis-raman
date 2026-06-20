@@ -8,6 +8,7 @@ import pytest
 
 import src
 import src.analysis.biological_pca as biological_pca
+from src import get_single_range_phase_dirs
 from src.analysis.biological_pca import (
     SubjectInputs,
     build_loading_region_summary,
@@ -264,9 +265,11 @@ def test_default_output_uses_only_canonical_dirs(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(biological_pca, "build_subject_biochemical_features", lambda results: features)
 
     def _canonical_dir(model: str) -> Path:
+        _phase_dirs = get_single_range_phase_dirs()
+        _bio = _phase_dirs["biological_pca"]
         path = expected_root / {
-            "PCA_1330": "01_fingerprint_1300/06_biological_pca",
-            "PCA_2850": "02_ch_stretch_2850/06_biological_pca",
+            "PCA_1330": f"01_fingerprint_1300/{_bio}",
+            "PCA_2850": f"02_ch_stretch_2850/{_bio}",
             "PCA_whole": "03_whole_spectrum_1300_plus_2850/04_biological_pca",
         }[model]
         path.mkdir(parents=True, exist_ok=True)

@@ -20,9 +20,35 @@ WHOLE_SPECTRA_PHASE_DIRS = {
     "variance_context": "03_variance_context",
 }
 
+# Ordered sequence of single-range EDA phases.  Numbers are derived from
+# position (1-indexed, zero-padded to 2 digits) so inserting or reordering
+# here automatically renumbers all downstream folders.
+SINGLE_RANGE_PHASE_SEQUENCE: list[tuple[str, str]] = [
+    ("group_comp",     "group_comparisons"),
+    ("pca",            "area_level_pca_qc"),
+    ("band",           "known_band_context"),
+    ("variance",       "variance_context"),
+    ("intra_disease",  "intra_disease"),
+    ("biological_pca", "biological_pca"),
+]
+
+
+def get_single_range_phase_dirs() -> dict[str, str]:
+    """Return {key: 'NN_suffix'} for every single-range EDA phase."""
+    return {
+        key: f"{i + 1:02d}_{suffix}"
+        for i, (key, suffix) in enumerate(SINGLE_RANGE_PHASE_SEQUENCE)
+    }
+
+
+def _bio_pca_range_dir(range_label: str) -> Path:
+    dirs = get_single_range_phase_dirs()
+    return Path(range_label) / dirs["biological_pca"]
+
+
 BIOLOGICAL_PCA_CANONICAL_DIRS = {
-    "PCA_1330": Path("01_fingerprint_1300") / "06_biological_pca",
-    "PCA_2850": Path("02_ch_stretch_2850") / "06_biological_pca",
+    "PCA_1330": _bio_pca_range_dir("01_fingerprint_1300"),
+    "PCA_2850": _bio_pca_range_dir("02_ch_stretch_2850"),
     "PCA_whole": Path("03_whole_spectrum_1300_plus_2850") / "04_biological_pca",
 }
 

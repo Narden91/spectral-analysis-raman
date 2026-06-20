@@ -27,6 +27,7 @@ from src import (
     config,
     get_eda_phase_dir,
     get_biological_pca_canonical_dir,
+    get_single_range_phase_dirs,
 )
 from src.analysis.spectral_loader import (
     build_group_matrix,
@@ -89,7 +90,7 @@ def _save_fig(fig: matplotlib.figure.Figure, name: str, out_dir: Path):
 
 
 def _log_phase(title: str) -> None:
-    logger.info("%s", title)
+    logger.info("\n  ── %s", title)
 
 
 def _figure_flag(key: str, default: bool = True) -> bool:
@@ -266,14 +267,7 @@ def _estimate_variance_decomposition(
     )
 
 
-_PHASE_DIRS = {
-    # "descriptive": "01_descriptive_statistics",
-    "group_comp": "01_group_comparisons",
-    "pca": "03_area_level_pca_qc",
-    "band": "04_known_band_context",
-    "variance": "05_variance_context",
-    "intra_disease": "06_intra_disease",
-}
+_PHASE_DIRS = get_single_range_phase_dirs()
 
 def _run_single_range_eda(
     spectral_range: str = "1300",
@@ -291,8 +285,8 @@ def _run_single_range_eda(
             "No measurement files found. Is the data directory correct?"
         )
 
-    logger.info(
-        "Loaded dynamic dataset index: %d files, %d subjects",
+    logger.debug(
+        "Loaded dataset index: %d files, %d subjects",
         len(df_index),
         df_index["subject_id"].nunique(),
     )
@@ -316,7 +310,6 @@ def _run_single_range_eda(
             "expected_files_per_subject", 12
         ),
     )
-    logger.info("Cohort summary built for range %s", spectral_range)
     if not cohort_summary["group_counts"].empty:
         logger.info(
             "Cohort group counts:\n%s",
@@ -397,25 +390,9 @@ def _run_single_range_eda(
     assert wavenumbers is not None, "wavenumbers must be set when at least one group is loaded"
     range_title = _range_title(spectral_range)
 
-    _log_phase("PHASE 0: Preprocessing")
+    groups = raw_groups
 
-    if spectral_range == "both":
-        logger.info(
-            "Whole-spectra groups are already preprocessed in the shared area pipeline; "
-            "skipping preprocess_spectra."
-        )
-        if skip_preprocess:
-            logger.info("--skip-preprocess has no additional effect for range=both")
-        groups = raw_groups
-    else:
-        logger.info(
-            "Single-range subject means are now built from pixel-level preprocessing before aggregation; "
-            "skipping the legacy subject-mean preprocessing pass."
-        )
-        if skip_preprocess:
-            logger.info("--skip-preprocess has no additional effect for single-range EDA")
-        groups = raw_groups
-
+    if spectral_range != "both":
         _log_phase("PHASE 0.5: Preprocessing Consistency Checks (PCS)")
         active_source = get_active_data_source()
         if active_source is not None and active_source.source_name != "raw_text":

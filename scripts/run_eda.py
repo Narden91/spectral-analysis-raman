@@ -168,12 +168,7 @@ def _write_warning_summaries(output_root: Path) -> list[str]:
 
 def _log_final_summary(ranges: list[str], biological_ran: bool, warnings: list[str]) -> None:
     output_root = _output_dir("eda_subdir")
-    logger.info("EDA complete: %s", config.get("data", {}).get("subject_group", "control_vs_disease"))
-    logger.info("Output root: %s", output_root)
-    logger.info("Main outputs:")
-    for spectral_range in ranges:
-        logger.info("  %s/", _range_label(spectral_range))
-    logger.info("  04_cross_region_summary/")
+    logger.info("EDA complete — output root: %s", output_root)
     if biological_ran:
         logger.info("Biological PCA:")
         for model_name in ("PCA_1330", "PCA_2850", "PCA_whole"):

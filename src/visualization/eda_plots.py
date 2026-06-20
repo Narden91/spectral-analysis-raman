@@ -27,6 +27,15 @@ set_gallery_theme()
 
 logging.getLogger("adjustText").setLevel(logging.ERROR)
 
+_INTRA_DISEASE_PASTEL: list[str] = [
+    "#A8D8EA",  # sky blue
+    "#FFD3B6",  # peach
+    "#D5ECC2",  # sage green
+    "#FCB9AA",  # rose
+    "#B5EAD7",  # mint
+    "#C7CEEA",  # lavender
+]
+
 
 def plot_group_mean_spectra(
     wavenumbers: np.ndarray,
@@ -646,21 +655,32 @@ def plot_intra_disease_correlation_overview(
     fig, axes = plt.subplots(n_targets, 1, figsize=(12, max(3.2, 2.6 * n_targets)), sharex=True)
     if n_targets == 1:
         axes = np.array([axes])
-    for ax, target in zip(axes, targets):
+    legend_handles: list[Line2D] = []
+    for i, (ax, target) in enumerate(zip(axes, targets)):
+        color = _INTRA_DISEASE_PASTEL[i % len(_INTRA_DISEASE_PASTEL)]
         grp = correlations[correlations["target"] == target].sort_values("wavenumber")
         smooth = None if smoothed_by_target is None else smoothed_by_target.get(target)
-        ax.plot(grp["wavenumber"], grp["rho"], color="#94A3B8", linewidth=0.8, alpha=0.75)
+        line_raw, = ax.plot(grp["wavenumber"], grp["rho"], color=color, linewidth=1.4, alpha=0.55)
         if smooth is not None:
-            ax.plot(grp["wavenumber"], smooth, color="#264653", linewidth=1.4)
+            ax.plot(grp["wavenumber"], smooth, color=color, linewidth=2.2, alpha=1.0)
         sig = grp["significant"].to_numpy(dtype=bool)
         if sig.any():
             ax.fill_between(grp["wavenumber"], -1, 1, where=sig, color="#F4A261", alpha=0.16, linewidth=0)
         ax.axhline(0, color="black", linestyle="--", linewidth=0.7)
         ax.set_ylabel(target, fontsize=9)
         ax.grid(True, axis="y", linestyle="--", alpha=0.25)
+        legend_handles.append(Line2D([0], [0], color=color, linewidth=2.2, label=target))
     axes[-1].set_xlabel("Raman Shift (cm$^{-1}$)", fontsize=11)
     fig.suptitle(title, y=1.01, fontsize=14)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.0),
+        ncol=max(1, n_targets),
+        frameon=False,
+        fontsize=9,
+    )
     return fig, axes
 
 
