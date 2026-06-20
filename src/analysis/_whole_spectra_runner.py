@@ -114,7 +114,7 @@ def _run_whole_spectra_eda(
             "Skipping split-dependent whole-spectrum relational analyses: split index could not be inferred"
         )
 
-    _log_phase("PHASE 3: Whole-spectrum global structure")
+    _log_phase("PHASE 1: Whole-spectrum global structure")
 
     structure_dir = get_whole_spectra_phase_dir("global_structure")
     structure_components = min(
@@ -225,7 +225,7 @@ def _run_whole_spectra_eda(
         else:
             logger.debug("MFA output disabled by analysis.whole_spectra.emit_mfa")
 
-    _log_phase("PHASE 4: Whole-spectrum global drivers")
+    _log_phase("PHASE 2: Whole-spectrum global drivers")
 
     drivers_dir = get_whole_spectra_phase_dir("global_drivers")
 
@@ -292,7 +292,7 @@ def _run_whole_spectra_eda(
             )
             _save_fig(fig, "ratio_summary.png", drivers_dir)
 
-    _log_phase("PHASE 5: Whole-spectrum variance context")
+    _log_phase("PHASE 3: Whole-spectrum variance context")
 
     variance_dir = get_whole_spectra_phase_dir("variance_context")
     intra, inter_subj, inter_grp = _estimate_variance_decomposition(

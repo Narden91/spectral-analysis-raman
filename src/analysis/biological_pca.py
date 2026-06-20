@@ -1243,7 +1243,7 @@ def _plot_scores_pair(result: ModelResult, output_dir: Path, pc_x: str, pc_y: st
     _scatter_scores(ax, result, pc_x, pc_y)
     ax.set_xlabel(f"{pc_x} ({_explained_variance_pct(result, pc_x):.1f}%)")
     ax.set_ylabel(f"{pc_y} ({_explained_variance_pct(result, pc_y):.1f}%)")
-    ax.set_title(f"{result.name} subject scores")
+    ax.set_title(f"{result.name} subject scores", fontsize=12, loc="center", pad=8)
     fig.tight_layout()
     _save_plot(fig, output_dir / filename)
 
@@ -1257,7 +1257,7 @@ def _plot_scores_pairgrid(result: ModelResult, output_dir: Path) -> None:
         _scatter_scores(ax, result, pc_x, pc_y)
         ax.set_xlabel(f"{pc_x} ({_explained_variance_pct(result, pc_x):.1f}%)")
         ax.set_ylabel(f"{pc_y} ({_explained_variance_pct(result, pc_y):.1f}%)")
-        ax.set_title(f"{pc_x} vs {pc_y}")
+        ax.set_title(f"{pc_x} vs {pc_y}", fontsize=12, loc="center")
     handles, labels = axes[0].get_legend_handles_labels()
     for ax in axes:
         legend = ax.get_legend()
@@ -1265,7 +1265,7 @@ def _plot_scores_pairgrid(result: ModelResult, output_dir: Path) -> None:
             legend.remove()
     if handles:
         fig.legend(handles, labels, bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=9)
-    fig.suptitle(f"{result.name} subject score views", y=1.02)
+    fig.suptitle(f"{result.name} subject score views", y=1.02, fontsize=12, x=0.5, ha="center")
     fig.tight_layout()
     _save_plot(fig, output_dir / "scores_pc_pairgrid.png")
 
@@ -1298,7 +1298,7 @@ def _plot_loadings(result: ModelResult, output_dir: Path, pcs: list[str] | None 
             ax.axhline(0, color="black", linestyle="--", linewidth=0.5)
             ax.set_xlabel("Raman shift (cm-1)")
             ax.set_ylabel("Loading")
-            ax.set_title(f"{result.name} {block} loadings")
+            ax.set_title(f"{result.name} {block} loadings", fontsize=12, loc="center")
             _place_outside_legend(ax, title=f"PC ({block})")
     else:
         fig, ax = plt.subplots(figsize=(10, 4))
@@ -1312,7 +1312,7 @@ def _plot_loadings(result: ModelResult, output_dir: Path, pcs: list[str] | None 
         ax.axhline(0, color="black", linestyle="--", linewidth=0.5)
         ax.set_xlabel("Raman shift (cm-1)")
         ax.set_ylabel("Loading")
-        ax.set_title(f"{result.name} loadings")
+        ax.set_title(f"{result.name} loadings", fontsize=12, loc="center")
         _place_outside_legend(ax, title="PC")
     fig.tight_layout()
     filename = "loadings_pc1_pc2.png" if is_compatibility else f"loadings_{file_suffix}.png"
@@ -1364,7 +1364,7 @@ def _plot_band_contributions(
     ax.set_yticks(y)
     ax.set_yticklabels(display_labels, fontsize=9)
     ax.set_xlabel("Relative absolute contribution")
-    ax.set_title(f"{result.name} loading-derived regions")
+    ax.set_title(f"{result.name} loading-derived regions", fontsize=12, loc="center")
     _place_outside_legend(
         ax,
         handles=[Line2D([0], [0], color=PC_COLORS.get(pc, "#6B7280"), lw=6) for pc in available_pcs],
@@ -1391,7 +1391,7 @@ def _plot_band_contributions(
         ax2.set_yticks(y)
         ax2.set_yticklabels(display_labels, fontsize=9)
         ax2.set_xlabel("Relative absolute contribution")
-        ax2.set_title(f"{result.name} loading-derived regions")
+        ax2.set_title(f"{result.name} loading-derived regions", fontsize=12, loc="center")
         _place_outside_legend(ax2, title="PC")
         fig2.tight_layout()
         _save_plot(fig2, output_dir / "band_contributions_pc1_pc2.png")
@@ -1446,7 +1446,7 @@ def _plot_biochemical_summary(result: ModelResult, output_dir: Path, pcs: list[s
         )
         bottom += vals
     ax.set_ylabel("Relative contribution")
-    ax.set_title(f"{result.name} region annotation summary")
+    ax.set_title(f"{result.name} region annotation summary", fontsize=12, loc="center")
     ax.set_ylim(0, 1)
     _place_outside_legend(ax, title="Broad context")
     fig.tight_layout()

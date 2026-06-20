@@ -2,6 +2,7 @@
 
 from typing import Optional
 import logging
+import math
 import warnings
 
 import numpy as np
@@ -35,6 +36,19 @@ _INTRA_DISEASE_PASTEL: list[str] = [
     "#B5EAD7",  # mint
     "#C7CEEA",  # lavender
 ]
+
+_TARGET_LABELS: dict[str, str] = {
+    "moca_baseline_total": "MoCA baseline",
+    "moca_3_months_total": "MoCA 3 months",
+    "delta_moca": "ΔMoCA",
+    "rbans_total_3_months": "RBANS total 3 m",
+    "aspects_scale_value": "ASPECTS scale",
+    "age_years": "Age (years)",
+}
+
+
+def _target_label(target: str) -> str:
+    return _TARGET_LABELS.get(str(target), str(target).replace("_", " "))
 
 
 def plot_group_mean_spectra(
@@ -256,7 +270,7 @@ def plot_pca_loadings(
         ax.grid(True, linestyle="--", alpha=0.3)
 
     axes[-1].set_xlabel("Raman Shift (cm$^{-1}$)", fontsize=12)
-    fig.suptitle(title, fontsize=14, y=1.01)
+    fig.suptitle(title, fontsize=13, x=0.5, ha="center", y=1.01)
     fig.tight_layout()
 
     return fig, axes
@@ -295,7 +309,7 @@ def plot_scree(
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="center right", fontsize=10)
 
-    ax1.set_title(title, fontsize=14)
+    ax1.set_title(title, fontsize=13, loc="center")
     fig.tight_layout()
 
     return fig, ax1
@@ -590,56 +604,81 @@ def plot_correlation_spectrum(
     annotate_no_significant: bool = False,
 ) -> tuple[plt.Figure, plt.Axes]:
     """Plot per-wavenumber Spearman rho with FDR-significant bands shaded."""
-    fig, ax = plt.subplots(figsize=(12, 4.5))
+    fig, ax = plt.subplots(figsize=(13, 4.8))
 
-    ax.plot(wavenumbers, rho, color="#94A3B8", linewidth=0.9, alpha=0.8, label="Raw rho")
+    # Use higher-contrast colors: light steel for raw, deep teal for smoothed
+    ax.plot(wavenumbers, rho, color="#94A3B8", linewidth=0.8, alpha=0.65, label="Raw ρ")
     if smoothed_rho is not None:
-        ax.plot(wavenumbers, smoothed_rho, color="#264653", linewidth=1.8, label="Smoothed rho")
-    ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
+        ax.plot(wavenumbers, smoothed_rho, color="#1B4F72", linewidth=2.0, label="Smoothed ρ")
+    ax.axhline(0, color="#555555", linestyle="--", linewidth=0.8)
+
+    # Determine y extent from data before fill
+    y_abs = float(np.nanmax(np.abs(rho))) if len(rho) else 0.3
+    y_pad = y_abs * 0.15
+    y_lo, y_hi = -(y_abs + y_pad), (y_abs + y_pad)
 
     sig = np.asarray(significant, dtype=bool)
     if sig.any():
         ax.fill_between(
-            wavenumbers, ax.get_ylim()[0], ax.get_ylim()[1],
-            where=sig, color="#F4A261", alpha=0.18, linewidth=0,
+            wavenumbers, y_lo, y_hi,
+            where=sig, color="#F4A261", alpha=0.22, linewidth=0,
+            label="FDR-significant",
         )
     elif annotate_no_significant:
         ax.text(
-            0.99,
-            0.96,
+            0.99, 0.97,
             "No FDR-significant wavenumbers",
             transform=ax.transAxes,
-            ha="right",
-            va="top",
-            fontsize=10,
+            ha="right", va="top",
+            fontsize=9,
             color="#7C2D12",
-            bbox={"facecolor": "white", "edgecolor": "#FDBA74", "alpha": 0.9},
+            bbox={"facecolor": "white", "edgecolor": "#FDBA74", "alpha": 0.9, "boxstyle": "round,pad=0.3"},
         )
 
     if top_regions is not None and not top_regions.empty:
-        y_max = float(np.nanmax(np.abs(rho))) if len(rho) else 0.0
         for _, row in top_regions.iterrows():
             ax.axvspan(
                 float(row["start_cm-1"]),
                 float(row["end_cm-1"]),
                 color="#2A9D8F",
-                alpha=0.12,
+                alpha=0.13,
                 linewidth=0,
             )
-        if y_max > 0:
-            for _, row in top_regions.head(5).iterrows():
-                start_cm = float(row["start_cm-1"])
-                end_cm = float(row["end_cm-1"])
-                ax.text((start_cm + end_cm) / 2, y_max * 0.9, str(row.get("region_id", "")), ha="center", va="bottom", fontsize=8)
+        # Region ID labels: place at bottom of plot, alternating heights to avoid overlap
+        for idx, (_, row) in enumerate(top_regions.head(5).iterrows()):
+            start_cm = float(row["start_cm-1"])
+            end_cm = float(row["end_cm-1"])
+            x_mid = (start_cm + end_cm) / 2
+            y_pos = y_lo + (y_pad * 0.6) if idx % 2 == 0 else y_lo + (y_pad * 1.8)
+            ax.text(
+                x_mid, y_pos,
+                str(row.get("region_id", "")),
+                ha="center", va="bottom",
+                fontsize=7.5, color="#1A6B5A",
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.7, "pad": 1},
+            )
 
-    ax.set_xlabel("Raman Shift (cm$^{-1}$)", fontsize=12)
-    ax.set_ylabel("Spearman ρ", fontsize=12)
-    ax.set_title(title, fontsize=14)
-    ax.set_xlim(wavenumbers.min(), wavenumbers.max())
-    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
-    if smoothed_rho is not None:
-        ax.legend(loc="upper right", fontsize=9)
-    fig.tight_layout()
+    ax.set_ylim(y_lo, y_hi)
+    ax.set_xlabel("Raman Shift (cm$^{-1}$)", fontsize=11)
+    ax.set_ylabel("Spearman ρ", fontsize=11)
+    ax.set_title(title, fontsize=13, pad=10)
+    ax.set_xlim(float(wavenumbers.min()), float(wavenumbers.max()))
+    ax.grid(True, axis="y", linestyle="--", alpha=0.25, zorder=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    # Legend below x-axis so it never overlaps the plot area
+    handles, labels_leg = ax.get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles, labels_leg,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.0),
+            ncol=len(handles),
+            frameon=False,
+            fontsize=9,
+        )
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
 
     return fig, ax
 
@@ -652,7 +691,11 @@ def plot_intra_disease_correlation_overview(
 ) -> tuple[plt.Figure, np.ndarray]:
     targets = list(correlations["target"].dropna().unique())
     n_targets = max(1, len(targets))
-    fig, axes = plt.subplots(n_targets, 1, figsize=(12, max(3.2, 2.6 * n_targets)), sharex=True)
+    fig, axes = plt.subplots(
+        n_targets, 1,
+        figsize=(13, max(3.5, 2.8 * n_targets)),
+        sharex=True,
+    )
     if n_targets == 1:
         axes = np.array([axes])
     legend_handles: list[Line2D] = []
@@ -660,26 +703,46 @@ def plot_intra_disease_correlation_overview(
         color = _INTRA_DISEASE_PASTEL[i % len(_INTRA_DISEASE_PASTEL)]
         grp = correlations[correlations["target"] == target].sort_values("wavenumber")
         smooth = None if smoothed_by_target is None else smoothed_by_target.get(target)
-        line_raw, = ax.plot(grp["wavenumber"], grp["rho"], color=color, linewidth=1.4, alpha=0.55)
+
+        y_abs = float(np.nanmax(np.abs(grp["rho"].to_numpy(dtype=float))) if len(grp) else 0.3)
+        y_pad = max(y_abs * 0.12, 0.02)
+
+        ax.plot(grp["wavenumber"], grp["rho"], color=color, linewidth=1.4, alpha=0.50)
         if smooth is not None:
             ax.plot(grp["wavenumber"], smooth, color=color, linewidth=2.2, alpha=1.0)
         sig = grp["significant"].to_numpy(dtype=bool)
         if sig.any():
-            ax.fill_between(grp["wavenumber"], -1, 1, where=sig, color="#F4A261", alpha=0.16, linewidth=0)
-        ax.axhline(0, color="black", linestyle="--", linewidth=0.7)
-        ax.set_ylabel(target, fontsize=9)
-        ax.grid(True, axis="y", linestyle="--", alpha=0.25)
-        legend_handles.append(Line2D([0], [0], color=color, linewidth=2.2, label=target))
+            ax.fill_between(
+                grp["wavenumber"],
+                -(y_abs + y_pad), (y_abs + y_pad),
+                where=sig, color="#F4A261", alpha=0.18, linewidth=0,
+            )
+        ax.axhline(0, color="#555555", linestyle="--", linewidth=0.7)
+        ax.set_ylim(-(y_abs + y_pad), (y_abs + y_pad))
+        ax.set_ylabel(_target_label(target), fontsize=9, labelpad=4)
+        ax.grid(True, axis="y", linestyle="--", alpha=0.20)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        legend_handles.append(
+            Line2D([0], [0], color=color, linewidth=2.2, label=_target_label(target))
+        )
+
     axes[-1].set_xlabel("Raman Shift (cm$^{-1}$)", fontsize=11)
-    fig.suptitle(title, y=1.01, fontsize=14)
-    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    # Legend below all subplots; max 3 columns so labels don't crowd
+    n_legend_cols = min(3, n_targets)
+    legend_rows = math.ceil(n_targets / n_legend_cols)
+    legend_height = 0.045 * legend_rows + 0.04
+    fig.tight_layout(rect=(0, legend_height, 1, 0.97))
+    fig.suptitle(title, fontsize=13, y=0.99)
     fig.legend(
         handles=legend_handles,
         loc="lower center",
         bbox_to_anchor=(0.5, 0.0),
-        ncol=max(1, n_targets),
+        ncol=n_legend_cols,
         frameon=False,
         fontsize=9,
+        handlelength=1.8,
+        columnspacing=1.2,
     )
     return fig, axes
 
@@ -689,21 +752,49 @@ def plot_intra_disease_top_regions(
     *,
     title: str = "Top intra-disease correlation regions",
 ) -> tuple[plt.Figure, plt.Axes]:
-    fig, ax = plt.subplots(figsize=(10, max(4, 0.42 * max(1, len(region_df)))))
     if region_df.empty:
+        fig, ax = plt.subplots(figsize=(10, 4))
         ax.text(0.5, 0.5, "No high-absolute-rho regions", ha="center", va="center")
         ax.set_axis_off()
         return fig, ax
+
     top = region_df.copy().head(12).iloc[::-1]
     labels = [
-        f"{row['target']}: {row['start_cm-1']:.0f}-{row['end_cm-1']:.0f}"
+        f"{_target_label(row['target'])}: {row['start_cm-1']:.0f}–{row['end_cm-1']:.0f} cm⁻¹"
         for _, row in top.iterrows()
     ]
     colors = ["#2A9D8F" if bool(val) else "#94A3B8" for val in top["has_fdr_significant"]]
-    ax.barh(labels, top["integrated_abs_rho"], color=colors, edgecolor="#334155", linewidth=0.4)
-    ax.set_xlabel("Integrated |rho|")
-    ax.set_title(title)
-    ax.grid(True, axis="x", linestyle="--", alpha=0.25)
+
+    # Size figure so each bar has enough vertical space and labels don't crowd
+    fig_h = max(4.5, 0.52 * len(top) + 1.5)
+    fig, ax = plt.subplots(figsize=(11, fig_h))
+
+    bars = ax.barh(labels, top["integrated_abs_rho"], color=colors, edgecolor="white", linewidth=0.6, height=0.65)
+
+    # Value labels at end of each bar
+    for bar, val in zip(bars, top["integrated_abs_rho"]):
+        ax.text(
+            bar.get_width() + 0.05,
+            bar.get_y() + bar.get_height() / 2,
+            f"{val:.1f}",
+            va="center", ha="left", fontsize=8, color="#334155",
+        )
+
+    ax.set_xlabel("Integrated |ρ|", fontsize=11)
+    ax.set_title(title, fontsize=13, pad=10)
+    ax.set_xlim(0, float(top["integrated_abs_rho"].max()) * 1.18)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.25, zorder=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="y", labelsize=9)
+
+    # Compact legend for FDR color encoding
+    legend_handles = [
+        Patch(facecolor="#2A9D8F", label="FDR-significant region"),
+        Patch(facecolor="#94A3B8", label="No FDR-significant wavenumbers"),
+    ]
+    ax.legend(handles=legend_handles, loc="lower right", fontsize=8, frameon=False)
+
     fig.tight_layout()
     return fig, ax
 

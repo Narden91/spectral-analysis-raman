@@ -435,7 +435,7 @@ def _run_single_range_eda(
     apply_to = set(rw_cfg.get("apply_to", []) if rw_cfg.get("enabled", False) else [])
 
     if spectral_range != "both":
-        _log_phase("PHASE 2: Visualization - Group comparisons")
+        _log_phase("PHASE 1: Visualization - Group comparisons")
 
         gc_dir = phase_dir("group_comp")
 
@@ -461,7 +461,7 @@ def _run_single_range_eda(
                     )
                     _save_fig(fig, f"difference_spectrum_{gender}.png", gc_dir)
 
-        _log_phase("PHASE 3: Exploratory/QC PCA (area-level)")
+        _log_phase("PHASE 2: Exploratory/QC PCA (area-level)")
 
         all_spectra = np.vstack(list(groups.values()))
         all_labels = np.concatenate([np.full(v.shape[0], k) for k, v in groups.items()])
@@ -604,7 +604,7 @@ def _run_single_range_eda(
             loadings_matrix.shape[0],
         )
 
-        _log_phase("PHASE 4: Known Raman band context")
+        _log_phase("PHASE 3: Known Raman band context")
 
         band_dfs = []
         band_labels = []
@@ -666,7 +666,7 @@ def _run_single_range_eda(
                     band_dir / f"band_tests_{spectral_range}.csv", index=False
                 )
 
-        _log_phase("PHASE 5: Variance decomposition")
+        _log_phase("PHASE 4: Variance decomposition")
 
         intra, inter_subj, inter_grp = _estimate_variance_decomposition(
             df_index,
@@ -705,7 +705,7 @@ def _run_single_range_eda(
             ]
         ).to_csv(var_dir / "variance_components.csv", index=False)
 
-        _log_phase("PHASE 5b: Normality assessment")
+        _log_phase("PHASE 4b: Normality assessment")
 
         for key, spectra in groups.items():
             norm = test_normality(spectra)
@@ -719,7 +719,7 @@ def _run_single_range_eda(
             config.get("analysis", {}).get("advanced", {}).get("intra_disease", {})
         )
         if intra_disease_cfg.get("enabled", False):
-            _log_phase("PHASE 6: Intra-disease clinical correlations")
+            _log_phase("PHASE 5: Intra-disease clinical correlations")
             try:
                 intra_csv = intra_disease_cfg.get("clinical_csv", "data/clinical_data_clean.csv")
                 intra_clinical_df = clinical_df if not clinical_df.empty else load_clinical_subjects()
@@ -802,7 +802,7 @@ def _run_single_range_eda(
 
     robust_cfg = config.get("analysis", {}).get("advanced", {}).get("robustness", {})
     if spectral_range != "both" and robust_cfg.get("enabled", False):
-        _log_phase("PHASE 7b: Region-influence robustness")
+        _log_phase("PHASE 6b: Region-influence robustness")
         robust_dir = get_eda_phase_dir(spectral_range, "07b_region_robustness")
         try:
             suspect_windows = robust_cfg.get("suspect_windows", [])
