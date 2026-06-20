@@ -26,8 +26,6 @@ import matplotlib.pyplot as plt
 from src import (
     config,
     get_eda_phase_dir,
-    _output_dir,
-    _range_label,
 )
 from src.analysis.spectral_loader import (
     build_group_matrix,
@@ -205,10 +203,10 @@ def _estimate_variance_decomposition(
 _PHASE_DIRS = {
     # "descriptive": "01_descriptive_statistics",
     "group_comp": "01_group_comparisons",
-    "pca": "02_pca",
-    "band": "03_band_analysis",
-    "variance": "04_variance_decomposition",
-    "intra_disease": "05_intra_disease",
+    "pca": "03_area_level_pca_qc",
+    "band": "04_known_band_context",
+    "variance": "05_variance_context",
+    "intra_disease": "06_intra_disease",
 }
 
 def _run_single_range_eda(
@@ -549,7 +547,7 @@ def _run_single_range_eda(
             loadings_matrix.shape[0],
         )
 
-        _log_phase("PHASE 4: Known Raman band analysis")
+        _log_phase("PHASE 4: Known Raman band context")
 
         band_dfs = []
         band_labels = []
@@ -741,15 +739,6 @@ def _run_single_range_eda(
             )
         except Exception as exc:
             logger.warning("Region robustness phase failed: %s", exc, exc_info=True)
-
-
-
-    _log_phase("EDA COMPLETE")
-    eda_base = _output_dir("eda_subdir")
-    label = _range_label(spectral_range)
-    logger.info("Outputs saved to: %s", eda_base / label)
-    for key, pname in _PHASE_DIRS.items():
-        logger.info("  %s/", pname)
 
     if spectral_range == "both":
         return result_both

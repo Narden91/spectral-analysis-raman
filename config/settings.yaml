@@ -183,6 +183,6 @@ output:
 
   # Human-readable subdirectory names per spectral range.
   range_labels:
-    "1300": "fingerprint_1300"  # str: label for fingerprint region
-    "2850": "ch_stretch_2850"  # str: label for CH-stretch region
-    "both": "whole_spectra"  # str: label for concatenated range
+    "1300": "01_fingerprint_1300"  # str: label for fingerprint region
+    "2850": "02_ch_stretch_2850"  # str: label for CH-stretch region
+    "both": "03_whole_spectrum_1300_plus_2850"  # str: label for concatenated range

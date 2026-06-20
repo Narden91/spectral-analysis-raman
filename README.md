@@ -106,9 +106,15 @@ uv run scripts/run_eda.py --range 1300 --max-subjects 10
 ```
 
 When `--range both` is selected, the EDA runner executes the ordinary PCA path
-and then the subject-level Biological PCA layer once. Biological PCA outputs are
-written under the active EDA result root in `biological_pca/`; there is no
-separate Biological PCA command.
+and then the subject-level Biological PCA layer once. Canonical Biological PCA
+outputs are written into the range-local result folders:
+
+- `01_fingerprint_1300/06_biological_pca/`
+- `02_ch_stretch_2850/06_biological_pca/`
+- `03_whole_spectrum_1300_plus_2850/04_biological_pca/`
+
+The root-level `biological_pca/` directory is retained as a compatibility and
+navigation index; there is no separate Biological PCA command.
 
 Spectral comparison and QC plots:
 

@@ -18,7 +18,7 @@ coverage.xml
 # Virtual environments
 .venv
 
-# plan*
+plan*
 
 data/
 Output_plot*/

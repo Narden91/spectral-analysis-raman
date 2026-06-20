@@ -1,22 +1,25 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
+import src
+import src.analysis.biological_pca as biological_pca
 from src.analysis.biological_pca import (
-    ModelResult,
     SubjectInputs,
-    biochemical_summary,
+    build_loading_region_summary,
+    build_region_contributions,
     build_subject_biochemical_features,
-    compute_band_contributions,
+    compute_loading_regions,
     fit_biological_pca_models,
     run_biological_pca,
     select_subjects,
     validate_biological_pca_config,
     validate_outputs,
 )
-import src.analysis.biological_pca as biological_pca
 
 
 def _cfg() -> dict:
@@ -34,15 +37,18 @@ def _cfg() -> dict:
             "n_components": 2,
             "aggregation": "median",
             "scale": False,
+            "loading_region_quantile": 0.8,
+            "loading_region_min_width_cm": 8.0,
+            "loading_region_merge_gap_cm": 6.0,
             "models": {
                 "PCA_1330": {
                     "spectral_blocks": ["1300"],
-                    "window": [1240, 1320],
+                    "window": "full",
                     "bands": ["amide_iii_1260", "ch2_bend_1300"],
                 },
                 "PCA_2850": {
                     "spectral_blocks": ["2850"],
-                    "window": [2840, 2945],
+                    "window": "full",
                     "bands": ["ch2_sym_stretch_2850", "ch3_sym_stretch_2930"],
                 },
                 "PCA_whole": {
@@ -142,6 +148,16 @@ def test_exact_component_validation_rejects_undersized_data() -> None:
         fit_biological_pca_models(_inputs(n_subjects=4), cfg=cfg)
 
 
+def test_full_axis_single_range_loadings_are_preserved() -> None:
+    cfg = _cfg()
+    results = fit_biological_pca_models(_inputs(), cfg=cfg)
+    fingerprint = next(result for result in results if result.name == "PCA_1330")
+    assert np.array_equal(
+        fingerprint.loadings["raman_shift"].to_numpy(dtype=float),
+        _inputs().axes["1300"],
+    )
+
+
 def test_whole_loadings_preserve_block_identity_and_unique_pairs() -> None:
     cfg = _cfg()
     results = fit_biological_pca_models(_inputs(), cfg=cfg)
@@ -151,7 +167,7 @@ def test_whole_loadings_preserve_block_identity_and_unique_pairs() -> None:
     assert not whole.loadings.duplicated(subset=["spectral_block", "raman_shift"]).any()
 
 
-def test_band_integration_records_represented_overlap_and_normalizes() -> None:
+def test_loading_region_extraction_normalizes_relative_contributions() -> None:
     cfg = _cfg()
     loadings = pd.DataFrame(
         {
@@ -161,17 +177,12 @@ def test_band_integration_records_represented_overlap_and_normalizes() -> None:
             "region_model": "PCA_1330",
         }
     )
-    contributions = compute_band_contributions(
-        "PCA_1330",
-        cfg["biological_pca"]["models"]["PCA_1330"],
-        loadings,
-        cfg,
-    )
-    assert set(contributions["represented_window_min"]) == {1240.0, 1300.0}
+    regions = compute_loading_regions("PCA_1330", loadings, cfg)
+    contributions = build_region_contributions(regions)
+    assert regions["start_cm-1"].min() == 1300.0
+    assert regions["end_cm-1"].max() == 1320.0
     pc1 = contributions[contributions["PC"] == "PC1"]
     assert abs(pc1["relative_absolute_contribution"].sum() - 1.0) < 1e-6
-    pc2 = contributions[contributions["PC"] == "PC2"]
-    assert pc2["relative_absolute_contribution"].isna().all()
 
 
 def test_interpretation_text_is_conservative() -> None:
@@ -179,17 +190,25 @@ def test_interpretation_text_is_conservative() -> None:
         {
             "region_model": ["PCA_1330", "PCA_1330"],
             "PC": ["PC1", "PC1"],
-            "biochemical_class": ["lipid", "protein"],
+            "spectral_block": ["single", "single"],
+            "region_id": ["PC1_R1", "PC1_R2"],
+            "region_label": ["1240.0-1280.0 cm-1", "1290.0-1320.0 cm-1"],
+            "absolute_integrated_loading": [0.7, 0.3],
             "relative_absolute_contribution": [0.7, 0.3],
+            "global_rank": [1, 2],
+            "block_rank": [1, 2],
+            "dominant_sign": ["positive", "negative"],
         }
     )
-    summary = biochemical_summary("PCA_1330", contributions)
-    sentence = summary.loc[0, "interpretation_sentence"].lower()
-    assert (
-        "associated raman loading contributions" in sentence
-        or "associated loading contributions" in sentence
-        or "regional raman loading pattern" in sentence
+    annotations = pd.DataFrame(
+        {
+            "region_id": ["PC1_R1", "PC1_R2"],
+            "biochemical_context": ["protein_associated_region", "mixed_context_region"],
+        }
     )
+    summary = build_loading_region_summary("PCA_1330", contributions, annotations)
+    sentence = summary.loc[0, "interpretation_sentence"].lower()
+    assert "loading-derived intervals" in sentence or "broad spectral structure" in sentence
     assert "increased" not in sentence
     assert "diagnoses" not in sentence
     assert "disease separation" not in sentence
@@ -211,19 +230,69 @@ def test_fit_outputs_have_unique_subject_rows_and_feature_columns() -> None:
     assert not features["subject_id"].duplicated().any()
 
 
-def test_default_output_is_relative_to_active_eda_root(monkeypatch, tmp_path) -> None:
+def test_known_bands_only_annotate_after_loading_regions_exist() -> None:
     cfg = _cfg()
-    cfg["biological_pca"]["output_subdir"] = "biological_pca"
+    results = fit_biological_pca_models(_inputs(), cfg=cfg)
+    fingerprint = next(result for result in results if result.name == "PCA_1330")
+    assert np.array_equal(
+        fingerprint.loadings["raman_shift"].to_numpy(dtype=float),
+        _inputs().axes["1300"],
+    )
+    assert not fingerprint.loading_regions.empty
+    assert "overlapping_bands" in fingerprint.region_annotation_candidates.columns
+
+
+def test_whole_loading_regions_preserve_block_identity() -> None:
+    cfg = _cfg()
+    results = fit_biological_pca_models(_inputs(), cfg=cfg)
+    whole = next(result for result in results if result.name == "PCA_whole")
+    assert set(whole.loading_regions["spectral_block"]) == {"1300", "2850"}
+    assert {"start_cm-1", "end_cm-1", "PC", "absolute_integrated_loading"}.issubset(
+        whole.loading_regions.columns
+    )
+
+
+def test_default_output_uses_index_and_canonical_dirs(monkeypatch, tmp_path) -> None:
+    cfg = _cfg()
     expected_root = tmp_path / "Results_control_vs_disease"
     inputs = _inputs()
     results = fit_biological_pca_models(inputs, cfg=cfg)
     features = build_subject_biochemical_features(results)
 
-    monkeypatch.setattr(biological_pca, "_output_dir", lambda key: expected_root)
     monkeypatch.setattr(biological_pca, "build_subject_inputs", lambda max_subjects=None, cfg=None: inputs)
     monkeypatch.setattr(biological_pca, "fit_biological_pca_models", lambda inputs, cfg=None: results)
     monkeypatch.setattr(biological_pca, "build_subject_biochemical_features", lambda results: features)
 
+    def _canonical_dir(model: str) -> Path:
+        path = expected_root / {
+            "PCA_1330": "01_fingerprint_1300/06_biological_pca",
+            "PCA_2850": "02_ch_stretch_2850/06_biological_pca",
+            "PCA_whole": "03_whole_spectrum_1300_plus_2850/04_biological_pca",
+        }[model]
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _cross_region_dir() -> Path:
+        path = expected_root / "04_cross_region_summary"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _index_dir() -> Path:
+        path = expected_root / "biological_pca"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr(src, "_output_dir", lambda key: expected_root)
+    monkeypatch.setattr(src, "get_biological_pca_canonical_dir", _canonical_dir)
+    monkeypatch.setattr(src, "get_cross_region_summary_dir", _cross_region_dir)
+    monkeypatch.setattr(src, "get_biological_pca_index_dir", _index_dir)
+    monkeypatch.setattr(biological_pca, "get_biological_pca_canonical_dir", src.get_biological_pca_canonical_dir)
+    monkeypatch.setattr(biological_pca, "get_cross_region_summary_dir", src.get_cross_region_summary_dir)
+    monkeypatch.setattr(biological_pca, "get_biological_pca_index_dir", src.get_biological_pca_index_dir)
+
     out = run_biological_pca(cfg=cfg)
     assert out == expected_root / "biological_pca"
-    assert (out / "subject_biochemical_pca_features.csv").exists()
+    assert (_canonical_dir("PCA_1330") / "scores.csv").exists()
+    assert (expected_root / "04_cross_region_summary" / "subject_biological_pca_scores.csv").exists()
+    assert (out / "index.csv").exists()
+    assert not (out / "PCA_1330" / "scores.csv").exists()

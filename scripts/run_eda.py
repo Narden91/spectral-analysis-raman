@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import logging
 import sys
 from pathlib import Path
@@ -24,7 +25,14 @@ assert _spec.loader is not None
 _spec.loader.exec_module(_cli_util)
 _cli_util.apply_config_override("config/eda.yaml", ROOT)
 
-from src import config, setup_logging, _output_dir
+from src import (
+    config,
+    get_biological_pca_canonical_dir,
+    get_run_metadata_dir,
+    setup_logging,
+    _output_dir,
+    _range_label,
+)
 from src.data_preparation import data_source_summary, resolve_data_source, write_analysis_provenance
 from src.terminal_output import print_kv_table
 
@@ -33,6 +41,20 @@ from src.analysis.biological_pca import run_biological_pca
 from src.analysis.run_eda import run_eda
 
 logger = logging.getLogger(__name__)
+
+
+def _attach_run_log_file(log_path: Path) -> None:
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == log_path:
+            return
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
+    )
+    root_logger.addHandler(handler)
 
 
 def _set_analysis_output_root() -> None:
@@ -117,16 +139,75 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _main() -> None:
-    setup_logging()
-    args = _parse_args()
+def _write_warning_summaries(output_root: Path) -> list[str]:
+    warnings: list[str] = []
+    for model_name in ("PCA_1330", "PCA_2850", "PCA_whole"):
+        canonical_dir = get_biological_pca_canonical_dir(model_name)
+        report_path = canonical_dir / "pc1_dominance_report.md"
+        if report_path.exists():
+            text = report_path.read_text(encoding="utf-8")
+            first_content_line = next(
+                (line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")),
+                "PC1 dominance report written.",
+            )
+            relative_report = report_path.relative_to(output_root)
+            warnings.append(f"{model_name}: {first_content_line} See {relative_report}")
 
+    metadata_dir = get_run_metadata_dir()
+    (metadata_dir / "warning_summary.md").write_text(
+        "\n".join(
+            ["# Warning Summary", ""]
+            + ([f"- {warning}" for warning in warnings] if warnings else ["No warnings collected."])
+        ),
+        encoding="utf-8",
+    )
+    (metadata_dir / "warning_summary.csv").write_text(
+        "warning\n" + "\n".join(json.dumps(warning) for warning in warnings),
+        encoding="utf-8",
+    )
+    return warnings
+
+
+def _log_final_summary(ranges: list[str], biological_ran: bool, warnings: list[str]) -> None:
+    output_root = _output_dir("eda_subdir")
+    logger.info("EDA complete: %s", config.get("data", {}).get("subject_group", "control_vs_disease"))
+    logger.info("Output root: %s", output_root)
+    logger.info("Main outputs:")
+    for spectral_range in ranges:
+        logger.info("  %s/", _range_label(spectral_range))
+    logger.info("  04_cross_region_summary/")
+    if biological_ran:
+        logger.info("  biological_pca/")
+        logger.info("Biological PCA:")
+        for model_name in ("PCA_1330", "PCA_2850", "PCA_whole"):
+            logger.info(
+                "  %s -> %s/",
+                model_name,
+                get_biological_pca_canonical_dir(model_name).relative_to(output_root),
+            )
+    if warnings:
+        logger.warning("Warnings:")
+        for warning in warnings:
+            logger.warning("  %s", warning)
+
+
+def _main() -> None:
+    args = _parse_args()
+    setup_logging()
     _set_analysis_output_root()
+    metadata_dir = get_run_metadata_dir()
+    _attach_run_log_file(metadata_dir / "run.log")
     data_source = resolve_data_source(config, source_override=args.source)
     print_kv_table("Active Data Source", data_source_summary(data_source))
     ranges = _requested_ranges(args.range)
     write_analysis_provenance(
         _output_dir("eda_subdir"),
+        data_source,
+        config,
+        command=" ".join(sys.argv),
+    )
+    write_analysis_provenance(
+        metadata_dir,
         data_source,
         config,
         command=" ".join(sys.argv),
@@ -143,8 +224,12 @@ def _main() -> None:
                 max_subjects=args.max_subjects,
             )
 
+        biological_ran = False
         if _should_run_biological_pca(ranges, args.skip_biological_pca):
             run_biological_pca(max_subjects=args.max_subjects)
+            biological_ran = True
+        warnings = _write_warning_summaries(_output_dir("eda_subdir")) if biological_ran else []
+        _log_final_summary(ranges, biological_ran, warnings)
     except (ValueError, RuntimeError) as exc:
         logger.error("%s", exc)
         sys.exit(1)

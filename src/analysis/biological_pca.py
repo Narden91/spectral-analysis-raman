@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from pathlib import Path
-import shutil
-import tempfile
 from typing import Iterable
 
 import matplotlib
@@ -18,7 +16,13 @@ import pandas as pd
 from scipy.interpolate import interp1d
 from scipy.spatial import ConvexHull
 
-from src import _output_dir, config, resolve_project_path
+from src import (
+    config,
+    get_biological_pca_canonical_dir,
+    get_biological_pca_index_dir,
+    get_cross_region_summary_dir,
+    resolve_project_path,
+)
 from src.analysis.statistics import run_pca
 from src.data_preparation.loaders import (
     load_area_summaries,
@@ -64,8 +68,13 @@ class ModelResult:
     scores: pd.DataFrame
     loadings: pd.DataFrame
     explained_variance: pd.DataFrame
+    loading_regions: pd.DataFrame
+    region_contributions: pd.DataFrame
+    region_annotation_candidates: pd.DataFrame
+    loading_region_summary: pd.DataFrame
     band_contributions: pd.DataFrame
     biochemical_summary: pd.DataFrame
+    pc1_warning: str | None = None
 
 
 def select_subjects(subject_ids: Iterable[object], max_subjects: int | None = None) -> list[str]:
@@ -539,6 +548,8 @@ def _model_axis_and_matrix(
     block = str(model_cfg.get("spectral_blocks", [])[0])
     axis = inputs.axes[block]
     window = model_cfg.get("window")
+    if str(window).lower() == "full":
+        return axis, inputs.matrices[block], [block]
     if not isinstance(window, (list, tuple)) or len(window) != 2:
         raise ValueError(f"{model_name} must define a two-value window")
     lower, upper = float(window[0]), float(window[1])
@@ -605,7 +616,10 @@ def _loadings_frame(
     if model_name != "PCA_whole" and blocks:
         expected = inputs.axes[blocks[0]]
         window = _biological_cfg(cfg)["models"][model_name]["window"]
-        mask = (expected >= float(window[0])) & (expected <= float(window[1]))
+        if str(window).lower() == "full":
+            mask = np.ones(expected.shape[0], dtype=bool)
+        else:
+            mask = (expected >= float(window[0])) & (expected <= float(window[1]))
         if len(df) != int(mask.sum()) or not np.allclose(df["raman_shift"].to_numpy(), expected[mask]):
             raise ValueError(f"{model_name} loading rows do not match the selected region axis")
     if model_name == "PCA_whole":
@@ -628,7 +642,7 @@ def _explained_variance_frame(model_name: str, result: dict) -> pd.DataFrame:
     )
 
 
-def _band_axis_for_model(
+def _loadings_by_block(
     model_name: str, loadings_df: pd.DataFrame
 ) -> dict[str, pd.DataFrame]:
     if model_name == "PCA_whole":
@@ -644,148 +658,364 @@ def _band_block_for_window(lower: float, upper: float) -> str:
     return "2850" if center >= 2000 else "1300"
 
 
-def compute_band_contributions(
+def _loading_region_cfg(cfg: dict) -> tuple[float, float, float]:
+    bp_cfg = _biological_cfg(cfg)
+    return (
+        float(bp_cfg.get("loading_region_quantile", 0.9)),
+        float(bp_cfg.get("loading_region_min_width_cm", 8.0)),
+        float(bp_cfg.get("loading_region_merge_gap_cm", 6.0)),
+    )
+
+
+def _region_label(row: pd.Series) -> str:
+    block = str(row.get("spectral_block", "single"))
+    prefix = f"{block} " if block not in {"", "single", "nan"} else ""
+    return f"{prefix}{row['start_cm-1']:.1f}-{row['end_cm-1']:.1f} cm-1"
+
+
+def _extract_loading_regions_for_series(
     model_name: str,
-    model_cfg: dict,
-    loadings_df: pd.DataFrame,
+    pc_name: str,
+    spectral_block: str,
+    axis: np.ndarray,
+    values: np.ndarray,
+    *,
+    quantile: float,
+    min_width_cm: float,
+    merge_gap_cm: float,
+) -> list[dict[str, object]]:
+    if axis.size == 0 or values.size == 0:
+        return []
+    abs_values = np.abs(values)
+    if not np.isfinite(abs_values).any() or np.nanmax(abs_values) == 0:
+        return []
+
+    threshold = float(np.nanquantile(abs_values, quantile))
+    active = abs_values >= threshold
+    intervals: list[list[int]] = []
+    start: int | None = None
+    for idx, is_active in enumerate(active):
+        if bool(is_active) and start is None:
+            start = idx
+        elif not bool(is_active) and start is not None:
+            intervals.append([start, idx - 1])
+            start = None
+    if start is not None:
+        intervals.append([start, len(active) - 1])
+
+    merged: list[list[int]] = []
+    for left, right in intervals:
+        if not merged:
+            merged.append([left, right])
+            continue
+        prev_left, prev_right = merged[-1]
+        gap = float(axis[left] - axis[prev_right])
+        if gap <= merge_gap_cm:
+            merged[-1][1] = right
+        else:
+            merged.append([left, right])
+
+    rows: list[dict[str, object]] = []
+    for left, right in merged:
+        start_cm = float(axis[left])
+        end_cm = float(axis[right])
+        width = float(end_cm - start_cm)
+        if width < min_width_cm:
+            continue
+        axis_slice = axis[left : right + 1]
+        value_slice = values[left : right + 1]
+        peak_idx = int(np.nanargmax(np.abs(value_slice)))
+        signed = (
+            float(value_slice[0])
+            if axis_slice.size == 1
+            else float(np.trapz(value_slice, axis_slice))
+        )
+        absolute = abs(signed)
+        rows.append(
+            {
+                "region_model": model_name,
+                "PC": pc_name,
+                "spectral_block": spectral_block,
+                "start_cm-1": start_cm,
+                "end_cm-1": end_cm,
+                "width_cm-1": width,
+                "peak_shift_cm-1": float(axis_slice[peak_idx]),
+                "peak_loading": float(value_slice[peak_idx]),
+                "peak_absolute_loading": float(np.abs(value_slice[peak_idx])),
+                "signed_integrated_loading": signed,
+                "absolute_integrated_loading": absolute,
+                "dominant_sign": "positive" if signed > 0 else ("negative" if signed < 0 else "zero"),
+                "threshold_abs_loading": threshold,
+            }
+        )
+    return rows
+
+
+def compute_loading_regions(model_name: str, loadings_df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    quantile, min_width_cm, merge_gap_cm = _loading_region_cfg(cfg)
+    rows: list[dict[str, object]] = []
+    pc_cols = [col for col in loadings_df.columns if col.startswith("PC") and col.endswith("_loading")]
+    by_block = _loadings_by_block(model_name, loadings_df)
+
+    for pc_col in pc_cols:
+        pc_name = pc_col.replace("_loading", "")
+        for spectral_block, block_df in by_block.items():
+            axis = block_df["raman_shift"].to_numpy(dtype=float)
+            values = block_df[pc_col].to_numpy(dtype=float)
+            rows.extend(
+                _extract_loading_regions_for_series(
+                    model_name,
+                    pc_name,
+                    spectral_block,
+                    axis,
+                    values,
+                    quantile=quantile,
+                    min_width_cm=min_width_cm,
+                    merge_gap_cm=merge_gap_cm,
+                )
+            )
+
+    regions = pd.DataFrame(rows)
+    if regions.empty:
+        return pd.DataFrame(
+            columns=[
+                "region_model",
+                "PC",
+                "spectral_block",
+                "region_id",
+                "region_label",
+                "start_cm-1",
+                "end_cm-1",
+                "width_cm-1",
+                "peak_shift_cm-1",
+                "peak_loading",
+                "peak_absolute_loading",
+                "signed_integrated_loading",
+                "absolute_integrated_loading",
+                "dominant_sign",
+                "threshold_abs_loading",
+            ]
+        )
+
+    regions = regions.sort_values(
+        ["PC", "spectral_block", "absolute_integrated_loading"],
+        ascending=[True, True, False],
+    ).reset_index(drop=True)
+    region_ids: list[str] = []
+    region_labels: list[str] = []
+    for pc, group in regions.groupby("PC", sort=False):
+        for rank, idx in enumerate(group.index, start=1):
+            region_ids.append((idx, f"{pc}_R{rank}"))
+    region_id_map = dict(region_ids)
+    regions["region_id"] = [region_id_map[idx] for idx in regions.index]
+    regions["region_label"] = regions.apply(_region_label, axis=1)
+    return regions[
+        [
+            "region_model",
+            "PC",
+            "spectral_block",
+            "region_id",
+            "region_label",
+            "start_cm-1",
+            "end_cm-1",
+            "width_cm-1",
+            "peak_shift_cm-1",
+            "peak_loading",
+            "peak_absolute_loading",
+            "signed_integrated_loading",
+            "absolute_integrated_loading",
+            "dominant_sign",
+            "threshold_abs_loading",
+        ]
+    ]
+
+
+def build_region_contributions(loading_regions: pd.DataFrame) -> pd.DataFrame:
+    if loading_regions.empty:
+        return pd.DataFrame(
+            columns=[
+                "region_model",
+                "PC",
+                "spectral_block",
+                "region_id",
+                "region_label",
+                "absolute_integrated_loading",
+                "relative_absolute_contribution",
+                "global_rank",
+                "block_rank",
+                "dominant_sign",
+            ]
+        )
+
+    rows: list[dict[str, object]] = []
+    for pc, pc_group in loading_regions.groupby("PC", sort=False):
+        total = float(pc_group["absolute_integrated_loading"].sum())
+        for block, block_group in pc_group.groupby("spectral_block", sort=False):
+            for block_rank, (_, row) in enumerate(
+                block_group.sort_values("absolute_integrated_loading", ascending=False).iterrows(),
+                start=1,
+            ):
+                rows.append(
+                    {
+                        "region_model": row["region_model"],
+                        "PC": pc,
+                        "spectral_block": block,
+                        "region_id": row["region_id"],
+                        "region_label": row["region_label"],
+                        "absolute_integrated_loading": row["absolute_integrated_loading"],
+                        "relative_absolute_contribution": (
+                            row["absolute_integrated_loading"] / total if total > 0 else np.nan
+                        ),
+                        "block_rank": block_rank,
+                        "dominant_sign": row["dominant_sign"],
+                    }
+                )
+    contributions = pd.DataFrame(rows)
+    for pc, group in contributions.groupby("PC", sort=False):
+        ordered = group.sort_values("absolute_integrated_loading", ascending=False)
+        for global_rank, idx in enumerate(ordered.index, start=1):
+            contributions.loc[idx, "global_rank"] = global_rank
+        rel = ordered["relative_absolute_contribution"]
+        if rel.notna().any():
+            rel_sum = float(rel.sum())
+            if abs(rel_sum - 1.0) >= CONTRIBUTION_TOLERANCE:
+                raise ValueError(f"Loading-region contributions for {pc} sum to {rel_sum}, not 1.0")
+    contributions["global_rank"] = contributions["global_rank"].astype(int)
+    return contributions
+
+
+def annotate_loading_regions(
+    model_name: str,
+    loading_regions: pd.DataFrame,
     cfg: dict,
 ) -> pd.DataFrame:
     windows = _band_windows(cfg)
     band_to_class = _band_class_map(_biological_cfg(cfg))
-    axis_by_block = _band_axis_for_model(model_name, loadings_df)
     rows: list[dict[str, object]] = []
-    pc_cols = [col for col in loadings_df.columns if col.startswith("PC") and col.endswith("_loading")]
 
-    for pc_col in pc_cols:
-        pc_name = pc_col.replace("_loading", "")
-        pc_rows: list[dict[str, object]] = []
-        for band_name in model_cfg.get("bands", []):
-            lower, upper = windows[str(band_name)]
-            axis_key = _band_block_for_window(lower, upper) if model_name == "PCA_whole" else "single"
-            band_axis_df = axis_by_block.get(axis_key, pd.DataFrame())
-            axis = band_axis_df["raman_shift"].to_numpy(dtype=float) if not band_axis_df.empty else np.array([])
-            mask = (axis >= lower) & (axis <= upper)
-            if not mask.any():
+    for _, region in loading_regions.iterrows():
+        overlapping_bands: list[str] = []
+        contexts: list[str] = []
+        for band_name, (lower, upper) in windows.items():
+            block = _band_block_for_window(lower, upper)
+            if model_name == "PCA_whole" and block != str(region["spectral_block"]):
                 continue
-            represented_axis = axis[mask]
-            loading_values = band_axis_df.loc[mask, pc_col].to_numpy(dtype=float)
-            if represented_axis.size == 1:
-                signed = float(loading_values[0])
-            else:
-                signed = float(np.trapz(loading_values, represented_axis))
-            absolute = abs(signed)
-            pc_rows.append(
-                {
-                    "region_model": model_name,
-                    "PC": pc_name,
-                    "band_name": str(band_name),
-                    "window_min": float(lower),
-                    "window_max": float(upper),
-                    "represented_window_min": float(np.min(represented_axis)),
-                    "represented_window_max": float(np.max(represented_axis)),
-                    "assignment": str(band_name),
-                    "biochemical_class": band_to_class[str(band_name)],
-                    "signed_integrated_loading": signed,
-                    "absolute_integrated_loading": absolute,
-                    "relative_absolute_contribution": np.nan,
-                    "dominant_sign": "positive" if signed > 0 else ("negative" if signed < 0 else "zero"),
-                }
-            )
-        total = float(sum(row["absolute_integrated_loading"] for row in pc_rows))
-        if total == 0 and pc_rows:
-            logger.warning(
-                "%s %s has zero total absolute integrated loading across included bands; "
-                "relative contributions are NaN",
-                model_name,
-                pc_name,
-            )
-        elif pc_rows:
-            for row in pc_rows:
-                row["relative_absolute_contribution"] = row["absolute_integrated_loading"] / total
-            rel_sum = sum(row["relative_absolute_contribution"] for row in pc_rows)
-            if abs(rel_sum - 1.0) >= CONTRIBUTION_TOLERANCE:
-                raise ValueError(
-                    f"{model_name} {pc_name} band contribution normalization failed: {rel_sum}"
-                )
-        rows.extend(pc_rows)
-
-    return pd.DataFrame(
-        rows,
-        columns=[
-            "region_model",
-            "PC",
-            "band_name",
-            "window_min",
-            "window_max",
-            "represented_window_min",
-            "represented_window_max",
-            "assignment",
-            "biochemical_class",
-            "signed_integrated_loading",
-            "absolute_integrated_loading",
-            "relative_absolute_contribution",
-            "dominant_sign",
-        ],
-    )
+            if float(region["start_cm-1"]) <= upper and float(region["end_cm-1"]) >= lower:
+                overlapping_bands.append(band_name)
+                contexts.append(band_to_class.get(band_name, "mixed"))
+        unique_contexts = sorted(set(contexts))
+        if not unique_contexts:
+            context_label = "unassigned_broad_interval"
+        elif len(unique_contexts) == 1:
+            context_label = f"{unique_contexts[0]}_associated_region"
+        else:
+            context_label = "mixed_context_region"
+        rows.append(
+            {
+                "region_model": region["region_model"],
+                "PC": region["PC"],
+                "spectral_block": region["spectral_block"],
+                "region_id": region["region_id"],
+                "region_label": region["region_label"],
+                "start_cm-1": region["start_cm-1"],
+                "end_cm-1": region["end_cm-1"],
+                "overlapping_bands": "; ".join(overlapping_bands),
+                "biochemical_context": context_label,
+                "overlap_count": len(overlapping_bands),
+                "annotation_note": (
+                    "Loading-derived interval overlaps broad known Raman context."
+                    if overlapping_bands
+                    else "Loading-derived interval has no direct overlap with configured known bands."
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
-def _interpretation_sentence(pc: str, dominant_class: str | None, mixed: bool) -> str:
-    if dominant_class == "lipid" and not mixed:
-        sentence = f"{pc} is dominated by lipid-associated Raman loading contributions."
-    elif dominant_class in {"protein", "nucleic_acid"} and not mixed:
+def _interpretation_sentence(pc: str, dominant_context: str | None, mixed: bool) -> str:
+    if dominant_context == "unassigned_broad_interval":
         sentence = (
-            "This component reflects a regional Raman loading pattern, "
-            "not a molecule-specific assignment."
+            f"{pc} is dominated by loading-derived intervals without direct known-band overlap. "
+            "Interpret this as broad spectral structure rather than a molecule-specific assignment."
+        )
+    elif mixed:
+        sentence = (
+            f"{pc} is dominated by loading-derived intervals overlapping mixed broad Raman context. "
+            "This remains an exploratory regional interpretation."
         )
     else:
-        sentence = f"{pc} shows mixed protein/lipid-associated loading contributions."
+        sentence = (
+            f"{pc} is dominated by loading-derived intervals overlapping broad {dominant_context.replace('_', ' ')}. "
+            "This remains an exploratory regional interpretation."
+        )
     lower = sentence.lower()
     if any(phrase in lower for phrase in FORBIDDEN_INTERPRETATION_PHRASES):
         raise ValueError(f"Forbidden interpretation wording generated: {sentence}")
     return sentence
 
 
-def biochemical_summary(model_name: str, contributions: pd.DataFrame) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
-    if contributions.empty:
+def build_loading_region_summary(
+    model_name: str,
+    region_contributions: pd.DataFrame,
+    annotations: pd.DataFrame,
+) -> pd.DataFrame:
+    if region_contributions.empty:
         return pd.DataFrame(
             columns=[
                 "region_model",
                 "PC",
-                "lipid",
-                "protein",
-                "nucleic_acid",
-                "mixed",
-                "dominant_biochemical_class",
+                "dominant_context",
+                "top_region_1",
+                "top_region_2",
+                "top_region_3",
                 "interpretation_sentence",
             ]
         )
-    for pc, group in contributions.groupby("PC", sort=False):
-        class_sums = (
-            group.groupby("biochemical_class")["relative_absolute_contribution"]
+
+    merged = region_contributions.merge(
+        annotations[["region_id", "biochemical_context"]],
+        on="region_id",
+        how="left",
+    )
+    rows: list[dict[str, object]] = []
+    for pc, group in merged.groupby("PC", sort=False):
+        context_sums = (
+            group.groupby("biochemical_context")["relative_absolute_contribution"]
             .sum(min_count=1)
-            .reindex(["lipid", "protein", "nucleic_acid", "mixed"])
+            .sort_values(ascending=False)
         )
-        finite = class_sums.dropna()
-        dominant = str(finite.idxmax()) if not finite.empty else None
-        is_mixed = (
-            dominant == "mixed"
-            or finite.size == 0
-            or (finite.size > 1 and finite.sort_values(ascending=False).iloc[:2].min() > 0.25)
-        )
+        dominant_context = str(context_sums.index[0]) if not context_sums.empty else None
+        mixed = len(context_sums) > 1 and float(context_sums.iloc[1]) > 0.25
+        top_regions = group.sort_values("relative_absolute_contribution", ascending=False)["region_label"].head(3).tolist()
         rows.append(
             {
                 "region_model": model_name,
                 "PC": pc,
-                "lipid": class_sums.get("lipid", np.nan),
-                "protein": class_sums.get("protein", np.nan),
-                "nucleic_acid": class_sums.get("nucleic_acid", np.nan),
-                "mixed": class_sums.get("mixed", np.nan),
-                "dominant_biochemical_class": dominant,
-                "interpretation_sentence": _interpretation_sentence(pc, dominant, is_mixed),
+                "dominant_context": dominant_context,
+                "top_region_1": top_regions[0] if len(top_regions) > 0 else None,
+                "top_region_2": top_regions[1] if len(top_regions) > 1 else None,
+                "top_region_3": top_regions[2] if len(top_regions) > 2 else None,
+                "interpretation_sentence": _interpretation_sentence(pc, dominant_context, mixed),
             }
         )
     return pd.DataFrame(rows)
+
+
+def compute_band_contributions(
+    model_name: str,
+    model_cfg: dict,
+    loadings_df: pd.DataFrame,
+    cfg: dict,
+) -> pd.DataFrame:
+    del model_cfg, loadings_df, cfg
+    # Transitional compatibility alias: populated from loading-region contributions.
+    return pd.DataFrame()
+
+
+def biochemical_summary(model_name: str, contributions: pd.DataFrame) -> pd.DataFrame:
+    del model_name, contributions
+    # Transitional compatibility alias: populated from loading-region summaries.
+    return pd.DataFrame()
 
 
 def fit_biological_pca_models(inputs: SubjectInputs, cfg: dict | None = None) -> list[ModelResult]:
@@ -801,13 +1031,54 @@ def fit_biological_pca_models(inputs: SubjectInputs, cfg: dict | None = None) ->
         model_cfg = bp_cfg["models"][model_name]
         axis, matrix, blocks = _model_axis_and_matrix(model_name, model_cfg, inputs)
         _validate_component_count(model_name, matrix, n_components)
-        pca_result = run_pca(matrix, n_components=n_components, scale=scale)
+        pca_result = run_pca(
+            matrix,
+            n_components=n_components,
+            scale=scale,
+            log_summary=False,
+            warn_on_high_pc1=False,
+        )
         scores = _scores_frame(model_name, inputs.subjects, pca_result["scores"], inputs.subject_spectra)
         loadings = _loadings_frame(model_name, axis, blocks, pca_result["loadings"], inputs, cfg)
         explained = _explained_variance_frame(model_name, pca_result)
-        contributions = compute_band_contributions(model_name, model_cfg, loadings, cfg)
-        summary = biochemical_summary(model_name, contributions)
-        results.append(ModelResult(model_name, scores, loadings, explained, contributions, summary))
+        loading_regions = compute_loading_regions(model_name, loadings, cfg)
+        region_contributions = build_region_contributions(loading_regions)
+        region_annotations = annotate_loading_regions(model_name, loading_regions, cfg)
+        loading_region_summary = build_loading_region_summary(
+            model_name,
+            region_contributions,
+            region_annotations,
+        )
+        compatibility_contributions = region_contributions.rename(
+            columns={
+                "region_id": "band_name",
+                "region_label": "assignment",
+            }
+        ).copy()
+        compatibility_summary = loading_region_summary.rename(
+            columns={"dominant_context": "dominant_biochemical_class"}
+        ).copy()
+        pc1_ratio = float(pca_result.get("pc1_variance_ratio", np.nan))
+        pc1_warning = (
+            f"PC1 explains {pc1_ratio * 100:.1f}% variance. Inspect baseline/background and score structure."
+            if np.isfinite(pc1_ratio) and pc1_ratio > 0.8
+            else None
+        )
+        results.append(
+            ModelResult(
+                name=model_name,
+                scores=scores,
+                loadings=loadings,
+                explained_variance=explained,
+                loading_regions=loading_regions,
+                region_contributions=region_contributions,
+                region_annotation_candidates=region_annotations,
+                loading_region_summary=loading_region_summary,
+                band_contributions=compatibility_contributions,
+                biochemical_summary=compatibility_summary,
+                pc1_warning=pc1_warning,
+            )
+        )
     return results
 
 
@@ -826,7 +1097,7 @@ def validate_outputs(
     cfg: dict | None = None,
 ) -> None:
     cfg = config if cfg is None else cfg
-    validate_unique_subject_rows(features, "subject_biochemical_pca_features.csv")
+    validate_unique_subject_rows(features, "subject_biological_pca_scores.csv")
     for result in results:
         validate_unique_subject_rows(result.scores, f"{result.name}/scores.csv")
         if result.name == "PCA_whole":
@@ -840,12 +1111,16 @@ def validate_outputs(
         else:
             model_cfg = _biological_cfg(cfg)["models"][result.name]
             block = str(model_cfg["spectral_blocks"][0])
-            lower, upper = model_cfg["window"]
-            expected = inputs.axes[block][(inputs.axes[block] >= lower) & (inputs.axes[block] <= upper)]
+            window = model_cfg["window"]
+            if str(window).lower() == "full":
+                expected = inputs.axes[block]
+            else:
+                lower, upper = window
+                expected = inputs.axes[block][(inputs.axes[block] >= lower) & (inputs.axes[block] <= upper)]
             actual = result.loadings["raman_shift"].to_numpy(dtype=float)
             if actual.size != expected.size or not np.allclose(actual, expected):
                 raise ValueError(f"{result.name} loading rows do not match the selected region axis")
-        for pc, group in result.band_contributions.groupby("PC", sort=False):
+        for pc, group in result.region_contributions.groupby("PC", sort=False):
             rel = group["relative_absolute_contribution"]
             if rel.isna().all():
                 continue
@@ -865,7 +1140,7 @@ def build_subject_biochemical_features(results: list[ModelResult]) -> pd.DataFra
     features = frames[0]
     for frame in frames[1:]:
         features = features.merge(frame, on="subject_id", how="inner")
-    validate_unique_subject_rows(features, "subject_biochemical_pca_features.csv")
+    validate_unique_subject_rows(features, "subject_biological_pca_scores.csv")
     return features
 
 
@@ -978,25 +1253,31 @@ def _plot_band_contributions(
 ) -> None:
     if pcs is None:
         pcs = ["PC1", "PC2"]
-    df = result.band_contributions[
-        result.band_contributions["PC"].isin(pcs)
-        & result.band_contributions["relative_absolute_contribution"].notna()
+    df = result.region_contributions[
+        result.region_contributions["PC"].isin(pcs)
+        & result.region_contributions["relative_absolute_contribution"].notna()
     ]
     if df.empty:
         return
     pivot = (
-        df.pivot(index="band_name", columns="PC", values="relative_absolute_contribution")
+        df.pivot(index="region_label", columns="PC", values="relative_absolute_contribution")
         .fillna(0)
         .reindex(columns=pcs, fill_value=0)
     )
     order = pivot.sum(axis=1).sort_values(ascending=True).index
     pivot = pivot.loc[order]
-    class_map = dict(zip(df["band_name"], df["biochemical_class"]))
+    annotation_map = dict(
+        zip(
+            result.region_annotation_candidates["region_label"],
+            result.region_annotation_candidates["biochemical_context"],
+        )
+    )
     class_colors = {
-        "lipid": "#E69F00",
-        "protein": "#0072B2",
-        "nucleic_acid": "#009E73",
-        "mixed": "#6D597A",
+        "lipid_associated_region": "#E69F00",
+        "protein_associated_region": "#0072B2",
+        "nucleic_acid_associated_region": "#009E73",
+        "mixed_context_region": "#6D597A",
+        "unassigned_broad_interval": "#6B7280",
     }
     fig, ax = plt.subplots(figsize=(8, max(4, 0.35 * len(pivot))))
     y = np.arange(len(pivot))
@@ -1005,7 +1286,7 @@ def _plot_band_contributions(
         if pc not in pivot.columns:
             continue
         offset = (i - 0.5) * height
-        colors = [class_colors.get(class_map.get(b, "mixed"), "#6D597A") for b in pivot.index]
+        colors = [class_colors.get(annotation_map.get(label, "unassigned_broad_interval"), "#6B7280") for label in pivot.index]
         ax.barh(
             y + offset,
             pivot[pc],
@@ -1019,28 +1300,48 @@ def _plot_band_contributions(
     ax.set_yticks(y)
     ax.set_yticklabels(pivot.index, fontsize=9)
     ax.set_xlabel("Relative absolute contribution")
-    ax.set_title(f"{result.name} band contributions")
+    ax.set_title(f"{result.name} loading-derived regions")
     ax.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(output_dir / "band_contributions_pc1_pc2.png", dpi=200)
+    fig.savefig(output_dir / "loading_regions_pc1_pc2.png", dpi=200)
+    if result.name == "PCA_whole":
+        fig.savefig(output_dir / "block_loading_regions_pc1_pc2.png", dpi=200)
     plt.close(fig)
 
 
 def _plot_biochemical_summary(result: ModelResult, output_dir: Path) -> None:
-    df = result.biochemical_summary[result.biochemical_summary["PC"].isin(["PC1", "PC2"])]
+    df = result.loading_region_summary[result.loading_region_summary["PC"].isin(["PC1", "PC2"])]
     if df.empty:
         return
-    class_cols = ["lipid", "protein", "nucleic_acid", "mixed"]
-    pivot = df.set_index("PC")[class_cols].fillna(0)
+    merged = result.region_contributions.merge(
+        result.region_annotation_candidates[["region_id", "biochemical_context"]],
+        on="region_id",
+        how="left",
+    )
+    merged = merged[merged["PC"].isin(["PC1", "PC2"])]
+    if merged.empty:
+        return
+    pivot = (
+        merged.pivot_table(
+            index="PC",
+            columns="biochemical_context",
+            values="relative_absolute_contribution",
+            aggfunc="sum",
+            fill_value=0,
+        )
+        .reindex(["PC1", "PC2"], fill_value=0)
+    )
     class_colors = {
-        "lipid": "#E69F00",
-        "protein": "#0072B2",
-        "nucleic_acid": "#009E73",
-        "mixed": "#6D597A",
+        "lipid_associated_region": "#E69F00",
+        "protein_associated_region": "#0072B2",
+        "nucleic_acid_associated_region": "#009E73",
+        "mixed_context_region": "#6D597A",
+        "unassigned_broad_interval": "#6B7280",
     }
     fig, ax = plt.subplots(figsize=(6, 4))
     bottom = np.zeros(len(pivot))
-    for cls in class_cols:
+    for cls in pivot.columns:
         vals = pivot[cls].to_numpy()
         if not vals.any():
             continue
@@ -1056,7 +1357,7 @@ def _plot_biochemical_summary(result: ModelResult, output_dir: Path) -> None:
         )
         bottom += vals
     ax.set_ylabel("Relative contribution")
-    ax.set_title(f"{result.name} biochemical class summary")
+    ax.set_title(f"{result.name} region annotation summary")
     ax.set_ylim(0, 1)
     ax.legend(fontsize=9)
     fig.tight_layout()
@@ -1086,9 +1387,9 @@ def _write_interpretation_md(
         if pc not in ev.index:
             continue
         pct = ev.loc[pc, "explained_variance_ratio"] * 100
-        summary_row = result.biochemical_summary[result.biochemical_summary["PC"] == pc]
+        summary_row = result.loading_region_summary[result.loading_region_summary["PC"] == pc]
         dominant = (
-            summary_row["dominant_biochemical_class"].iloc[0]
+            summary_row["dominant_context"].iloc[0]
             if not summary_row.empty
             else None
         )
@@ -1097,20 +1398,20 @@ def _write_interpretation_md(
             if not summary_row.empty
             else ""
         )
-        top_bands = (
-            result.band_contributions[
-                (result.band_contributions["PC"] == pc)
-                & result.band_contributions["relative_absolute_contribution"].notna()
+        top_regions = (
+            result.region_contributions[
+                (result.region_contributions["PC"] == pc)
+                & result.region_contributions["relative_absolute_contribution"].notna()
             ]
             .sort_values("relative_absolute_contribution", ascending=False)
             .head(5)
         )
-        band_list = ", ".join(
-            f"{row['band_name']} ({row['relative_absolute_contribution'] * 100:.1f}%)"
-            for _, row in top_bands.iterrows()
+        region_list = ", ".join(
+            f"{row['region_label']} ({row['relative_absolute_contribution'] * 100:.1f}%)"
+            for _, row in top_regions.iterrows()
         )
         lines.append(
-            f"| {pc} | {pct:.1f}% | {dominant or 'N/A'} | {band_list} | {sentence} |"
+            f"| {pc} | {pct:.1f}% | {dominant or 'N/A'} | {region_list} | {sentence} |"
         )
 
     lines.extend(
@@ -1137,9 +1438,9 @@ def _build_pca_comparison_summary(results: list[ModelResult]) -> pd.DataFrame:
             if pc not in ev.index:
                 continue
             pct = ev.loc[pc, "explained_variance_ratio"] * 100
-            summary_row = result.biochemical_summary[result.biochemical_summary["PC"] == pc]
+            summary_row = result.loading_region_summary[result.loading_region_summary["PC"] == pc]
             dominant = (
-                summary_row["dominant_biochemical_class"].iloc[0]
+                summary_row["dominant_context"].iloc[0]
                 if not summary_row.empty
                 else None
             )
@@ -1148,13 +1449,13 @@ def _build_pca_comparison_summary(results: list[ModelResult]) -> pd.DataFrame:
                 if not summary_row.empty
                 else ""
             )
-            top_bands = (
-                result.band_contributions[
-                    (result.band_contributions["PC"] == pc)
-                    & result.band_contributions["relative_absolute_contribution"].notna()
+            top_regions = (
+                result.region_contributions[
+                    (result.region_contributions["PC"] == pc)
+                    & result.region_contributions["relative_absolute_contribution"].notna()
                 ]
                 .sort_values("relative_absolute_contribution", ascending=False)
-                .head(3)["band_name"]
+                .head(3)["region_label"]
                 .tolist()
             )
             rows.append(
@@ -1162,69 +1463,153 @@ def _build_pca_comparison_summary(results: list[ModelResult]) -> pd.DataFrame:
                     "model": result.name,
                     "PC": pc,
                     "explained_variance_pct": pct,
-                    "dominant_class": dominant,
-                    "top_band_1": top_bands[0] if len(top_bands) > 0 else None,
-                    "top_band_2": top_bands[1] if len(top_bands) > 1 else None,
-                    "top_band_3": top_bands[2] if len(top_bands) > 2 else None,
+                    "dominant_context": dominant,
+                    "top_region_1": top_regions[0] if len(top_regions) > 0 else None,
+                    "top_region_2": top_regions[1] if len(top_regions) > 1 else None,
+                    "top_region_3": top_regions[2] if len(top_regions) > 2 else None,
                     "interpretation_sentence": sentence,
                 }
             )
     return pd.DataFrame(rows)
 
 
+def _write_pc1_dominance_report(result: ModelResult, output_dir: Path) -> None:
+    if not result.pc1_warning:
+        return
+    pc1_row = result.explained_variance[result.explained_variance["PC"] == "PC1"]
+    variance_pct = (
+        float(pc1_row["explained_variance_ratio"].iloc[0]) * 100
+        if not pc1_row.empty
+        else np.nan
+    )
+    top_regions = result.region_contributions[
+        result.region_contributions["PC"] == "PC1"
+    ].sort_values("relative_absolute_contribution", ascending=False).head(5)
+    lines = [
+        f"# {result.name} PC1 Dominance Report",
+        "",
+        f"PC1 explains {variance_pct:.1f}% of variance.",
+        "",
+        "This may reflect dominant background structure, normalization effects, concentration differences, or strong biological/technical variation. Interpret PC1 with caution and inspect scores and loadings before drawing conclusions.",
+        "",
+        "## Top loading-derived regions",
+        "",
+    ]
+    for _, row in top_regions.iterrows():
+        lines.append(
+            f"- {row['region_label']}: {row['relative_absolute_contribution'] * 100:.1f}% of PC1 integrated absolute loading"
+        )
+    (output_dir / "pc1_dominance_report.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_biological_pca_summary_markdown(summary_df: pd.DataFrame, output_dir: Path) -> None:
+    lines = [
+        "# Biological PCA Summary",
+        "",
+        "| Model | PC | Explained variance | Dominant context | Top region | Interpretation |",
+        "|---|---|---|---|---|---|",
+    ]
+    for _, row in summary_df.iterrows():
+        lines.append(
+            f"| {row['model']} | {row['PC']} | {row['explained_variance_pct']:.1f}% | "
+            f"{row.get('dominant_context') or 'N/A'} | {row.get('top_region_1') or 'N/A'} | "
+            f"{row['interpretation_sentence']} |"
+        )
+    (output_dir / "biological_pca_summary.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_biological_pca_index(
+    results: list[ModelResult],
+    *,
+    index_dir: Path,
+    comparison: pd.DataFrame,
+) -> None:
+    index_dir.mkdir(parents=True, exist_ok=True)
+    (index_dir / "README.md").write_text(
+        "\n".join(
+            [
+                "# Biological PCA Index",
+                "",
+                "Range-local Biological PCA folders are the canonical interpretation outputs.",
+                "This root-level directory is retained for compatibility and navigation.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    rows: list[dict[str, object]] = []
+    for result in results:
+        canonical_dir = get_biological_pca_canonical_dir(result.name)
+        pointer_dir = index_dir / result.name
+        pointer_dir.mkdir(parents=True, exist_ok=True)
+        (pointer_dir / "README.md").write_text(
+            "\n".join(
+                [
+                    f"# {result.name}",
+                    "",
+                    "Canonical Biological PCA outputs are located at:",
+                    "",
+                    str(canonical_dir.relative_to(index_dir.parent)),
+                    "",
+                    "This directory is retained for backward navigation only.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        rows.append(
+            {
+                "model": result.name,
+                "canonical_dir": str(canonical_dir.relative_to(index_dir.parent)),
+                "pc1_warning": result.pc1_warning or "",
+            }
+        )
+    pd.DataFrame(rows).to_csv(index_dir / "index.csv", index=False)
+    comparison.to_csv(index_dir / "pca_comparison_summary.csv", index=False)
+
+
 def _write_outputs(
-    staging_dir: Path,
     inputs: SubjectInputs,
     results: list[ModelResult],
     features: pd.DataFrame,
-) -> list[Path]:
-    written: list[Path] = []
-    tables = {
+) -> dict[str, Path]:
+    cross_region_dir = get_cross_region_summary_dir()
+    index_dir = get_biological_pca_index_dir()
+    comparison = _build_pca_comparison_summary(results)
+    pc3_threshold = float(config.get("biological_pca", {}).get("pc3_variance_threshold", 0.05))
+
+    shared_tables = {
         "subject_spectra.csv": inputs.subject_spectra,
         "subject_region_counts.csv": inputs.subject_region_counts,
         "input_provenance.csv": inputs.input_provenance,
-        "subject_biochemical_pca_features.csv": features,
+        "subject_biological_pca_scores.csv": features,
+        "pca_comparison_summary.csv": comparison,
     }
-    for filename, df in tables.items():
-        path = staging_dir / filename
-        df.to_csv(path, index=False)
-        written.append(Path(filename))
+    for filename, df in shared_tables.items():
+        df.to_csv(cross_region_dir / filename, index=False)
 
-    pc3_threshold = float(
-        config.get("biological_pca", {}).get("pc3_variance_threshold", 0.05)
-    )
-
+    consistency_rows: list[dict[str, object]] = []
+    written_paths: dict[str, Path] = {}
     for result in results:
-        model_dir = staging_dir / result.name
-        model_dir.mkdir(parents=True, exist_ok=True)
+        model_dir = get_biological_pca_canonical_dir(result.name)
+        written_paths[result.name] = model_dir
         model_tables = {
             "scores.csv": result.scores,
             "loadings.csv": result.loadings,
             "explained_variance.csv": result.explained_variance,
+            "loading_regions.csv": result.loading_regions,
+            "region_contributions.csv": result.region_contributions,
+            "region_annotation_candidates.csv": result.region_annotation_candidates,
+            "loading_region_summary.csv": result.loading_region_summary,
             "band_contributions.csv": result.band_contributions,
             "biochemical_summary.csv": result.biochemical_summary,
         }
         for filename, df in model_tables.items():
             df.to_csv(model_dir / filename, index=False)
-            written.append(Path(result.name) / filename)
 
         pcs = ["PC1", "PC2"]
         ev = result.explained_variance.set_index("PC")
         pc3_ratio = ev.loc["PC3", "explained_variance_ratio"] if "PC3" in ev.index else 0.0
         if pc3_ratio >= pc3_threshold:
             pcs.append("PC3")
-            logger.info(
-                "%s PC3 retained (%.1f%% variance)",
-                result.name,
-                pc3_ratio * 100,
-            )
-        else:
-            logger.info(
-                "%s PC3 not retained (%.1f%% variance < threshold %.0f%%)",
-                result.name,
-                pc3_ratio * 100,
-                pc3_threshold * 100,
-            )
 
         _plot_scores(result, model_dir)
         _plot_scree(result, model_dir)
@@ -1232,31 +1617,24 @@ def _write_outputs(
         _plot_band_contributions(result, model_dir, pcs=pcs)
         _plot_biochemical_summary(result, model_dir)
         _write_interpretation_md(result, model_dir, pc3_threshold=pc3_threshold)
-        written.extend(
-            [
-                Path(result.name) / "scores_pc1_pc2.png",
-                Path(result.name) / "scree_plot.png",
-                Path(result.name) / "loadings_pc1_pc2.png",
-                Path(result.name) / "band_contributions_pc1_pc2.png",
-                Path(result.name) / "biochemical_summary_pc1_pc2.png",
-                Path(result.name) / "conservative_interpretation.md",
-            ]
-        )
+        _write_pc1_dominance_report(result, model_dir)
 
-    comparison = _build_pca_comparison_summary(results)
-    comparison.to_csv(staging_dir / "pca_comparison_summary.csv", index=False)
-    written.append(Path("pca_comparison_summary.csv"))
+        top_summary = result.loading_region_summary.head(1)
+        if not top_summary.empty:
+            consistency_rows.append(
+                {
+                    "model": result.name,
+                    "dominant_context": top_summary["dominant_context"].iloc[0],
+                    "top_region_1": top_summary["top_region_1"].iloc[0],
+                    "interpretation_sentence": top_summary["interpretation_sentence"].iloc[0],
+                }
+            )
 
-    return written
-
-
-def _promote_staging(staging_dir: Path, output_dir: Path, relative_files: Iterable[Path]) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for relative in relative_files:
-        src = staging_dir / relative
-        dst = output_dir / relative
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+    region_consistency = pd.DataFrame(consistency_rows)
+    region_consistency.to_csv(cross_region_dir / "region_consistency_summary.csv", index=False)
+    _write_biological_pca_summary_markdown(comparison, cross_region_dir)
+    _write_biological_pca_index(results, index_dir=index_dir, comparison=comparison)
+    return written_paths
 
 
 def run_biological_pca(
@@ -1266,28 +1644,17 @@ def run_biological_pca(
     cfg: dict | None = None,
 ) -> Path:
     cfg = config if cfg is None else cfg
-    bp_cfg = _biological_cfg(cfg)
-    if output_dir is None:
-        subdir = str(bp_cfg.get("output_subdir", "biological_pca"))
-        out = _output_dir("eda_subdir") / subdir
-    else:
+    if output_dir is not None:
         out = Path(output_dir)
-    if not out.is_absolute():
-        out = resolve_project_path(out)
-    assert out is not None
+        if not out.is_absolute():
+            out = resolve_project_path(out)
+        assert out is not None
 
     inputs = build_subject_inputs(max_subjects=max_subjects, cfg=cfg)
     results = fit_biological_pca_models(inputs, cfg=cfg)
     features = build_subject_biochemical_features(results)
     validate_outputs(inputs, results, features, cfg=cfg)
-
-    staging_parent = out.parent
-    staging_parent.mkdir(parents=True, exist_ok=True)
-    tmp_dir = Path(tempfile.mkdtemp(prefix=f".{out.name}_staging_", dir=staging_parent))
-    try:
-        relative_files = _write_outputs(tmp_dir, inputs, results, features)
-        _promote_staging(tmp_dir, out, relative_files)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-    logger.info("Biological PCA outputs written to %s", out)
-    return out
+    _write_outputs(inputs, results, features)
+    index_dir = get_biological_pca_index_dir()
+    logger.info("Biological PCA outputs written to %s", index_dir.parent)
+    return index_dir

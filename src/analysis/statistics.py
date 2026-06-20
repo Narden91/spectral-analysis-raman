@@ -233,6 +233,9 @@ def run_pca(
     n_components: Optional[int] = None,
     random_state: Optional[int] = None,
     scale: bool = True,
+    *,
+    log_summary: bool = True,
+    warn_on_high_pc1: bool = True,
 ) -> dict:
     """
     Run PCA on spectra matrix.
@@ -290,20 +293,27 @@ def run_pca(
 
     cumvar = np.cumsum(pca.explained_variance_ratio_)
     
-    if len(pca.explained_variance_ratio_) > 0 and pca.explained_variance_ratio_[0] > 0.8:
+    pc1_variance_ratio = (
+        float(pca.explained_variance_ratio_[0])
+        if len(pca.explained_variance_ratio_) > 0
+        else np.nan
+    )
+
+    if warn_on_high_pc1 and np.isfinite(pc1_variance_ratio) and pc1_variance_ratio > 0.8:
         logger.warning(
             "PC1 explains > 80%% of the variance (%.1f%%). This is unusually high "
             "for normalized Raman spectra and may indicate baseline artifacts "
             "or a dominant background signal.",
-            pca.explained_variance_ratio_[0] * 100
+            pc1_variance_ratio * 100
         )
-        
-    logger.info(
-        "PCA: %d components explain %.1f%% of variance (scale=%s)",
-        n_components,
-        cumvar[-1] * 100,
-        scale,
-    )
+
+    if log_summary:
+        logger.info(
+            "PCA: %d components explain %.1f%% of variance (scale=%s)",
+            n_components,
+            cumvar[-1] * 100,
+            scale,
+        )
 
     return {
         "scores": scores,
@@ -312,6 +322,7 @@ def run_pca(
         "cumulative_variance": cumvar,
         "pca_model": pca,
         "scaler": scaler,
+        "pc1_variance_ratio": pc1_variance_ratio,
     }
 
 

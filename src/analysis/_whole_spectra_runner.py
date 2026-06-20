@@ -12,8 +12,6 @@ from src import (
     config,
     get_whole_spectra_phase_dir,
     whole_spectra_split_index,
-    _output_dir,
-    _range_label,
 )
 from src.analysis._single_range import (
     _estimate_variance_decomposition,
@@ -358,14 +356,6 @@ def _run_whole_spectra_eda(
             title=f"Regional SNV Residual Variance ({range_title})",
         )
         _save_fig(fig, "regional_snv_residual_variance.png", variance_dir)
-
-    _log_phase("EDA COMPLETE")
-    eda_base = _output_dir("eda_subdir")
-    label = _range_label("both")
-    logger.info("Outputs saved to: %s", eda_base / label)
-    for dirname in WHOLE_SPECTRA_PHASE_DIRS.values():
-        logger.info("  %s/", dirname)
-
     return {
         "groups": groups,
         "wavenumbers": wavenumbers,

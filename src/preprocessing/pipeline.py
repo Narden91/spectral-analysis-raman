@@ -335,7 +335,7 @@ def _apply_initial_qc(
         }
     )
     if int(invalid.sum()) > 0:
-        logger.info("Initial QC removed %d/%d spectra", int(invalid.sum()), spectra.shape[0])
+        logger.debug("Initial QC removed %d/%d spectra", int(invalid.sum()), spectra.shape[0])
     return spectra[valid_mask], valid_mask, flags_df
 
 

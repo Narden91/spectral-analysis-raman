@@ -106,19 +106,22 @@ biological_pca:
   scale: false
   output_subdir: "biological_pca"
   pc3_variance_threshold: 0.05
+  loading_region_quantile: 0.9
+  loading_region_min_width_cm: 8.0
+  loading_region_merge_gap_cm: 6.0
   figures:
     emit_convex_hull: false
   models:
     PCA_1330:
       spectral_blocks: ["1300"]
-      window: [1240, 1470]
+      window: "full"
       bands:
         - amide_iii_1260
         - ch2_bend_1300
         - ch2_scissor_1450
     PCA_2850:
       spectral_blocks: ["2850"]
-      window: [2840, 2975]
+      window: "full"
       bands:
         - ch2_sym_stretch_2850
         - ch2_asym_stretch_2885

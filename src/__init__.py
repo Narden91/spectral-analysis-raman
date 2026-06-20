@@ -20,6 +20,12 @@ WHOLE_SPECTRA_PHASE_DIRS = {
     "variance_context": "03_variance_context",
 }
 
+BIOLOGICAL_PCA_CANONICAL_DIRS = {
+    "PCA_1330": Path("01_fingerprint_1300") / "06_biological_pca",
+    "PCA_2850": Path("02_ch_stretch_2850") / "06_biological_pca",
+    "PCA_whole": Path("03_whole_spectrum_1300_plus_2850") / "04_biological_pca",
+}
+
 
 def resolve_project_path(path_like: str | Path | None) -> Path | None:
     """Resolve relative paths against the repository root."""
@@ -187,6 +193,37 @@ def get_eda_phase_dir(spectral_range: str, phase: str) -> Path:
 def get_whole_spectra_phase_dir(phase: str) -> Path:
     """Return an output directory for a whole-spectra EDA phase."""
     return get_eda_phase_dir("both", WHOLE_SPECTRA_PHASE_DIRS.get(phase, phase))
+
+
+def get_run_metadata_dir() -> Path:
+    """Return the metadata directory for the active EDA run."""
+    path = _output_dir("eda_subdir") / "00_run_metadata"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_cross_region_summary_dir() -> Path:
+    """Return the cross-region summary directory for the active EDA run."""
+    path = _output_dir("eda_subdir") / "04_cross_region_summary"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_biological_pca_index_dir() -> Path:
+    """Return the compatibility Biological PCA index directory."""
+    path = _output_dir("eda_subdir") / "biological_pca"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_biological_pca_canonical_dir(model_name: str) -> Path:
+    """Return the canonical range-local directory for a Biological PCA model."""
+    relative = BIOLOGICAL_PCA_CANONICAL_DIRS.get(str(model_name))
+    if relative is None:
+        raise ValueError(f"Unknown Biological PCA model: {model_name}")
+    path = _output_dir("eda_subdir") / relative
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def whole_spectra_split_index(wavenumbers) -> int | None:
