@@ -276,6 +276,23 @@ def run_pca(
         else analysis_cfg.get("random_state", 42)
     )
 
+    # Drop columns that are all-NaN (e.g. channels with no valid data after
+    # nanmedian aggregation).  sklearn PCA does not handle NaN; leaving them in
+    # would corrupt scores silently or raise.
+    spectra = np.asarray(spectra, dtype=float)
+    all_nan_cols = np.all(~np.isfinite(spectra), axis=0)
+    if all_nan_cols.any():
+        n_dropped = int(all_nan_cols.sum())
+        logger.warning(
+            "run_pca: dropping %d all-NaN/inf feature column(s) before PCA "
+            "(out of %d total)",
+            n_dropped,
+            spectra.shape[1],
+        )
+        spectra = spectra[:, ~all_nan_cols]
+    if spectra.size == 0:
+        raise ValueError("No valid features remain after dropping all-NaN columns.")
+
     # Clamp n_components to valid range
     max_components = min(spectra.shape[0], spectra.shape[1])
     n_components = min(n_components, max_components)
@@ -290,6 +307,14 @@ def run_pca(
 
     pca = PCA(n_components=n_components, random_state=random_state)
     scores = pca.fit_transform(spectra_processed)
+
+    # Deterministic sign convention: flip each PC so the loading with the largest
+    # absolute value is positive.  Scikit-learn does not guarantee sign across
+    # versions; this ensures stable direction for interpretation and figures.
+    signs = np.sign(pca.components_[np.arange(n_components), np.argmax(np.abs(pca.components_), axis=1)])
+    signs[signs == 0] = 1.0
+    pca.components_ *= signs[:, np.newaxis]
+    scores *= signs[np.newaxis, :]
 
     cumvar = np.cumsum(pca.explained_variance_ratio_)
     
@@ -444,6 +469,12 @@ def compare_band_intensities_between_groups(
             )
             continue
 
+        # Test selection heuristic: n>=20 → Welch t-test; n<20 → Mann-Whitney U.
+        # The Shapiro-Wilk normality test (computed separately by check_normality)
+        # is NOT wired into this selection.  Rationale: in small Raman cohorts
+        # n is typically <20 so Mann-Whitney is chosen anyway, and FDR correction
+        # is applied across bands.  Note that adjacent wavenumber bands are
+        # correlated; the FDR correction does not account for this dependency.
         use_parametric = (
             method == "parametric"
             or (method == "auto" and len(a) >= 20 and len(b) >= 20)

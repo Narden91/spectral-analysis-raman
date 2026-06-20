@@ -24,7 +24,10 @@ def clean_subject_id(raw_id: str) -> str:
         .replace("''", "")
         .replace("'", "")
     )
-    return _TRAILING_LETTERS_RE.sub("", cleaned)
+    result = _TRAILING_LETTERS_RE.sub("", cleaned)
+    if result != raw_id:
+        logger.debug("subject_id rewrite: %r -> %r", raw_id, result)
+    return result
 
 
 # Matches the measurement number at the end of a reorganized stem:

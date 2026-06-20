@@ -25,7 +25,11 @@ def read_txt_spectrum(
         spectra (np.ndarray): 3D array of shape (N, M, W) or 2D (N*M, W)
         metadata (dict): Extracted metadata from filename
     """
-    df = pd.read_csv(filepath, sep=r"\s+", engine="c", dtype=np.float64)
+    try:
+        df = pd.read_csv(filepath, sep=r"\s+", engine="c", dtype=np.float64, encoding="utf-8")
+    except UnicodeDecodeError:
+        logger.debug("UTF-8 decode failed for %s; retrying with latin-1", Path(filepath).name)
+        df = pd.read_csv(filepath, sep=r"\s+", engine="c", dtype=np.float64, encoding="latin-1")
     df.columns = [c.strip().lstrip("#") for c in df.columns]
 
     try:

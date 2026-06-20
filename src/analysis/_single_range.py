@@ -522,7 +522,7 @@ def _run_single_range_eda(
             pca_result["scores"],
             all_labels,
             pca_result["explained_variance_ratio"],
-            title=f"PCA Score Plot ({range_title})",
+            title=f"Area-Level QC PCA Score Plot ({range_title}) — exploratory/QC only, not subject-level",
             loadings=pca_result["loadings"],
             wavenumbers=wavenumbers,
         )
@@ -534,7 +534,7 @@ def _run_single_range_eda(
             pca_result["explained_variance_ratio"],
             pc_x=0,
             pc_y=2,
-            title=f"PCA Score Plot PC1 vs PC3 ({range_title})",
+            title=f"Area-Level QC PCA Score Plot PC1 vs PC3 ({range_title}) — exploratory/QC only, not subject-level",
             loadings=pca_result["loadings"],
             wavenumbers=wavenumbers,
         )

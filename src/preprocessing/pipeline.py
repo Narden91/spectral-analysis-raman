@@ -160,6 +160,7 @@ def _compute_qc_metrics(spectra: np.ndarray) -> pd.DataFrame:
                 "n_spike_repaired_channels",
                 "spike_repair_fraction",
                 "baseline_fraction",
+                "clipped_fraction",
                 "saturation_fraction",
                 "is_outlier",
                 "outlier_score",
@@ -1036,6 +1037,11 @@ def run_preprocessing(
             metrics_df.loc[:, "n_suppressed_cosmic_channels"] = 0
             metrics_df.loc[:, "fraction_corrected"] = 0.0
 
+    # Quality filter runs on post-cosmic-ray / pre-baseline / pre-edge-trim spectra.
+    # SNR and area metrics therefore reflect raw intensities including fluorescence
+    # background.  An edge-trim-aware preview is used to avoid false rejection from
+    # noisy frame edges, but the area floor is still computed on the full raw range.
+    # This is intentional: baseline-corrected SNR is unavailable at rejection time.
     if quality_enabled and result.size > 0:
         quality_mask, quality_stats = _spectral_quality_mask_with_edge_guard(
             result,
@@ -1047,7 +1053,11 @@ def run_preprocessing(
         kept_indices = np.where(retained_mask)[0]
         dropped = kept_indices[~quality_mask]
         flags_df.loc[dropped, "qc_flag"] = True
-        flags_df.loc[dropped, "qc_reason"] = "quality_filter"
+        # Append new reason rather than overwriting, preserving root-cause traceability.
+        existing = flags_df.loc[dropped, "qc_reason"].fillna("")
+        flags_df.loc[dropped, "qc_reason"] = existing.where(
+            existing == "", existing + "; quality_filter"
+        ).where(existing != "", "quality_filter")
         retained_mask[kept_indices[~quality_mask]] = False
         result = result[quality_mask]
         metrics_df = metrics_df.loc[quality_mask].reset_index(drop=True)
@@ -1098,6 +1108,25 @@ def run_preprocessing(
         if keep_stages:
             stage_arrays["baseline"] = baselines
             stage_arrays["baseline_corrected"] = result.copy()
+
+        # Clip negative residuals introduced by baseline overshoot.
+        # Physical Raman intensity must be >= 0; negatives violate this.
+        # Record per-spectrum fraction clipped for QC audit.
+        if result.size > 0:
+            neg_mask = result < 0
+            clipped_fraction = neg_mask.sum(axis=1) / max(result.shape[1], 1)
+            result = np.maximum(result, 0.0)
+            if "clipped_fraction" in metrics_df.columns:
+                metrics_df.loc[:, "clipped_fraction"] = clipped_fraction
+            n_clipped = int((clipped_fraction > 0).sum())
+            if n_clipped > 0:
+                logger.debug(
+                    "Baseline clip: %d/%d spectra had negative channels "
+                    "(mean clipped fraction %.4f)",
+                    n_clipped,
+                    len(clipped_fraction),
+                    float(clipped_fraction[clipped_fraction > 0].mean()),
+                )
 
     spike_cfg = pre_cfg.get("spike_repair", {})
     if bool(spike_cfg.get("enabled", True)) and result.size > 0:

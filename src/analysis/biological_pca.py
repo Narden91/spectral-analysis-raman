@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 from pathlib import Path
 from typing import Iterable
@@ -66,6 +66,7 @@ class SubjectInputs:
     axes: dict[str, np.ndarray]
     matrices: dict[str, np.ndarray]
     subjects: list[str]
+    excluded_subjects: list[dict[str, str]] = field(default_factory=list)  # [{subject_id, reason}]
 
 
 @dataclass(frozen=True)
@@ -432,6 +433,7 @@ def build_subject_inputs(max_subjects: int | None = None, cfg: dict | None = Non
         axes=axes,
         matrices=matrix_arrays,
         subjects=included_subjects,
+        excluded_subjects=[],
     )
 
 
@@ -456,14 +458,24 @@ def _build_subject_inputs_from_materialized_store(max_subjects: int | None = Non
     region_rows: list[dict[str, object]] = []
     subject_rows: list[dict[str, object]] = []
 
+    excluded_subjects: list[dict[str, str]] = []
     for subject_id in subjects:
         has_all_blocks = all(
             np.any(payloads[block]["subject_ids"].astype(str) == str(subject_id))
             for block in BLOCKS
         )
         if not has_all_blocks:
+            missing_blocks = [b for b in BLOCKS if not np.any(payloads[b]["subject_ids"].astype(str) == str(subject_id))]
+            excluded_subjects.append({"subject_id": str(subject_id), "reason": f"missing blocks: {', '.join(missing_blocks)}"})
             continue
         included_subjects.append(str(subject_id))
+
+    if excluded_subjects:
+        logger.warning(
+            "BioPCA excluded %d subject(s) for missing spectral data: %s",
+            len(excluded_subjects),
+            ", ".join(d["subject_id"] for d in excluded_subjects[:10]),
+        )
 
     for subject_id in included_subjects:
         feature_values: dict[str, float] = {}
@@ -539,6 +551,7 @@ def _build_subject_inputs_from_materialized_store(max_subjects: int | None = Non
         axes=axes,
         matrices=matrix_arrays,
         subjects=included_subjects,
+        excluded_subjects=excluded_subjects,
     )
 
 
@@ -1489,6 +1502,35 @@ def _write_interpretation_md(result: ModelResult, output_dir: Path) -> None:
     (output_dir / "conservative_interpretation.md").write_text(text, encoding="utf-8")
 
 
+def _build_pca_whole_block_contributions(result: ModelResult) -> pd.DataFrame:
+    """Compute per-PC loading variance share for each spectral block in PCA_whole.
+
+    Unweighted block concatenation means blocks with more total variance dominate.
+    This table surfaces the imbalance so readers know which block drives each PC.
+    Rows: one per (PC, spectral_block). Columns: PC, spectral_block, n_features,
+    sum_sq_loading, block_variance_share.
+    """
+    if "spectral_block" not in result.loadings.columns:
+        return pd.DataFrame()
+    rows: list[dict[str, object]] = []
+    pcs = [pc for pc in CANONICAL_PCS if f"{pc}_loading" in result.loadings.columns]
+    for pc in pcs:
+        col = f"{pc}_loading"
+        total_ss = float((result.loadings[col] ** 2).sum())
+        for block, grp in result.loadings.groupby("spectral_block"):
+            block_ss = float((grp[col] ** 2).sum())
+            rows.append(
+                {
+                    "PC": pc,
+                    "spectral_block": str(block),
+                    "n_features": int(len(grp)),
+                    "sum_sq_loading": round(block_ss, 6),
+                    "block_variance_share": round(block_ss / total_ss, 4) if total_ss > 0 else float("nan"),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def _build_pca_comparison_summary(results: list[ModelResult]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for result in results:
@@ -1612,12 +1654,24 @@ def _write_outputs(
     cross_region_dir = get_cross_region_summary_dir()
     comparison = _build_pca_comparison_summary(results)
 
+    # Build subject-retention audit table (included + excluded with reasons).
+    included_rows = [
+        {"subject_id": sid, "status": "included", "reason": ""}
+        for sid in inputs.subjects
+    ]
+    excluded_rows = [
+        {"subject_id": d["subject_id"], "status": "excluded", "reason": d.get("reason", "")}
+        for d in (inputs.excluded_subjects or [])
+    ]
+    retention_df = pd.DataFrame(included_rows + excluded_rows).sort_values("subject_id").reset_index(drop=True)
+
     shared_tables = {
         "subject_spectra.csv": inputs.subject_spectra,
         "subject_region_counts.csv": inputs.subject_region_counts,
         "input_provenance.csv": inputs.input_provenance,
         "subject_biological_pca_scores.csv": features,
         "pca_comparison_summary.csv": comparison,
+        "subject_retention.csv": retention_df,
     }
     for filename, df in shared_tables.items():
         df.to_csv(cross_region_dir / filename, index=False)
@@ -1640,6 +1694,11 @@ def _write_outputs(
         }
         for filename, df in model_tables.items():
             df.to_csv(model_dir / filename, index=False)
+
+        if result.name == "PCA_whole":
+            block_contrib = _build_pca_whole_block_contributions(result)
+            if not block_contrib.empty:
+                block_contrib.to_csv(model_dir / "pca_whole_block_contributions.csv", index=False)
 
         pcs = [pc for pc in CANONICAL_PCS if pc in result.explained_variance["PC"].tolist()]
         _plot_scores_pair(result, model_dir, "PC1", "PC2", "scores_pc1_pc2.png")
