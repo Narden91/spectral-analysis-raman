@@ -70,6 +70,23 @@ def _mean_signal(matrix: np.ndarray) -> np.ndarray:
     return np.nanmean(np.asarray(matrix, dtype=float), axis=0)
 
 
+def _snv_rescale(y: np.ndarray) -> np.ndarray:
+    """SNV-rescale a 1-D spectrum for display only (zero mean, unit std).
+
+    Applied when regions with different normalization methods (e.g. area norm vs
+    SNV) are plotted on a shared y-axis.  Never mutates stored data.
+    """
+    arr = np.asarray(y, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return arr
+    mu = float(np.mean(finite))
+    sd = float(np.std(finite))
+    if sd < 1e-12:
+        return arr - mu
+    return (arr - mu) / sd
+
+
 def _peak_indices(signal: np.ndarray, peak_cfg: dict) -> np.ndarray:
     if not bool(peak_cfg.get("enabled", True)):
         return np.array([], dtype=int)
@@ -494,15 +511,23 @@ def plot_cohort_mean_spectra_grid(
     for ax, cohort in zip(axes.flat, COHORT_ORDER):
         condition, gender = cohort
         segments = cohort_segments.get(cohort, {})
+        # SNV-rescale every region's mean spectrum for display so regions with
+        # different normalization (area norm vs SNV) share a comparable y-axis.
+        # Peak annotation uses the rescaled signal for prominence detection;
+        # actual wavenumber positions are unaffected.
+        display_segments = {
+            region: _snv_rescale(np.asarray(y, dtype=float))
+            for region, y in segments.items()
+        }
         annotated_segments: list[tuple[np.ndarray, np.ndarray, np.ndarray, str]] = []
         for region in region_axes:
-            y = segments.get(region)
-            if y is None:
+            y_disp = display_segments.get(region)
+            if y_disp is None:
                 continue
             color = REGION_COLORS.get(region, "#475569")
             (line,) = ax.plot(
                 display_axes[region],
-                y,
+                y_disp,
                 color=color,
                 linewidth=1.8,
                 label=_region_title(region),
@@ -513,7 +538,7 @@ def plot_cohort_mean_spectra_grid(
             annotated_segments.append(
                 (
                     np.asarray(display_axes[region], dtype=float),
-                    np.asarray(y, dtype=float),
+                    y_disp,
                     np.asarray(region_axes[region], dtype=float),
                     color,
                 )
@@ -521,7 +546,7 @@ def plot_cohort_mean_spectra_grid(
         _set_spectrum_limits(
             ax,
             display_axes.values(),
-            [np.asarray(values, dtype=float) for values in segments.values()],
+            list(display_segments.values()),
             top_pad=0.22,
         )
         for x_values, y_values, actual_wavenumbers, color in annotated_segments:
