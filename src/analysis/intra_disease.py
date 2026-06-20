@@ -35,6 +35,12 @@ _DEFAULT_TARGETS = (
 )
 
 
+def smooth_correlation_profile(values: np.ndarray, window: int = 9) -> np.ndarray:
+    """Light rolling smoother for visualization only."""
+    series = pd.Series(np.asarray(values, dtype=float))
+    return series.rolling(window=window, center=True, min_periods=1).mean().to_numpy(dtype=float)
+
+
 def build_disease_subject_mean_matrix(
     df_index: pd.DataFrame,
     clinical_df: pd.DataFrame,
@@ -224,10 +230,142 @@ def summarize_significant_targets(
     return pd.DataFrame(rows)
 
 
+def summarize_correlation_regions(
+    correlations: pd.DataFrame,
+    *,
+    spectral_range: str,
+    biological_regions: pd.DataFrame | None = None,
+    abs_quantile: float = 0.9,
+    min_width_cm: float = 8.0,
+    merge_gap_cm: float = 6.0,
+) -> pd.DataFrame:
+    """Merge adjacent high-absolute-rho intervals into region-level summaries."""
+    if correlations.empty:
+        return pd.DataFrame(
+            columns=[
+                "target",
+                "spectral_range",
+                "region_id",
+                "start_cm-1",
+                "end_cm-1",
+                "width_cm-1",
+                "integrated_abs_rho",
+                "max_abs_rho",
+                "mean_abs_rho",
+                "min_fdr_q",
+                "n_significant_wavenumbers",
+                "has_fdr_significant",
+                "overlaps_biological_pca_region",
+                "overlapping_pc",
+                "overlap_fraction",
+                "overlap_region_id",
+            ]
+        )
+
+    rows: list[dict[str, object]] = []
+    biological_regions = biological_regions.copy() if biological_regions is not None else pd.DataFrame()
+    if not biological_regions.empty and "spectral_block" in biological_regions.columns:
+        biological_regions = biological_regions[biological_regions["spectral_block"].astype(str) == str(spectral_range)].copy()
+
+    for target, grp in correlations.groupby("target", sort=False):
+        ordered = grp.sort_values("wavenumber").reset_index(drop=True)
+        abs_rho = ordered["rho"].abs().to_numpy(dtype=float)
+        if not np.isfinite(abs_rho).any():
+            continue
+        threshold = float(np.nanquantile(abs_rho, abs_quantile))
+        active = abs_rho >= threshold
+        wavenumbers = ordered["wavenumber"].to_numpy(dtype=float)
+        starts: list[int] = []
+        stops: list[int] = []
+        start: int | None = None
+        for idx, is_active in enumerate(active):
+            if is_active and start is None:
+                start = idx
+            elif not is_active and start is not None:
+                starts.append(start)
+                stops.append(idx - 1)
+                start = None
+        if start is not None:
+            starts.append(start)
+            stops.append(len(active) - 1)
+
+        merged: list[list[int]] = []
+        for left, right in zip(starts, stops):
+            if not merged:
+                merged.append([left, right])
+                continue
+            gap = float(wavenumbers[left] - wavenumbers[merged[-1][1]])
+            if gap <= merge_gap_cm:
+                merged[-1][1] = right
+            else:
+                merged.append([left, right])
+
+        region_counter = 0
+        for left, right in merged:
+            start_cm = float(wavenumbers[left])
+            end_cm = float(wavenumbers[right])
+            width = end_cm - start_cm
+            if width < min_width_cm:
+                continue
+            region_counter += 1
+            window = ordered.iloc[left : right + 1].copy()
+            overlap_flag = False
+            overlapping_pc = None
+            overlap_fraction = 0.0
+            overlap_region_id = None
+            if not biological_regions.empty:
+                overlaps = biological_regions[
+                    (biological_regions["start_cm-1"].astype(float) <= end_cm)
+                    & (biological_regions["end_cm-1"].astype(float) >= start_cm)
+                ].copy()
+                if not overlaps.empty:
+                    overlaps["overlap_width"] = overlaps.apply(
+                        lambda row: max(
+                            0.0,
+                            min(end_cm, float(row["end_cm-1"])) - max(start_cm, float(row["start_cm-1"])),
+                        ),
+                        axis=1,
+                    )
+                    best = overlaps.sort_values("overlap_width", ascending=False).iloc[0]
+                    overlap_width = float(best["overlap_width"])
+                    overlap_flag = overlap_width > 0
+                    overlap_fraction = overlap_width / max(width, 1e-9)
+                    overlapping_pc = best.get("PC")
+                    overlap_region_id = best.get("region_id")
+
+            rows.append(
+                {
+                    "target": target,
+                    "spectral_range": spectral_range,
+                    "region_id": f"{target}_R{region_counter}",
+                    "start_cm-1": start_cm,
+                    "end_cm-1": end_cm,
+                    "width_cm-1": width,
+                    "integrated_abs_rho": float(np.trapz(window["rho"].abs().to_numpy(dtype=float), window["wavenumber"].to_numpy(dtype=float))),
+                    "max_abs_rho": float(window["rho"].abs().max()),
+                    "mean_abs_rho": float(window["rho"].abs().mean()),
+                    "min_fdr_q": float(window["fdr_q"].min()),
+                    "n_significant_wavenumbers": int(window["significant"].sum()),
+                    "has_fdr_significant": bool(window["significant"].any()),
+                    "overlaps_biological_pca_region": overlap_flag,
+                    "overlapping_pc": overlapping_pc,
+                    "overlap_fraction": overlap_fraction,
+                    "overlap_region_id": overlap_region_id,
+                }
+            )
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["target", "integrated_abs_rho"], ascending=[True, False]).reset_index(drop=True)
+
+
 def run_intra_disease_pca(
     mean_spectra: np.ndarray,
     n_components: int = 10,
     random_state: int = 42,
+    *,
+    warn_on_high_pc1: bool = True,
 ) -> dict:
     """Run PCA specifically on disease-only subjects.
     
@@ -255,4 +393,5 @@ def run_intra_disease_pca(
         n_components=min(n_components, mean_spectra.shape[0] - 1),
         random_state=random_state,
         scale=False,
+        warn_on_high_pc1=warn_on_high_pc1,
     )

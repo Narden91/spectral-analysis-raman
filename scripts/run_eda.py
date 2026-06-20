@@ -141,17 +141,15 @@ def _parse_args() -> argparse.Namespace:
 
 def _write_warning_summaries(output_root: Path) -> list[str]:
     warnings: list[str] = []
-    for model_name in ("PCA_1330", "PCA_2850", "PCA_whole"):
-        canonical_dir = get_biological_pca_canonical_dir(model_name)
-        report_path = canonical_dir / "pc1_dominance_report.md"
-        if report_path.exists():
-            text = report_path.read_text(encoding="utf-8")
-            first_content_line = next(
-                (line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")),
-                "PC1 dominance report written.",
-            )
-            relative_report = report_path.relative_to(output_root)
-            warnings.append(f"{model_name}: {first_content_line} See {relative_report}")
+    for report_path in sorted(output_root.rglob("pc1_dominance_report.md")):
+        text = report_path.read_text(encoding="utf-8")
+        content_lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
+        summary_line = next(
+            (line for line in content_lines if "PC1 variance:" in line or line.startswith("PC1 explains")),
+            content_lines[0] if content_lines else "PC1 dominance report written.",
+        )
+        relative_report = report_path.relative_to(output_root)
+        warnings.append(f"{relative_report.parent.name}: {summary_line} See {relative_report}")
 
     metadata_dir = get_run_metadata_dir()
     (metadata_dir / "warning_summary.md").write_text(
@@ -177,7 +175,6 @@ def _log_final_summary(ranges: list[str], biological_ran: bool, warnings: list[s
         logger.info("  %s/", _range_label(spectral_range))
     logger.info("  04_cross_region_summary/")
     if biological_ran:
-        logger.info("  biological_pca/")
         logger.info("Biological PCA:")
         for model_name in ("PCA_1330", "PCA_2850", "PCA_whole"):
             logger.info(

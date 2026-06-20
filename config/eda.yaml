@@ -101,11 +101,10 @@ whole_spectra:
 # ---------------------------------------------------------------------------
 biological_pca:
   enabled: true
-  n_components: 5
+  n_components: 3
   aggregation: "median"
   scale: false
   output_subdir: "biological_pca"
-  pc3_variance_threshold: 0.05
   loading_region_quantile: 0.9
   loading_region_min_width_cm: 8.0
   loading_region_merge_gap_cm: 6.0

@@ -1,4 +1,4 @@
-"""Full Exploratory Data Analysis pipeline for Raman spectroscopy data.
+﻿"""Full Exploratory Data Analysis pipeline for Raman spectroscopy data.
 
 Supports two public workflows:
 1. Single-range EDA for `1300` or `2850`, which keeps the broad descriptive,
@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 from src import (
     config,
     get_eda_phase_dir,
+    get_biological_pca_canonical_dir,
 )
 from src.analysis.spectral_loader import (
     build_group_matrix,
@@ -49,6 +50,8 @@ from src.analysis.robustness import run_region_robustness, write_region_influenc
 from src.analysis.intra_disease import (
     build_disease_subject_mean_matrix,
     compute_intra_disease_correlations,
+    smooth_correlation_profile,
+    summarize_correlation_regions,
     summarize_significant_targets,
 )
 from src.preprocessing.pipeline import preprocess_spectra, apply_region_weights
@@ -62,6 +65,8 @@ from src.visualization.eda_plots import (
     plot_difference_spectra,
     plot_variance_decomposition,
     plot_correlation_spectrum,
+    plot_intra_disease_correlation_overview,
+    plot_intra_disease_top_regions,
 )
 from src.visualization.advanced_plots import plot_all_bands_raincloud
 
@@ -72,7 +77,7 @@ _VALID_RANGES = {"1300", "2850", "both"}
 
 
 def _range_title(spectral_range: str) -> str:
-    return "whole spectra" if spectral_range == "both" else f"{spectral_range} cm⁻¹"
+    return "whole spectra" if spectral_range == "both" else f"{spectral_range} cm-1"
 
 
 def _save_fig(fig: matplotlib.figure.Figure, name: str, out_dir: Path):
@@ -89,6 +94,67 @@ def _log_phase(title: str) -> None:
 
 def _figure_flag(key: str, default: bool = True) -> bool:
     return bool(config.get("analysis", {}).get("figures", {}).get(key, default))
+
+
+def _write_pca_pc1_dominance_report(
+    output_dir: Path,
+    *,
+    model_name: str,
+    model_type: str,
+    pca_result: dict,
+    n_items: int,
+    item_label: str,
+    preprocessing_context: str,
+    score_plot: str,
+    loading_plot: str,
+    wavenumbers: np.ndarray | None = None,
+) -> None:
+    pc1_ratio = float(pca_result.get("pc1_variance_ratio", np.nan))
+    if not np.isfinite(pc1_ratio) or pc1_ratio <= 0.8:
+        return
+
+    ev = np.asarray(pca_result.get("explained_variance_ratio", []), dtype=float)
+    cum = np.asarray(pca_result.get("cumulative_variance", []), dtype=float)
+    top_lines: list[str] = []
+    if wavenumbers is not None and np.asarray(pca_result.get("loadings")).size:
+        pc1_loadings = np.asarray(pca_result["loadings"][0], dtype=float)
+        top_idx = np.argsort(np.abs(pc1_loadings))[-10:][::-1]
+        top_lines = [
+            f"- {float(wavenumbers[idx]):.1f} cm-1: loading {pc1_loadings[idx]:+.4f}"
+            for idx in top_idx
+        ]
+
+    lines = [
+        f"# {model_name} PC1 Dominance Report",
+        "",
+        f"- Model name: {model_name}",
+        f"- Model type: {model_type}",
+        f"- {item_label}: {n_items}",
+        f"- PC1 variance: {pc1_ratio * 100:.1f}%",
+        f"- Cumulative variance (PC1-PC3): {float(cum[min(2, len(cum) - 1)]) * 100:.1f}%" if len(cum) else "- Cumulative variance (PC1-PC3): N/A",
+        f"- Preprocessing context: {preprocessing_context}",
+        f"- Score plot: {score_plot}",
+        f"- Loading plot: {loading_plot}",
+        "",
+        "This is a QC finding. Dominant PC1 may reflect baseline/background structure, normalization effects, concentration differences, technical structure, subject structure, or true broad variance.",
+        "",
+    ]
+    if len(ev):
+        lines.extend(
+            [
+                "## Variance Table",
+                "",
+                "| PC | Explained variance | Cumulative variance |",
+                "|---|---:|---:|",
+            ]
+        )
+        for i in range(min(3, len(ev))):
+            lines.append(f"| PC{i + 1} | {ev[i] * 100:.1f}% | {cum[i] * 100:.1f}% |")
+        lines.append("")
+    if top_lines:
+        lines.extend(["## Top loading wavenumbers", "", *top_lines, ""])
+
+    (output_dir / "pc1_dominance_report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 
@@ -108,7 +174,7 @@ def _estimate_variance_decomposition(
 
         Total = Between-group (SSB/N) + Within-group / Between-subject (SSW/N)
 
-    We still report a third "measurement-noise" component — the fraction of
+    We still report a third "measurement-noise" component - the fraction of
     within-group variance that can be attributed to finite spatial averaging
     (Var(pixel) / n_pixels).  This is estimated by preprocessing pixel
     spectra from a subsample of subjects.
@@ -291,7 +357,7 @@ def _run_single_range_eda(
                 logger.warning("No data for group %s, skipping", key)
                 continue
             logger.debug(
-                "  %s: %d subjects × %d wavenumbers",
+                "  %s: %d subjects x %d wavenumbers",
                 key,
                 spectra.shape[0],
                 spectra.shape[1],
@@ -317,7 +383,7 @@ def _run_single_range_eda(
                     f"expected {len(wavenumbers)} wavenumbers, got {len(wave)}."
                 )
             logger.debug(
-                "  %s: %d subjects × %d wavenumbers",
+                "  %s: %d subjects x %d wavenumbers",
                 key,
                 spectra.shape[0],
                 spectra.shape[1],
@@ -325,7 +391,7 @@ def _run_single_range_eda(
 
     if not raw_groups:
         raise RuntimeError(
-            "No valid groups loaded — check that spectra files are present and "
+            "No valid groups loaded - check that spectra files are present and "
             "preprocessing did not discard all data."
         )
     assert wavenumbers is not None, "wavenumbers must be set when at least one group is loaded"
@@ -392,7 +458,7 @@ def _run_single_range_eda(
     apply_to = set(rw_cfg.get("apply_to", []) if rw_cfg.get("enabled", False) else [])
 
     if spectral_range != "both":
-        _log_phase("PHASE 2: Visualization — Group comparisons")
+        _log_phase("PHASE 2: Visualization - Group comparisons")
 
         gc_dir = phase_dir("group_comp")
 
@@ -412,8 +478,8 @@ def _run_single_range_eda(
                         wavenumbers,
                         groups[g_key],
                         groups[c_key],
-                        label=f"{gender.capitalize()} (Disease − Control)",
-                        title=f"Difference Spectrum — {gender.capitalize()} ({range_title})",
+                        label=f"{gender.capitalize()} (Disease âˆ’ Control)",
+                        title=f"Difference Spectrum - {gender.capitalize()} ({range_title})",
                         color=GROUP_COLORS.get(g_key, "#CC3311"),
                     )
                     _save_fig(fig, f"difference_spectrum_{gender}.png", gc_dir)
@@ -442,12 +508,14 @@ def _run_single_range_eda(
                 pca_input,
                 n_components=n_comps,
                 random_state=42,
+                warn_on_high_pc1=False,
             )
         else:
             pca_result = run_pca(
                 pca_input,
                 n_components=n_comps,
                 scale=False,
+                warn_on_high_pc1=False,
             )
 
         fig, _ = plot_pca_scores(
@@ -540,9 +608,21 @@ def _run_single_range_eda(
             top_k=top_k,
         )
         interp_df.to_csv(pca_dir / f"pca_loading_interpretation_{spectral_range}.csv", index=False)
+        _write_pca_pc1_dominance_report(
+            pca_dir,
+            model_name=f"PCA_{spectral_range}_area_level_qc",
+            model_type="area-level QC PCA",
+            pca_result=pca_result,
+            n_items=pca_input.shape[0],
+            item_label="Areas used",
+            preprocessing_context="area-level preprocessed, normalized spectra used for exploratory/QC PCA",
+            score_plot="pca_scores_pc1_pc2.png",
+            loading_plot="pca_loadings.png",
+            wavenumbers=wavenumbers,
+        )
 
         logger.debug(
-            "Saved PCA loadings CSV (%d wavenumbers × %d PCs)",
+            "Saved PCA loadings CSV (%d wavenumbers x %d PCs)",
             len(wavenumbers),
             loadings_matrix.shape[0],
         )
@@ -580,7 +660,7 @@ def _run_single_range_eda(
                     fig_rc, _ = plot_all_bands_raincloud(
                         all_bands[band_cols],
                         np.array(band_labels),
-                        title=f"Raman Band Distributions (Raincloud) — {range_title}",
+                        title=f"Raman Band Distributions (Raincloud) - {range_title}",
                     )
                     _save_fig(fig_rc, "band_rainclouds.png", band_dir)
 
@@ -674,7 +754,17 @@ def _run_single_range_eda(
                 else:
                     intra_dir = phase_dir("intra_disease")
                     corr_df = compute_intra_disease_correlations(spectra_id, wn_id, clin_aligned)
+                    biological_regions = pd.DataFrame()
+                    model_name = {"1300": "PCA_1330", "2850": "PCA_2850"}.get(spectral_range)
+                    if model_name is not None:
+                        bio_regions_path = get_biological_pca_canonical_dir(model_name) / "loading_regions.csv"
+                        if bio_regions_path.exists():
+                            biological_regions = pd.read_csv(bio_regions_path)
+                    smoothed_by_target: dict[str, np.ndarray] = {}
                     for target, grp in corr_df.groupby("target"):
+                        grp = grp.sort_values("wavenumber").reset_index(drop=True)
+                        smoothed = smooth_correlation_profile(grp["rho"].to_numpy(dtype=float))
+                        smoothed_by_target[target] = smoothed
                         grp.to_csv(
                             intra_dir / f"intra_disease_corr_{target}_{spectral_range}.csv", index=False
                         )
@@ -682,12 +772,47 @@ def _run_single_range_eda(
                             grp["wavenumber"].to_numpy(dtype=float),
                             grp["rho"].to_numpy(dtype=float),
                             grp["significant"].to_numpy(dtype=bool),
-                            title=f"Intra-disease correlation — {target} ({range_title})",
+                            title=f"Intra-disease correlation - {target} ({range_title})",
                         )
                         _save_fig(fig, f"intra_disease_corr_{target}_{spectral_range}.png", intra_dir)
+                        target_regions = summarize_correlation_regions(
+                            grp,
+                            spectral_range=spectral_range,
+                            biological_regions=biological_regions,
+                        )
+                        fig, _ = plot_correlation_spectrum(
+                            grp["wavenumber"].to_numpy(dtype=float),
+                            grp["rho"].to_numpy(dtype=float),
+                            grp["significant"].to_numpy(dtype=bool),
+                            title=f"Intra-disease correlation - {target} ({range_title})",
+                            smoothed_rho=smoothed,
+                            top_regions=target_regions.head(5),
+                            annotate_no_significant=not bool(grp["significant"].any()),
+                        )
+                        _save_fig(fig, f"intra_disease_corr_{target}_{spectral_range}_enhanced.png", intra_dir)
 
                     summary_df = summarize_significant_targets(corr_df)
                     summary_df.to_csv(intra_dir / f"intra_disease_summary_{spectral_range}.csv", index=False)
+                    region_summary_df = summarize_correlation_regions(
+                        corr_df,
+                        spectral_range=spectral_range,
+                        biological_regions=biological_regions,
+                    )
+                    region_summary_df.to_csv(
+                        intra_dir / f"intra_disease_top_regions_{spectral_range}.csv",
+                        index=False,
+                    )
+                    fig, _ = plot_intra_disease_correlation_overview(
+                        corr_df,
+                        smoothed_by_target=smoothed_by_target,
+                        title=f"Intra-disease correlation overview ({range_title})",
+                    )
+                    _save_fig(fig, f"intra_disease_correlation_overview_{spectral_range}.png", intra_dir)
+                    fig, _ = plot_intra_disease_top_regions(
+                        region_summary_df,
+                        title=f"Top intra-disease correlation regions ({range_title})",
+                    )
+                    _save_fig(fig, f"intra_disease_top_regions_{spectral_range}.png", intra_dir)
                     logger.info(
                         "Intra-disease correlations: %d subjects, %d targets tested",
                         spectra_id.shape[0],

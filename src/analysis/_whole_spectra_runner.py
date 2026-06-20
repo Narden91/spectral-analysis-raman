@@ -16,6 +16,7 @@ from src import (
 from src.analysis._single_range import (
     _estimate_variance_decomposition,
     _log_phase,
+    _write_pca_pc1_dominance_report,
     _save_fig,
 )
 from src.analysis.joint_dr import joint_pca_mfa
@@ -134,6 +135,7 @@ def _run_whole_spectra_eda(
         all_spectra,
         n_components=structure_components,
         scale=False,
+        warn_on_high_pc1=False,
     )
     fig, _ = plot_pca_scores(
         pca_result["scores"],
@@ -165,6 +167,18 @@ def _run_whole_spectra_eda(
         }
     )
     pca_variance_df.to_csv(structure_dir / "pca_variance_whole.csv", index=False)
+    _write_pca_pc1_dominance_report(
+        structure_dir,
+        model_name="PCA_whole_area_level_qc",
+        model_type="whole-spectrum PCA",
+        pca_result=pca_result,
+        n_items=all_spectra.shape[0],
+        item_label="Areas used",
+        preprocessing_context="paired whole-spectrum area-level spectra after preprocessing and area-level SNV",
+        score_plot="pca_scores_pc1_pc2.png",
+        loading_plot="scree_plot.png",
+        wavenumbers=wavenumbers,
+    )
 
     if split_index is not None:
         emit_mfa = bool(

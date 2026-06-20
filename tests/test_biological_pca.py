@@ -34,7 +34,7 @@ def _cfg() -> dict:
             }
         },
         "biological_pca": {
-            "n_components": 2,
+            "n_components": 3,
             "aggregation": "median",
             "scale": False,
             "loading_region_quantile": 0.8,
@@ -252,7 +252,7 @@ def test_whole_loading_regions_preserve_block_identity() -> None:
     )
 
 
-def test_default_output_uses_index_and_canonical_dirs(monkeypatch, tmp_path) -> None:
+def test_default_output_uses_only_canonical_dirs(monkeypatch, tmp_path) -> None:
     cfg = _cfg()
     expected_root = tmp_path / "Results_control_vs_disease"
     inputs = _inputs()
@@ -277,22 +277,27 @@ def test_default_output_uses_index_and_canonical_dirs(monkeypatch, tmp_path) -> 
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _index_dir() -> Path:
-        path = expected_root / "biological_pca"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
     monkeypatch.setattr(src, "_output_dir", lambda key: expected_root)
     monkeypatch.setattr(src, "get_biological_pca_canonical_dir", _canonical_dir)
     monkeypatch.setattr(src, "get_cross_region_summary_dir", _cross_region_dir)
-    monkeypatch.setattr(src, "get_biological_pca_index_dir", _index_dir)
     monkeypatch.setattr(biological_pca, "get_biological_pca_canonical_dir", src.get_biological_pca_canonical_dir)
     monkeypatch.setattr(biological_pca, "get_cross_region_summary_dir", src.get_cross_region_summary_dir)
-    monkeypatch.setattr(biological_pca, "get_biological_pca_index_dir", src.get_biological_pca_index_dir)
 
     out = run_biological_pca(cfg=cfg)
-    assert out == expected_root / "biological_pca"
+    assert out["PCA_1330"] == _canonical_dir("PCA_1330")
+    assert out["cross_region_summary"] == _cross_region_dir()
     assert (_canonical_dir("PCA_1330") / "scores.csv").exists()
+    assert (_canonical_dir("PCA_1330") / "scores_pc1_pc3.png").exists()
+    assert (_canonical_dir("PCA_1330") / "scores_pc2_pc3.png").exists()
+    assert (_canonical_dir("PCA_1330") / "scores_pc_pairgrid.png").exists()
+    assert (_canonical_dir("PCA_1330") / "loadings_pc1_pc2_pc3.png").exists()
+    assert (_canonical_dir("PCA_1330") / "loading_regions_pc1_pc2_pc3.png").exists()
     assert (expected_root / "04_cross_region_summary" / "subject_biological_pca_scores.csv").exists()
-    assert (out / "index.csv").exists()
-    assert not (out / "PCA_1330" / "scores.csv").exists()
+    assert not (expected_root / "biological_pca").exists()
+
+
+def test_comparison_summary_and_consistency_include_pc3() -> None:
+    cfg = _cfg()
+    results = fit_biological_pca_models(_inputs(), cfg=cfg)
+    comparison = biological_pca._build_pca_comparison_summary(results)
+    assert set(comparison["PC"]) == {"PC1", "PC2", "PC3"}

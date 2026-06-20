@@ -575,11 +575,17 @@ def plot_correlation_spectrum(
     rho: np.ndarray,
     significant: np.ndarray,
     title: str = "Correlation Spectrum",
+    *,
+    smoothed_rho: np.ndarray | None = None,
+    top_regions: pd.DataFrame | None = None,
+    annotate_no_significant: bool = False,
 ) -> tuple[plt.Figure, plt.Axes]:
     """Plot per-wavenumber Spearman rho with FDR-significant bands shaded."""
     fig, ax = plt.subplots(figsize=(12, 4.5))
 
-    ax.plot(wavenumbers, rho, color="#264653", linewidth=1.2)
+    ax.plot(wavenumbers, rho, color="#94A3B8", linewidth=0.9, alpha=0.8, label="Raw rho")
+    if smoothed_rho is not None:
+        ax.plot(wavenumbers, smoothed_rho, color="#264653", linewidth=1.8, label="Smoothed rho")
     ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
 
     sig = np.asarray(significant, dtype=bool)
@@ -588,14 +594,97 @@ def plot_correlation_spectrum(
             wavenumbers, ax.get_ylim()[0], ax.get_ylim()[1],
             where=sig, color="#F4A261", alpha=0.18, linewidth=0,
         )
+    elif annotate_no_significant:
+        ax.text(
+            0.99,
+            0.96,
+            "No FDR-significant wavenumbers",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=10,
+            color="#7C2D12",
+            bbox={"facecolor": "white", "edgecolor": "#FDBA74", "alpha": 0.9},
+        )
+
+    if top_regions is not None and not top_regions.empty:
+        y_max = float(np.nanmax(np.abs(rho))) if len(rho) else 0.0
+        for _, row in top_regions.iterrows():
+            ax.axvspan(
+                float(row["start_cm-1"]),
+                float(row["end_cm-1"]),
+                color="#2A9D8F",
+                alpha=0.12,
+                linewidth=0,
+            )
+        if y_max > 0:
+            for _, row in top_regions.head(5).iterrows():
+                start_cm = float(row["start_cm-1"])
+                end_cm = float(row["end_cm-1"])
+                ax.text((start_cm + end_cm) / 2, y_max * 0.9, str(row.get("region_id", "")), ha="center", va="bottom", fontsize=8)
 
     ax.set_xlabel("Raman Shift (cm$^{-1}$)", fontsize=12)
     ax.set_ylabel("Spearman ρ", fontsize=12)
     ax.set_title(title, fontsize=14)
     ax.set_xlim(wavenumbers.min(), wavenumbers.max())
     ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    if smoothed_rho is not None:
+        ax.legend(loc="upper right", fontsize=9)
     fig.tight_layout()
 
+    return fig, ax
+
+
+def plot_intra_disease_correlation_overview(
+    correlations: pd.DataFrame,
+    *,
+    smoothed_by_target: dict[str, np.ndarray] | None = None,
+    title: str = "Intra-disease correlation overview",
+) -> tuple[plt.Figure, np.ndarray]:
+    targets = list(correlations["target"].dropna().unique())
+    n_targets = max(1, len(targets))
+    fig, axes = plt.subplots(n_targets, 1, figsize=(12, max(3.2, 2.6 * n_targets)), sharex=True)
+    if n_targets == 1:
+        axes = np.array([axes])
+    for ax, target in zip(axes, targets):
+        grp = correlations[correlations["target"] == target].sort_values("wavenumber")
+        smooth = None if smoothed_by_target is None else smoothed_by_target.get(target)
+        ax.plot(grp["wavenumber"], grp["rho"], color="#94A3B8", linewidth=0.8, alpha=0.75)
+        if smooth is not None:
+            ax.plot(grp["wavenumber"], smooth, color="#264653", linewidth=1.4)
+        sig = grp["significant"].to_numpy(dtype=bool)
+        if sig.any():
+            ax.fill_between(grp["wavenumber"], -1, 1, where=sig, color="#F4A261", alpha=0.16, linewidth=0)
+        ax.axhline(0, color="black", linestyle="--", linewidth=0.7)
+        ax.set_ylabel(target, fontsize=9)
+        ax.grid(True, axis="y", linestyle="--", alpha=0.25)
+    axes[-1].set_xlabel("Raman Shift (cm$^{-1}$)", fontsize=11)
+    fig.suptitle(title, y=1.01, fontsize=14)
+    fig.tight_layout()
+    return fig, axes
+
+
+def plot_intra_disease_top_regions(
+    region_df: pd.DataFrame,
+    *,
+    title: str = "Top intra-disease correlation regions",
+) -> tuple[plt.Figure, plt.Axes]:
+    fig, ax = plt.subplots(figsize=(10, max(4, 0.42 * max(1, len(region_df)))))
+    if region_df.empty:
+        ax.text(0.5, 0.5, "No high-absolute-rho regions", ha="center", va="center")
+        ax.set_axis_off()
+        return fig, ax
+    top = region_df.copy().head(12).iloc[::-1]
+    labels = [
+        f"{row['target']}: {row['start_cm-1']:.0f}-{row['end_cm-1']:.0f}"
+        for _, row in top.iterrows()
+    ]
+    colors = ["#2A9D8F" if bool(val) else "#94A3B8" for val in top["has_fdr_significant"]]
+    ax.barh(labels, top["integrated_abs_rho"], color=colors, edgecolor="#334155", linewidth=0.4)
+    ax.set_xlabel("Integrated |rho|")
+    ax.set_title(title)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.25)
+    fig.tight_layout()
     return fig, ax
 
 

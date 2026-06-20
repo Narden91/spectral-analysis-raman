@@ -113,8 +113,18 @@ outputs are written into the range-local result folders:
 - `02_ch_stretch_2850/06_biological_pca/`
 - `03_whole_spectrum_1300_plus_2850/04_biological_pca/`
 
-The root-level `biological_pca/` directory is retained as a compatibility and
-navigation index; there is no separate Biological PCA command.
+There is no separate Biological PCA command, and new runs do not generate a
+root-level `biological_pca/` directory.
+
+Biological PCA is reported with exactly three components: PC1, PC2, and PC3.
+Canonical figures per model are:
+
+- `scores_pc1_pc2.png`
+- `scores_pc1_pc3.png`
+- `scores_pc2_pc3.png`
+- `scores_pc_pairgrid.png`
+- `loadings_pc1_pc2_pc3.png`
+- `loading_regions_pc1_pc2_pc3.png`
 
 Spectral comparison and QC plots:
 
