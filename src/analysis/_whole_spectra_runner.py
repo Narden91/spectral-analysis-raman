@@ -19,6 +19,7 @@ from src.analysis._single_range import (
     _write_pca_pc1_dominance_report,
     _save_fig,
 )
+from src.analysis.eda_mode import resolve_eda_analysis_mode
 from src.analysis.joint_dr import joint_pca_mfa
 from src.analysis.statistics import (
     run_pca,
@@ -78,6 +79,7 @@ def _run_whole_spectra_eda(
     group_ids: dict[str, list[str]],
     range_title: str,
 ) -> dict:
+    analysis_mode = resolve_eda_analysis_mode(config)
     all_spectra = np.vstack(list(groups.values()))
     all_labels = np.concatenate([np.full(v.shape[0], k) for k, v in groups.items()])
     all_sids = []
@@ -246,38 +248,6 @@ def _run_whole_spectra_eda(
             ratio_export.insert(0, "subject_id", all_sids)
             ratio_export.to_csv(drivers_dir / "cross_region_ratios.csv", index=False)
 
-            ratio_test_frames = [
-                test_ratios_between_groups(
-                    ratio_df,
-                    np.array(
-                        [
-                            "disease" if "disease" in label else "control"
-                            for label in all_labels
-                        ]
-                    ),
-                    [("disease", "control")],
-                )
-            ]
-            available_groups = set(all_labels.tolist())
-            if {"female_disease", "female_control"}.issubset(available_groups):
-                ratio_test_frames.append(
-                    test_ratios_between_groups(
-                        ratio_df,
-                        all_labels,
-                        [("female_disease", "female_control")],
-                    )
-                )
-            if {"male_disease", "male_control"}.issubset(available_groups):
-                ratio_test_frames.append(
-                    test_ratios_between_groups(
-                        ratio_df,
-                        all_labels,
-                        [("male_disease", "male_control")],
-                    )
-                )
-            ratio_test_df = pd.concat(ratio_test_frames, ignore_index=True)
-            ratio_test_df.to_csv(drivers_dir / "ratio_group_tests.csv", index=False)
-
             fig, _ = plot_band_boxplots(
                 ratio_df,
                 all_labels,
@@ -286,11 +256,50 @@ def _run_whole_spectra_eda(
             )
             _save_fig(fig, "ratio_boxplots.png", drivers_dir)
 
-            fig, _ = plot_ratio_summary(
-                ratio_test_df,
-                title=f"Cross-Region Ratio Summary ({range_title})",
-            )
-            _save_fig(fig, "ratio_summary.png", drivers_dir)
+            if analysis_mode == "disease_vs_control":
+                ratio_test_frames = [
+                    test_ratios_between_groups(
+                        ratio_df,
+                        np.array(
+                            [
+                                "disease" if "disease" in label else "control"
+                                for label in all_labels
+                            ]
+                        ),
+                        [("disease", "control")],
+                    )
+                ]
+                available_groups = set(all_labels.tolist())
+                if {"female_disease", "female_control"}.issubset(available_groups):
+                    ratio_test_frames.append(
+                        test_ratios_between_groups(
+                            ratio_df,
+                            all_labels,
+                            [("female_disease", "female_control")],
+                        )
+                    )
+                if {"male_disease", "male_control"}.issubset(available_groups):
+                    ratio_test_frames.append(
+                        test_ratios_between_groups(
+                            ratio_df,
+                            all_labels,
+                            [("male_disease", "male_control")],
+                        )
+                    )
+                ratio_test_df = pd.concat(ratio_test_frames, ignore_index=True)
+                ratio_test_df.to_csv(drivers_dir / "ratio_group_tests.csv", index=False)
+                fig, _ = plot_ratio_summary(
+                    ratio_test_df,
+                    title=f"Cross-Region Ratio Summary ({range_title})",
+                )
+                _save_fig(fig, "ratio_summary.png", drivers_dir)
+            else:
+                logger.info(
+                    "Skipping ratio group comparisons for whole spectra: "
+                    "EDA mode '%s' has no control cohort contrasts.",
+                    analysis_mode,
+                )
+                ratio_test_df = pd.DataFrame()
 
     _log_phase("PHASE 3: Whole-spectrum variance context")
 
