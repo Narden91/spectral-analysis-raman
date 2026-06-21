@@ -29,7 +29,7 @@ from src.fusion.area_pipeline import process_subject_areas
 from src.io.file_crawler import build_file_index, disambiguate_subject_ids
 from src.io.txt_reader import read_txt_spectrum
 from src.metadata.clinical import load_clinical_data, merge_index_with_clinical
-from src.preprocessing.pipeline import run_preprocessing
+from src.preprocessing.pipeline import flatten_spectra_rows, run_preprocessing
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,21 @@ def _range_key(range_code: str) -> str:
     return "fingerprint" if str(range_code) == "1300" else "ch_stretch"
 
 
+def _area_entity_count(area_metadata: pd.DataFrame) -> int:
+    if area_metadata.empty:
+        return 0
+    if {"subject_id", "area_id"}.issubset(area_metadata.columns):
+        return int(
+            area_metadata[["subject_id", "area_id"]]
+            .astype(str)
+            .drop_duplicates()
+            .shape[0]
+        )
+    if "area_id" in area_metadata.columns:
+        return int(area_metadata["area_id"].astype(str).nunique())
+    return len(area_metadata)
+
+
 def _common_axis(vectors: list[np.ndarray]) -> np.ndarray:
     if not vectors:
         return np.array([], dtype=float)
@@ -149,11 +164,7 @@ def _read_raw_measurement_vectors(file_index: pd.DataFrame) -> dict[str, dict[st
     for _, row in file_index.iterrows():
         range_code = str(int(float(row["spectral_range_cm-1"])))
         wavenumbers, _, _, spectra, _ = read_txt_spectrum(row["filepath"])
-        flat = np.asarray(spectra, dtype=float)
-        if flat.ndim == 1:
-            flat = flat.reshape(1, -1)
-        elif flat.ndim > 2:
-            flat = flat.reshape(-1, flat.shape[-1])
+        flat = flatten_spectra_rows(spectra)
         grouped[range_code]["axes"].append(np.asarray(wavenumbers, dtype=float))
         grouped[range_code]["rows"].append(
             {
@@ -203,11 +214,7 @@ def _preprocess_measurement_vectors(file_index: pd.DataFrame) -> tuple[dict[str,
     for _, row in file_index.iterrows():
         range_code = str(int(float(row["spectral_range_cm-1"])))
         wavenumbers, _, _, spectra, _ = read_txt_spectrum(row["filepath"])
-        flat = np.asarray(spectra, dtype=float)
-        if flat.ndim == 1:
-            flat = flat.reshape(1, -1)
-        elif flat.ndim > 2:
-            flat = flat.reshape(-1, flat.shape[-1])
+        flat = flatten_spectra_rows(spectra)
         result = run_preprocessing(
             flat,
             np.asarray(wavenumbers, dtype=float),
@@ -325,15 +332,15 @@ def _whole_area_store_from_ranges(
     payload_2850: dict[str, np.ndarray],
 ) -> dict[str, np.ndarray]:
     rows_1300 = {
-        area_id: index
+        (str(payload_1300["subject_ids"][index]), area_id): index
         for index, area_id in enumerate(payload_1300["area_ids"].astype(str))
     }
     rows_2850 = {
-        area_id: index
+        (str(payload_2850["subject_ids"][index]), area_id): index
         for index, area_id in enumerate(payload_2850["area_ids"].astype(str))
     }
-    paired_area_ids = sorted(set(rows_1300) & set(rows_2850))
-    if not paired_area_ids:
+    paired_keys = sorted(set(rows_1300) & set(rows_2850))
+    if not paired_keys:
         return {
             "values": np.empty((0, 0), dtype=float),
             "area_ids": np.array([], dtype=str),
@@ -342,11 +349,12 @@ def _whole_area_store_from_ranges(
             "feature_names": np.array([], dtype=str),
         }
     values = []
+    area_ids = []
     measurement_ids = []
     subject_ids = []
-    for area_id in paired_area_ids:
-        left_idx = rows_1300[area_id]
-        right_idx = rows_2850[area_id]
+    for subject_id, area_id in paired_keys:
+        left_idx = rows_1300[(subject_id, area_id)]
+        right_idx = rows_2850[(subject_id, area_id)]
         values.append(
             np.concatenate(
                 [
@@ -355,10 +363,11 @@ def _whole_area_store_from_ranges(
                 ]
             )
         )
+        area_ids.append(area_id)
         measurement_ids.append(
             f"{payload_1300['measurement_ids'][left_idx]}|{payload_2850['measurement_ids'][right_idx]}"
         )
-        subject_ids.append(str(payload_1300["subject_ids"][left_idx]))
+        subject_ids.append(subject_id)
     feature_names = np.asarray(
         [f"1300__{shift:.1f}" for shift in payload_1300["wavenumbers"]]
         + [f"2850__{shift:.1f}" for shift in payload_2850["wavenumbers"]],
@@ -366,7 +375,7 @@ def _whole_area_store_from_ranges(
     )
     return {
         "values": np.vstack(values),
-        "area_ids": np.asarray(paired_area_ids, dtype=str),
+        "area_ids": np.asarray(area_ids, dtype=str),
         "measurement_ids": np.asarray(measurement_ids, dtype=str),
         "subject_ids": np.asarray(subject_ids, dtype=str),
         "feature_names": feature_names,
@@ -491,7 +500,7 @@ def _build_manifest(
             "subjects": int(file_index["subject_id"].astype(str).nunique()),
             "files": int(file_index["file_id"].astype(str).nunique()),
             "measurements": int(file_index["measurement_id"].astype(str).nunique()),
-            "areas": int(area_metadata["area_id"].astype(str).nunique()) if not area_metadata.empty else 0,
+            "areas": _area_entity_count(area_metadata),
             "spectra_1300": int(spectra_payloads["1300"]["spectra"].shape[0]),
             "spectra_2850": int(spectra_payloads["2850"]["spectra"].shape[0]),
         },

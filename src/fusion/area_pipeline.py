@@ -20,6 +20,7 @@ from src.fusion.concatenate import concatenate_regions
 from src.io.txt_reader import read_txt_spectrum
 from src.preprocessing.pipeline import (
     coffee_ring_mask,
+    flatten_spectra_rows,
     intersect_region_masks,
     normalize_spectra,
     run_preprocessing,
@@ -40,9 +41,9 @@ def _flatten_cube(spectra: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     if spectra.ndim == 2:
         n = spectra.shape[0]
         coords = np.column_stack([np.arange(n), np.zeros(n, dtype=int)])
-        return spectra, coords
+        return flatten_spectra_rows(spectra), coords
     n_x, n_y, n_wn = spectra.shape
-    flat = spectra.reshape(n_x * n_y, n_wn)
+    flat = flatten_spectra_rows(spectra)
     xs, ys = np.meshgrid(np.arange(n_x), np.arange(n_y), indexing="ij")
     coords = np.column_stack([xs.ravel(), ys.ravel()])
     return flat, coords
@@ -138,8 +139,12 @@ def _preprocess_region(
     if artifact_dir is not None and artifact_stem is not None:
         save_preprocessing_artifacts(preprocess_result, artifact_dir, artifact_stem)
     if baseline_qc_dir is not None and artifact_stem is not None:
-        n_pixels = preprocess_result.spectra.shape[0]
-        condition_labels = {idx: condition_label for idx in range(n_pixels)} if condition_label else None
+        retained_indices = np.where(preprocess_result.retained_mask)[0]
+        condition_labels = (
+            {int(idx): condition_label for idx in retained_indices}
+            if condition_label
+            else None
+        )
         sample_baseline_qc_artifacts(
             preprocess_result,
             baseline_qc_dir,

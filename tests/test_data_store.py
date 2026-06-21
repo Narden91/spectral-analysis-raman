@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -106,6 +108,13 @@ def test_build_parsed_store_and_validate(configured_store_paths: dict[str, Path]
 
     validation = validate_store(store.path, "parsed", src.config)
     assert validation.is_valid
+
+    manifest = json.loads((store.path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["counts"]["areas"] == 2
+
+    with np.load(store.path / "whole_area_store.npz", allow_pickle=False) as data:
+        assert np.asarray(data["values"]).shape[0] == 2
+        assert set(np.asarray(data["subject_ids"]).astype(str).tolist()) == {"1", "2"}
 
 
 def test_resolve_preprocessed_source_and_group_matrix(configured_store_paths: dict[str, Path]) -> None:

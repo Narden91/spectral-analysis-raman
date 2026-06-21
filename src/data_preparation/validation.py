@@ -90,6 +90,21 @@ def _validate_generated_signatures(store_path: Path, manifest: dict[str, Any], e
             errors.append(f"Generated file hash mismatch for {relative_name}")
 
 
+def _area_entity_count(area_metadata: pd.DataFrame) -> int:
+    if area_metadata.empty:
+        return 0
+    if {"subject_id", "area_id"}.issubset(area_metadata.columns):
+        return int(
+            area_metadata[["subject_id", "area_id"]]
+            .astype(str)
+            .drop_duplicates()
+            .shape[0]
+        )
+    if "area_id" in area_metadata.columns:
+        return int(area_metadata["area_id"].astype(str).nunique())
+    return len(area_metadata)
+
+
 def _validate_manifest_counts(store_path: Path, manifest: dict[str, Any], errors: list[str]) -> None:
     try:
         file_index = pd.read_parquet(store_path / "file_index.parquet")
@@ -104,7 +119,7 @@ def _validate_manifest_counts(store_path: Path, manifest: dict[str, Any], errors
         "subjects": int(clinical["subject_id"].nunique()) if "subject_id" in clinical.columns else len(clinical),
         "files": int(file_index["file_id"].nunique()) if "file_id" in file_index.columns else len(file_index),
         "measurements": int(file_index["measurement_id"].nunique()) if "measurement_id" in file_index.columns else len(file_index),
-        "areas": int(area_metadata["area_id"].nunique()) if "area_id" in area_metadata.columns else len(area_metadata),
+        "areas": _area_entity_count(area_metadata),
     }
     for key, value in expected.items():
         if int(counts.get(key, -1)) != value:

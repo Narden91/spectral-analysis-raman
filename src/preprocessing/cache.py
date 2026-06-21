@@ -28,7 +28,7 @@ import pandas as pd
 
 from src import config as _cfg, resolve_project_path
 from src.io.txt_reader import read_txt_spectrum
-from src.preprocessing.pipeline import retention_guard_config, run_preprocessing
+from src.preprocessing.pipeline import flatten_spectra_rows, retention_guard_config, run_preprocessing
 
 logger = logging.getLogger(__name__)
 
@@ -122,11 +122,7 @@ def build_area_cache(
         return CachedArea(wavenumbers=wavenumbers, spectra=spectra, manifest=manifest)
 
     wavenumbers, _, _, cube, _ = read_txt_spectrum(filepath)
-    flat = np.asarray(cube)
-    if flat.ndim == 1:
-        flat = flat.reshape(1, -1)
-    elif flat.ndim > 2:
-        flat = flat.reshape(-1, flat.shape[-1])
+    flat = flatten_spectra_rows(cube)
 
     n_input = int(flat.shape[0])
     result = run_preprocessing(
