@@ -55,6 +55,12 @@ from src.analysis.intra_disease import (
     summarize_correlation_regions,
     summarize_significant_targets,
 )
+from src.analysis.eda_mode import (
+    filter_index_for_eda_mode,
+    group_configs_for_eda_mode,
+    resolve_eda_analysis_mode,
+    validate_eda_mode_config,
+)
 from src.preprocessing.pipeline import preprocess_spectra, apply_region_weights
 from src.visualization.eda_plots import (
     GROUP_COLORS,
@@ -291,10 +297,11 @@ def _run_single_range_eda(
         df_index["subject_id"].nunique(),
     )
 
-    subject_group = config.get("data", {}).get("subject_group")
-    if subject_group == "disease_only":
+    analysis_mode = resolve_eda_analysis_mode(config)
+    validate_eda_mode_config(config, analysis_mode, df_index)
+    if analysis_mode == "disease_only":
         n_before = df_index["subject_id"].nunique()
-        df_index = df_index[~df_index["is_control"]].copy()
+        df_index = filter_index_for_eda_mode(df_index, analysis_mode)
         n_after = df_index["subject_id"].nunique()
         logger.info(
             "Disease-only mode: retained %d disease subjects, excluded %d controls",
@@ -319,18 +326,7 @@ def _run_single_range_eda(
 
     _log_phase(f"PHASE 0: Loading and aggregating spectra (range={spectral_range} cm-1)")
 
-    if subject_group == "disease_only":
-        group_configs = {
-            "female_disease": {"gender": "female", "is_control": False},
-            "male_disease": {"gender": "male", "is_control": False},
-        }
-    else:
-        group_configs = {
-            "female_disease": {"gender": "female", "is_control": False},
-            "female_control": {"gender": "female", "is_control": True},
-            "male_disease": {"gender": "male", "is_control": False},
-            "male_control": {"gender": "male", "is_control": True},
-        }
+    group_configs = group_configs_for_eda_mode(analysis_mode)
 
     raw_groups: dict[str, np.ndarray] = {}
     group_ids: dict[str, list[str]] = {}
@@ -479,7 +475,7 @@ def _run_single_range_eda(
             pca_input.shape[0] - 1,
         )
         
-        if subject_group == "disease_only":
+        if analysis_mode == "disease_only":
             from src.analysis.intra_disease import run_intra_disease_pca
             pca_result = run_intra_disease_pca(
                 pca_input,
@@ -718,7 +714,7 @@ def _run_single_range_eda(
         intra_disease_cfg = (
             config.get("analysis", {}).get("advanced", {}).get("intra_disease", {})
         )
-        if intra_disease_cfg.get("enabled", False):
+        if analysis_mode == "disease_only":
             _log_phase("PHASE 5: Intra-disease clinical correlations")
             try:
                 intra_csv = intra_disease_cfg.get("clinical_csv", "data/clinical_data_clean.csv")

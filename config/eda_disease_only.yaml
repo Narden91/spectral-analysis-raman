@@ -6,14 +6,8 @@
 # ---------------------------------------------------------------------------
 _extends: eda.yaml
 
-output:
-  eda_root: "output_EDA_disease_only"
-
-data:
-  clinical_csv: "data/clinical_data.csv"
-  subject_group: "disease_only"
-
 analysis:
+  mode: "disease_only"
   advanced:
     intra_disease:
       enabled: true

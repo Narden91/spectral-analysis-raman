@@ -86,8 +86,28 @@ def _validate_generated_signatures(store_path: Path, manifest: dict[str, Any], e
         if not candidate.is_file():
             errors.append(f"Manifest references missing generated file: {relative_name}")
             continue
-        if signature.get("sha256") != hash_file(candidate):
+        if not _file_matches_signature(candidate, signature):
             errors.append(f"Generated file hash mismatch for {relative_name}")
+
+
+def _file_matches_signature(path: Path, expected: dict[str, Any]) -> bool:
+    """Fast-path file validation using stat metadata before hashing bytes."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+
+    expected_mtime_ns = expected.get("mtime_ns")
+    expected_size = expected.get("size")
+    if expected_mtime_ns is not None and expected_size is not None:
+        if int(stat.st_mtime_ns) == int(expected_mtime_ns) and int(stat.st_size) == int(expected_size):
+            return True
+        return False
+
+    expected_hash = expected.get("sha256")
+    if expected_hash is None:
+        return False
+    return expected_hash == hash_file(path)
 
 
 def _area_entity_count(area_metadata: pd.DataFrame) -> int:
@@ -234,7 +254,7 @@ def validate_store(path: str | Path, expected_store_type: str, config: dict) -> 
             input_path = Path(relative_name)
             if not input_path.is_file():
                 input_path = Path(config.get("data", {}).get("raw_text_dir", "data/raw")).parent / relative_name
-            if input_path.is_file() and expected.get("sha256") != hash_file(input_path):
+            if input_path.is_file() and not _file_matches_signature(input_path, expected):
                 is_stale = True
                 if policy == "error":
                     errors.append(f"Store is stale relative to input {relative_name}")

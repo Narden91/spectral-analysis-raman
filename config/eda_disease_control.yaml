@@ -5,10 +5,8 @@
 # ---------------------------------------------------------------------------
 _extends: eda.yaml
 
-output:
-  eda_root: "output_EDA_disease_vs_control"
-
 analysis:
+  mode: "disease_vs_control"
   advanced:
     intra_disease:
       enabled: false

@@ -158,6 +158,7 @@ def write_analysis_provenance(
         "data_source_path": str(data_source.source_path),
         "data_manifest_hash": data_source.manifest_hash,
         "analysis_config_hash": config_hash(cfg),
+        "analysis_mode": cfg.get("analysis", {}).get("mode"),
         "started_at": iso_utc_now(),
         "command": command,
     }

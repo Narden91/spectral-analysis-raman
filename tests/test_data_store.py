@@ -11,7 +11,8 @@ import pytest
 import src
 from src.analysis.spectral_loader import build_group_matrix
 from src.data_preparation.materialize import build_parsed_store, build_preprocessed_store
-from src.data_preparation.store import get_active_data_source, resolve_data_source
+from src.data_preparation.store import DataSource, get_active_data_source, resolve_data_source, write_analysis_provenance
+from src.data_preparation import validation as validation_module
 from src.data_preparation.validation import validate_store
 
 
@@ -150,3 +151,33 @@ def test_validation_fails_when_required_file_missing(configured_store_paths: dic
     validation = validate_store(store.path, "parsed", src.config)
     assert not validation.is_valid
     assert any("area_metadata.parquet" in error for error in validation.errors)
+
+
+def test_validate_store_uses_stat_fast_path_for_unchanged_inputs(
+    configured_store_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = build_parsed_store(src.config, force=True)
+
+    def _unexpected_hash(_: str | Path) -> str:
+        raise AssertionError("hash_file should not be called for unchanged input signatures")
+
+    monkeypatch.setattr(validation_module, "hash_file", _unexpected_hash)
+    validation = validate_store(store.path, "parsed", src.config)
+    assert validation.is_valid
+
+
+def test_write_analysis_provenance_records_analysis_mode(tmp_path: Path) -> None:
+    data_source = DataSource(
+        source_name="preprocessed",
+        source_path=tmp_path / "preprocessed",
+        manifest={"counts": {"subjects": 2}},
+        manifest_hash="manifest-hash",
+        was_built=False,
+    )
+    cfg = {"analysis": {"mode": "disease_only"}}
+
+    write_analysis_provenance(tmp_path / "provenance", data_source, cfg, command="uv run scripts/run_eda.py")
+
+    run_manifest = json.loads((tmp_path / "provenance" / "run_manifest.json").read_text(encoding="utf-8"))
+    assert run_manifest["analysis_mode"] == "disease_only"

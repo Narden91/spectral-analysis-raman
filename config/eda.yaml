@@ -27,6 +27,7 @@ output:
 # Analysis parameters
 # ---------------------------------------------------------------------------
 analysis:
+  mode: "disease_vs_control"  # str: one of {"disease_vs_control", "disease_only"}
   statistical_test: "auto"  # str: "auto", "parametric", or "non-parametric"
   pca_n_components: 10  # int: number of principal components to compute
   random_state: 42  # int: reproducibility seed
@@ -56,7 +57,7 @@ analysis:
       tsne_n_iter: 1000  # int: t-SNE optimization iterations
 
     intra_disease:
-      enabled: true  # bool: per-wavenumber Spearman correlations vs clinical targets, disease subjects only
+      enabled: false  # bool: per-wavenumber Spearman correlations vs clinical targets, disease subjects only
       clinical_csv: "data/clinical_data.csv"  # str: disease-only curated clinical CSV
     robustness:
       enabled: false  # bool: compare baseline vs region-masked analyses

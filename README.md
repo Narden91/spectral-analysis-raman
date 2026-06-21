@@ -103,7 +103,7 @@ uv run scripts/manage_data_store.py info --source preprocessed
 ```
 
 ### 2. Running the Exploratory Data Analysis (EDA)
-The EDA script executes statistical checks and principal component analyses. It supports case-control comparison and disease-only clinical correlation modes.
+The EDA script executes statistical checks and principal component analyses. EDA mode selection is explicit and authoritative through either `analysis.mode` in config or `--analysis-mode` on the CLI.
 
 #### Mode A: Case vs. Control (Default case)
 Compares healthy controls against disease subjects.
@@ -122,9 +122,17 @@ uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both
 #### Mode B: Disease-Only Cohort (Clinical Correlations)
 Restricts analysis to disease subjects to correlate spectral bands with clinical parameters (requires `data/clinical_data.csv`).
 ```bash
+uv run scripts/run_eda.py --analysis-mode disease_only --range both
+
+# Equivalent wrapper-based invocation
 uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range both
 ```
 *   **Output Directory**: `Results_intra_disease/`
+
+Notes:
+*   `--analysis-mode` overrides `analysis.mode` from config.
+*   `config/eda_disease_control.yaml` and `config/eda_disease_only.yaml` are thin wrappers over `config/eda.yaml`.
+*   Output root selection is derived from the resolved EDA mode, not from `data.subject_group` or wrapper-specific output paths.
 
 ### 3. Spectral Plotting & QC Visualization
 Generate post-preprocessing waveforms and individual scan layouts for diagnostic audit:

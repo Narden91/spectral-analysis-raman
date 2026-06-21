@@ -38,6 +38,13 @@ from src.terminal_output import print_kv_table
 
 from src.analysis._single_range import _VALID_RANGES
 from src.analysis.biological_pca import run_biological_pca
+from src.analysis.eda_mode import (
+    EDA_ANALYSIS_MODES,
+    apply_eda_analysis_mode,
+    eda_output_root,
+    resolve_eda_analysis_mode,
+    validate_eda_mode_config,
+)
 from src.analysis.run_eda import run_eda
 
 logger = logging.getLogger(__name__)
@@ -57,13 +64,9 @@ def _attach_run_log_file(log_path: Path) -> None:
     root_logger.addHandler(handler)
 
 
-def _set_analysis_output_root() -> None:
+def _set_analysis_output_root(mode: str) -> None:
     """Route all EDA-owned outputs to the selected analysis family."""
-    subject_group = config.get("data", {}).get("subject_group")
-    if subject_group == "disease_only":
-        config.setdefault("output", {})["eda_root"] = "Results_intra_disease"
-    else:
-        config.setdefault("output", {})["eda_root"] = "Results_control_vs_disease"
+    config.setdefault("output", {})["eda_root"] = eda_output_root(mode)
 
 
 def _requested_ranges(cli_range: str | None) -> list[str]:
@@ -126,6 +129,15 @@ def _parse_args() -> argparse.Namespace:
         "Supports _extends: <base.yaml> for inheritance.",
     )
     parser.add_argument(
+        "--analysis-mode",
+        choices=list(EDA_ANALYSIS_MODES),
+        default=None,
+        help=(
+            "Explicit EDA analysis family. Overrides analysis.mode from config. "
+            "Valid options: disease_vs_control, disease_only."
+        ),
+    )
+    parser.add_argument(
         "--skip-biological-pca",
         action="store_true",
         help="Skip the subject-level Biological PCA layer.",
@@ -186,7 +198,10 @@ def _log_final_summary(ranges: list[str], biological_ran: bool, warnings: list[s
 def _main() -> None:
     args = _parse_args()
     setup_logging()
-    _set_analysis_output_root()
+    analysis_mode = resolve_eda_analysis_mode(config, override=args.analysis_mode)
+    apply_eda_analysis_mode(config, analysis_mode)
+    validate_eda_mode_config(config, analysis_mode)
+    _set_analysis_output_root(analysis_mode)
     metadata_dir = get_run_metadata_dir()
     _attach_run_log_file(metadata_dir / "run.log")
     data_source = resolve_data_source(config, source_override=args.source)
