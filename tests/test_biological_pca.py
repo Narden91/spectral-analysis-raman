@@ -8,6 +8,7 @@ import pytest
 
 import src
 import src.analysis.biological_pca as biological_pca
+import src.analysis.subject_features as subject_features
 from src import get_single_range_phase_dirs
 from src.analysis.biological_pca import (
     SubjectInputs,
@@ -21,6 +22,7 @@ from src.analysis.biological_pca import (
     validate_biological_pca_config,
     validate_outputs,
 )
+from src.analysis.subject_features import build_subject_feature_matrices, write_subject_feature_exports
 
 
 def _cfg() -> dict:
@@ -231,6 +233,64 @@ def test_fit_outputs_have_unique_subject_rows_and_feature_columns() -> None:
     assert not features["subject_id"].duplicated().any()
 
 
+def test_subject_feature_matrices_preserve_block_identity(monkeypatch) -> None:
+    clinical = pd.DataFrame(
+        {
+            "subject_id": ["S00", "S01", "S02", "S03"],
+            "condition": ["Disease"] * 4,
+            "is_control": [False] * 4,
+            "gender": ["female", "male", "female", "male"],
+            "moca_baseline_total": [19.0, 23.0, 20.0, 24.0],
+        }
+    )
+    endpoints = pd.DataFrame(
+        {
+            "subject_id": ["S00", "S01", "S02", "S03"],
+            "moca_severity_group": ["low_moca", "high_moca", "high_moca", "high_moca"],
+            "delta_moca_group": ["decline", "stable_or_improved", "decline", "stable_or_improved"],
+            "lesion_location_group": ["left", "right", "posterior", "left"],
+        }
+    )
+    monkeypatch.setattr(subject_features, "load_clinical_subjects", lambda: clinical)
+    monkeypatch.setattr(
+        subject_features,
+        "build_clinical_endpoints",
+        lambda cfg=None: type("EndpointResult", (), {"clinical_subject_table": endpoints})(),
+    )
+    matrices, provenance = build_subject_feature_matrices(_inputs(), cfg=_cfg())
+    assert "1300__1240.0" in matrices["1300"].columns
+    assert "2850__2840.0" in matrices["2850"].columns
+    assert "1300__1240.0" in matrices["whole"].columns
+    assert "2850__2840.0" in matrices["whole"].columns
+    assert not matrices["whole"]["subject_id"].duplicated().any()
+    assert "analysis_mode" in provenance.columns
+
+
+def test_subject_feature_export_writes_required_outputs(monkeypatch, tmp_path: Path) -> None:
+    clinical = pd.DataFrame(
+        {
+            "subject_id": ["S00", "S01", "S02", "S03"],
+            "condition": ["Disease"] * 4,
+            "is_control": [False] * 4,
+            "gender": ["female", "male", "female", "male"],
+        }
+    )
+    endpoints = pd.DataFrame({"subject_id": ["S00", "S01", "S02", "S03"]})
+    monkeypatch.setattr(subject_features, "load_clinical_subjects", lambda: clinical)
+    monkeypatch.setattr(
+        subject_features,
+        "build_clinical_endpoints",
+        lambda cfg=None: type("EndpointResult", (), {"clinical_subject_table": endpoints})(),
+    )
+    written = write_subject_feature_exports(_inputs(), output_dir=tmp_path, cfg=_cfg())
+    assert (tmp_path / "subject_feature_matrix_1300.parquet").exists()
+    assert (tmp_path / "subject_feature_matrix_2850.parquet").exists()
+    assert (tmp_path / "subject_feature_matrix_whole.parquet").exists()
+    assert (tmp_path / "subject_feature_provenance.csv").exists()
+    roundtrip = pd.read_parquet(written["subject_feature_matrix_whole"])
+    assert roundtrip["subject_id"].astype(str).nunique() == 4
+
+
 def test_known_bands_only_annotate_after_loading_regions_exist() -> None:
     cfg = _cfg()
     results = fit_biological_pca_models(_inputs(), cfg=cfg)
@@ -263,6 +323,16 @@ def test_default_output_uses_only_canonical_dirs(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(biological_pca, "build_subject_inputs", lambda max_subjects=None, cfg=None: inputs)
     monkeypatch.setattr(biological_pca, "fit_biological_pca_models", lambda inputs, cfg=None: results)
     monkeypatch.setattr(biological_pca, "build_subject_biochemical_features", lambda results: features)
+    monkeypatch.setattr(
+        biological_pca,
+        "write_subject_feature_exports",
+        lambda inputs, output_dir=None, cfg=None: {
+            "subject_feature_matrix_1300": expected_root / "04_cross_region_summary" / "subject_feature_matrix_1300.parquet",
+            "subject_feature_matrix_2850": expected_root / "04_cross_region_summary" / "subject_feature_matrix_2850.parquet",
+            "subject_feature_matrix_whole": expected_root / "04_cross_region_summary" / "subject_feature_matrix_whole.parquet",
+            "subject_feature_provenance": expected_root / "04_cross_region_summary" / "subject_feature_provenance.csv",
+        },
+    )
 
     def _canonical_dir(model: str) -> Path:
         _phase_dirs = get_single_range_phase_dirs()

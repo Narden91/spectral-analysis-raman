@@ -39,6 +39,7 @@ from src.terminal_output import print_kv_table
 
 from src.analysis._single_range import _VALID_RANGES
 from src.analysis.biological_pca import run_biological_pca
+from src.analysis.disease_stratification import run_disease_stratification
 from src.analysis.eda_mode import (
     EDA_ANALYSIS_MODES,
     apply_eda_analysis_mode,
@@ -252,9 +253,16 @@ def _main() -> None:
             )
 
         biological_ran = False
+        biological_outputs: dict[str, Path] = {}
         if _should_run_biological_pca(ranges, args.skip_biological_pca):
-            run_biological_pca(max_subjects=args.max_subjects)
+            biological_outputs = run_biological_pca(max_subjects=args.max_subjects)
             biological_ran = True
+            stratification_cfg = config.get("analysis", {}).get("disease_stratification", {})
+            if analysis_mode == "disease_only" and bool(stratification_cfg.get("enabled", True)):
+                run_disease_stratification(
+                    feature_matrix_path=biological_outputs.get("subject_feature_matrix_whole"),
+                    cfg=config,
+                )
         warnings = _write_warning_summaries(_output_dir("eda_subdir")) if biological_ran else []
         _log_final_summary(ranges, biological_ran, warnings)
     except (ValueError, RuntimeError) as exc:

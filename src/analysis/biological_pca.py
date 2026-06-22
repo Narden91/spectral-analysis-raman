@@ -23,6 +23,7 @@ from src import (
     get_cross_region_summary_dir,
     resolve_project_path,
 )
+from src.analysis.subject_features import write_subject_feature_exports
 from src.analysis.statistics import run_pca
 from src.data_preparation.loaders import (
     load_area_summaries,
@@ -1750,10 +1751,11 @@ def run_biological_pca(
         assert out is not None
 
     inputs = build_subject_inputs(max_subjects=max_subjects, cfg=cfg)
+    written_paths = write_subject_feature_exports(inputs, cfg=cfg)
     results = fit_biological_pca_models(inputs, cfg=cfg)
     features = build_subject_biochemical_features(results)
     validate_outputs(inputs, results, features, cfg=cfg)
-    written_paths = _write_outputs(inputs, results, features)
+    written_paths.update(_write_outputs(inputs, results, features))
     logger.info("Biological PCA outputs written to %s", get_cross_region_summary_dir().parent)
     return written_paths
 

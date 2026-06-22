@@ -77,6 +77,14 @@ analysis:
       enabled: false  # bool: compare baseline vs region-masked analyses
       suspect_windows: [[2655, 2685]]  # list[list[float]]: regions to downweight/exclude
       downweight_factor: 0.0  # float: 0 = exclude window, >0 = residual weight
+  disease_stratification:
+    enabled: true  # bool: run disease-internal subject-level stratification from exported whole-spectrum features
+    min_subjects_per_group: 5  # int: skip formal testing when any stratum falls below this size
+    cluster_alpha: 0.05  # float: uncorrected cluster-forming threshold
+    n_permutations: 1000  # int: label permutations for cluster-mass correction
+    random_state: 42  # int: reproducibility seed for permutation testing
+    candidate_region_min_width_cm: 8.0  # float: minimum merged region width
+    candidate_region_merge_gap_cm: 6.0  # float: maximum within-region gap
   whole_spectra:
     emit_mfa: false  # bool: write MFA to whole_spectra/exploratory_multiblock/MFA/
 
