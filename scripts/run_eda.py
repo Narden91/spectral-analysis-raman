@@ -52,8 +52,11 @@ from src.analysis.eda_mode import (
 from src.analysis.longitudinal_moca import run_longitudinal_moca
 from src.analysis.pls_regression import run_pls_regression
 from src.analysis.run_eda import run_eda
+from src.analysis.integrated_candidates import run_integrated_candidates
+from src.analysis.minimal_panel import run_minimal_panel
 from src.analysis.spectral_regions import run_candidate_region_detector
 from src.analysis.splsda import run_splsda_classifier
+from src.reporting.candidate_region_report import run_candidate_region_report
 
 logger = logging.getLogger(__name__)
 
@@ -318,11 +321,42 @@ def _main() -> None:
                     )
 
                 splsda_cfg = config.get("analysis", {}).get("splsda", {})
+                splsda_outputs: dict[str, Path] = {}
                 if bool(splsda_cfg.get("enabled", True)):
                     logger.info("Starting PLS-L1DA exploratory classifier (Phase 9)")
-                    run_splsda_classifier(
+                    splsda_outputs = run_splsda_classifier(
                         feature_matrix_path=feature_matrix_path,
                         pls_outputs=pls_outputs,
+                        cfg=config,
+                    )
+
+                integrated_cfg = config.get("analysis", {}).get("integrated_candidates", {})
+                integrated_outputs: dict[str, Path] = {}
+                if bool(integrated_cfg.get("enabled", True)):
+                    logger.info("Starting integrated candidate evidence table (Phase 11)")
+                    integrated_outputs = run_integrated_candidates(
+                        feature_matrix_path=feature_matrix_path,
+                        pls_vip_path=pls_outputs.get("pls_vip_bands"),
+                        splsda_bands_path=splsda_outputs.get("pls_l1da_selected_bands"),
+                        cfg=config,
+                    )
+
+                panel_cfg = config.get("analysis", {}).get("minimal_panel", {})
+                panel_outputs: dict[str, Path] = {}
+                if bool(panel_cfg.get("enabled", True)):
+                    logger.info("Starting minimal candidate Raman panel (Phase 13)")
+                    panel_outputs = run_minimal_panel(
+                        feature_matrix_path=feature_matrix_path,
+                        integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
+                        cfg=config,
+                    )
+
+                report_cfg = config.get("analysis", {}).get("publication_report", {})
+                if bool(report_cfg.get("enabled", True)):
+                    logger.info("Starting publication report generator (Phase 14)")
+                    run_candidate_region_report(
+                        integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
+                        minimal_panel_path=panel_outputs.get("minimal_candidate_panel"),
                         cfg=config,
                     )
         warnings = _write_warning_summaries(_output_dir("eda_subdir")) if biological_ran else []

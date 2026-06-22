@@ -286,10 +286,25 @@ def run_pls_regression(
             "n_permutations": n_permutations,
         })
 
-    perf_df = pd.DataFrame(perf_rows)
-    vip_df = pd.DataFrame(vip_rows)
-    coef_df = pd.DataFrame(coef_rows)
-    perm_df = pd.DataFrame(perm_rows)
+    perf_df = pd.DataFrame(
+        perf_rows,
+        columns=[
+            "target", "r2", "rmse", "mae", "n_subjects", "selected_n_components",
+            "cv_strategy", "permutation_p_value", "high_variance_flag",
+        ],
+    )
+    vip_df = pd.DataFrame(
+        vip_rows,
+        columns=["target", "feature_name", "spectral_block", "wavenumber", "vip_score", "above_threshold"],
+    )
+    coef_df = pd.DataFrame(
+        coef_rows,
+        columns=["target", "feature_name", "spectral_block", "wavenumber", "coefficient"],
+    )
+    perm_df = pd.DataFrame(
+        perm_rows,
+        columns=["target", "observed_r2", "null_distribution_mean", "null_distribution_std", "permutation_p_value", "n_permutations"],
+    )
 
     perf_path = target_dir / "pls_regression_performance.csv"
     vip_path = target_dir / "pls_vip_bands.csv"

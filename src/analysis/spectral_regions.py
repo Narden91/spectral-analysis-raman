@@ -179,10 +179,33 @@ def candidate_region_feature_names(feature_columns: list[str], region: pd.Series
 
 
 def _normalize_candidates(source_analysis: str, frame: pd.DataFrame) -> pd.DataFrame:
-    if frame.empty:
-        return pd.DataFrame()
-
     normalized = frame.copy()
+    if normalized.empty:
+        return pd.DataFrame(columns=[
+            "source_analysis",
+            "analysis_name",
+            "target",
+            "contrast_name",
+            "group_variable",
+            "group_a",
+            "group_b",
+            "spectral_block",
+            "candidate_region_id",
+            "selection_basis",
+            "start_cm-1",
+            "end_cm-1",
+            "width_cm-1",
+            "n_features",
+            "min_fdr_q",
+            "min_cluster_p_value",
+            "n_fdr_significant",
+            "n_cluster_significant",
+            "max_abs_effect",
+            "mean_abs_effect",
+            "integrated_abs_effect",
+            "effect_metric",
+        ])
+
     rename_map = {
         "max_abs_rho": "max_abs_effect",
         "mean_abs_rho": "mean_abs_effect",
@@ -293,17 +316,15 @@ def run_candidate_region_detector(
         if not normalized.empty:
             frames.append(normalized)
 
-    combined = (
-        pd.concat(frames, ignore_index=True, sort=False)
-        if frames
-        else _normalize_candidates("clinical_correlation_matrix", pd.DataFrame())
-    )
-    if not combined.empty:
+    if frames:
+        combined = pd.concat(frames, ignore_index=True, sort=False)
         combined = combined.sort_values(
             ["source_analysis", "analysis_name", "contrast_name", "target", "min_cluster_p_value", "integrated_abs_effect"],
             ascending=[True, True, True, True, True, False],
             na_position="last",
         ).reset_index(drop=True)
+    else:
+        combined = _normalize_candidates("clinical_correlation_matrix", pd.DataFrame())
     path = target_dir / "candidate_regions_cluster_corrected.csv"
     combined.to_csv(path, index=False)
     logger.info("Unified candidate-region table written to %s", path)

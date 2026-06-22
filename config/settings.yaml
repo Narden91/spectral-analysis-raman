@@ -159,18 +159,19 @@ preprocessing:
 # Output
 # ---------------------------------------------------------------------------
 output:
-  # Preferred roots per pipeline track.
-  eda_root: "output_EDA"  # str: EDA output directory
-  ml_root: "output_ML"  # str: ML output directory
-  dl_root: "output_DL"  # str: DL output directory
+  # Preferred root per pipeline track.
+  # The EDA runner overrides this based on analysis.mode:
+  #   disease_only        -> Results_intra_disease
+  #   disease_vs_control  -> Results_control_vs_disease
+  eda_root: "Results_control_vs_disease"  # str: EDA output directory
 
   # Whether to persist per-area preprocessing artifacts (QC tables + manifests)
-  # under output_EDA/processed/preprocessing_artifacts.
+  # under <eda_root>/processed/preprocessing_artifacts.
   # bool: false reduces disk use when only aggregate outputs are needed.
   keep_preprocessing_artifacts: false
 
   # Whether to persist the paired-area whole-spectrum cache under
-  # output_EDA/processed/whole_spectra.
+  # <eda_root>/processed/whole_spectra.
   # bool: false keeps whole-spectrum intermediates in-memory only.
   keep_whole_spectra_cache: false
 

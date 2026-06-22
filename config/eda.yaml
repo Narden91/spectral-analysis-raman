@@ -146,6 +146,32 @@ analysis:
     n_permutations: 500
     random_state: 42
     emit_oplsda: false
+  integrated_candidates:
+    enabled: true
+    vip_threshold: 1.0
+  minimal_panel:
+    enabled: true
+    max_features: 10
+    min_features: 5
+    n_outer_splits: 5
+    n_inner_splits: 3
+    n_permutations: 1000
+    n_bootstrap: 200
+    random_state: 42
+    continuous_targets: [moca_baseline, moca_3m, delta_moca]
+    binary_targets:
+      - group_variable: moca_severity_group
+        ordered_groups: [low_moca, high_moca]
+      - group_variable: delta_moca_group
+        ordered_groups: [decline, stable_or_improved]
+    vip_threshold: 1.0
+    require_pls_gate: true
+  publication_report:
+    enabled: true
+    robust_requires:
+      - fdr_significant
+      - cluster_permutation
+      - covariate_persisted
 
 # ---------------------------------------------------------------------------
 # Whole-spectra band definitions (Movasaghi et al. 2007 + lab curation)
