@@ -85,6 +85,7 @@ analysis:
     random_state: 42  # int: reproducibility seed for permutation testing
     candidate_region_min_width_cm: 8.0  # float: minimum merged region width
     candidate_region_merge_gap_cm: 6.0  # float: maximum within-region gap
+    candidate_region_fallback_quantile: 0.9  # float: top-|effect| fallback quantile when no formal hits survive
   clinical_correlation_matrix:
     enabled: true  # bool: run disease-only feature-clinical discovery on whole-spectrum subject features
     targets: [moca_baseline, moca_3m, delta_moca, rbans_total, age, aspects_score]
@@ -95,6 +96,7 @@ analysis:
     random_state: 42  # int: reproducibility seed for permutation testing
     candidate_region_min_width_cm: 8.0  # float: minimum merged region width
     candidate_region_merge_gap_cm: 6.0  # float: maximum within-region gap
+    candidate_region_fallback_quantile: 0.9  # float: top-|effect| fallback quantile when no formal hits survive
   longitudinal_moca:
     enabled: true  # bool: run disease-only longitudinal Delta MoCA feature associations
     min_subjects: 5  # int: minimum subjects per model after endpoint/group filtering
@@ -104,6 +106,7 @@ analysis:
     random_state: 42  # int: reproducibility seed for permutation testing
     candidate_region_min_width_cm: 8.0  # float: minimum merged region width
     candidate_region_merge_gap_cm: 6.0  # float: maximum within-region gap
+    candidate_region_fallback_quantile: 0.9  # float: top-|effect| fallback quantile when no formal hits survive
     top_scatterplot_regions: 5  # int: number of candidate regions to visualize
   whole_spectra:
     emit_mfa: false  # bool: write MFA to whole_spectra/exploratory_multiblock/MFA/

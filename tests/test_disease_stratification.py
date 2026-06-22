@@ -59,7 +59,6 @@ def test_run_disease_stratification_writes_expected_outputs(tmp_path: Path) -> N
     )
 
     tests = pd.read_csv(written["stratification_wavenumber_tests"])
-    counts = pd.read_csv(written["stratification_group_counts"])
     candidates = pd.read_csv(written["stratification_candidate_regions"])
 
     assert "low_vs_high_moca" in set(tests["contrast_name"])
@@ -67,9 +66,9 @@ def test_run_disease_stratification_writes_expected_outputs(tmp_path: Path) -> N
     assert "mannwhitney" in set(tests["test"].dropna())
     assert "kruskal" in set(tests["test"].dropna())
     assert "insufficient sample size" in set(tests["status"])
-    assert "lesion_location_group" in set(counts["group_variable"])
     assert (written["stratification_effect_plots"] / "low_vs_high_moca.png").exists()
     assert not candidates.empty
+    assert "selection_basis" in candidates.columns
 
 
 def test_run_disease_stratification_rejects_duplicate_subject_rows(tmp_path: Path) -> None:

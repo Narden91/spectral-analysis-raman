@@ -88,13 +88,11 @@ def test_run_clinical_correlation_matrix_writes_expected_outputs(tmp_path: Path)
 
     correlations = pd.read_csv(written["clinical_correlation_matrix"])
     candidates = pd.read_csv(written["clinical_correlation_candidate_regions"])
-    missingness = pd.read_csv(written["endpoint_missingness_report"])
 
     assert set(written) == {
         "clinical_correlation_matrix",
         "clinical_correlation_heatmap",
         "clinical_correlation_candidate_regions",
-        "endpoint_missingness_report",
     }
     assert set(correlations["target"]) == {
         "moca_baseline",
@@ -106,10 +104,11 @@ def test_run_clinical_correlation_matrix_writes_expected_outputs(tmp_path: Path)
     }
     assert correlations.loc[correlations["target"] == "moca_baseline", "n"].nunique() == 1
     assert int(correlations.loc[correlations["target"] == "moca_baseline", "n"].iloc[0]) == 12
-    assert int(missingness.loc[missingness["endpoint"] == "aspects_score", "n_missing"].iloc[0]) == 1
+    assert int(correlations.loc[correlations["target"] == "aspects_score", "n_missing_target"].iloc[0]) == 1
     assert (tmp_path / "clinical_correlations" / "clinical_correlation_heatmap.png").exists()
     assert not candidates.empty
     assert "delta_moca" in set(candidates["target"])
+    assert "selection_basis" in candidates.columns
 
 
 def test_run_clinical_correlation_matrix_rejects_duplicate_subject_rows(tmp_path: Path) -> None:

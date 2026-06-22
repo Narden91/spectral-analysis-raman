@@ -87,17 +87,20 @@ def test_run_longitudinal_moca_writes_expected_outputs(tmp_path: Path) -> None:
 
     associations = pd.read_csv(written["delta_moca_associations"])
     candidates = pd.read_csv(written["delta_moca_candidate_regions"])
-    group_comparison = pd.read_csv(written["delta_moca_group_comparison"])
 
-    assert int(associations["n"].iloc[0]) == 12
-    assert set(associations["target"]) == {"delta_moca"}
-    assert "decline_vs_stable_or_improved" in set(group_comparison["contrast_name"])
-    ok_rows = group_comparison.loc[group_comparison["status"] == "ok"]
+    delta_rows = associations.loc[associations["analysis_name"] == "delta_moca_association"]
+    group_rows = associations.loc[associations["analysis_name"] == "decline_group_comparison"]
+
+    assert int(delta_rows["n"].iloc[0]) == 12
+    assert set(delta_rows["target"]) == {"delta_moca"}
+    assert "decline_vs_stable_or_improved" in set(group_rows["contrast_name"])
+    ok_rows = group_rows.loc[group_rows["status"] == "ok"]
     assert int(ok_rows["n_group_a"].iloc[0]) == 6
     assert int(ok_rows["n_group_b"].iloc[0]) == 6
     assert not candidates.empty
     assert set(candidates["analysis_name"]).issubset(
         {"delta_moca_association", "decline_group_comparison"}
     )
+    assert "selection_basis" in candidates.columns
     scatter_files = list((tmp_path / "longitudinal_moca" / "delta_moca_scatterplots").glob("*.png"))
     assert scatter_files

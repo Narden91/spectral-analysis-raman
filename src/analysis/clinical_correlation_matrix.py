@@ -185,12 +185,29 @@ def run_clinical_correlation_matrix(
         if correlation_frames
         else _empty_correlation_table()
     )
+    if not correlations.empty:
+        correlations = correlations.merge(
+            missingness.rename(
+                columns={
+                    "n_subjects_with_spectra": "n_total_disease_subjects",
+                    "n_non_missing": "n_non_missing_target",
+                    "n_missing": "n_missing_target",
+                    "missing_rate": "missing_rate_target",
+                }
+            ),
+            left_on="target",
+            right_on="endpoint",
+            how="left",
+        ).drop(columns=["endpoint", "status_y"], errors="ignore").rename(
+            columns={"status_x": "status"}
+        )
     candidate_regions = build_candidate_regions(
         correlations,
         group_columns=("target",),
         effect_column="rho",
         min_width_cm=float(matrix_cfg.get("candidate_region_min_width_cm", 8.0)),
         merge_gap_cm=float(matrix_cfg.get("candidate_region_merge_gap_cm", 6.0)),
+        fallback_quantile=float(matrix_cfg.get("candidate_region_fallback_quantile", 0.9)),
     ).rename(
         columns={
             "max_abs_effect": "max_abs_rho",
@@ -202,11 +219,15 @@ def run_clinical_correlation_matrix(
     matrix_path = target_dir / "clinical_correlation_matrix.csv"
     heatmap_path = target_dir / "clinical_correlation_heatmap.png"
     candidate_path = target_dir / "clinical_correlation_candidate_regions.csv"
-    missingness_path = target_dir / "endpoint_missingness_report.csv"
+    obsolete_paths = [
+        target_dir / "endpoint_missingness_report.csv",
+    ]
+    for obsolete_path in obsolete_paths:
+        if obsolete_path.exists():
+            obsolete_path.unlink()
 
     correlations.to_csv(matrix_path, index=False)
     candidate_regions.to_csv(candidate_path, index=False)
-    missingness.to_csv(missingness_path, index=False)
     _plot_correlation_heatmap(correlations, heatmap_path)
 
     logger.info("Clinical correlation matrix outputs written to %s", target_dir)
@@ -214,5 +235,4 @@ def run_clinical_correlation_matrix(
         "clinical_correlation_matrix": matrix_path,
         "clinical_correlation_heatmap": heatmap_path,
         "clinical_correlation_candidate_regions": candidate_path,
-        "endpoint_missingness_report": missingness_path,
     }

@@ -168,6 +168,8 @@ def run_longitudinal_moca(
     target_dir.mkdir(parents=True, exist_ok=True)
     scatter_dir = target_dir / "delta_moca_scatterplots"
     scatter_dir.mkdir(parents=True, exist_ok=True)
+    for stale_plot in scatter_dir.glob("*.png"):
+        stale_plot.unlink()
     logger.info(
         "Longitudinal Delta MoCA: %d disease subjects, %d whole-spectrum features",
         len(disease_only),
@@ -248,6 +250,7 @@ def run_longitudinal_moca(
         effect_column="rho",
         min_width_cm=float(longitudinal_cfg.get("candidate_region_min_width_cm", 8.0)),
         merge_gap_cm=float(longitudinal_cfg.get("candidate_region_merge_gap_cm", 6.0)),
+        fallback_quantile=float(longitudinal_cfg.get("candidate_region_fallback_quantile", 0.9)),
     )
     group_candidates = build_candidate_regions(
         group_comparison.assign(analysis_name="decline_group_comparison"),
@@ -255,6 +258,7 @@ def run_longitudinal_moca(
         effect_column="effect_size",
         min_width_cm=float(longitudinal_cfg.get("candidate_region_min_width_cm", 8.0)),
         merge_gap_cm=float(longitudinal_cfg.get("candidate_region_merge_gap_cm", 6.0)),
+        fallback_quantile=float(longitudinal_cfg.get("candidate_region_fallback_quantile", 0.9)),
     )
     candidate_regions = pd.concat(
         [association_candidates, group_candidates],
@@ -298,18 +302,35 @@ def run_longitudinal_moca(
         )
         _plot_region_scatter_panels(disease_only, feature_meta, region, scatter_dir / filename)
 
+    combined_results = pd.concat(
+        [
+            delta_associations.assign(
+                analysis_name="delta_moca_association",
+                effect_metric="spearman_rho",
+            ),
+            group_comparison.assign(
+                analysis_name="decline_group_comparison",
+                effect_metric="rank_biserial",
+            ),
+        ],
+        ignore_index=True,
+        sort=False,
+    )
     association_path = target_dir / "delta_moca_associations.csv"
     candidate_path = target_dir / "delta_moca_candidate_regions.csv"
-    group_path = target_dir / "delta_moca_group_comparison.csv"
+    obsolete_paths = [
+        target_dir / "delta_moca_group_comparison.csv",
+    ]
+    for obsolete_path in obsolete_paths:
+        if obsolete_path.exists():
+            obsolete_path.unlink()
 
-    delta_associations.to_csv(association_path, index=False)
+    combined_results.to_csv(association_path, index=False)
     candidate_regions.to_csv(candidate_path, index=False)
-    group_comparison.to_csv(group_path, index=False)
 
     logger.info("Longitudinal Delta MoCA outputs written to %s", target_dir)
     return {
         "delta_moca_associations": association_path,
         "delta_moca_candidate_regions": candidate_path,
-        "delta_moca_group_comparison": group_path,
         "delta_moca_scatterplots": scatter_dir,
     }

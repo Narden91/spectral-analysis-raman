@@ -397,12 +397,19 @@ def _multigroup_feature_tests(
     return tests, counts
 
 
-def _candidate_regions(tests: pd.DataFrame, *, min_width_cm: float = 8.0, merge_gap_cm: float = 6.0) -> pd.DataFrame:
+def _candidate_regions(
+    tests: pd.DataFrame,
+    *,
+    min_width_cm: float = 8.0,
+    merge_gap_cm: float = 6.0,
+    fallback_quantile: float = 0.9,
+) -> pd.DataFrame:
     columns = [
         "contrast_name",
         "group_variable",
         "spectral_block",
         "candidate_region_id",
+        "selection_basis",
         "start_cm-1",
         "end_cm-1",
         "width_cm-1",
@@ -410,21 +417,75 @@ def _candidate_regions(tests: pd.DataFrame, *, min_width_cm: float = 8.0, merge_
         "min_fdr_q",
         "min_cluster_p_value",
         "max_abs_effect",
+        "mean_abs_effect",
+        "integrated_abs_effect",
     ]
     rows: list[dict[str, object]] = []
+
+    def _append_region(
+        *,
+        contrast_name: str,
+        group_variable: str,
+        block: str,
+        selection_basis: str,
+        region_index: int,
+        window: pd.DataFrame,
+    ) -> None:
+        rows.append(
+            {
+                "contrast_name": contrast_name,
+                "group_variable": group_variable,
+                "spectral_block": block,
+                "candidate_region_id": f"{block}_R{region_index}",
+                "selection_basis": selection_basis,
+                "start_cm-1": float(window["wavenumber"].iloc[0]),
+                "end_cm-1": float(window["wavenumber"].iloc[-1]),
+                "width_cm-1": float(window["wavenumber"].iloc[-1] - window["wavenumber"].iloc[0]),
+                "n_features": int(len(window)),
+                "min_fdr_q": float(window["fdr_q"].min()) if "fdr_q" in window.columns else np.nan,
+                "min_cluster_p_value": float(window["cluster_p_value"].min()) if "cluster_p_value" in window.columns else np.nan,
+                "max_abs_effect": float(window["effect_size"].abs().max()) if "effect_size" in window.columns else np.nan,
+                "mean_abs_effect": float(window["effect_size"].abs().mean()) if "effect_size" in window.columns else np.nan,
+                "integrated_abs_effect": float(
+                    np.trapz(
+                        window["effect_size"].abs().to_numpy(dtype=float),
+                        window["wavenumber"].to_numpy(dtype=float),
+                    )
+                ) if "effect_size" in window.columns else np.nan,
+            }
+        )
+
     ok = tests.loc[tests["status"].eq("ok")].copy()
     if ok.empty:
         return pd.DataFrame(columns=columns)
 
-    candidate_mask = ok["significant_fdr"].fillna(False)
-    if "cluster_p_value" in ok.columns:
-        candidate_mask = candidate_mask | ok["cluster_p_value"].lt(0.05).fillna(False)
-    candidates = ok.loc[candidate_mask].copy()
-    if candidates.empty:
-        return pd.DataFrame(columns=columns)
+    for (contrast_name, block), block_df in ok.groupby(["contrast_name", "spectral_block"], sort=False):
+        ordered_full = block_df.sort_values("wavenumber").reset_index(drop=True)
+        candidate_mask = ordered_full["significant_fdr"].astype("boolean").fillna(False).to_numpy(dtype=bool)
+        if "cluster_p_value" in ordered_full.columns:
+            candidate_mask = candidate_mask | ordered_full["cluster_p_value"].lt(0.05).fillna(False).to_numpy(dtype=bool)
 
-    for (contrast_name, block), block_df in candidates.groupby(["contrast_name", "spectral_block"], sort=False):
-        ordered = block_df.sort_values("wavenumber").reset_index(drop=True)
+        if candidate_mask.any():
+            ordered = ordered_full.loc[candidate_mask].copy().reset_index(drop=True)
+            selection_basis = "significant_or_cluster"
+        else:
+            abs_effect = ordered_full["effect_size"].abs().to_numpy(dtype=float)
+            finite = np.isfinite(abs_effect)
+            if not finite.any():
+                continue
+            threshold = float(np.nanquantile(abs_effect[finite], fallback_quantile))
+            fallback_mask = abs_effect >= threshold
+            ordered = ordered_full.loc[fallback_mask].copy().reset_index(drop=True)
+            selection_basis = "top_abs_effect_fallback"
+            if ordered.empty:
+                peak_index = int(np.nanargmax(abs_effect))
+                peak_wavenumber = float(ordered_full.loc[peak_index, "wavenumber"])
+                half_width = max(min_width_cm / 2.0, merge_gap_cm)
+                ordered = ordered_full.loc[
+                    ordered_full["wavenumber"].between(peak_wavenumber - half_width, peak_wavenumber + half_width)
+                ].copy().reset_index(drop=True)
+                selection_basis = "top_peak_window_fallback"
+
         start = 0
         region_index = 0
         for index in range(1, len(ordered) + 1):
@@ -435,22 +496,33 @@ def _candidate_regions(tests: pd.DataFrame, *, min_width_cm: float = 8.0, merge_
             width = float(window["wavenumber"].iloc[-1] - window["wavenumber"].iloc[0])
             if width >= min_width_cm or len(window) > 1:
                 region_index += 1
-                rows.append(
-                    {
-                        "contrast_name": contrast_name,
-                        "group_variable": str(window["group_variable"].iloc[0]),
-                        "spectral_block": block,
-                        "candidate_region_id": f"{block}_R{region_index}",
-                        "start_cm-1": float(window["wavenumber"].iloc[0]),
-                        "end_cm-1": float(window["wavenumber"].iloc[-1]),
-                        "width_cm-1": width,
-                        "n_features": int(len(window)),
-                        "min_fdr_q": float(window["fdr_q"].min()) if "fdr_q" in window.columns else np.nan,
-                        "min_cluster_p_value": float(window["cluster_p_value"].min()) if "cluster_p_value" in window.columns else np.nan,
-                        "max_abs_effect": float(window["effect_size"].abs().max()) if "effect_size" in window.columns else np.nan,
-                    }
+                _append_region(
+                    contrast_name=contrast_name,
+                    group_variable=str(window["group_variable"].iloc[0]),
+                    block=block,
+                    selection_basis=selection_basis,
+                    region_index=region_index,
+                    window=window,
                 )
             start = index
+
+        if region_index == 0:
+            abs_effect = ordered_full["effect_size"].abs().to_numpy(dtype=float)
+            if np.isfinite(abs_effect).any():
+                peak_index = int(np.nanargmax(abs_effect))
+                peak_wavenumber = float(ordered_full.loc[peak_index, "wavenumber"])
+                half_width = max(min_width_cm / 2.0, merge_gap_cm)
+                window = ordered_full.loc[
+                    ordered_full["wavenumber"].between(peak_wavenumber - half_width, peak_wavenumber + half_width)
+                ].copy().reset_index(drop=True)
+                _append_region(
+                    contrast_name=contrast_name,
+                    group_variable=str(window["group_variable"].iloc[0]),
+                    block=block,
+                    selection_basis="top_peak_window_fallback",
+                    region_index=1,
+                    window=window,
+                )
     return pd.DataFrame(rows, columns=columns)
 
 
@@ -563,6 +635,7 @@ def run_disease_stratification(
         tests,
         min_width_cm=float(strat_cfg.get("candidate_region_min_width_cm", 8.0)),
         merge_gap_cm=float(strat_cfg.get("candidate_region_merge_gap_cm", 6.0)),
+        fallback_quantile=float(strat_cfg.get("candidate_region_fallback_quantile", 0.9)),
     )
 
     target_dir = (
@@ -572,19 +645,24 @@ def run_disease_stratification(
     )
     plots_dir = target_dir / "stratification_effect_plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
+    for stale_plot in plots_dir.glob("*.png"):
+        stale_plot.unlink()
 
     tests_path = target_dir / "stratification_wavenumber_tests.csv"
-    counts_path = target_dir / "stratification_group_counts.csv"
     candidates_path = target_dir / "stratification_candidate_regions.csv"
+    obsolete_paths = [
+        target_dir / "stratification_group_counts.csv",
+    ]
+    for obsolete_path in obsolete_paths:
+        if obsolete_path.exists():
+            obsolete_path.unlink()
     tests.to_csv(tests_path, index=False)
-    counts.to_csv(counts_path, index=False)
     candidate_regions.to_csv(candidates_path, index=False)
     _plot_effects(tests, plots_dir)
 
     logger.info("Disease stratification outputs written to %s", target_dir)
     return {
         "stratification_wavenumber_tests": tests_path,
-        "stratification_group_counts": counts_path,
         "stratification_candidate_regions": candidates_path,
         "stratification_effect_plots": plots_dir,
     }

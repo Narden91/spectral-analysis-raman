@@ -498,16 +498,20 @@ def build_candidate_regions(
     effect_column: str,
     min_width_cm: float = 8.0,
     merge_gap_cm: float = 6.0,
+    fallback_quantile: float = 0.9,
 ) -> pd.DataFrame:
     base_columns = list(group_columns) + [
         "spectral_block",
         "candidate_region_id",
+        "selection_basis",
         "start_cm-1",
         "end_cm-1",
         "width_cm-1",
         "n_features",
         "min_fdr_q",
         "min_cluster_p_value",
+        "n_fdr_significant",
+        "n_cluster_significant",
         "max_abs_effect",
         "mean_abs_effect",
         "integrated_abs_effect",
@@ -521,17 +525,70 @@ def build_candidate_regions(
     if working.empty:
         return pd.DataFrame(columns=base_columns)
 
-    candidate_mask = working["significant_fdr"].fillna(False)
-    if "cluster_p_value" in working.columns:
-        candidate_mask = candidate_mask | working["cluster_p_value"].lt(0.05).fillna(False)
-    candidates = working.loc[candidate_mask].copy()
-    if candidates.empty:
-        return pd.DataFrame(columns=base_columns)
-
     rows: list[dict[str, object]] = []
     group_keys = list(group_columns) + ["spectral_block"]
-    for group_values, block_df in candidates.groupby(group_keys, sort=False):
-        ordered = block_df.sort_values("wavenumber").reset_index(drop=True)
+
+    def _append_region(window: pd.DataFrame, *, selection_basis: str, region_index: int) -> None:
+        row = {
+            "spectral_block": str(window["spectral_block"].iloc[0]),
+            "candidate_region_id": f"{window['spectral_block'].iloc[0]}_R{region_index}",
+            "selection_basis": selection_basis,
+            "start_cm-1": float(window["wavenumber"].iloc[0]),
+            "end_cm-1": float(window["wavenumber"].iloc[-1]),
+            "width_cm-1": float(window["wavenumber"].iloc[-1] - window["wavenumber"].iloc[0]),
+            "n_features": int(len(window)),
+            "min_fdr_q": float(window["fdr_q"].min()) if "fdr_q" in window.columns else np.nan,
+            "min_cluster_p_value": (
+                float(window["cluster_p_value"].min())
+                if "cluster_p_value" in window.columns
+                else np.nan
+            ),
+            "n_fdr_significant": int(
+                window["significant_fdr"].astype("boolean").fillna(False).sum()
+            ) if "significant_fdr" in window.columns else 0,
+            "n_cluster_significant": int(
+                window["cluster_p_value"].lt(0.05).fillna(False).sum()
+            ) if "cluster_p_value" in window.columns else 0,
+            "max_abs_effect": float(window[effect_column].abs().max()),
+            "mean_abs_effect": float(window[effect_column].abs().mean()),
+            "integrated_abs_effect": float(
+                np.trapz(
+                    window[effect_column].abs().to_numpy(dtype=float),
+                    window["wavenumber"].to_numpy(dtype=float),
+                )
+            ),
+        }
+        rows.append(row)
+
+    for group_values, block_df in working.groupby(group_keys, sort=False):
+        ordered_full = block_df.sort_values("wavenumber").reset_index(drop=True)
+        sig_mask = pd.Series(False, index=ordered_full.index, dtype=bool)
+        if "significant_fdr" in ordered_full.columns:
+            sig_mask = sig_mask | ordered_full["significant_fdr"].astype("boolean").fillna(False).to_numpy(dtype=bool)
+        if "cluster_p_value" in ordered_full.columns:
+            sig_mask = sig_mask | ordered_full["cluster_p_value"].lt(0.05).fillna(False).to_numpy(dtype=bool)
+
+        if sig_mask.any():
+            ordered = ordered_full.loc[sig_mask].copy().reset_index(drop=True)
+            selection_basis = "significant_or_cluster"
+        else:
+            abs_effect = ordered_full[effect_column].abs().to_numpy(dtype=float)
+            finite = np.isfinite(abs_effect)
+            if not finite.any():
+                continue
+            threshold = float(np.nanquantile(abs_effect[finite], fallback_quantile))
+            fallback_mask = abs_effect >= threshold
+            ordered = ordered_full.loc[fallback_mask].copy().reset_index(drop=True)
+            selection_basis = "top_abs_effect_fallback"
+            if ordered.empty:
+                peak_index = int(np.nanargmax(abs_effect))
+                peak_wavenumber = float(ordered_full.loc[peak_index, "wavenumber"])
+                half_width = max(min_width_cm / 2.0, merge_gap_cm)
+                ordered = ordered_full.loc[
+                    ordered_full["wavenumber"].between(peak_wavenumber - half_width, peak_wavenumber + half_width)
+                ].copy().reset_index(drop=True)
+                selection_basis = "top_peak_window_fallback"
+
         start = 0
         region_index = 0
         for index in range(1, len(ordered) + 1):
@@ -544,39 +601,32 @@ def build_candidate_regions(
             width = float(window["wavenumber"].iloc[-1] - window["wavenumber"].iloc[0])
             if width >= min_width_cm or len(window) > 1:
                 region_index += 1
-                row = {
-                    "spectral_block": str(window["spectral_block"].iloc[0]),
-                    "candidate_region_id": f"{window['spectral_block'].iloc[0]}_R{region_index}",
-                    "start_cm-1": float(window["wavenumber"].iloc[0]),
-                    "end_cm-1": float(window["wavenumber"].iloc[-1]),
-                    "width_cm-1": width,
-                    "n_features": int(len(window)),
-                    "min_fdr_q": float(window["fdr_q"].min()) if "fdr_q" in window.columns else np.nan,
-                    "min_cluster_p_value": (
-                        float(window["cluster_p_value"].min())
-                        if "cluster_p_value" in window.columns
-                        else np.nan
-                    ),
-                    "max_abs_effect": float(window[effect_column].abs().max()),
-                    "mean_abs_effect": float(window[effect_column].abs().mean()),
-                    "integrated_abs_effect": float(
-                        np.trapz(
-                            window[effect_column].abs().to_numpy(dtype=float),
-                            window["wavenumber"].to_numpy(dtype=float),
-                        )
-                    ),
-                }
-                if not isinstance(group_values, tuple):
-                    group_values = (group_values,)
+                _append_region(window, selection_basis=selection_basis, region_index=region_index)
+            start = index
+
+        if region_index == 0:
+            abs_effect = ordered_full[effect_column].abs().to_numpy(dtype=float)
+            if np.isfinite(abs_effect).any():
+                peak_index = int(np.nanargmax(abs_effect))
+                peak_wavenumber = float(ordered_full.loc[peak_index, "wavenumber"])
+                half_width = max(min_width_cm / 2.0, merge_gap_cm)
+                window = ordered_full.loc[
+                    ordered_full["wavenumber"].between(peak_wavenumber - half_width, peak_wavenumber + half_width)
+                ].copy().reset_index(drop=True)
+                region_index = 1
+                _append_region(window, selection_basis="top_peak_window_fallback", region_index=region_index)
+
+        if region_index > 0:
+            if not isinstance(group_values, tuple):
+                group_values = (group_values,)
+            for row in rows[-region_index:]:
                 for key, value in zip(group_keys, group_values):
                     row[key] = value
-                rows.append(row)
-            start = index
 
     out = pd.DataFrame(rows)
     if out.empty:
         return pd.DataFrame(columns=base_columns)
     return out.loc[:, base_columns].sort_values(
-        list(group_columns) + ["integrated_abs_effect"],
-        ascending=[True] * len(group_columns) + [False],
+        list(group_columns) + ["selection_basis", "integrated_abs_effect"],
+        ascending=[True] * len(group_columns) + [True, False],
     ).reset_index(drop=True)
