@@ -6,8 +6,10 @@ import logging
 from pathlib import Path
 
 from src import config
+from src.analysis.biochemical_ratios import run_biochemical_ratios
 from src.analysis.clinical_correlation_matrix import run_clinical_correlation_matrix
 from src.analysis.covariate_models import run_covariate_region_models
+from src.analysis.disease_subgroups import run_disease_subgroups
 from src.analysis.disease_stratification import run_disease_stratification
 from src.analysis.integrated_candidates import run_integrated_candidates
 from src.analysis.longitudinal_moca import run_longitudinal_moca
@@ -98,6 +100,13 @@ def run_disease_only_cross_region_pipeline(
         )
         outputs["splsda"] = splsda_outputs
 
+    if _phase_enabled(cfg, "biochemical_ratios"):
+        logger.info("Starting biochemical ratio analysis (Phase 10)")
+        outputs["biochemical_ratios"] = run_biochemical_ratios(
+            feature_matrix_path=feature_matrix_path,
+            cfg=cfg,
+        )
+
     integrated_outputs: dict[str, Path] = {}
     if _phase_enabled(cfg, "integrated_candidates"):
         logger.info("Starting integrated candidate evidence table (Phase 11)")
@@ -108,6 +117,14 @@ def run_disease_only_cross_region_pipeline(
             cfg=cfg,
         )
         outputs["integrated_candidates"] = integrated_outputs
+
+    if _phase_enabled(cfg, "disease_subgroups"):
+        logger.info("Starting disease subgroup analysis (Phase 12)")
+        outputs["disease_subgroups"] = run_disease_subgroups(
+            feature_matrix_path=feature_matrix_path,
+            integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
+            cfg=cfg,
+        )
 
     panel_outputs: dict[str, Path] = {}
     if _phase_enabled(cfg, "minimal_panel"):

@@ -233,14 +233,18 @@ def run_splsda_classifier(
         ordered_groups = target_def["ordered_groups"]
         
         if group_var not in disease_only.columns:
-            logger.warning("Target '%s' not found, skipping PLS-L1DA", group_var)
+            logger.info("Target '%s' not found, skipping PLS-L1DA", group_var)
             continue
             
         frame = disease_only[disease_only[group_var].isin(ordered_groups)].copy()
         class_counts = frame[group_var].value_counts()
         if len(class_counts) < 2 or class_counts.min() < min_subjects_per_group:
-            logger.warning("Target '%s' has insufficient class sizes (%s), skipping. Minimum required is %d per class.", 
-                           group_var, dict(class_counts), min_subjects_per_group)
+            logger.info(
+                "Target '%s' has insufficient class sizes (%s), skipping. Minimum required is %d per class.",
+                group_var,
+                dict(class_counts),
+                min_subjects_per_group,
+            )
             continue
             
         y = (frame[group_var] == ordered_groups[1]).astype(int).to_numpy()

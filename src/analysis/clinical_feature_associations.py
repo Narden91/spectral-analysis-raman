@@ -209,7 +209,7 @@ def compute_spearman_feature_tests(
     valid_rows = target_values.notna().to_numpy(dtype=bool)
     n_valid = int(valid_rows.sum())
     if n_valid < min_subjects:
-        logger.warning("Target '%s' has only %d valid subjects; skipping", target, n_valid)
+        logger.info("Target '%s' has only %d valid subjects; skipping", target, n_valid)
         return pd.DataFrame()
 
     feature_names = feature_meta["feature_name"].tolist()

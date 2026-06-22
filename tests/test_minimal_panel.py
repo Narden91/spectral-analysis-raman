@@ -85,6 +85,8 @@ def test_run_minimal_panel_produces_expected_outputs(input_paths: dict[str, Path
                     "n_inner_splits": 2,
                     "n_permutations": 10,
                     "n_bootstrap": 20,
+                    "n_jobs": 1,
+                    "detect_gpu": False,
                     "random_state": 42,
                     "continuous_targets": ["delta_moca"],
                     "binary_targets": [

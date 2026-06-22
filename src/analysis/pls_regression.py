@@ -182,13 +182,13 @@ def run_pls_regression(
 
     for target in targets:
         if target not in disease_only.columns:
-            logger.warning("Target '%s' not found, skipping PLS regression", target)
+            logger.info("Target '%s' not found, skipping PLS regression", target)
             continue
 
         target_values = pd.to_numeric(disease_only[target], errors="coerce")
         valid_mask = target_values.notna()
         if valid_mask.sum() < min_subjects:
-            logger.warning("Target '%s' has only %d valid subjects, skipping", target, valid_mask.sum())
+            logger.info("Target '%s' has only %d valid subjects, skipping", target, valid_mask.sum())
             continue
 
         frame = disease_only.loc[valid_mask].copy()

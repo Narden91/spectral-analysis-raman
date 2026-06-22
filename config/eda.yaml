@@ -146,9 +146,21 @@ analysis:
     n_permutations: 500
     random_state: 42
     emit_oplsda: false
+  biochemical_ratios:
+    enabled: true
+    targets: [moca_baseline, moca_3m, delta_moca]
+    min_subjects: 5
+    fdr_alpha: 0.05
   integrated_candidates:
     enabled: true
     vip_threshold: 1.0
+  disease_subgroups:
+    enabled: true
+    min_subjects: 10
+    min_clusters: 2
+    max_clusters: 4
+    n_bootstrap: 100
+    random_state: 42
   minimal_panel:
     enabled: true
     max_features: 10
@@ -157,6 +169,8 @@ analysis:
     n_inner_splits: 3
     n_permutations: 1000
     n_bootstrap: 200
+    n_jobs: -1
+    detect_gpu: true
     random_state: 42
     continuous_targets: [moca_baseline, moca_3m, delta_moca]
     binary_targets:

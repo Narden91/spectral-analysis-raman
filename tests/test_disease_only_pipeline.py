@@ -70,12 +70,23 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
         assert kwargs["pls_outputs"] == {"pls_vip_bands": Path("vip.csv")}
         return {"pls_l1da_selected_bands": Path("selected.csv")}
 
+    def biochemical_runner(**kwargs):
+        calls.append("biochemical")
+        assert kwargs["feature_matrix_path"] == feature_matrix_path
+        return {"biochemical_ratio_associations": Path("ratios.csv")}
+
     def integrated_runner(**kwargs):
         calls.append("integrated")
         assert kwargs["feature_matrix_path"] == feature_matrix_path
         assert kwargs["pls_vip_path"] == Path("vip.csv")
         assert kwargs["splsda_bands_path"] == Path("selected.csv")
         return {"integrated_candidate_regions": Path("integrated.csv")}
+
+    def subgroup_runner(**kwargs):
+        calls.append("subgroups")
+        assert kwargs["feature_matrix_path"] == feature_matrix_path
+        assert kwargs["integrated_candidates_path"] == Path("integrated.csv")
+        return {"disease_subgroup_assignments": Path("subgroups.csv")}
 
     def panel_runner(**kwargs):
         calls.append("panel")
@@ -93,7 +104,9 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
     monkeypatch.setattr(pipeline, "run_covariate_region_models", covariate_runner)
     monkeypatch.setattr(pipeline, "run_pls_regression", pls_runner)
     monkeypatch.setattr(pipeline, "run_splsda_classifier", splsda_runner)
+    monkeypatch.setattr(pipeline, "run_biochemical_ratios", biochemical_runner)
     monkeypatch.setattr(pipeline, "run_integrated_candidates", integrated_runner)
+    monkeypatch.setattr(pipeline, "run_disease_subgroups", subgroup_runner)
     monkeypatch.setattr(pipeline, "run_minimal_panel", panel_runner)
     monkeypatch.setattr(pipeline, "run_candidate_region_report", report_runner)
 
@@ -107,7 +120,9 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
             covariate_models=True,
             pls_regression=True,
             splsda=True,
+            biochemical_ratios=True,
             integrated_candidates=True,
+            disease_subgroups=True,
             minimal_panel=True,
             publication_report=True,
         ),
@@ -121,7 +136,9 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
         "covariate",
         "pls",
         "splsda",
+        "biochemical",
         "integrated",
+        "subgroups",
         "panel",
         "report",
     ]
@@ -157,7 +174,9 @@ def test_disease_only_pipeline_respects_disabled_phases(
             covariate_models=False,
             pls_regression=False,
             splsda=False,
+            biochemical_ratios=False,
             integrated_candidates=False,
+            disease_subgroups=False,
             minimal_panel=False,
             publication_report=False,
         ),

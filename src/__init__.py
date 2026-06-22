@@ -30,7 +30,9 @@ CROSS_REGION_PHASE_DIRS = {
     "covariate_models": "07_covariate_models",
     "pls_regression": "08_pls_regression",
     "splsda": "09_splsda_exploratory_classifier",
+    "biochemical_ratios": "10_biochemical_ratios",
     "integrated_candidates": "11_integrated_candidates",
+    "disease_subgroups": "12_disease_subgroups",
     "minimal_panel": "13_minimal_panel",
     "publication_report": "14_publication_report",
 }
@@ -156,8 +158,13 @@ def load_config(config_path: str = "config/settings.yaml") -> dict:
 config = load_config()
 
 
-def setup_logging(level: int = logging.INFO) -> None:
+def setup_logging(
+    level: int = logging.INFO,
+    *,
+    console_level: int | None = None,
+) -> None:
     """Configure root logger for the pipeline (call once at entry point)."""
+    console_level = level if console_level is None else console_level
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
     root_logger.setLevel(level)
@@ -172,12 +179,15 @@ def setup_logging(level: int = logging.INFO) -> None:
             show_path=False,
             markup=False,
         )
-        handler.setLevel(level)
+        handler.setLevel(console_level)
         handler.setFormatter(logging.Formatter("%(message)s"))
         root_logger.addHandler(handler)
     except Exception:
         log_fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-        logging.basicConfig(level=level, format=log_fmt, datefmt="%Y-%m-%d %H:%M:%S")
+        handler = logging.StreamHandler()
+        handler.setLevel(console_level)
+        handler.setFormatter(logging.Formatter(log_fmt, datefmt="%Y-%m-%d %H:%M:%S"))
+        root_logger.addHandler(handler)
 
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
 

@@ -35,7 +35,7 @@ from src import (
 )
 from src.data_preparation import data_source_summary, resolve_data_source, write_analysis_provenance
 from src.clinical.endpoints import build_and_write_clinical_endpoints
-from src.terminal_output import print_kv_table
+from src.terminal_output import print_kv_table, print_status
 
 from src.analysis._single_range import _VALID_RANGES
 from src.analysis.biological_pca import run_biological_pca
@@ -159,6 +159,11 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Override data.source with one of: raw_text, parsed, preprocessed.",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show detailed INFO logs in the terminal. Detailed logs are always written to run.log.",
+    )
     return parser.parse_args()
 
 
@@ -201,14 +206,18 @@ def _log_final_summary(ranges: list[str], biological_ran: bool, warnings: list[s
                 get_biological_pca_canonical_dir(model_name).relative_to(output_root),
             )
     if warnings:
-        logger.warning("Warnings:")
+        logger.warning(
+            "%d warning summaries written to %s",
+            len(warnings),
+            get_run_metadata_dir() / "warning_summary.md",
+        )
         for warning in warnings:
-            logger.warning("  %s", warning)
+            logger.info("Warning summary: %s", warning)
 
 
 def _main() -> None:
     args = _parse_args()
-    setup_logging()
+    setup_logging(console_level=logging.INFO if args.verbose else logging.WARNING)
     analysis_mode = resolve_eda_analysis_mode(config, override=args.analysis_mode)
     apply_eda_analysis_mode(config, analysis_mode)
     _apply_analysis_mode_runtime_defaults(analysis_mode)
@@ -219,6 +228,10 @@ def _main() -> None:
     data_source = resolve_data_source(config, source_override=args.source)
     print_kv_table("Active Data Source", data_source_summary(data_source))
     ranges = _requested_ranges(args.range)
+    print_status(
+        f"Running EDA mode={analysis_mode} ranges={', '.join(ranges)} "
+        f"output={_output_dir('eda_subdir')}"
+    )
     write_analysis_provenance(
         _output_dir("eda_subdir"),
         data_source,
@@ -246,25 +259,32 @@ def _main() -> None:
 
         results: dict[str, dict] = {}
         for spectral_range in ranges:
+            print_status(f"Starting {spectral_range} EDA")
             results[spectral_range] = run_eda(
                 spectral_range=spectral_range,
                 skip_preprocess=args.skip_preprocess,
                 max_subjects=args.max_subjects,
             )
+            print_status(f"Finished {spectral_range} EDA")
 
         biological_ran = False
         biological_outputs: dict[str, Path] = {}
         if _should_run_biological_pca(ranges, args.skip_biological_pca):
+            print_status("Starting Biological PCA")
             biological_outputs = run_biological_pca(max_subjects=args.max_subjects)
             biological_ran = True
+            print_status("Finished Biological PCA")
             if analysis_mode == "disease_only":
                 feature_matrix_path = biological_outputs.get("subject_feature_matrix_whole")
+                print_status("Starting disease-only cross-region phases")
                 run_disease_only_cross_region_pipeline(
                     feature_matrix_path=feature_matrix_path,
                     cfg=config,
                 )
+                print_status("Finished disease-only cross-region phases")
         warnings = _write_warning_summaries(_output_dir("eda_subdir")) if biological_ran else []
         _log_final_summary(ranges, biological_ran, warnings)
+        print_status(f"EDA complete. Outputs: {_output_dir('eda_subdir')}")
     except (ValueError, RuntimeError) as exc:
         logger.error("%s", exc)
         sys.exit(1)

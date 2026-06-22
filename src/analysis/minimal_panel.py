@@ -17,6 +17,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import ElasticNet, ElasticNetCV, LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, mean_absolute_error, mean_squared_error, r2_score, roc_auc_score
@@ -58,7 +59,7 @@ def _load_integrated_candidates(path: str | Path | None) -> pd.DataFrame | None:
         return None
     df = pd.read_csv(path)
     if df.empty:
-        logger.warning("Integrated candidate table is empty")
+        logger.info("Integrated candidate table is empty")
     return df
 
 
@@ -194,6 +195,91 @@ def _l1_logistic_model(c: float, random_state: int) -> LogisticRegression:
     )
 
 
+def _normalize_n_jobs(n_jobs: int) -> int:
+    return 1 if n_jobs == 0 else n_jobs
+
+
+def _parallel_values(n_jobs: int, calls: list[Any]) -> list[Any]:
+    if n_jobs == 1 or len(calls) <= 1:
+        return [func(*args) for func, args in calls]
+    return Parallel(n_jobs=n_jobs)(delayed(func)(*args) for func, args in calls)
+
+
+def _permuted_continuous_r2(
+    X: np.ndarray,
+    y: np.ndarray,
+    n_outer_splits: int,
+    n_inner_splits: int,
+    random_state: int,
+) -> float:
+    rng = np.random.default_rng(random_state)
+    y_perm = y[rng.permutation(len(y))]
+    _, _, perf = _nested_cv_elasticnet(
+        X,
+        y_perm,
+        n_outer_splits=n_outer_splits,
+        n_inner_splits=n_inner_splits,
+        random_state=random_state,
+    )
+    return float(perf["r2"])
+
+
+def _permuted_binary_balanced_accuracy(
+    X: np.ndarray,
+    y: np.ndarray,
+    n_outer_splits: int,
+    n_inner_splits: int,
+    random_state: int,
+    c_values: list[float] | None,
+) -> float:
+    rng = np.random.default_rng(random_state)
+    y_perm = y[rng.permutation(len(y))]
+    _, _, _, perf = _nested_cv_logistic_l1(
+        X,
+        y_perm,
+        n_outer_splits=n_outer_splits,
+        n_inner_splits=n_inner_splits,
+        random_state=random_state,
+        c_values=c_values,
+    )
+    return float(perf["balanced_accuracy"])
+
+
+def _bootstrap_coefficients(
+    X: np.ndarray,
+    y: np.ndarray,
+    task: str,
+    random_state: int,
+) -> np.ndarray | None:
+    rng = np.random.default_rng(random_state)
+    idx = rng.integers(0, X.shape[0], size=X.shape[0])
+    X_boot, y_boot = X[idx], y[idx]
+    if len(np.unique(y_boot)) < 2 and task == "binary":
+        return None
+    scaler = StandardScaler()
+    X_boot_scaled = scaler.fit_transform(X_boot)
+    try:
+        if task == "continuous":
+            model = _elasticnet_model(random_state)
+            _fit_elasticnet(model, X_boot_scaled, y_boot, "bootstrap ElasticNet")
+            return np.asarray(model.coef_, dtype=float)
+        model = _l1_logistic_model(1.0, random_state)
+        model.fit(X_boot_scaled, y_boot)
+        return np.asarray(model.coef_.ravel(), dtype=float)
+    except Exception:
+        return None
+
+
+def _optional_gpu_status() -> str:
+    try:
+        import cupy as cp  # type: ignore[import-not-found]
+
+        count = int(cp.cuda.runtime.getDeviceCount())
+        return f"cupy_available:{count}_cuda_device(s)" if count else "cupy_available:no_cuda_device"
+    except Exception:
+        return "not_available"
+
+
 def _nested_cv_elasticnet(
     X: np.ndarray,
     y: np.ndarray,
@@ -311,18 +397,19 @@ def _permutation_test_continuous(
     n_inner_splits: int,
     n_permutations: int,
     random_state: int,
+    observed_r2: float,
+    n_jobs: int,
 ) -> tuple[float, float, float]:
     rng = np.random.default_rng(random_state)
-    observed_r2 = _nested_cv_elasticnet(
-        X, y, n_outer_splits=n_outer_splits, n_inner_splits=n_inner_splits, random_state=random_state
-    )[2]["r2"]
-    null_r2: list[float] = []
-    for _ in range(n_permutations):
-        y_perm = y[rng.permutation(len(y))]
-        _, _, perf = _nested_cv_elasticnet(
-            X, y_perm, n_outer_splits=n_outer_splits, n_inner_splits=n_inner_splits, random_state=random_state
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
+    calls = [
+        (
+            _permuted_continuous_r2,
+            (X, y, n_outer_splits, n_inner_splits, int(seed)),
         )
-        null_r2.append(perf["r2"])
+        for seed in seeds
+    ]
+    null_r2 = _parallel_values(n_jobs, calls)
     null_arr = np.array(null_r2)
     finite = null_arr[np.isfinite(null_arr)]
     if len(finite) == 0:
@@ -339,24 +426,25 @@ def _permutation_test_binary(
     n_inner_splits: int,
     n_permutations: int,
     random_state: int,
+    observed_balanced_accuracy: float,
+    n_jobs: int,
     c_values: list[float] | None = None,
 ) -> tuple[float, float, float]:
     rng = np.random.default_rng(random_state)
-    observed_bal_acc = _nested_cv_logistic_l1(
-        X, y, n_outer_splits=n_outer_splits, n_inner_splits=n_inner_splits, random_state=random_state, c_values=c_values
-    )[3]["balanced_accuracy"]
-    null_scores: list[float] = []
-    for _ in range(n_permutations):
-        y_perm = y[rng.permutation(len(y))]
-        _, _, _, perf = _nested_cv_logistic_l1(
-            X, y_perm, n_outer_splits=n_outer_splits, n_inner_splits=n_inner_splits, random_state=random_state, c_values=c_values
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
+    calls = [
+        (
+            _permuted_binary_balanced_accuracy,
+            (X, y, n_outer_splits, n_inner_splits, int(seed), c_values),
         )
-        null_scores.append(perf["balanced_accuracy"])
+        for seed in seeds
+    ]
+    null_scores = _parallel_values(n_jobs, calls)
     null_arr = np.array(null_scores)
     finite = null_arr[np.isfinite(null_arr)]
     if len(finite) == 0:
         return np.nan, np.nan, np.nan
-    p_value = float(np.mean(finite >= observed_bal_acc))
+    p_value = float(np.mean(finite >= observed_balanced_accuracy))
     return p_value, float(np.mean(finite)), float(np.std(finite))
 
 
@@ -368,31 +456,20 @@ def _bootstrap_coefficient_ci(
     n_bootstrap: int,
     random_state: int,
     task: str,
+    n_jobs: int,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(random_state)
-    n_samples = X.shape[0]
     coef_samples: dict[str, list[float]] = {name: [] for name in feature_names}
-
-    for _ in range(n_bootstrap):
-        idx = rng.integers(0, n_samples, size=n_samples)
-        X_boot, y_boot = X[idx], y[idx]
-        if len(np.unique(y_boot)) < 2 and task == "binary":
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_bootstrap, dtype=np.int64)
+    calls = [
+        (_bootstrap_coefficients, (X, y, task, int(seed)))
+        for seed in seeds
+    ]
+    for coefs in _parallel_values(n_jobs, calls):
+        if coefs is None:
             continue
-        scaler = StandardScaler()
-        X_boot_scaled = scaler.fit_transform(X_boot)
-        try:
-            if task == "continuous":
-                model = _elasticnet_model(random_state)
-                _fit_elasticnet(model, X_boot_scaled, y_boot, "bootstrap ElasticNet")
-                coefs = model.coef_
-            else:
-                model = _l1_logistic_model(1.0, random_state)
-                model.fit(X_boot_scaled, y_boot)
-                coefs = model.coef_.ravel()
-            for name, coef in zip(feature_names, coefs):
-                coef_samples[name].append(float(coef))
-        except Exception:
-            continue
+        for name, coef in zip(feature_names, coefs):
+            coef_samples[name].append(float(coef))
 
     rows: list[dict[str, object]] = []
     for name in feature_names:
@@ -521,7 +598,7 @@ def run_minimal_panel(
         ]).to_csv(target_dir / "minimal_candidate_panel.csv", index=False)
         pd.DataFrame(columns=[
             "endpoint", "endpoint_type", "metric", "value", "n_subjects", "permutation_p_value",
-            "n_permutations", "cv_strategy",
+            "n_permutations", "cv_strategy", "compute_backend", "gpu_status",
         ]).to_csv(target_dir / "minimal_panel_cv_performance.csv", index=False)
         pd.DataFrame(columns=[
             "endpoint", "feature_name", "mean_coefficient", "ci_low", "ci_high", "n_bootstrap_used",
@@ -539,6 +616,9 @@ def run_minimal_panel(
     n_permutations = int(panel_cfg.get("n_permutations", 1000))
     n_bootstrap = int(panel_cfg.get("n_bootstrap", 200))
     random_state = int(panel_cfg.get("random_state", 42))
+    n_jobs = _normalize_n_jobs(int(panel_cfg.get("n_jobs", -1)))
+    gpu_status = _optional_gpu_status() if bool(panel_cfg.get("detect_gpu", True)) else "not_checked"
+    logger.debug("Minimal panel compute backend: sklearn_cpu; optional GPU status: %s", gpu_status)
 
     continuous_targets = [str(t) for t in panel_cfg.get("continuous_targets", ["moca_baseline", "moca_3m", "delta_moca"])]
     binary_targets = panel_cfg.get("binary_targets", _DEFAULT_BINARY_TARGETS)
@@ -552,12 +632,12 @@ def run_minimal_panel(
 
     for target in continuous_targets:
         if target not in disease_only.columns:
-            logger.warning("Continuous target '%s' not found; skipping", target)
+            logger.info("Continuous target '%s' not found; skipping", target)
             continue
         y = pd.to_numeric(disease_only[target], errors="coerce")
         valid = y.notna() & np.isfinite(X_full).all(axis=1)
         if valid.sum() < 10:
-            logger.warning("Target '%s' has only %d valid subjects; skipping", target, valid.sum())
+            logger.info("Target '%s' has only %d valid subjects; skipping", target, valid.sum())
             continue
         X = X_full[valid]
         y_arr = y.loc[valid].to_numpy(dtype=float)
@@ -572,28 +652,34 @@ def run_minimal_panel(
             task="continuous",
         )
 
+        selected_indices = [feature_names.index(s) for s in selected]
+        X_selected = X[:, selected_indices]
+
         _, cv_info, perf = _nested_cv_elasticnet(
-            X[:, [feature_names.index(s) for s in selected]],
+            X_selected,
             y_arr,
             n_outer_splits=n_outer_splits,
             n_inner_splits=n_inner_splits,
             random_state=random_state,
         )
         p_value, null_mean, null_std = _permutation_test_continuous(
-            X[:, [feature_names.index(s) for s in selected]],
+            X_selected,
             y_arr,
             n_outer_splits=n_outer_splits,
             n_inner_splits=n_inner_splits,
             n_permutations=n_permutations,
             random_state=random_state,
+            observed_r2=perf["r2"],
+            n_jobs=n_jobs,
         )
         ci_df = _bootstrap_coefficient_ci(
-            X[:, [feature_names.index(s) for s in selected]],
+            X_selected,
             y_arr,
             selected,
             n_bootstrap=n_bootstrap,
             random_state=random_state,
             task="continuous",
+            n_jobs=n_jobs,
         )
 
         for _, row in selection_df.iterrows():
@@ -617,6 +703,8 @@ def run_minimal_panel(
             "permutation_p_value": p_value,
             "n_permutations": n_permutations,
             "cv_strategy": cv_info["cv_strategy"],
+            "compute_backend": "sklearn_cpu",
+            "gpu_status": gpu_status,
         })
         perf_rows.append({
             "endpoint": target,
@@ -627,6 +715,8 @@ def run_minimal_panel(
             "permutation_p_value": pd.NA,
             "n_permutations": pd.NA,
             "cv_strategy": cv_info["cv_strategy"],
+            "compute_backend": "sklearn_cpu",
+            "gpu_status": gpu_status,
         })
         for _, row in ci_df.iterrows():
             coef_rows.append({
@@ -642,7 +732,7 @@ def run_minimal_panel(
         group_var = str(target_def["group_variable"])
         ordered_groups = tuple(target_def["ordered_groups"])
         if group_var not in disease_only.columns:
-            logger.warning("Binary target '%s' not found; skipping", group_var)
+            logger.info("Binary target '%s' not found; skipping", group_var)
             continue
         subset = disease_only[disease_only[group_var].isin(ordered_groups)].copy()
         subset[group_var] = subset[group_var].astype(str)
@@ -651,7 +741,7 @@ def run_minimal_panel(
         X = pool_subset.to_numpy(dtype=float)
         valid = y.notna() & np.isfinite(X).all(axis=1)
         if valid.sum() < 10 or y.loc[valid].nunique() < 2:
-            logger.warning("Binary target '%s' has insufficient valid subjects; skipping", group_var)
+            logger.info("Binary target '%s' has insufficient valid subjects; skipping", group_var)
             continue
         X = X[valid]
         y_arr = y.loc[valid].to_numpy(dtype=int)
@@ -666,28 +756,34 @@ def run_minimal_panel(
             task="binary",
         )
 
+        selected_indices = [pool_subset.columns.get_loc(s) for s in selected]
+        X_selected = X[:, selected_indices]
+
         _, _, cv_info, perf = _nested_cv_logistic_l1(
-            X[:, [pool_subset.columns.get_loc(s) for s in selected]],
+            X_selected,
             y_arr,
             n_outer_splits=n_outer_splits,
             n_inner_splits=n_inner_splits,
             random_state=random_state,
         )
         p_value, null_mean, null_std = _permutation_test_binary(
-            X[:, [pool_subset.columns.get_loc(s) for s in selected]],
+            X_selected,
             y_arr,
             n_outer_splits=n_outer_splits,
             n_inner_splits=n_inner_splits,
             n_permutations=n_permutations,
             random_state=random_state,
+            observed_balanced_accuracy=perf["balanced_accuracy"],
+            n_jobs=n_jobs,
         )
         ci_df = _bootstrap_coefficient_ci(
-            X[:, [pool_subset.columns.get_loc(s) for s in selected]],
+            X_selected,
             y_arr,
             selected,
             n_bootstrap=n_bootstrap,
             random_state=random_state,
             task="binary",
+            n_jobs=n_jobs,
         )
 
         for _, row in selection_df.iterrows():
@@ -711,6 +807,8 @@ def run_minimal_panel(
             "permutation_p_value": p_value,
             "n_permutations": n_permutations,
             "cv_strategy": cv_info["cv_strategy"],
+            "compute_backend": "sklearn_cpu",
+            "gpu_status": gpu_status,
         })
         perf_rows.append({
             "endpoint": group_var,
@@ -721,6 +819,8 @@ def run_minimal_panel(
             "permutation_p_value": pd.NA,
             "n_permutations": pd.NA,
             "cv_strategy": cv_info["cv_strategy"],
+            "compute_backend": "sklearn_cpu",
+            "gpu_status": gpu_status,
         })
         for _, row in ci_df.iterrows():
             coef_rows.append({
@@ -743,7 +843,7 @@ def run_minimal_panel(
         perf_rows,
         columns=[
             "endpoint", "endpoint_type", "metric", "value", "n_subjects", "permutation_p_value",
-            "n_permutations", "cv_strategy",
+            "n_permutations", "cv_strategy", "compute_backend", "gpu_status",
         ],
     )
     coef_df = pd.DataFrame(
