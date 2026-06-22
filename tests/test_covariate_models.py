@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+
+from src.analysis.covariate_models import run_covariate_region_models
+
+
+def _feature_matrix() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for index in range(12):
+        delta = float(index - 5)
+        group = "decline" if delta < 0 else "stable_or_improved"
+        rows.append(
+            {
+                "subject_id": f"D{index:02d}",
+                "condition": "Disease",
+                "is_control": False,
+                "age": float(50 + index),
+                "delta_moca": delta,
+                "moca_baseline": float(20 + index),
+                "delta_moca_group": group,
+                "1300__1240.0": float(10 + delta * 2.0),
+                "1300__1245.0": float(11 + delta * 2.2),
+                "1300__1250.0": float(12 + delta * 2.4),
+                "2850__2840.0": float(7 - delta * 1.4),
+                "2850__2850.0": float(8 - delta * 1.6),
+                "2850__2930.0": float(9 - delta * 1.8),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _candidate_regions() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "source_analysis": ["clinical_correlation_matrix", "disease_stratification"],
+            "analysis_name": ["clinical_correlation_matrix", "low_vs_high_moca"],
+            "target": ["delta_moca", pd.NA],
+            "contrast_name": ["delta_moca", "decline_vs_stable_or_improved"],
+            "group_variable": [pd.NA, "delta_moca_group"],
+            "group_a": [pd.NA, "decline"],
+            "group_b": [pd.NA, "stable_or_improved"],
+            "spectral_block": ["1300", "2850"],
+            "candidate_region_id": ["1300_R1", "2850_R1"],
+            "selection_basis": ["significant_or_cluster", "top_abs_effect_fallback"],
+            "start_cm-1": [1240.0, 2840.0],
+            "end_cm-1": [1250.0, 2850.0],
+            "width_cm-1": [10.0, 10.0],
+            "n_features": [3, 2],
+            "min_fdr_q": [0.01, 0.4],
+            "min_cluster_p_value": [0.02, 0.3],
+            "n_fdr_significant": [2, 0],
+            "n_cluster_significant": [2, 0],
+            "max_abs_effect": [0.8, 0.4],
+            "mean_abs_effect": [0.75, 0.35],
+            "integrated_abs_effect": [7.0, 3.0],
+            "effect_metric": ["spearman_rho", "rank_biserial"],
+        }
+    )
+
+
+def test_run_covariate_region_models_reports_missing_covariates_and_formulas(tmp_path: Path) -> None:
+    matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
+    candidate_path = tmp_path / "candidate_regions_cluster_corrected.csv"
+    _feature_matrix().to_parquet(matrix_path, index=False)
+    _candidate_regions().to_csv(candidate_path, index=False)
+
+    written = run_covariate_region_models(
+        feature_matrix_path=matrix_path,
+        candidate_regions_path=candidate_path,
+        output_dir=tmp_path,
+        cfg={
+            "analysis": {
+                "covariate_models": {
+                    "enabled": True,
+                    "covariates": ["age", "sex"],
+                    "min_subjects": 6,
+                    "random_state": 42,
+                }
+            },
+            "whole_spectra": {
+                "bands": {
+                    "amide_iii_1260": [1235.0, 1255.0],
+                    "ch2_sym_stretch_2850": [2840.0, 2855.0],
+                    "ch3_sym_stretch_2930": [2925.0, 2935.0],
+                },
+                "ratio_pairs": [
+                    ["amide_iii_1260", "ch2_sym_stretch_2850"],
+                    ["ch2_sym_stretch_2850", "ch3_sym_stretch_2930"],
+                ],
+            },
+        },
+    )
+
+    models = pd.read_csv(written["covariate_adjusted_region_models"])
+    availability = pd.read_csv(written["covariate_availability_report"])
+
+    assert set(models["predictor_type"]) == {"region", "ratio"}
+    assert models["formula"].str.contains("age").all()
+    assert not models["formula"].str.contains("sex").any()
+    assert models["n_subjects"].ge(6).all()
+    assert availability["missing_covariates"].str.contains("sex").any()
+    assert availability["available_covariates"].str.contains("age").all()

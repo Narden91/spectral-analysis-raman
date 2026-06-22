@@ -15,7 +15,9 @@ import pandas as pd
 from scipy import stats
 
 from src import config, get_cross_region_summary_dir
+from src.analysis.spectral_regions import build_candidate_regions
 from src.analysis.statistics import fdr_correction
+from src.statistics.cluster_permutation import apply_binary_cluster_permutation
 
 logger = logging.getLogger(__name__)
 
@@ -175,65 +177,6 @@ def _binary_feature_tests(
     return tests, counts
 
 
-def _cluster_masses(effects: np.ndarray, p_values: np.ndarray, alpha: float) -> list[tuple[int, int, float]]:
-    active = (p_values < alpha) & np.isfinite(effects)
-    clusters: list[tuple[int, int, float]] = []
-    start: int | None = None
-    sign = 0.0
-    for index, is_active in enumerate(active):
-        current_sign = np.sign(effects[index]) if is_active else 0.0
-        if is_active and start is None:
-            start = index
-            sign = current_sign
-            continue
-        if is_active and start is not None and current_sign == sign:
-            continue
-        if start is not None:
-            stop = index - 1 if not is_active else index - 1
-            mass = float(np.nansum(np.abs(effects[start : stop + 1])))
-            clusters.append((start, stop, mass))
-            start = index if is_active else None
-            sign = current_sign if is_active else 0.0
-    if start is not None:
-        stop = len(active) - 1
-        mass = float(np.nansum(np.abs(effects[start : stop + 1])))
-        clusters.append((start, stop, mass))
-    return clusters
-
-
-def _permutation_cluster_maxima(
-    values: np.ndarray,
-    labels: np.ndarray,
-    n_permutations: int,
-    alpha: float,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    n_left = int((labels == 0).sum())
-    maxima = np.zeros(n_permutations, dtype=float)
-    pooled = np.asarray(values, dtype=float)
-
-    for perm_index in range(n_permutations):
-        order = rng.permutation(len(labels))
-        left_idx = order[:n_left]
-        right_idx = order[n_left:]
-        left = pooled[left_idx]
-        right = pooled[right_idx]
-        test_result = stats.mannwhitneyu(
-            left,
-            right,
-            axis=0,
-            alternative="two-sided",
-        )
-        p_values = np.asarray(test_result.pvalue, dtype=float)
-        effects = np.asarray(
-            _rank_biserial_effect(left, right, np.asarray(test_result.statistic, dtype=float)),
-            dtype=float,
-        )
-        clusters = _cluster_masses(effects, p_values, alpha)
-        maxima[perm_index] = max((mass for _, _, mass in clusters), default=0.0)
-    return maxima
-
-
 def _apply_cluster_permutation(
     tests: pd.DataFrame,
     frame: pd.DataFrame,
@@ -243,43 +186,15 @@ def _apply_cluster_permutation(
     cluster_alpha: float,
     random_state: int,
 ) -> pd.DataFrame:
-    if tests.empty or tests["status"].ne("ok").all():
-        return tests
-
-    out = tests.copy()
-    out["cluster_id"] = pd.NA
-    out["cluster_mass"] = np.nan
-    out["cluster_p_value"] = np.nan
-    rng = np.random.default_rng(random_state)
-
-    subset = frame.loc[frame[spec.variable].isin(spec.ordered_groups)].copy()
-    subset[spec.variable] = subset[spec.variable].astype(str)
-    labels = np.where(subset[spec.variable] == spec.ordered_groups[0], 0, 1)
-
-    for block, block_df in out.groupby("spectral_block", sort=False):
-        ordered = block_df.sort_values("wavenumber").reset_index()
-        effects = ordered["effect_size"].to_numpy(dtype=float)
-        p_values = ordered["p_value"].to_numpy(dtype=float)
-        clusters = _cluster_masses(effects, p_values, cluster_alpha)
-        if not clusters:
-            continue
-
-        feature_names = ordered["feature_name"].tolist()
-        values = subset[feature_names].to_numpy(dtype=float)
-        maxima = _permutation_cluster_maxima(
-            values,
-            labels,
-            n_permutations=n_permutations,
-            alpha=cluster_alpha,
-            rng=rng,
-        )
-        for cluster_index, (start, stop, mass) in enumerate(clusters, start=1):
-            corrected = float((1 + np.sum(maxima >= mass)) / (n_permutations + 1))
-            for row_index in ordered.loc[start : stop, "index"]:
-                out.loc[row_index, "cluster_id"] = f"{block}_C{cluster_index}"
-                out.loc[row_index, "cluster_mass"] = mass
-                out.loc[row_index, "cluster_p_value"] = corrected
-    return out
+    return apply_binary_cluster_permutation(
+        tests,
+        frame,
+        group_column=spec.variable,
+        ordered_groups=(spec.ordered_groups[0], spec.ordered_groups[1]),
+        n_permutations=n_permutations,
+        cluster_alpha=cluster_alpha,
+        random_state=random_state,
+    )
 
 
 def _kruskal_effect_size(h_statistic: float, n_subjects: int, n_groups: int) -> float:
@@ -397,135 +312,6 @@ def _multigroup_feature_tests(
     return tests, counts
 
 
-def _candidate_regions(
-    tests: pd.DataFrame,
-    *,
-    min_width_cm: float = 8.0,
-    merge_gap_cm: float = 6.0,
-    fallback_quantile: float = 0.9,
-) -> pd.DataFrame:
-    columns = [
-        "contrast_name",
-        "group_variable",
-        "spectral_block",
-        "candidate_region_id",
-        "selection_basis",
-        "start_cm-1",
-        "end_cm-1",
-        "width_cm-1",
-        "n_features",
-        "min_fdr_q",
-        "min_cluster_p_value",
-        "max_abs_effect",
-        "mean_abs_effect",
-        "integrated_abs_effect",
-    ]
-    rows: list[dict[str, object]] = []
-
-    def _append_region(
-        *,
-        contrast_name: str,
-        group_variable: str,
-        block: str,
-        selection_basis: str,
-        region_index: int,
-        window: pd.DataFrame,
-    ) -> None:
-        rows.append(
-            {
-                "contrast_name": contrast_name,
-                "group_variable": group_variable,
-                "spectral_block": block,
-                "candidate_region_id": f"{block}_R{region_index}",
-                "selection_basis": selection_basis,
-                "start_cm-1": float(window["wavenumber"].iloc[0]),
-                "end_cm-1": float(window["wavenumber"].iloc[-1]),
-                "width_cm-1": float(window["wavenumber"].iloc[-1] - window["wavenumber"].iloc[0]),
-                "n_features": int(len(window)),
-                "min_fdr_q": float(window["fdr_q"].min()) if "fdr_q" in window.columns else np.nan,
-                "min_cluster_p_value": float(window["cluster_p_value"].min()) if "cluster_p_value" in window.columns else np.nan,
-                "max_abs_effect": float(window["effect_size"].abs().max()) if "effect_size" in window.columns else np.nan,
-                "mean_abs_effect": float(window["effect_size"].abs().mean()) if "effect_size" in window.columns else np.nan,
-                "integrated_abs_effect": float(
-                    np.trapz(
-                        window["effect_size"].abs().to_numpy(dtype=float),
-                        window["wavenumber"].to_numpy(dtype=float),
-                    )
-                ) if "effect_size" in window.columns else np.nan,
-            }
-        )
-
-    ok = tests.loc[tests["status"].eq("ok")].copy()
-    if ok.empty:
-        return pd.DataFrame(columns=columns)
-
-    for (contrast_name, block), block_df in ok.groupby(["contrast_name", "spectral_block"], sort=False):
-        ordered_full = block_df.sort_values("wavenumber").reset_index(drop=True)
-        candidate_mask = ordered_full["significant_fdr"].astype("boolean").fillna(False).to_numpy(dtype=bool)
-        if "cluster_p_value" in ordered_full.columns:
-            candidate_mask = candidate_mask | ordered_full["cluster_p_value"].lt(0.05).fillna(False).to_numpy(dtype=bool)
-
-        if candidate_mask.any():
-            ordered = ordered_full.loc[candidate_mask].copy().reset_index(drop=True)
-            selection_basis = "significant_or_cluster"
-        else:
-            abs_effect = ordered_full["effect_size"].abs().to_numpy(dtype=float)
-            finite = np.isfinite(abs_effect)
-            if not finite.any():
-                continue
-            threshold = float(np.nanquantile(abs_effect[finite], fallback_quantile))
-            fallback_mask = abs_effect >= threshold
-            ordered = ordered_full.loc[fallback_mask].copy().reset_index(drop=True)
-            selection_basis = "top_abs_effect_fallback"
-            if ordered.empty:
-                peak_index = int(np.nanargmax(abs_effect))
-                peak_wavenumber = float(ordered_full.loc[peak_index, "wavenumber"])
-                half_width = max(min_width_cm / 2.0, merge_gap_cm)
-                ordered = ordered_full.loc[
-                    ordered_full["wavenumber"].between(peak_wavenumber - half_width, peak_wavenumber + half_width)
-                ].copy().reset_index(drop=True)
-                selection_basis = "top_peak_window_fallback"
-
-        start = 0
-        region_index = 0
-        for index in range(1, len(ordered) + 1):
-            is_break = index == len(ordered) or (ordered.loc[index, "wavenumber"] - ordered.loc[index - 1, "wavenumber"]) > merge_gap_cm
-            if not is_break:
-                continue
-            window = ordered.iloc[start:index].copy()
-            width = float(window["wavenumber"].iloc[-1] - window["wavenumber"].iloc[0])
-            if width >= min_width_cm or len(window) > 1:
-                region_index += 1
-                _append_region(
-                    contrast_name=contrast_name,
-                    group_variable=str(window["group_variable"].iloc[0]),
-                    block=block,
-                    selection_basis=selection_basis,
-                    region_index=region_index,
-                    window=window,
-                )
-            start = index
-
-        if region_index == 0:
-            abs_effect = ordered_full["effect_size"].abs().to_numpy(dtype=float)
-            if np.isfinite(abs_effect).any():
-                peak_index = int(np.nanargmax(abs_effect))
-                peak_wavenumber = float(ordered_full.loc[peak_index, "wavenumber"])
-                half_width = max(min_width_cm / 2.0, merge_gap_cm)
-                window = ordered_full.loc[
-                    ordered_full["wavenumber"].between(peak_wavenumber - half_width, peak_wavenumber + half_width)
-                ].copy().reset_index(drop=True)
-                _append_region(
-                    contrast_name=contrast_name,
-                    group_variable=str(window["group_variable"].iloc[0]),
-                    block=block,
-                    selection_basis="top_peak_window_fallback",
-                    region_index=1,
-                    window=window,
-                )
-    return pd.DataFrame(rows, columns=columns)
-
-
 def _plot_effects(tests: pd.DataFrame, output_dir: Path) -> None:
     ok = tests.loc[tests["status"].eq("ok")].copy()
     if ok.empty or "effect_size" not in ok.columns:
@@ -631,8 +417,10 @@ def run_disease_stratification(
 
     tests = pd.concat(test_frames, ignore_index=True, sort=False)
     counts = pd.concat(count_frames, ignore_index=True, sort=False)
-    candidate_regions = _candidate_regions(
+    candidate_regions = build_candidate_regions(
         tests,
+        group_columns=("contrast_name", "group_variable"),
+        effect_column="effect_size",
         min_width_cm=float(strat_cfg.get("candidate_region_min_width_cm", 8.0)),
         merge_gap_cm=float(strat_cfg.get("candidate_region_merge_gap_cm", 6.0)),
         fallback_quantile=float(strat_cfg.get("candidate_region_fallback_quantile", 0.9)),

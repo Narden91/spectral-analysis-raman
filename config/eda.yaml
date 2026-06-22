@@ -108,6 +108,13 @@ analysis:
     candidate_region_merge_gap_cm: 6.0  # float: maximum within-region gap
     candidate_region_fallback_quantile: 0.9  # float: top-|effect| fallback quantile when no formal hits survive
     top_scatterplot_regions: 5  # int: number of candidate regions to visualize
+  candidate_regions:
+    enabled: true  # bool: unify phase-6 candidate regions into one cross-analysis table
+  covariate_models:
+    enabled: true  # bool: run covariate-adjusted models on candidate regions and configured ratios
+    covariates: [age, sex]
+    min_subjects: 8  # int: minimum complete-case subjects per model
+    random_state: 42  # int: reproducibility seed for deterministic logistic fits
   whole_spectra:
     emit_mfa: false  # bool: write MFA to whole_spectra/exploratory_multiblock/MFA/
 

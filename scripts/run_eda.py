@@ -40,6 +40,7 @@ from src.terminal_output import print_kv_table
 from src.analysis._single_range import _VALID_RANGES
 from src.analysis.biological_pca import run_biological_pca
 from src.analysis.clinical_correlation_matrix import run_clinical_correlation_matrix
+from src.analysis.covariate_models import run_covariate_region_models
 from src.analysis.disease_stratification import run_disease_stratification
 from src.analysis.eda_mode import (
     EDA_ANALYSIS_MODES,
@@ -50,6 +51,7 @@ from src.analysis.eda_mode import (
 )
 from src.analysis.longitudinal_moca import run_longitudinal_moca
 from src.analysis.run_eda import run_eda
+from src.analysis.spectral_regions import run_candidate_region_detector
 
 logger = logging.getLogger(__name__)
 
@@ -264,22 +266,43 @@ def _main() -> None:
                 clinical_matrix_cfg = config.get("analysis", {}).get("clinical_correlation_matrix", {})
                 longitudinal_cfg = config.get("analysis", {}).get("longitudinal_moca", {})
                 stratification_cfg = config.get("analysis", {}).get("disease_stratification", {})
+                candidate_cfg = config.get("analysis", {}).get("candidate_regions", {})
+                covariate_cfg = config.get("analysis", {}).get("covariate_models", {})
+                clinical_outputs: dict[str, Path] = {}
+                longitudinal_outputs: dict[str, Path] = {}
+                stratification_outputs: dict[str, Path] = {}
                 if bool(clinical_matrix_cfg.get("enabled", True)):
                     logger.info("Starting disease-only clinical correlation matrix")
-                    run_clinical_correlation_matrix(
+                    clinical_outputs = run_clinical_correlation_matrix(
                         feature_matrix_path=feature_matrix_path,
                         cfg=config,
                     )
                 if bool(longitudinal_cfg.get("enabled", True)):
                     logger.info("Starting longitudinal Delta MoCA analysis")
-                    run_longitudinal_moca(
+                    longitudinal_outputs = run_longitudinal_moca(
                         feature_matrix_path=feature_matrix_path,
                         cfg=config,
                     )
                 if bool(stratification_cfg.get("enabled", True)):
                     logger.info("Starting disease stratification analysis")
-                    run_disease_stratification(
+                    stratification_outputs = run_disease_stratification(
                         feature_matrix_path=feature_matrix_path,
+                        cfg=config,
+                    )
+                candidate_outputs: dict[str, Path] = {}
+                if bool(candidate_cfg.get("enabled", True)):
+                    logger.info("Starting unified candidate-region detector")
+                    candidate_outputs = run_candidate_region_detector(
+                        clinical_outputs=clinical_outputs,
+                        longitudinal_outputs=longitudinal_outputs,
+                        stratification_outputs=stratification_outputs,
+                        cfg=config,
+                    )
+                if bool(covariate_cfg.get("enabled", True)):
+                    logger.info("Starting covariate-adjusted region models")
+                    run_covariate_region_models(
+                        feature_matrix_path=feature_matrix_path,
+                        candidate_regions_path=candidate_outputs.get("candidate_regions_cluster_corrected"),
                         cfg=config,
                     )
         warnings = _write_warning_summaries(_output_dir("eda_subdir")) if biological_ran else []
