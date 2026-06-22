@@ -28,6 +28,8 @@ CROSS_REGION_PHASE_DIRS = {
     "disease_stratification": "05_disease_stratification",
     "candidate_regions": "06_candidate_regions",
     "covariate_models": "07_covariate_models",
+    "pls_regression": "08_pls_regression",
+    "splsda": "09_splsda_exploratory_classifier",
 }
 
 # Ordered sequence of single-range EDA phases.  Numbers are derived from

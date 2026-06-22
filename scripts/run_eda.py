@@ -50,8 +50,10 @@ from src.analysis.eda_mode import (
     validate_eda_mode_config,
 )
 from src.analysis.longitudinal_moca import run_longitudinal_moca
+from src.analysis.pls_regression import run_pls_regression
 from src.analysis.run_eda import run_eda
 from src.analysis.spectral_regions import run_candidate_region_detector
+from src.analysis.splsda import run_splsda_classifier
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +305,24 @@ def _main() -> None:
                     run_covariate_region_models(
                         feature_matrix_path=feature_matrix_path,
                         candidate_regions_path=candidate_outputs.get("candidate_regions_cluster_corrected"),
+                        cfg=config,
+                    )
+                
+                pls_cfg = config.get("analysis", {}).get("pls_regression", {})
+                pls_outputs: dict[str, Path] = {}
+                if bool(pls_cfg.get("enabled", True)):
+                    logger.info("Starting PLS1 regression (Phase 8)")
+                    pls_outputs = run_pls_regression(
+                        feature_matrix_path=feature_matrix_path,
+                        cfg=config,
+                    )
+
+                splsda_cfg = config.get("analysis", {}).get("splsda", {})
+                if bool(splsda_cfg.get("enabled", True)):
+                    logger.info("Starting PLS-L1DA exploratory classifier (Phase 9)")
+                    run_splsda_classifier(
+                        feature_matrix_path=feature_matrix_path,
+                        pls_outputs=pls_outputs,
                         cfg=config,
                     )
         warnings = _write_warning_summaries(_output_dir("eda_subdir")) if biological_ran else []

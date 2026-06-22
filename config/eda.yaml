@@ -117,6 +117,35 @@ analysis:
     random_state: 42  # int: reproducibility seed for deterministic logistic fits
   whole_spectra:
     emit_mfa: false  # bool: write MFA to whole_spectra/exploratory_multiblock/MFA/
+  pls_regression:
+    enabled: true
+    targets: [moca_baseline, moca_3m, delta_moca]
+    component_grid: [1, 2, 3, 4, 5]
+    max_components: 5
+    tune_components_inside_cv: true
+    n_cv_splits: 5       # used when n >= 15; LOO when n < 15
+    min_subjects: 10
+    vip_threshold: 1.0
+    n_permutations: 1000
+    random_state: 42
+  splsda:
+    enabled: true
+    gate_on_pls_p_value: 0.05
+    targets:
+      - group_variable: moca_severity_group
+        ordered_groups: [low_moca, high_moca]
+        label: "cognitive-severity classifier"
+      - group_variable: delta_moca_group
+        ordered_groups: [decline, stable_or_improved]
+        label: "disease-trajectory classifier"
+    component_grid: [1, 2, 3, 4, 5]
+    c_range: [0.01, 0.1, 1.0, 10.0]
+    n_outer_splits: 5
+    n_inner_splits: 3
+    min_subjects_per_group: 3
+    n_permutations: 500
+    random_state: 42
+    emit_oplsda: false
 
 # ---------------------------------------------------------------------------
 # Whole-spectra band definitions (Movasaghi et al. 2007 + lab curation)
