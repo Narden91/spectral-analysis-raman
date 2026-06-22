@@ -258,13 +258,6 @@ def get_cross_region_phase_dir(phase: str) -> Path:
     return path
 
 
-def get_biological_pca_index_dir() -> Path:
-    """Return the compatibility Biological PCA index directory."""
-    path = _output_dir("eda_subdir") / "biological_pca"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def get_biological_pca_canonical_dir(model_name: str) -> Path:
     """Return the canonical range-local directory for a Biological PCA model."""
     relative = BIOLOGICAL_PCA_CANONICAL_DIRS.get(str(model_name))
@@ -283,11 +276,3 @@ def whole_spectra_split_index(wavenumbers) -> int | None:
         return infer_concatenated_range_split_index(wavenumbers)
     except ValueError:
         return None
-
-
-def whole_spectra_split_position(wavenumbers) -> float | None:
-    """Return the visual split position between whole-spectra regions."""
-    split_index = whole_spectra_split_index(wavenumbers)
-    if split_index is None:
-        return None
-    return float((wavenumbers[split_index - 1] + wavenumbers[split_index]) / 2.0)

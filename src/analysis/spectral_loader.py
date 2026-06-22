@@ -105,24 +105,6 @@ def _read_one_file(fpath: Path) -> tuple[np.ndarray, np.ndarray] | None:
         return None
 
 
-def _average_area_vectors(
-    wavenumbers: np.ndarray,
-    area_vectors: np.ndarray,
-    weights: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute the whole-spectrum subject mean from paired-area vectors.
-
-    EDA whole-spectrum mode currently treats each surviving paired area as one
-    unit and computes the subject mean as a direct n_valid_pixels-weighted
-    average across all paired areas for that subject.
-    """
-    if area_vectors.size == 0:
-        return wavenumbers, np.array([])
-    if weights.size == 0 or np.nansum(weights) <= 0:
-        return wavenumbers, np.nanmean(area_vectors, axis=0)
-    return wavenumbers, np.average(area_vectors, axis=0, weights=weights)
-
-
 def _select_subject_ids(
     df_index: pd.DataFrame,
     gender: Optional[str] = None,

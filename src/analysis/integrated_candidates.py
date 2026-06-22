@@ -14,7 +14,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from src import config, get_biological_pca_canonical_dir, get_cross_region_phase_dir
@@ -81,13 +80,6 @@ def _region_feature_names(feature_columns: list[str], region: pd.Series) -> list
         if lower <= wavenumber <= upper:
             out.append(column)
     return out
-
-
-def _region_mean_feature(frame: pd.DataFrame, feature_columns: list[str], region: pd.Series) -> pd.Series:
-    columns = _region_feature_names(feature_columns, region)
-    if not columns:
-        return pd.Series(np.nan, index=frame.index, dtype=float)
-    return frame[columns].mean(axis=1)
 
 
 def _annotate_covariate_persistence(

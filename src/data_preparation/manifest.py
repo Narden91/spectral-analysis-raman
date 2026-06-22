@@ -77,11 +77,3 @@ def write_manifest(path: str | Path, manifest: dict[str, Any]) -> dict[str, Any]
 
 def config_hash(payload: dict[str, Any]) -> str:
     return hash_json(payload)
-
-
-def signatures_for_paths(paths: dict[str, str | Path]) -> dict[str, dict[str, Any]]:
-    return {
-        name: file_signature(path).to_dict()
-        for name, path in sorted(paths.items())
-    }
-

@@ -242,15 +242,6 @@ def _preprocess_area(row: pd.Series) -> tuple[np.ndarray, np.ndarray, pd.DataFra
     return result.spectra, result.wavenumbers, provenance, int(spectra_flat.shape[0])
 
 
-def _assert_axis(existing: np.ndarray | None, candidate: np.ndarray, block: str) -> np.ndarray:
-    candidate = np.asarray(candidate, dtype=float)
-    if existing is None:
-        return candidate
-    if existing.size != candidate.size or not np.allclose(existing, candidate, rtol=0, atol=1e-8):
-        raise ValueError(f"Post-preprocessing Raman axes are inconsistent within spectral block {block}")
-    return existing
-
-
 def _common_axis(axes: list[np.ndarray], block: str) -> np.ndarray:
     if not axes:
         raise ValueError(f"No post-preprocessing Raman axes found for block {block}")
@@ -1020,23 +1011,6 @@ def build_loading_region_summary(
             }
         )
     return pd.DataFrame(rows)
-
-
-def compute_band_contributions(
-    model_name: str,
-    model_cfg: dict,
-    loadings_df: pd.DataFrame,
-    cfg: dict,
-) -> pd.DataFrame:
-    del model_cfg, loadings_df, cfg
-    # Transitional compatibility alias: populated from loading-region contributions.
-    return pd.DataFrame()
-
-
-def biochemical_summary(model_name: str, contributions: pd.DataFrame) -> pd.DataFrame:
-    del model_name, contributions
-    # Transitional compatibility alias: populated from loading-region summaries.
-    return pd.DataFrame()
 
 
 def fit_biological_pca_models(inputs: SubjectInputs, cfg: dict | None = None) -> list[ModelResult]:

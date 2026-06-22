@@ -13,10 +13,12 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional
+import warnings
 
 import numpy as np
 import pandas as pd
 from pybaselines.smooth import snip
+from pybaselines.utils import ParameterWarning
 from pybaselines.whittaker import asls, arpls
 from scipy.interpolate import interp1d
 from scipy.ndimage import median_filter
@@ -566,13 +568,17 @@ def correct_baseline(
                 smooth_half_window=smooth_half_window,
             )
         elif chosen_method == "arpls":
-            baseline, _ = arpls(
-                row,
-                lam=resolved_arpls_lam,
-                diff_order=2,
-                max_iter=resolved_arpls_max_iter,
-                tol=resolved_arpls_ratio,
-            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ParameterWarning)
+                baseline, _ = arpls(
+                    row,
+                    lam=resolved_arpls_lam,
+                    diff_order=2,
+                    max_iter=resolved_arpls_max_iter,
+                    tol=resolved_arpls_ratio,
+                )
+            for warning in caught:
+                logger.debug("arPLS baseline warning for spectrum %d: %s", index, warning.message)
         else:
             raise ValueError(f"Unknown baseline method: {chosen_method}")
         baselines[index] = baseline

@@ -39,9 +39,7 @@ from src.terminal_output import print_kv_table
 
 from src.analysis._single_range import _VALID_RANGES
 from src.analysis.biological_pca import run_biological_pca
-from src.analysis.clinical_correlation_matrix import run_clinical_correlation_matrix
-from src.analysis.covariate_models import run_covariate_region_models
-from src.analysis.disease_stratification import run_disease_stratification
+from src.analysis.disease_only_pipeline import run_disease_only_cross_region_pipeline
 from src.analysis.eda_mode import (
     EDA_ANALYSIS_MODES,
     apply_eda_analysis_mode,
@@ -49,14 +47,7 @@ from src.analysis.eda_mode import (
     resolve_eda_analysis_mode,
     validate_eda_mode_config,
 )
-from src.analysis.longitudinal_moca import run_longitudinal_moca
-from src.analysis.pls_regression import run_pls_regression
 from src.analysis.run_eda import run_eda
-from src.analysis.integrated_candidates import run_integrated_candidates
-from src.analysis.minimal_panel import run_minimal_panel
-from src.analysis.spectral_regions import run_candidate_region_detector
-from src.analysis.splsda import run_splsda_classifier
-from src.reporting.candidate_region_report import run_candidate_region_report
 
 logger = logging.getLogger(__name__)
 
@@ -268,97 +259,10 @@ def _main() -> None:
             biological_ran = True
             if analysis_mode == "disease_only":
                 feature_matrix_path = biological_outputs.get("subject_feature_matrix_whole")
-                clinical_matrix_cfg = config.get("analysis", {}).get("clinical_correlation_matrix", {})
-                longitudinal_cfg = config.get("analysis", {}).get("longitudinal_moca", {})
-                stratification_cfg = config.get("analysis", {}).get("disease_stratification", {})
-                candidate_cfg = config.get("analysis", {}).get("candidate_regions", {})
-                covariate_cfg = config.get("analysis", {}).get("covariate_models", {})
-                clinical_outputs: dict[str, Path] = {}
-                longitudinal_outputs: dict[str, Path] = {}
-                stratification_outputs: dict[str, Path] = {}
-                if bool(clinical_matrix_cfg.get("enabled", True)):
-                    logger.info("Starting disease-only clinical correlation matrix")
-                    clinical_outputs = run_clinical_correlation_matrix(
-                        feature_matrix_path=feature_matrix_path,
-                        cfg=config,
-                    )
-                if bool(longitudinal_cfg.get("enabled", True)):
-                    logger.info("Starting longitudinal Delta MoCA analysis")
-                    longitudinal_outputs = run_longitudinal_moca(
-                        feature_matrix_path=feature_matrix_path,
-                        cfg=config,
-                    )
-                if bool(stratification_cfg.get("enabled", True)):
-                    logger.info("Starting disease stratification analysis")
-                    stratification_outputs = run_disease_stratification(
-                        feature_matrix_path=feature_matrix_path,
-                        cfg=config,
-                    )
-                candidate_outputs: dict[str, Path] = {}
-                if bool(candidate_cfg.get("enabled", True)):
-                    logger.info("Starting unified candidate-region detector")
-                    candidate_outputs = run_candidate_region_detector(
-                        clinical_outputs=clinical_outputs,
-                        longitudinal_outputs=longitudinal_outputs,
-                        stratification_outputs=stratification_outputs,
-                        cfg=config,
-                    )
-                if bool(covariate_cfg.get("enabled", True)):
-                    logger.info("Starting covariate-adjusted region models")
-                    run_covariate_region_models(
-                        feature_matrix_path=feature_matrix_path,
-                        candidate_regions_path=candidate_outputs.get("candidate_regions_cluster_corrected"),
-                        cfg=config,
-                    )
-                
-                pls_cfg = config.get("analysis", {}).get("pls_regression", {})
-                pls_outputs: dict[str, Path] = {}
-                if bool(pls_cfg.get("enabled", True)):
-                    logger.info("Starting PLS1 regression (Phase 8)")
-                    pls_outputs = run_pls_regression(
-                        feature_matrix_path=feature_matrix_path,
-                        cfg=config,
-                    )
-
-                splsda_cfg = config.get("analysis", {}).get("splsda", {})
-                splsda_outputs: dict[str, Path] = {}
-                if bool(splsda_cfg.get("enabled", True)):
-                    logger.info("Starting PLS-L1DA exploratory classifier (Phase 9)")
-                    splsda_outputs = run_splsda_classifier(
-                        feature_matrix_path=feature_matrix_path,
-                        pls_outputs=pls_outputs,
-                        cfg=config,
-                    )
-
-                integrated_cfg = config.get("analysis", {}).get("integrated_candidates", {})
-                integrated_outputs: dict[str, Path] = {}
-                if bool(integrated_cfg.get("enabled", True)):
-                    logger.info("Starting integrated candidate evidence table (Phase 11)")
-                    integrated_outputs = run_integrated_candidates(
-                        feature_matrix_path=feature_matrix_path,
-                        pls_vip_path=pls_outputs.get("pls_vip_bands"),
-                        splsda_bands_path=splsda_outputs.get("pls_l1da_selected_bands"),
-                        cfg=config,
-                    )
-
-                panel_cfg = config.get("analysis", {}).get("minimal_panel", {})
-                panel_outputs: dict[str, Path] = {}
-                if bool(panel_cfg.get("enabled", True)):
-                    logger.info("Starting minimal candidate Raman panel (Phase 13)")
-                    panel_outputs = run_minimal_panel(
-                        feature_matrix_path=feature_matrix_path,
-                        integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
-                        cfg=config,
-                    )
-
-                report_cfg = config.get("analysis", {}).get("publication_report", {})
-                if bool(report_cfg.get("enabled", True)):
-                    logger.info("Starting publication report generator (Phase 14)")
-                    run_candidate_region_report(
-                        integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
-                        minimal_panel_path=panel_outputs.get("minimal_candidate_panel"),
-                        cfg=config,
-                    )
+                run_disease_only_cross_region_pipeline(
+                    feature_matrix_path=feature_matrix_path,
+                    cfg=config,
+                )
         warnings = _write_warning_summaries(_output_dir("eda_subdir")) if biological_ran else []
         _log_final_summary(ranges, biological_ran, warnings)
     except (ValueError, RuntimeError) as exc:

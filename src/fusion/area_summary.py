@@ -32,24 +32,6 @@ def summarize_area_pixels(concatenated_pixels: np.ndarray) -> dict[str, np.ndarr
     }
 
 
-def area_store_from_process_results(results: list[dict]) -> "AreaStore":
-    """Build an AreaStore from the list of dicts returned by process_subject_areas()."""
-    store = AreaStore()
-    for r in results:
-        store.add(
-            subject_id=r["subject_id"],
-            slide_number=r["slide_number"],
-            area_id=r["area_id"],
-            area_mean=r["area_mean"],
-            area_mean_bc=r.get("area_mean_bc"),
-            area_std=r["area_std"],
-            n_valid_pixels=r["n_valid_pixels"],
-            ch_pixels=np.asarray(r.get("ch_pixels", np.empty((0, 0))), dtype=float),
-        )
-
-    return store
-
-
 @dataclass
 class AreaStore:
     """In-memory store for area-level summaries with NPZ persistence.

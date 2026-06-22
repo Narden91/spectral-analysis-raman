@@ -20,7 +20,6 @@ def pastelize_color(color: str, retain: float = 0.58) -> str:
 # Core Color Palettes
 # ---------------------------------------------------------------------------
 
-_UNKNOWN_COLOR = "#A0AEC0"
 POINT_EDGE_COLOR = "#334155"
 SUBJECT_SCATTER_SIZE = 45
 
@@ -28,18 +27,6 @@ SUBJECT_SCATTER_SIZE = 45
 # These replace the previous blue/cyan pairing, which was too close in score
 # plots. The hues stay colorblind-aware while remaining easy to separate
 # on white backgrounds.
-CONDITION_COLORS = {
-    "disease": pastelize_color("#D55E00", retain=0.74),
-    "control": pastelize_color("#009E73", retain=0.72),
-    "unknown": _UNKNOWN_COLOR,
-}
-
-GENDER_COLORS = {
-    "female": pastelize_color("#CC79A7", retain=0.72),
-    "male": pastelize_color("#0072B2", retain=0.68),
-    "unknown": _UNKNOWN_COLOR,
-}
-
 GROUP_COLORS = {
     "female_disease": pastelize_color("#B24C7C", retain=0.73),
     "female_control": pastelize_color("#E69F00", retain=0.74),
@@ -54,115 +41,6 @@ GROUP_LABELS = {
     "male_disease": "Male Disease",
     "male_control": "Male Control",
 }
-
-# Human-readable display labels for column/axis names
-DISPLAY_LABELS: dict[str, str] = {
-    "gender": "Gender",
-    "condition": "Condition",
-    "is_control": "Condition",
-    "subject_id": "Subject",
-    "moca_baseline": "MoCA baseline",
-    "moca_3m": "MoCA 3m",
-    "moca_baseline_total": "MoCA baseline",
-    "moca_3_months_total": "MoCA 3m",
-    "delta_moca": "ΔMoCA (3m − baseline)",
-    "age": "Age (years)",
-    "age_years": "Age (years)",
-    "rbans_total": "RBANS 3m",
-    "rbans_total_3_months": "RBANS 3m",
-    "aspects_score": "ASPECTS",
-    "aspects_scale_value": "ASPECTS",
-}
-
-
-def display_label(col: str) -> str:
-    """Return a human-readable display label for a column name."""
-    return DISPLAY_LABELS.get(col, col.replace("_", " ").title())
-
-
-def _normalize_category(value: object) -> str:
-    if value is None:
-        return "unknown"
-    if isinstance(value, (float, np.floating)) and np.isnan(value):
-        return "unknown"
-    return str(value).strip().lower()
-
-
-def category_sort_key(color_col: str, category: object) -> tuple[object, ...]:
-    col = str(color_col).strip().lower()
-    normalized = _normalize_category(category)
-
-    if col in {"condition", "is_control"}:
-        order = {"disease": 0, "control": 1, "unknown": 2}
-        return (order.get(normalized, 99), normalized)
-
-    if col == "gender":
-        order = {"female": 0, "male": 1, "unknown": 2}
-        return (order.get(normalized, 99), normalized)
-
-    group_order = {
-        "female_disease": 0,
-        "female_control": 1,
-        "male_disease": 2,
-        "male_control": 3,
-    }
-    if normalized in group_order:
-        return (group_order[normalized], normalized)
-
-    return (99, normalized)
-
-
-def format_category_label(color_col: str, category: object) -> str:
-    col = str(color_col).strip().lower()
-    normalized = _normalize_category(category)
-
-    if normalized in GROUP_LABELS:
-        return GROUP_LABELS[normalized]
-
-    if col in {"condition", "is_control", "gender"}:
-        return normalized.capitalize()
-
-    return str(category)
-
-
-def get_discrete_palette(color_col: str, categories: list[object] | np.ndarray) -> dict[object, str]:
-    col = str(color_col).strip().lower()
-    categories_list = list(categories)
-
-    if col in {"condition", "is_control"}:
-        return {
-            category: CONDITION_COLORS.get(_normalize_category(category), _UNKNOWN_COLOR)
-            for category in categories_list
-        }
-
-    if col == "gender":
-        return {
-            category: GENDER_COLORS.get(_normalize_category(category), _UNKNOWN_COLOR)
-            for category in categories_list
-        }
-
-    normalized_categories = {_normalize_category(category) for category in categories_list}
-    if normalized_categories and normalized_categories.issubset(GROUP_COLORS.keys()):
-        return {
-            category: GROUP_COLORS.get(_normalize_category(category), _UNKNOWN_COLOR)
-            for category in categories_list
-        }
-
-    fallback_cycle = [
-        pastelize_color("#CC79A7", retain=0.72),
-        pastelize_color("#E69F00", retain=0.74),
-        pastelize_color("#009E73", retain=0.74),
-        pastelize_color("#4C78A8", retain=0.70),
-        pastelize_color("#6D597A", retain=0.72),
-        pastelize_color("#D55E00", retain=0.74),
-        pastelize_color("#2A9D8F", retain=0.74),
-        pastelize_color("#7F5539", retain=0.72),
-    ]
-    return {
-        category: fallback_cycle[i % len(fallback_cycle)]
-        for i, category in enumerate(categories_list)
-    }
-
 
 WHOLE_SPECTRA_RANGE_LABELS = {
     "fingerprint_1300": "Fingerprint (1300)",

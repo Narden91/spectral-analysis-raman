@@ -13,9 +13,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
+import warnings
 
 import numpy as np
 import pandas as pd
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import ElasticNet, ElasticNetCV, LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, mean_absolute_error, mean_squared_error, r2_score, roc_auc_score
 from sklearn.model_selection import KFold, LeaveOneOut, StratifiedKFold
@@ -28,6 +30,10 @@ from src.analysis.clinical_feature_associations import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ELASTICNET_MAX_ITER = 5_000
+_ELASTICNET_TOL = 1e-3
+_LOGISTIC_MAX_ITER = 10_000
 
 _DEFAULT_BINARY_TARGETS = (
     {"group_variable": "moca_severity_group", "ordered_groups": ("low_moca", "high_moca")},
@@ -149,6 +155,45 @@ def _cv_strategy(n_samples: int, n_splits: int, random_state: int, stratified: b
     return KFold(n_splits=min(n_splits, n_samples), shuffle=True, random_state=random_state)
 
 
+def _elasticnet_cv_model(cv, random_state: int) -> ElasticNetCV:
+    return ElasticNetCV(
+        l1_ratio=[0.1, 0.5, 0.7, 0.9, 0.95, 0.99, 1.0],
+        cv=cv,
+        random_state=random_state,
+        max_iter=_ELASTICNET_MAX_ITER,
+        tol=_ELASTICNET_TOL,
+    )
+
+
+def _elasticnet_model(random_state: int) -> ElasticNet:
+    return ElasticNet(
+        alpha=0.1,
+        l1_ratio=0.5,
+        random_state=random_state,
+        max_iter=_ELASTICNET_MAX_ITER,
+        tol=_ELASTICNET_TOL,
+    )
+
+
+def _fit_elasticnet(model: ElasticNet | ElasticNetCV, X: np.ndarray, y: np.ndarray, context: str) -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        model.fit(X, y)
+    for warning in caught:
+        logger.debug("%s convergence warning: %s", context, warning.message)
+
+
+def _l1_logistic_model(c: float, random_state: int) -> LogisticRegression:
+    return LogisticRegression(
+        solver="liblinear",
+        C=c,
+        l1_ratio=1.0,
+        class_weight="balanced",
+        random_state=random_state,
+        max_iter=_LOGISTIC_MAX_ITER,
+    )
+
+
 def _nested_cv_elasticnet(
     X: np.ndarray,
     y: np.ndarray,
@@ -172,13 +217,8 @@ def _nested_cv_elasticnet(
         X_test_scaled = scaler.transform(X_test)
 
         inner_cv = KFold(n_splits=min(n_inner_splits, len(X_train)), shuffle=True, random_state=random_state)
-        model = ElasticNetCV(
-            l1_ratio=[0.1, 0.5, 0.7, 0.9, 0.95, 0.99, 1.0],
-            cv=inner_cv,
-            random_state=random_state,
-            max_iter=5000,
-        )
-        model.fit(X_train_scaled, y_train)
+        model = _elasticnet_cv_model(inner_cv, random_state)
+        _fit_elasticnet(model, X_train_scaled, y_train, "nested ElasticNetCV")
         y_pred[test_idx] = model.predict(X_test_scaled)
         selected_alphas.append(float(model.alpha_))
         selected_l1_ratios.append(float(model.l1_ratio_))
@@ -231,13 +271,7 @@ def _nested_cv_logistic_l1(
         for c in c_values:
             scores = []
             for in_train, in_test in inner_cv.split(X_train_scaled, y_train):
-                clf = LogisticRegression(
-                    penalty="l1",
-                    solver="liblinear",
-                    C=c,
-                    class_weight="balanced",
-                    random_state=random_state,
-                )
+                clf = _l1_logistic_model(c, random_state)
                 clf.fit(X_train_scaled[in_train], y_train[in_train])
                 scores.append(balanced_accuracy_score(y_train[in_test], clf.predict(X_train_scaled[in_test])))
             mean_score = float(np.mean(scores))
@@ -245,13 +279,7 @@ def _nested_cv_logistic_l1(
                 best_score = mean_score
                 best_c = c
 
-        final_clf = LogisticRegression(
-            penalty="l1",
-            solver="liblinear",
-            C=best_c,
-            class_weight="balanced",
-            random_state=random_state,
-        )
+        final_clf = _l1_logistic_model(best_c, random_state)
         final_clf.fit(X_train_scaled, y_train)
         y_pred[test_idx] = final_clf.predict(X_test_scaled)
         if len(final_clf.classes_) == 2:
@@ -354,11 +382,11 @@ def _bootstrap_coefficient_ci(
         X_boot_scaled = scaler.fit_transform(X_boot)
         try:
             if task == "continuous":
-                model = ElasticNet(alpha=0.1, l1_ratio=0.5, random_state=random_state, max_iter=5000)
-                model.fit(X_boot_scaled, y_boot)
+                model = _elasticnet_model(random_state)
+                _fit_elasticnet(model, X_boot_scaled, y_boot, "bootstrap ElasticNet")
                 coefs = model.coef_
             else:
-                model = LogisticRegression(penalty="l1", solver="liblinear", C=1.0, class_weight="balanced", random_state=random_state)
+                model = _l1_logistic_model(1.0, random_state)
                 model.fit(X_boot_scaled, y_boot)
                 coefs = model.coef_.ravel()
             for name, coef in zip(feature_names, coefs):
@@ -407,8 +435,8 @@ def _select_panel(
         X_train_scaled = scaler.fit_transform(X_train)
         if task == "continuous":
             inner_cv = KFold(n_splits=min(n_inner_splits, len(X_train)), shuffle=True, random_state=random_state)
-            model = ElasticNetCV(l1_ratio=[0.1, 0.5, 0.7, 0.9, 0.95, 0.99, 1.0], cv=inner_cv, random_state=random_state, max_iter=5000)
-            model.fit(X_train_scaled, y_train)
+            model = _elasticnet_cv_model(inner_cv, random_state)
+            _fit_elasticnet(model, X_train_scaled, y_train, "panel-selection ElasticNetCV")
             coefs = model.coef_.reshape(-1, 1)
         else:
             inner_splits = min(n_inner_splits, np.bincount(y_train).min())
@@ -418,13 +446,13 @@ def _select_panel(
             for c in [0.01, 0.1, 1.0, 10.0, 100.0]:
                 scores = []
                 for in_train, in_test in inner_cv.split(X_train_scaled, y_train):
-                    clf = LogisticRegression(penalty="l1", solver="liblinear", C=c, class_weight="balanced", random_state=random_state)
+                    clf = _l1_logistic_model(c, random_state)
                     clf.fit(X_train_scaled[in_train], y_train[in_train])
                     scores.append(balanced_accuracy_score(y_train[in_test], clf.predict(X_train_scaled[in_test])))
                 if np.mean(scores) > best_score:
                     best_score = np.mean(scores)
                     best_c = c
-            model = LogisticRegression(penalty="l1", solver="liblinear", C=best_c, class_weight="balanced", random_state=random_state)
+            model = _l1_logistic_model(best_c, random_state)
             model.fit(X_train_scaled, y_train)
             coefs = model.coef_.reshape(-1, 1)
         coef_matrix = np.concatenate([coef_matrix, coefs], axis=1)

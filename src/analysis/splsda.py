@@ -22,6 +22,8 @@ from src.analysis.clinical_feature_associations import (
 
 logger = logging.getLogger(__name__)
 
+_LOGISTIC_MAX_ITER = 10_000
+
 
 def _cfg(cfg: dict | None = None) -> dict:
     return config if cfg is None else cfg
@@ -63,6 +65,17 @@ def _remove_orthogonal_component(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     
     X_ortho_removed = X - np.outer(t_ortho, p_ortho)
     return X_ortho_removed
+
+
+def _l1_logistic_model(c: float, random_state: int) -> LogisticRegression:
+    return LogisticRegression(
+        solver="liblinear",
+        C=c,
+        l1_ratio=1.0,
+        class_weight="balanced",
+        random_state=random_state,
+        max_iter=_LOGISTIC_MAX_ITER,
+    )
 
 
 def _tune_pls_l1da(
@@ -108,7 +121,7 @@ def _tune_pls_l1da(
                 X_tr_pls = pls.transform(X_tr)
                 X_te_pls = pls.transform(X_te)
                 
-                clf = LogisticRegression(penalty='l1', solver='liblinear', C=c, class_weight='balanced', random_state=random_state)
+                clf = _l1_logistic_model(c, random_state)
                 clf.fit(X_tr_pls, y_tr)
                 
                 preds = clf.predict(X_te_pls)
@@ -157,7 +170,7 @@ def _permutation_test(
             X_train_pls = pls.transform(X_train_scaled)
             X_test_pls = pls.transform(X_test_scaled)
             
-            clf = LogisticRegression(penalty='l1', solver='liblinear', C=best_c, class_weight='balanced', random_state=random_state)
+            clf = _l1_logistic_model(best_c, random_state)
             clf.fit(X_train_pls, y_train)
             
             y_pred[test_idx] = clf.predict(X_test_pls)
@@ -267,7 +280,7 @@ def run_splsda_classifier(
             X_train_pls = pls.transform(X_train_scaled)
             X_test_pls = pls.transform(X_test_scaled)
             
-            clf = LogisticRegression(penalty='l1', solver='liblinear', C=best_c, class_weight='balanced', random_state=random_state)
+            clf = _l1_logistic_model(best_c, random_state)
             clf.fit(X_train_pls, y_train)
             
             y_pred[test_idx] = clf.predict(X_test_pls)
@@ -291,7 +304,7 @@ def run_splsda_classifier(
         final_pls.fit(X_scaled, y)
         X_scaled_pls = final_pls.transform(X_scaled)
         
-        final_clf = LogisticRegression(penalty='l1', solver='liblinear', C=final_c, class_weight='balanced', random_state=random_state)
+        final_clf = _l1_logistic_model(final_c, random_state)
         final_clf.fit(X_scaled_pls, y)
         
         log_reg_coefs = final_clf.coef_.ravel()

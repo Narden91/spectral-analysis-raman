@@ -226,23 +226,6 @@ def build_cache_for_index(
     return pd.DataFrame(manifests)
 
 
-def load_area_spectra(
-    subject_id: str,
-    area_id: str,
-    region: str,
-) -> CachedArea:
-    """Load a cached area; raises FileNotFoundError if not yet built."""
-    range_label = _REGION_LABELS[region]
-    npz_path, manifest_path = _area_paths(range_label, subject_id, area_id)
-    if not npz_path.exists() or not manifest_path.exists():
-        raise FileNotFoundError(f"No cached area for subject={subject_id} area={area_id} region={region}")
-    with np.load(npz_path) as npz:
-        wavenumbers = npz["wavenumbers"]
-        spectra = npz["spectra"]
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    return CachedArea(wavenumbers=wavenumbers, spectra=spectra, manifest=manifest)
-
-
 def load_subject_pixels(
     subject_id: str,
     region: str,

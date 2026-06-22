@@ -275,6 +275,101 @@ def _estimate_variance_decomposition(
 
 _PHASE_DIRS = get_single_range_phase_dirs()
 
+
+def _run_intra_disease_correlation_phase(
+    *,
+    df_index: pd.DataFrame,
+    clinical_df: pd.DataFrame,
+    spectral_range: str,
+    range_title: str,
+    phase_dir,
+) -> None:
+    _log_phase("PHASE 5: Intra-disease clinical correlations")
+    try:
+        runtime_cfg = config.get("analysis", {}).get("clinical_endpoints_runtime", {})
+        subject_table_path = runtime_cfg.get("subject_table_path")
+        if subject_table_path:
+            intra_clinical_df = pd.read_csv(subject_table_path)
+        else:
+            intra_clinical_df = clinical_df if not clinical_df.empty else load_clinical_subjects()
+        wn_id, spectra_id, clin_aligned = build_disease_subject_mean_matrix(
+            df_index, intra_clinical_df, spectral_range
+        )
+        if spectra_id.size == 0:
+            logger.warning("Intra-disease analysis: no disease subjects with cached spectra, skipping")
+            return
+
+        intra_dir = phase_dir("intra_disease")
+        corr_df = compute_intra_disease_correlations(spectra_id, wn_id, clin_aligned)
+        biological_regions = pd.DataFrame()
+        model_name = {"1300": "PCA_1330", "2850": "PCA_2850"}.get(spectral_range)
+        if model_name is not None:
+            bio_regions_path = get_biological_pca_canonical_dir(model_name) / "loading_regions.csv"
+            if bio_regions_path.exists():
+                biological_regions = pd.read_csv(bio_regions_path)
+
+        smoothed_by_target: dict[str, np.ndarray] = {}
+        for target, grp in corr_df.groupby("target"):
+            grp = grp.sort_values("wavenumber").reset_index(drop=True)
+            smoothed = smooth_correlation_profile(grp["rho"].to_numpy(dtype=float))
+            smoothed_by_target[target] = smoothed
+            grp.to_csv(
+                intra_dir / f"intra_disease_corr_{target}_{spectral_range}.csv", index=False
+            )
+            fig, _ = plot_correlation_spectrum(
+                grp["wavenumber"].to_numpy(dtype=float),
+                grp["rho"].to_numpy(dtype=float),
+                grp["significant"].to_numpy(dtype=bool),
+                title=f"Intra-disease correlation - {target} ({range_title})",
+            )
+            _save_fig(fig, f"intra_disease_corr_{target}_{spectral_range}.png", intra_dir)
+            target_regions = summarize_correlation_regions(
+                grp,
+                spectral_range=spectral_range,
+                biological_regions=biological_regions,
+            )
+            fig, _ = plot_correlation_spectrum(
+                grp["wavenumber"].to_numpy(dtype=float),
+                grp["rho"].to_numpy(dtype=float),
+                grp["significant"].to_numpy(dtype=bool),
+                title=f"Intra-disease correlation - {target} ({range_title})",
+                smoothed_rho=smoothed,
+                top_regions=target_regions.head(5),
+                annotate_no_significant=not bool(grp["significant"].any()),
+            )
+            _save_fig(fig, f"intra_disease_corr_{target}_{spectral_range}_enhanced.png", intra_dir)
+
+        summary_df = summarize_significant_targets(corr_df)
+        summary_df.to_csv(intra_dir / f"intra_disease_summary_{spectral_range}.csv", index=False)
+        region_summary_df = summarize_correlation_regions(
+            corr_df,
+            spectral_range=spectral_range,
+            biological_regions=biological_regions,
+        )
+        region_summary_df.to_csv(
+            intra_dir / f"intra_disease_top_regions_{spectral_range}.csv",
+            index=False,
+        )
+        fig, _ = plot_intra_disease_correlation_overview(
+            corr_df,
+            smoothed_by_target=smoothed_by_target,
+            title=f"Intra-disease correlation overview ({range_title})",
+        )
+        _save_fig(fig, f"intra_disease_correlation_overview_{spectral_range}.png", intra_dir)
+        fig, _ = plot_intra_disease_top_regions(
+            region_summary_df,
+            title=f"Top intra-disease correlation regions ({range_title})",
+        )
+        _save_fig(fig, f"intra_disease_top_regions_{spectral_range}.png", intra_dir)
+        logger.info(
+            "Intra-disease correlations: %d subjects, %d targets tested",
+            spectra_id.shape[0],
+            summary_df.shape[0],
+        )
+    except Exception as exc:
+        logger.warning("Intra-disease correlation phase failed: %s", exc)
+
+
 def _run_single_range_eda(
     spectral_range: str = "1300",
     skip_preprocess: bool = False,
@@ -711,92 +806,14 @@ def _run_single_range_eda(
                 norm["fraction_normal"] * 100,
             )
 
-        intra_disease_cfg = (
-            config.get("analysis", {}).get("advanced", {}).get("intra_disease", {})
-        )
         if analysis_mode == "disease_only":
-            _log_phase("PHASE 5: Intra-disease clinical correlations")
-            try:
-                runtime_cfg = config.get("analysis", {}).get("clinical_endpoints_runtime", {})
-                subject_table_path = runtime_cfg.get("subject_table_path")
-                if subject_table_path:
-                    intra_clinical_df = pd.read_csv(subject_table_path)
-                else:
-                    intra_clinical_df = clinical_df if not clinical_df.empty else load_clinical_subjects()
-                wn_id, spectra_id, clin_aligned = build_disease_subject_mean_matrix(
-                    df_index, intra_clinical_df, spectral_range
-                )
-                if spectra_id.size == 0:
-                    logger.warning("Intra-disease analysis: no disease subjects with cached spectra, skipping")
-                else:
-                    intra_dir = phase_dir("intra_disease")
-                    corr_df = compute_intra_disease_correlations(spectra_id, wn_id, clin_aligned)
-                    biological_regions = pd.DataFrame()
-                    model_name = {"1300": "PCA_1330", "2850": "PCA_2850"}.get(spectral_range)
-                    if model_name is not None:
-                        bio_regions_path = get_biological_pca_canonical_dir(model_name) / "loading_regions.csv"
-                        if bio_regions_path.exists():
-                            biological_regions = pd.read_csv(bio_regions_path)
-                    smoothed_by_target: dict[str, np.ndarray] = {}
-                    for target, grp in corr_df.groupby("target"):
-                        grp = grp.sort_values("wavenumber").reset_index(drop=True)
-                        smoothed = smooth_correlation_profile(grp["rho"].to_numpy(dtype=float))
-                        smoothed_by_target[target] = smoothed
-                        grp.to_csv(
-                            intra_dir / f"intra_disease_corr_{target}_{spectral_range}.csv", index=False
-                        )
-                        fig, _ = plot_correlation_spectrum(
-                            grp["wavenumber"].to_numpy(dtype=float),
-                            grp["rho"].to_numpy(dtype=float),
-                            grp["significant"].to_numpy(dtype=bool),
-                            title=f"Intra-disease correlation - {target} ({range_title})",
-                        )
-                        _save_fig(fig, f"intra_disease_corr_{target}_{spectral_range}.png", intra_dir)
-                        target_regions = summarize_correlation_regions(
-                            grp,
-                            spectral_range=spectral_range,
-                            biological_regions=biological_regions,
-                        )
-                        fig, _ = plot_correlation_spectrum(
-                            grp["wavenumber"].to_numpy(dtype=float),
-                            grp["rho"].to_numpy(dtype=float),
-                            grp["significant"].to_numpy(dtype=bool),
-                            title=f"Intra-disease correlation - {target} ({range_title})",
-                            smoothed_rho=smoothed,
-                            top_regions=target_regions.head(5),
-                            annotate_no_significant=not bool(grp["significant"].any()),
-                        )
-                        _save_fig(fig, f"intra_disease_corr_{target}_{spectral_range}_enhanced.png", intra_dir)
-
-                    summary_df = summarize_significant_targets(corr_df)
-                    summary_df.to_csv(intra_dir / f"intra_disease_summary_{spectral_range}.csv", index=False)
-                    region_summary_df = summarize_correlation_regions(
-                        corr_df,
-                        spectral_range=spectral_range,
-                        biological_regions=biological_regions,
-                    )
-                    region_summary_df.to_csv(
-                        intra_dir / f"intra_disease_top_regions_{spectral_range}.csv",
-                        index=False,
-                    )
-                    fig, _ = plot_intra_disease_correlation_overview(
-                        corr_df,
-                        smoothed_by_target=smoothed_by_target,
-                        title=f"Intra-disease correlation overview ({range_title})",
-                    )
-                    _save_fig(fig, f"intra_disease_correlation_overview_{spectral_range}.png", intra_dir)
-                    fig, _ = plot_intra_disease_top_regions(
-                        region_summary_df,
-                        title=f"Top intra-disease correlation regions ({range_title})",
-                    )
-                    _save_fig(fig, f"intra_disease_top_regions_{spectral_range}.png", intra_dir)
-                    logger.info(
-                        "Intra-disease correlations: %d subjects, %d targets tested",
-                        spectra_id.shape[0],
-                        summary_df.shape[0],
-                    )
-            except Exception as exc:
-                logger.warning("Intra-disease correlation phase failed: %s", exc)
+            _run_intra_disease_correlation_phase(
+                df_index=df_index,
+                clinical_df=clinical_df,
+                spectral_range=spectral_range,
+                range_title=range_title,
+                phase_dir=phase_dir,
+            )
 
 
 
@@ -852,6 +869,3 @@ def _run_single_range_eda(
         "group_ids": group_ids,
         "cohort_summary": cohort_summary,
     }
-
-
-run_eda = _run_single_range_eda

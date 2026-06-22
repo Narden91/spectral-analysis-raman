@@ -4,10 +4,6 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Callable, TypeVar
-
-
-T = TypeVar("T")
 
 
 def ensure_project_root_on_path(root: Path | None = None) -> Path:
@@ -33,17 +29,3 @@ def apply_config_override(default: str, root: Path | None = None) -> None:
 
     if "RAMAN_CONFIG" not in os.environ:
         os.environ["RAMAN_CONFIG"] = str(project_root / default)
-
-
-def run_multi_seed(
-    n_runs: int,
-    base_seed: int,
-    base_dir: Path,
-    fn: Callable[[int, int, Path], T],
-) -> list[T]:
-    results: list[T] = []
-    for run_idx in range(int(n_runs)):
-        seed = int(base_seed) + run_idx
-        run_dir = base_dir / f"run_{run_idx + 1:03d}" if int(n_runs) > 1 else base_dir
-        results.append(fn(run_idx, seed, run_dir))
-    return results

@@ -28,6 +28,7 @@ catboost_info/
 .agent/
 .github/
 .claude/
+.cursor/
 notebook/
 doc/Analysis_*
 legacy_results/
