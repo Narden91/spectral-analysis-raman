@@ -34,6 +34,7 @@ from src import (
     _range_label,
 )
 from src.data_preparation import data_source_summary, resolve_data_source, write_analysis_provenance
+from src.clinical.endpoints import build_and_write_clinical_endpoints
 from src.terminal_output import print_kv_table
 
 from src.analysis._single_range import _VALID_RANGES
@@ -67,6 +68,15 @@ def _attach_run_log_file(log_path: Path) -> None:
 def _set_analysis_output_root(mode: str) -> None:
     """Route all EDA-owned outputs to the selected analysis family."""
     config.setdefault("output", {})["eda_root"] = eda_output_root(mode)
+
+
+def _apply_analysis_mode_runtime_defaults(mode: str) -> None:
+    intra_disease_cfg = (
+        config.setdefault("analysis", {})
+        .setdefault("advanced", {})
+        .setdefault("intra_disease", {})
+    )
+    intra_disease_cfg["enabled"] = mode == "disease_only"
 
 
 def _requested_ranges(cli_range: str | None) -> list[str]:
@@ -180,7 +190,7 @@ def _write_warning_summaries(output_root: Path) -> list[str]:
 
 def _log_final_summary(ranges: list[str], biological_ran: bool, warnings: list[str]) -> None:
     output_root = _output_dir("eda_subdir")
-    logger.info("EDA complete — output root: %s", output_root)
+    logger.info("EDA complete - output root: %s", output_root)
     if biological_ran:
         logger.info("Biological PCA:")
         for model_name in ("PCA_1330", "PCA_2850", "PCA_whole"):
@@ -200,6 +210,7 @@ def _main() -> None:
     setup_logging()
     analysis_mode = resolve_eda_analysis_mode(config, override=args.analysis_mode)
     apply_eda_analysis_mode(config, analysis_mode)
+    _apply_analysis_mode_runtime_defaults(analysis_mode)
     validate_eda_mode_config(config, analysis_mode)
     _set_analysis_output_root(analysis_mode)
     metadata_dir = get_run_metadata_dir()
@@ -222,6 +233,15 @@ def _main() -> None:
 
     try:
         _validate_ranges(ranges)
+        if (
+            analysis_mode == "disease_only"
+            and bool(config.get("analysis", {}).get("clinical_endpoints", {}).get("enabled", True))
+        ):
+            endpoint_result = build_and_write_clinical_endpoints(cfg=config)
+            config.setdefault("analysis", {})["clinical_endpoints_runtime"] = {
+                "subject_table_path": str(endpoint_result.output_dir / "clinical_subject_table.csv")
+            }
+            logger.info("Clinical endpoints written to %s", endpoint_result.output_dir)
 
         results: dict[str, dict] = {}
         for spectral_range in ranges:

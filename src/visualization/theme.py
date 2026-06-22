@@ -61,11 +61,16 @@ DISPLAY_LABELS: dict[str, str] = {
     "condition": "Condition",
     "is_control": "Condition",
     "subject_id": "Subject",
+    "moca_baseline": "MoCA baseline",
+    "moca_3m": "MoCA 3m",
     "moca_baseline_total": "MoCA baseline",
     "moca_3_months_total": "MoCA 3m",
     "delta_moca": "ΔMoCA (3m − baseline)",
+    "age": "Age (years)",
     "age_years": "Age (years)",
+    "rbans_total": "RBANS 3m",
     "rbans_total_3_months": "RBANS 3m",
+    "aspects_score": "ASPECTS",
     "aspects_scale_value": "ASPECTS",
 }
 

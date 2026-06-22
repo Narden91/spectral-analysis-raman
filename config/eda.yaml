@@ -28,6 +28,20 @@ output:
 # ---------------------------------------------------------------------------
 analysis:
   mode: "disease_vs_control"  # str: one of {"disease_vs_control", "disease_only"}
+  clinical_endpoints:
+    enabled: true
+    clinical_table: data/clinical_data.csv
+    subject_id_col: subject_id
+    moca_baseline_col: moca_baseline_total
+    moca_3m_col: moca_3m_total
+    rbans_col: rbans_total
+    age_col: age
+    aspects_col: aspects_score
+    sex_col: sex
+    diagnosis_col: diagnosis_category
+    lesion_location_col: lesion_location
+    severity_threshold: 20
+    decline_threshold: 0
   statistical_test: "auto"  # str: "auto", "parametric", or "non-parametric"
   pca_n_components: 10  # int: number of principal components to compute
   random_state: 42  # int: reproducibility seed

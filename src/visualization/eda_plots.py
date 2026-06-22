@@ -38,11 +38,16 @@ _INTRA_DISEASE_PASTEL: list[str] = [
 ]
 
 _TARGET_LABELS: dict[str, str] = {
+    "moca_baseline": "MoCA baseline",
+    "moca_3m": "MoCA 3 months",
     "moca_baseline_total": "MoCA baseline",
     "moca_3_months_total": "MoCA 3 months",
     "delta_moca": "ΔMoCA",
+    "rbans_total": "RBANS total 3 m",
     "rbans_total_3_months": "RBANS total 3 m",
+    "aspects_score": "ASPECTS scale",
     "aspects_scale_value": "ASPECTS scale",
+    "age": "Age (years)",
     "age_years": "Age (years)",
 }
 

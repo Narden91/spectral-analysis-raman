@@ -26,12 +26,12 @@ from src.preprocessing.pipeline import resolve_region_key
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TARGETS = (
-    "moca_baseline_total",
-    "moca_3_months_total",
+    "moca_baseline",
+    "moca_3m",
     "delta_moca",
-    "rbans_total_3_months",
-    "aspects_scale_value",
-    "age_years",
+    "rbans_total",
+    "aspects_score",
+    "age",
 )
 
 

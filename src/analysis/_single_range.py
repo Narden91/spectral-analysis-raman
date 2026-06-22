@@ -96,7 +96,7 @@ def _save_fig(fig: matplotlib.figure.Figure, name: str, out_dir: Path):
 
 
 def _log_phase(title: str) -> None:
-    logger.info("\n  ── %s", title)
+    logger.info("\n  -- %s", title)
 
 
 def _figure_flag(key: str, default: bool = True) -> bool:
@@ -717,8 +717,12 @@ def _run_single_range_eda(
         if analysis_mode == "disease_only":
             _log_phase("PHASE 5: Intra-disease clinical correlations")
             try:
-                intra_csv = intra_disease_cfg.get("clinical_csv", "data/clinical_data_clean.csv")
-                intra_clinical_df = clinical_df if not clinical_df.empty else load_clinical_subjects()
+                runtime_cfg = config.get("analysis", {}).get("clinical_endpoints_runtime", {})
+                subject_table_path = runtime_cfg.get("subject_table_path")
+                if subject_table_path:
+                    intra_clinical_df = pd.read_csv(subject_table_path)
+                else:
+                    intra_clinical_df = clinical_df if not clinical_df.empty else load_clinical_subjects()
                 wn_id, spectra_id, clin_aligned = build_disease_subject_mean_matrix(
                     df_index, intra_clinical_df, spectral_range
                 )
