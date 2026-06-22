@@ -85,6 +85,26 @@ analysis:
     random_state: 42  # int: reproducibility seed for permutation testing
     candidate_region_min_width_cm: 8.0  # float: minimum merged region width
     candidate_region_merge_gap_cm: 6.0  # float: maximum within-region gap
+  clinical_correlation_matrix:
+    enabled: true  # bool: run disease-only feature-clinical discovery on whole-spectrum subject features
+    targets: [moca_baseline, moca_3m, delta_moca, rbans_total, age, aspects_score]
+    min_subjects: 5  # int: minimum subjects with non-missing endpoint values
+    fdr_alpha: 0.05  # float: BH-FDR significance threshold
+    cluster_alpha: 0.05  # float: uncorrected cluster-forming threshold
+    n_permutations: 1000  # int: target permutations for cluster-mass correction
+    random_state: 42  # int: reproducibility seed for permutation testing
+    candidate_region_min_width_cm: 8.0  # float: minimum merged region width
+    candidate_region_merge_gap_cm: 6.0  # float: maximum within-region gap
+  longitudinal_moca:
+    enabled: true  # bool: run disease-only longitudinal Delta MoCA feature associations
+    min_subjects: 5  # int: minimum subjects per model after endpoint/group filtering
+    fdr_alpha: 0.05  # float: BH-FDR significance threshold
+    cluster_alpha: 0.05  # float: uncorrected cluster-forming threshold
+    n_permutations: 1000  # int: permutations for cluster-mass correction
+    random_state: 42  # int: reproducibility seed for permutation testing
+    candidate_region_min_width_cm: 8.0  # float: minimum merged region width
+    candidate_region_merge_gap_cm: 6.0  # float: maximum within-region gap
+    top_scatterplot_regions: 5  # int: number of candidate regions to visualize
   whole_spectra:
     emit_mfa: false  # bool: write MFA to whole_spectra/exploratory_multiblock/MFA/
 

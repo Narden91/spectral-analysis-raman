@@ -39,6 +39,7 @@ from src.terminal_output import print_kv_table
 
 from src.analysis._single_range import _VALID_RANGES
 from src.analysis.biological_pca import run_biological_pca
+from src.analysis.clinical_correlation_matrix import run_clinical_correlation_matrix
 from src.analysis.disease_stratification import run_disease_stratification
 from src.analysis.eda_mode import (
     EDA_ANALYSIS_MODES,
@@ -47,6 +48,7 @@ from src.analysis.eda_mode import (
     resolve_eda_analysis_mode,
     validate_eda_mode_config,
 )
+from src.analysis.longitudinal_moca import run_longitudinal_moca
 from src.analysis.run_eda import run_eda
 
 logger = logging.getLogger(__name__)
@@ -257,12 +259,29 @@ def _main() -> None:
         if _should_run_biological_pca(ranges, args.skip_biological_pca):
             biological_outputs = run_biological_pca(max_subjects=args.max_subjects)
             biological_ran = True
-            stratification_cfg = config.get("analysis", {}).get("disease_stratification", {})
-            if analysis_mode == "disease_only" and bool(stratification_cfg.get("enabled", True)):
-                run_disease_stratification(
-                    feature_matrix_path=biological_outputs.get("subject_feature_matrix_whole"),
-                    cfg=config,
-                )
+            if analysis_mode == "disease_only":
+                feature_matrix_path = biological_outputs.get("subject_feature_matrix_whole")
+                clinical_matrix_cfg = config.get("analysis", {}).get("clinical_correlation_matrix", {})
+                longitudinal_cfg = config.get("analysis", {}).get("longitudinal_moca", {})
+                stratification_cfg = config.get("analysis", {}).get("disease_stratification", {})
+                if bool(clinical_matrix_cfg.get("enabled", True)):
+                    logger.info("Starting disease-only clinical correlation matrix")
+                    run_clinical_correlation_matrix(
+                        feature_matrix_path=feature_matrix_path,
+                        cfg=config,
+                    )
+                if bool(longitudinal_cfg.get("enabled", True)):
+                    logger.info("Starting longitudinal Delta MoCA analysis")
+                    run_longitudinal_moca(
+                        feature_matrix_path=feature_matrix_path,
+                        cfg=config,
+                    )
+                if bool(stratification_cfg.get("enabled", True)):
+                    logger.info("Starting disease stratification analysis")
+                    run_disease_stratification(
+                        feature_matrix_path=feature_matrix_path,
+                        cfg=config,
+                    )
         warnings = _write_warning_summaries(_output_dir("eda_subdir")) if biological_ran else []
         _log_final_summary(ranges, biological_ran, warnings)
     except (ValueError, RuntimeError) as exc:

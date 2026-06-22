@@ -81,11 +81,20 @@ def _feature_columns(frame: pd.DataFrame) -> list[str]:
     ]
 
 
-def _rank_biserial_effect(left: np.ndarray, right: np.ndarray, u_statistic: float) -> float:
+def _rank_biserial_effect(
+    left: np.ndarray,
+    right: np.ndarray,
+    u_statistic: float | np.ndarray,
+) -> float | np.ndarray:
     denominator = float(len(left) * len(right))
     if denominator == 0:
-        return float("nan")
-    return float((2.0 * u_statistic / denominator) - 1.0)
+        if np.ndim(u_statistic) == 0:
+            return float("nan")
+        return np.full(np.asarray(u_statistic).shape, np.nan, dtype=float)
+    effect = (2.0 * np.asarray(u_statistic, dtype=float) / denominator) - 1.0
+    if np.ndim(effect) == 0:
+        return float(effect)
+    return effect
 
 
 def _binary_feature_tests(
@@ -127,11 +136,18 @@ def _binary_feature_tests(
     group_a, group_b = spec.ordered_groups
     left = subset.loc[subset[spec.variable] == group_a, feature_meta["feature_name"]].to_numpy(dtype=float)
     right = subset.loc[subset[spec.variable] == group_b, feature_meta["feature_name"]].to_numpy(dtype=float)
+    test_result = stats.mannwhitneyu(
+        left,
+        right,
+        axis=0,
+        alternative="two-sided",
+    )
+    u_statistics = np.asarray(test_result.statistic, dtype=float)
+    p_values = np.asarray(test_result.pvalue, dtype=float)
+    effects = np.asarray(_rank_biserial_effect(left, right, u_statistics), dtype=float)
 
     rows: list[dict[str, object]] = []
     for index, feature_row in feature_meta.iterrows():
-        u_statistic, p_value = stats.mannwhitneyu(left[:, index], right[:, index], alternative="two-sided")
-        effect = _rank_biserial_effect(left[:, index], right[:, index], float(u_statistic))
         rows.append(
             {
                 "contrast_name": spec.label,
@@ -144,9 +160,9 @@ def _binary_feature_tests(
                 "wavenumber": feature_row["wavenumber"],
                 "n_group_a": left.shape[0],
                 "n_group_b": right.shape[0],
-                "u_statistic": float(u_statistic),
-                "p_value": float(p_value),
-                "effect_size": float(effect),
+                "u_statistic": float(u_statistics[index]),
+                "p_value": float(p_values[index]),
+                "effect_size": float(effects[index]),
                 "effect_size_name": "rank_biserial",
                 "status": "ok",
             }
@@ -202,20 +218,17 @@ def _permutation_cluster_maxima(
         right_idx = order[n_left:]
         left = pooled[left_idx]
         right = pooled[right_idx]
-        p_values = np.empty(pooled.shape[1], dtype=float)
-        effects = np.empty(pooled.shape[1], dtype=float)
-        for feature_index in range(pooled.shape[1]):
-            u_statistic, p_value = stats.mannwhitneyu(
-                left[:, feature_index],
-                right[:, feature_index],
-                alternative="two-sided",
-            )
-            p_values[feature_index] = float(p_value)
-            effects[feature_index] = _rank_biserial_effect(
-                left[:, feature_index],
-                right[:, feature_index],
-                float(u_statistic),
-            )
+        test_result = stats.mannwhitneyu(
+            left,
+            right,
+            axis=0,
+            alternative="two-sided",
+        )
+        p_values = np.asarray(test_result.pvalue, dtype=float)
+        effects = np.asarray(
+            _rank_biserial_effect(left, right, np.asarray(test_result.statistic, dtype=float)),
+            dtype=float,
+        )
         clusters = _cluster_masses(effects, p_values, alpha)
         maxima[perm_index] = max((mass for _, _, mass in clusters), default=0.0)
     return maxima
@@ -346,12 +359,16 @@ def _multigroup_feature_tests(
         for group_b in present_groups[left_index + 1 :]:
             left = group_arrays[group_a]
             right = group_arrays[group_b]
+            test_result = stats.mannwhitneyu(
+                left,
+                right,
+                axis=0,
+                alternative="two-sided",
+            )
+            u_statistics = np.asarray(test_result.statistic, dtype=float)
+            p_values = np.asarray(test_result.pvalue, dtype=float)
+            effects = np.asarray(_rank_biserial_effect(left, right, u_statistics), dtype=float)
             for feature_index, feature_row in feature_meta.iterrows():
-                u_statistic, p_value = stats.mannwhitneyu(
-                    left[:, feature_index],
-                    right[:, feature_index],
-                    alternative="two-sided",
-                )
                 pairwise_rows.append(
                     {
                         "contrast_name": f"{spec.label}__{group_a}_vs_{group_b}",
@@ -364,9 +381,9 @@ def _multigroup_feature_tests(
                         "wavenumber": feature_row["wavenumber"],
                         "n_group_a": left.shape[0],
                         "n_group_b": right.shape[0],
-                        "u_statistic": float(u_statistic),
-                        "p_value": float(p_value),
-                        "effect_size": _rank_biserial_effect(left[:, feature_index], right[:, feature_index], float(u_statistic)),
+                        "u_statistic": float(u_statistics[feature_index]),
+                        "p_value": float(p_values[feature_index]),
+                        "effect_size": float(effects[feature_index]),
                         "effect_size_name": "rank_biserial",
                         "status": "ok",
                     }
@@ -502,6 +519,11 @@ def run_disease_stratification(
     if not feature_columns:
         raise ValueError("Disease stratification requires whole-spectrum subject feature columns")
     feature_meta = _feature_metadata(feature_columns)
+    logger.info(
+        "Disease stratification: %d disease subjects, %d whole-spectrum features",
+        len(disease_only),
+        len(feature_meta),
+    )
 
     min_subjects = int(strat_cfg.get("min_subjects_per_group", 5))
     cluster_alpha = float(strat_cfg.get("cluster_alpha", 0.05))
@@ -523,6 +545,7 @@ def run_disease_stratification(
         )
         test_frames.append(tests)
         count_frames.append(counts)
+        logger.info("Disease stratification: %s complete", spec.label)
 
     lesion_tests, lesion_counts = _multigroup_feature_tests(
         disease_only,
@@ -532,6 +555,7 @@ def run_disease_stratification(
     )
     test_frames.append(lesion_tests)
     count_frames.append(lesion_counts)
+    logger.info("Disease stratification: %s complete", LESION_SPEC.label)
 
     tests = pd.concat(test_frames, ignore_index=True, sort=False)
     counts = pd.concat(count_frames, ignore_index=True, sort=False)
