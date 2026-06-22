@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from src import config, get_cross_region_summary_dir
+from src import config, get_cross_region_phase_dir
 from src.analysis.eda_mode import resolve_eda_analysis_mode
 from src.clinical.endpoints import build_clinical_endpoints
 from src.data_preparation.loaders import load_clinical_subjects
@@ -240,7 +240,7 @@ def write_subject_feature_exports(
     cfg: dict | None = None,
 ) -> dict[str, Path]:
     cfg = config if cfg is None else cfg
-    target_dir = get_cross_region_summary_dir() if output_dir is None else Path(output_dir)
+    target_dir = get_cross_region_phase_dir("subject_features") if output_dir is None else Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     matrices, provenance = build_subject_feature_matrices(inputs, cfg=cfg)

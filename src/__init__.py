@@ -20,6 +20,16 @@ WHOLE_SPECTRA_PHASE_DIRS = {
     "variance_context": "03_variance_context",
 }
 
+CROSS_REGION_PHASE_DIRS = {
+    "subject_features": "01_subject_features",
+    "biological_pca_summary": "02_biological_pca_summary",
+    "clinical_correlations": "03_clinical_correlations",
+    "longitudinal_moca": "04_longitudinal_moca",
+    "disease_stratification": "05_disease_stratification",
+    "candidate_regions": "06_candidate_regions",
+    "covariate_models": "07_covariate_models",
+}
+
 # Ordered sequence of single-range EDA phases.  Numbers are derived from
 # position (1-indexed, zero-padded to 2 digits) so inserting or reordering
 # here automatically renumbers all downstream folders.
@@ -231,6 +241,14 @@ def get_run_metadata_dir() -> Path:
 def get_cross_region_summary_dir() -> Path:
     """Return the cross-region summary directory for the active EDA run."""
     path = _output_dir("eda_subdir") / "04_cross_region_summary"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_cross_region_phase_dir(phase: str) -> Path:
+    """Return a numbered phase directory under the cross-region summary root."""
+    suffix = CROSS_REGION_PHASE_DIRS.get(phase, phase)
+    path = get_cross_region_summary_dir() / suffix
     path.mkdir(parents=True, exist_ok=True)
     return path
 

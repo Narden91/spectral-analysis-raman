@@ -14,7 +14,14 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from src import config, get_cross_region_summary_dir
+from src import config, get_cross_region_phase_dir
+from src.analysis.clinical_feature_associations import (
+    compute_binary_group_feature_tests,
+    feature_columns,
+    feature_metadata,
+    filter_disease_subjects,
+    load_subject_feature_matrix,
+)
 from src.analysis.spectral_regions import build_candidate_regions
 from src.analysis.statistics import fdr_correction
 from src.statistics.cluster_permutation import apply_binary_cluster_permutation
@@ -50,37 +57,12 @@ LESION_SPEC = StratificationSpec(
     ordered_groups=("left", "right", "posterior", "other"),
     kind="multigroup",
 )
-FEATURE_PREFIXES = ("1300__", "2850__")
-
-
 def _cfg(cfg: dict | None = None) -> dict:
     return config if cfg is None else cfg
 
 
 def _stratification_cfg(cfg: dict) -> dict:
     return cfg.get("analysis", {}).get("disease_stratification", {})
-
-
-def _feature_metadata(columns: list[str]) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
-    for column in columns:
-        block, wavenumber = column.split("__", 1)
-        rows.append(
-            {
-                "feature_name": column,
-                "spectral_block": block,
-                "wavenumber": float(wavenumber),
-            }
-        )
-    return pd.DataFrame(rows).sort_values(["spectral_block", "wavenumber"]).reset_index(drop=True)
-
-
-def _feature_columns(frame: pd.DataFrame) -> list[str]:
-    return [
-        column
-        for column in frame.columns
-        if column.startswith(FEATURE_PREFIXES)
-    ]
 
 
 def _rank_biserial_effect(
@@ -97,84 +79,6 @@ def _rank_biserial_effect(
     if np.ndim(effect) == 0:
         return float(effect)
     return effect
-
-
-def _binary_feature_tests(
-    frame: pd.DataFrame,
-    feature_meta: pd.DataFrame,
-    spec: StratificationSpec,
-    min_subjects_per_group: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    subset = frame.loc[frame[spec.variable].notna()].copy()
-    subset[spec.variable] = subset[spec.variable].astype(str)
-
-    counts = (
-        subset[spec.variable]
-        .value_counts()
-        .reindex(spec.ordered_groups, fill_value=0)
-        .rename_axis("group_name")
-        .reset_index(name="n_subjects")
-    )
-    counts["group_variable"] = spec.variable
-    counts["contrast_name"] = spec.label
-    insufficient = counts["n_subjects"].lt(min_subjects_per_group).any()
-    counts["status"] = np.where(insufficient, "insufficient sample size", "ok")
-    counts["min_subjects_per_group"] = min_subjects_per_group
-
-    if insufficient:
-        return pd.DataFrame(
-            [
-                {
-                    "contrast_name": spec.label,
-                    "group_variable": spec.variable,
-                    "group_a": spec.ordered_groups[0],
-                    "group_b": spec.ordered_groups[1],
-                    "test": "mannwhitney",
-                    "status": "insufficient sample size",
-                }
-            ]
-        ), counts
-
-    group_a, group_b = spec.ordered_groups
-    left = subset.loc[subset[spec.variable] == group_a, feature_meta["feature_name"]].to_numpy(dtype=float)
-    right = subset.loc[subset[spec.variable] == group_b, feature_meta["feature_name"]].to_numpy(dtype=float)
-    test_result = stats.mannwhitneyu(
-        left,
-        right,
-        axis=0,
-        alternative="two-sided",
-    )
-    u_statistics = np.asarray(test_result.statistic, dtype=float)
-    p_values = np.asarray(test_result.pvalue, dtype=float)
-    effects = np.asarray(_rank_biserial_effect(left, right, u_statistics), dtype=float)
-
-    rows: list[dict[str, object]] = []
-    for index, feature_row in feature_meta.iterrows():
-        rows.append(
-            {
-                "contrast_name": spec.label,
-                "group_variable": spec.variable,
-                "group_a": group_a,
-                "group_b": group_b,
-                "test": "mannwhitney",
-                "feature_name": feature_row["feature_name"],
-                "spectral_block": feature_row["spectral_block"],
-                "wavenumber": feature_row["wavenumber"],
-                "n_group_a": left.shape[0],
-                "n_group_b": right.shape[0],
-                "u_statistic": float(u_statistics[index]),
-                "p_value": float(p_values[index]),
-                "effect_size": float(effects[index]),
-                "effect_size_name": "rank_biserial",
-                "status": "ok",
-            }
-        )
-
-    tests = pd.DataFrame(rows)
-    q_values, significant = fdr_correction(tests["p_value"].to_numpy(dtype=float))
-    tests["fdr_q"] = q_values
-    tests["significant_fdr"] = significant
-    return tests, counts
 
 
 def _apply_cluster_permutation(
@@ -357,26 +261,13 @@ def run_disease_stratification(
     if not bool(strat_cfg.get("enabled", True)):
         return {}
 
-    matrix_path = (
-        Path(feature_matrix_path)
-        if feature_matrix_path is not None
-        else get_cross_region_summary_dir() / "subject_feature_matrix_whole.parquet"
-    )
-    frame = pd.read_parquet(matrix_path)
-    frame["subject_id"] = frame["subject_id"].astype(str)
-    if frame["subject_id"].duplicated().any():
-        raise ValueError("Disease stratification requires one row per subject")
+    frame = load_subject_feature_matrix(feature_matrix_path=feature_matrix_path)
+    disease_only = filter_disease_subjects(frame)
 
-    disease_only = frame.copy()
-    if "is_control" in disease_only.columns:
-        disease_only = disease_only.loc[~disease_only["is_control"].fillna(False).astype(bool)].copy()
-    elif "condition" in disease_only.columns:
-        disease_only = disease_only.loc[disease_only["condition"].astype(str).str.lower() != "control"].copy()
-
-    feature_columns = _feature_columns(disease_only)
-    if not feature_columns:
+    spectral_feature_columns = feature_columns(disease_only)
+    if not spectral_feature_columns:
         raise ValueError("Disease stratification requires whole-spectrum subject feature columns")
-    feature_meta = _feature_metadata(feature_columns)
+    feature_meta = feature_metadata(spectral_feature_columns)
     logger.info(
         "Disease stratification: %d disease subjects, %d whole-spectrum features",
         len(disease_only),
@@ -392,7 +283,15 @@ def run_disease_stratification(
     count_frames: list[pd.DataFrame] = []
 
     for spec in BINARY_SPECS:
-        tests, counts = _binary_feature_tests(disease_only, feature_meta, spec, min_subjects)
+        tests, counts = compute_binary_group_feature_tests(
+            disease_only,
+            feature_meta,
+            group_column=spec.variable,
+            ordered_groups=(spec.ordered_groups[0], spec.ordered_groups[1]),
+            contrast_name=spec.label,
+            min_subjects_per_group=min_subjects,
+            fdr_alpha=0.05,
+        )
         tests = _apply_cluster_permutation(
             tests,
             disease_only,
@@ -429,7 +328,7 @@ def run_disease_stratification(
     target_dir = (
         Path(output_dir)
         if output_dir is not None
-        else get_cross_region_summary_dir() / "disease_stratification"
+        else get_cross_region_phase_dir("disease_stratification")
     )
     plots_dir = target_dir / "stratification_effect_plots"
     plots_dir.mkdir(parents=True, exist_ok=True)

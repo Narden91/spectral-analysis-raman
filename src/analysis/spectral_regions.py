@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src import config, get_cross_region_summary_dir
+from src import config, get_cross_region_phase_dir
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +272,7 @@ def run_candidate_region_detector(
     target_dir = (
         Path(output_dir)
         if output_dir is not None
-        else get_cross_region_summary_dir()
+        else get_cross_region_phase_dir("candidate_regions")
     )
     target_dir.mkdir(parents=True, exist_ok=True)
 

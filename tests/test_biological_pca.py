@@ -327,10 +327,10 @@ def test_default_output_uses_only_canonical_dirs(monkeypatch, tmp_path) -> None:
         biological_pca,
         "write_subject_feature_exports",
         lambda inputs, output_dir=None, cfg=None: {
-            "subject_feature_matrix_1300": expected_root / "04_cross_region_summary" / "subject_feature_matrix_1300.parquet",
-            "subject_feature_matrix_2850": expected_root / "04_cross_region_summary" / "subject_feature_matrix_2850.parquet",
-            "subject_feature_matrix_whole": expected_root / "04_cross_region_summary" / "subject_feature_matrix_whole.parquet",
-            "subject_feature_provenance": expected_root / "04_cross_region_summary" / "subject_feature_provenance.csv",
+            "subject_feature_matrix_1300": expected_root / "04_cross_region_summary" / "01_subject_features" / "subject_feature_matrix_1300.parquet",
+            "subject_feature_matrix_2850": expected_root / "04_cross_region_summary" / "01_subject_features" / "subject_feature_matrix_2850.parquet",
+            "subject_feature_matrix_whole": expected_root / "04_cross_region_summary" / "01_subject_features" / "subject_feature_matrix_whole.parquet",
+            "subject_feature_provenance": expected_root / "04_cross_region_summary" / "01_subject_features" / "subject_feature_provenance.csv",
         },
     )
 
@@ -365,7 +365,7 @@ def test_default_output_uses_only_canonical_dirs(monkeypatch, tmp_path) -> None:
     assert (_canonical_dir("PCA_1330") / "scores_pc_pairgrid.png").exists()
     assert (_canonical_dir("PCA_1330") / "loadings_pc1_pc2_pc3.png").exists()
     assert (_canonical_dir("PCA_1330") / "loading_regions_pc1_pc2_pc3.png").exists()
-    assert (expected_root / "04_cross_region_summary" / "subject_biological_pca_scores.csv").exists()
+    assert (expected_root / "04_cross_region_summary" / "02_biological_pca_summary" / "subject_biological_pca_scores.csv").exists()
     assert not (expected_root / "biological_pca").exists()
 
 

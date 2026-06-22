@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src import config, get_cross_region_summary_dir
+from src import config, get_cross_region_phase_dir
 from src.analysis.clinical_feature_associations import (
     apply_spearman_cluster_permutation,
     build_candidate_regions,
@@ -154,7 +154,7 @@ def run_clinical_correlation_matrix(
     target_dir = (
         Path(output_dir)
         if output_dir is not None
-        else get_cross_region_summary_dir() / "clinical_correlations"
+        else get_cross_region_phase_dir("clinical_correlations")
     )
     target_dir.mkdir(parents=True, exist_ok=True)
 

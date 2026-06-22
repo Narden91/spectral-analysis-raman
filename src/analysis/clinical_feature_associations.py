@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from src import config, get_cross_region_summary_dir
+from src import config, get_cross_region_phase_dir
 from src.analysis.spectral_regions import build_candidate_regions
 from src.analysis.statistics import fdr_correction
 from src.statistics.cluster_permutation import (
@@ -33,7 +33,7 @@ def load_subject_feature_matrix(
     path = (
         Path(feature_matrix_path)
         if feature_matrix_path is not None
-        else get_cross_region_summary_dir() / "subject_feature_matrix_whole.parquet"
+        else get_cross_region_phase_dir("subject_features") / "subject_feature_matrix_whole.parquet"
     )
     frame = pd.read_parquet(path)
     if "subject_id" not in frame.columns:
@@ -318,4 +318,3 @@ def compute_binary_group_feature_tests(
     tests["fdr_q"] = q_values
     tests["significant_fdr"] = significant
     return tests, counts
-

@@ -20,6 +20,7 @@ from scipy.spatial import ConvexHull
 from src import (
     config,
     get_biological_pca_canonical_dir,
+    get_cross_region_phase_dir,
     get_cross_region_summary_dir,
     resolve_project_path,
 )
@@ -1653,6 +1654,8 @@ def _write_outputs(
     features: pd.DataFrame,
 ) -> dict[str, Path]:
     cross_region_dir = get_cross_region_summary_dir()
+    subject_features_dir = get_cross_region_phase_dir("subject_features")
+    summary_dir = get_cross_region_phase_dir("biological_pca_summary")
     comparison = _build_pca_comparison_summary(results)
 
     # Build subject-retention audit table (included + excluded with reasons).
@@ -1666,16 +1669,14 @@ def _write_outputs(
     ]
     retention_df = pd.DataFrame(included_rows + excluded_rows).sort_values("subject_id").reset_index(drop=True)
 
-    shared_tables = {
+    feature_tables = {
         "subject_spectra.csv": inputs.subject_spectra,
         "subject_region_counts.csv": inputs.subject_region_counts,
         "input_provenance.csv": inputs.input_provenance,
-        "subject_biological_pca_scores.csv": features,
-        "pca_comparison_summary.csv": comparison,
         "subject_retention.csv": retention_df,
     }
-    for filename, df in shared_tables.items():
-        df.to_csv(cross_region_dir / filename, index=False)
+    for filename, df in feature_tables.items():
+        df.to_csv(subject_features_dir / filename, index=False)
 
     consistency_rows: list[dict[str, object]] = []
     written_paths: dict[str, Path] = {}
@@ -1731,9 +1732,13 @@ def _write_outputs(
             )
 
     region_consistency = pd.DataFrame(consistency_rows)
-    region_consistency.to_csv(cross_region_dir / "region_consistency_summary.csv", index=False)
-    _write_biological_pca_summary_markdown(comparison, cross_region_dir)
+    features.to_csv(summary_dir / "subject_biological_pca_scores.csv", index=False)
+    comparison.to_csv(summary_dir / "pca_comparison_summary.csv", index=False)
+    region_consistency.to_csv(summary_dir / "region_consistency_summary.csv", index=False)
+    _write_biological_pca_summary_markdown(comparison, summary_dir)
     written_paths["cross_region_summary"] = cross_region_dir
+    written_paths["subject_features_dir"] = subject_features_dir
+    written_paths["biological_pca_summary_dir"] = summary_dir
     return written_paths
 
 

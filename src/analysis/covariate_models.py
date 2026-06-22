@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
-from src import config, get_cross_region_summary_dir
+from src import config, get_cross_region_phase_dir
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
@@ -83,7 +83,7 @@ def _empty_availability_table() -> pd.DataFrame:
 def _candidate_path(path: str | Path | None = None) -> Path:
     if path is not None:
         return Path(path)
-    return get_cross_region_summary_dir() / "candidate_regions_cluster_corrected.csv"
+    return get_cross_region_phase_dir("candidate_regions") / "candidate_regions_cluster_corrected.csv"
 
 
 def _encode_covariate(frame: pd.DataFrame, column: str) -> tuple[pd.Series | None, str | None]:
@@ -268,7 +268,7 @@ def run_covariate_region_models(
     target_dir = (
         Path(output_dir)
         if output_dir is not None
-        else get_cross_region_summary_dir()
+        else get_cross_region_phase_dir("covariate_models")
     )
     target_dir.mkdir(parents=True, exist_ok=True)
 

@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from src import config, get_cross_region_summary_dir
+from src import config, get_cross_region_phase_dir
 from src.analysis.clinical_feature_associations import (
     apply_binary_cluster_permutation,
     apply_spearman_cluster_permutation,
@@ -163,7 +163,7 @@ def run_longitudinal_moca(
     target_dir = (
         Path(output_dir)
         if output_dir is not None
-        else get_cross_region_summary_dir() / "longitudinal_moca"
+        else get_cross_region_phase_dir("longitudinal_moca")
     )
     target_dir.mkdir(parents=True, exist_ok=True)
     scatter_dir = target_dir / "delta_moca_scatterplots"
