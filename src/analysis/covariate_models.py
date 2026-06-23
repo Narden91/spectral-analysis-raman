@@ -15,6 +15,7 @@ from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
 )
+from src.analysis.band_features import band_mean, infer_block_from_upper, ratio_from_integrals
 from src.analysis.spectral_regions import candidate_region_feature_names
 
 logger = logging.getLogger(__name__)
@@ -240,16 +241,7 @@ def _region_predictor(
 
 
 def _band_feature(frame: pd.DataFrame, feature_names: list[str], block: str, lower: float, upper: float) -> pd.Series:
-    columns: list[str] = []
-    for feature_name in feature_names:
-        if not feature_name.startswith(f"{block}__"):
-            continue
-        wavenumber = float(feature_name.split("__", 1)[1])
-        if lower <= wavenumber <= upper:
-            columns.append(feature_name)
-    if not columns:
-        return pd.Series(np.nan, index=frame.index, dtype=float)
-    return frame[columns].mean(axis=1)
+    return band_mean(frame, feature_names, block=block, lower=lower, upper=upper)
 
 
 def _ratio_predictors(frame: pd.DataFrame, feature_names: list[str], cfg: dict) -> pd.DataFrame:
@@ -258,10 +250,7 @@ def _ratio_predictors(frame: pd.DataFrame, feature_names: list[str], cfg: dict) 
     band_series: dict[str, pd.Series] = {}
     for band_name, limits in bands_cfg.items():
         lower, upper = float(limits[0]), float(limits[1])
-        if upper < 2000:
-            block = "1300"
-        else:
-            block = "2850"
+        block = infer_block_from_upper(upper)
         band_series[str(band_name)] = _band_feature(frame, feature_names, block, lower, upper)
 
     ratios: dict[str, pd.Series] = {}
@@ -269,8 +258,7 @@ def _ratio_predictors(frame: pd.DataFrame, feature_names: list[str], cfg: dict) 
         left, right = str(pair[0]), str(pair[1])
         if left not in band_series or right not in band_series:
             continue
-        denominator = band_series[right].replace(0.0, np.nan)
-        ratios[f"{left}__over__{right}"] = band_series[left] / denominator
+        ratios[f"{left}__over__{right}"] = ratio_from_integrals(band_series[left], band_series[right])
     return pd.DataFrame(ratios, index=frame.index)
 
 

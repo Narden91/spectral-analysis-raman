@@ -268,6 +268,33 @@ def get_cross_region_phase_dir(phase: str) -> Path:
     return path
 
 
+_SPECTRAL_INTERPRETABILITY_SUBDIRS = {
+    "peak_shape": "peak_shape",
+    "nmf": "nmf_decomposition",
+    "entropy": "spectral_entropy",
+    "discriminant": "discriminant_signatures",
+    "coupling": "feature_coupling",
+    "index_clustering": "index_clustering",
+    "consistency": "endpoint_consistency",
+    "figures": "figures",
+}
+
+
+def get_confirmatory_panel_dir() -> Path:
+    """Top-level output root for Tier-1 pre-registered panel results."""
+    path = _output_dir("eda_subdir") / "05_confirmatory_panel"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_spectral_interpretability_dir(phase: str) -> Path:
+    """Return a phase subfolder under the Tier-2 spectral interpretability root."""
+    suffix = _SPECTRAL_INTERPRETABILITY_SUBDIRS.get(phase, phase)
+    path = _output_dir("eda_subdir") / "06_spectral_interpretability" / suffix
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def get_biological_pca_canonical_dir(model_name: str) -> Path:
     """Return the canonical range-local directory for a Biological PCA model."""
     relative = BIOLOGICAL_PCA_CANONICAL_DIRS.get(str(model_name))

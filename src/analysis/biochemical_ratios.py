@@ -12,6 +12,7 @@ import pandas as pd
 from scipy import stats
 
 from src import config, get_cross_region_phase_dir
+from src.analysis.band_features import band_integral, infer_block_from_upper, ratio_from_integrals
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
@@ -40,46 +41,6 @@ def _band_windows(cfg: dict[str, Any]) -> dict[str, tuple[float, float]]:
     return windows
 
 
-def _block_columns(columns: list[str], block: str) -> list[tuple[str, float]]:
-    out: list[tuple[str, float]] = []
-    prefix = f"{block}__"
-    for column in columns:
-        if not column.startswith(prefix):
-            continue
-        try:
-            wavenumber = float(column.split("__", 1)[1])
-        except ValueError:
-            continue
-        out.append((column, wavenumber))
-    return sorted(out, key=lambda item: item[1])
-
-
-def _band_integral(
-    frame: pd.DataFrame,
-    columns: list[str],
-    *,
-    lower: float,
-    upper: float,
-) -> pd.Series:
-    block = "1300" if upper < 2000 else "2850"
-    selected = [
-        (column, wavenumber)
-        for column, wavenumber in _block_columns(columns, block)
-        if lower <= wavenumber <= upper
-    ]
-    if not selected:
-        return pd.Series(np.nan, index=frame.index, dtype=float)
-
-    selected_columns = [column for column, _ in selected]
-    wavenumbers = np.array([wavenumber for _, wavenumber in selected], dtype=float)
-    values = frame[selected_columns].to_numpy(dtype=float)
-    if values.shape[1] == 1:
-        integrated = values[:, 0]
-    else:
-        integrated = np.trapz(values, wavenumbers, axis=1)
-    return pd.Series(integrated, index=frame.index, dtype=float)
-
-
 def _build_band_table(
     frame: pd.DataFrame,
     columns: list[str],
@@ -87,7 +48,8 @@ def _build_band_table(
 ) -> pd.DataFrame:
     band_features: dict[str, pd.Series] = {}
     for band_name, (lower, upper) in _band_windows(cfg).items():
-        series = _band_integral(frame, columns, lower=lower, upper=upper)
+        block = infer_block_from_upper(upper)
+        series = band_integral(frame, columns, block=block, lower=lower, upper=upper)
         if series.notna().any():
             band_features[band_name] = series
     return pd.DataFrame(band_features, index=frame.index)
@@ -104,8 +66,10 @@ def _build_ratio_table(
         numerator_name, denominator_name = str(pair[0]), str(pair[1])
         if numerator_name not in bands or denominator_name not in bands:
             continue
-        denominator = bands[denominator_name].replace(0.0, np.nan)
-        ratios[f"{numerator_name}__over__{denominator_name}"] = bands[numerator_name] / denominator
+        ratios[f"{numerator_name}__over__{denominator_name}"] = ratio_from_integrals(
+            bands[numerator_name],
+            bands[denominator_name],
+        )
     return pd.DataFrame(ratios, index=bands.index)
 
 

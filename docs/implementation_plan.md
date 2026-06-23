@@ -816,8 +816,8 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 ### Tier 1 (statistical core)
 
 - [ ] Phases A–J, S, L, and K implemented, each with passing tests.
-- [ ] Block-aware normalization invariants locked by test (Phase B).
-- [ ] `preregistration.md` frozen before result tables exist (Phase A).
+- [x] Block-aware normalization invariants locked by test (Phase B).
+- [x] `preregistration.md` frozen before result tables exist (Phase A).
 - [ ] Mandatory anchor hypothesis (oxidative index vs ΔMoCA) tested in Phase E before panel FDR.
 - [ ] Every panel result reports effect size + CI + FDR q + permutation p + partial-Spearman + variance test + achieved n.
 
@@ -839,3 +839,45 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 - [ ] Disease-only smoke run completes and writes `Results_intra_disease/05_confirmatory_panel/` and `Results_intra_disease/06_spectral_interpretability/` as sibling folders alongside `04_cross_region_summary/`, plus run manifests.
 - [ ] All reports/captions contain no diagnostic / predictive / biomarker / causal language (enforced by test).
 - [ ] No new top-level entry point; outputs routed through existing helpers; generated artifacts git-ignored.
+
+---
+
+## 8. Implementation Progress
+
+Track completed phases here. **Next iteration starts at Phase E.**
+
+### Tier 1 — Statistical core
+
+- [x] **Phase A** — Pre-registration config block (`config/eda.yaml` `analysis.preregistered_panel`; `get_confirmatory_panel_dir()` / `get_spectral_interpretability_dir()` in `src/__init__.py`; `src/analysis/preregistered_panel.py::write_preregistration_snapshot`; tests in `tests/test_preregistered_panel.py::test_preregistration_snapshot_is_frozen`)
+- [x] **Phase B** — Block-aware normalization regression guard (`tests/test_block_normalization.py`; no production change)
+- [x] **Phase C** — Band-integral helper + named-index panel (`src/analysis/band_features.py`; `build_panel_matrix` / `run_preregistered_panel`; refactored `biochemical_ratios.py`, `covariate_models.py`; tests in `tests/test_band_features.py`, `tests/test_preregistered_panel.py`)
+- [x] **Phase D** — Extreme-contrast endpoints (`mild_threshold` / `recovery_threshold` in config; `moca_severity_group_extreme`, `delta_moca_group_extreme` in `src/clinical/endpoints.py`; tests in `tests/test_clinical_endpoints.py`)
+- [ ] **Phase E** — Mandatory anchor test + robust group contrasts
+- [ ] **Phase F** — Permutation validation of contrasts
+- [ ] **Phase G** — Covariate control via partial Spearman
+- [ ] **Phase H** — Heterogeneity / variance-homogeneity testing
+- [ ] **Phase I** — Clustering insight (reuse; optional UMAP supplement)
+- [ ] **Phase J** — Minimal interpretable model restricted to the panel
+- [ ] **Phase S** — Cross-endpoint consistency
+- [ ] **Phase L** — Graded robustness ranking
+- [ ] **Phase K** — Four-domain biochemical narrative report
+
+### Tier 2 — Structure-aware interpretability
+
+- [ ] **Phase M** — Spectral-shape analysis (shift + FWHM + asymmetry)
+- [ ] **Phase N** — NMF decomposition
+- [ ] **Phase O** — Spectral entropy / dispersion fingerprint
+- [ ] **Phase P** — Difference-spectrum signatures
+- [ ] **Phase Q** — Cross-feature coupling + biochemical regimes
+- [ ] **Phase R** — Index-space clustering (optional)
+- [ ] **Phase U** — Journal figure set
+
+### Wiring & reproducibility
+
+- [ ] **Phase V** — Pipeline wiring in `disease_only_pipeline.py`, manifests, full smoke run
+
+### Notes (Phases A–D, 2026-06-23)
+
+- `run_preregistered_panel()` writes `05_confirmatory_panel/preregistration.md` and `panel_feature_matrix.csv` but is **not yet wired** into `disease_only_pipeline.py` (Phase V).
+- Path helpers registered; Tier-2 subdirs ready via `get_spectral_interpretability_dir()`.
+- Phase A–D tests: `uv run pytest tests/test_band_features.py tests/test_preregistered_panel.py tests/test_block_normalization.py tests/test_clinical_endpoints.py -v` (22 tests green with biochemical/covariate regression tests).

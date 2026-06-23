@@ -169,7 +169,13 @@ def _missingness_report(subject_table: pd.DataFrame) -> pd.DataFrame:
 
 def _group_counts(subject_table: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    for column in ("moca_severity_group", "delta_moca_group", "lesion_location_group"):
+    for column in (
+        "moca_severity_group",
+        "delta_moca_group",
+        "moca_severity_group_extreme",
+        "delta_moca_group_extreme",
+        "lesion_location_group",
+    ):
         counts = subject_table[column].fillna("missing").value_counts(dropna=False).sort_index()
         for group_name, count in counts.items():
             rows.append(
@@ -191,6 +197,8 @@ def _summary_table(subject_table: pd.DataFrame, source_path: Path, endpoint_cfg:
                 "n_unique_subject_ids": int(subject_table["subject_id"].nunique()),
                 "severity_threshold": float(endpoint_cfg.get("severity_threshold", 20)),
                 "decline_threshold": float(endpoint_cfg.get("decline_threshold", 0)),
+                "mild_threshold": float(endpoint_cfg.get("mild_threshold", 25)),
+                "recovery_threshold": float(endpoint_cfg.get("recovery_threshold", 2)),
             }
         ]
     )
@@ -243,6 +251,8 @@ def build_clinical_endpoints(
 
     severity_threshold = float(endpoint_cfg.get("severity_threshold", 20))
     decline_threshold = float(endpoint_cfg.get("decline_threshold", 0))
+    mild_threshold = float(endpoint_cfg.get("mild_threshold", 25))
+    recovery_threshold = float(endpoint_cfg.get("recovery_threshold", 2))
     subject_table["delta_moca"] = subject_table["moca_3m"] - subject_table["moca_baseline"]
     subject_table["moca_severity_group"] = pd.Series(pd.NA, index=subject_table.index, dtype="string")
     subject_table.loc[subject_table["moca_baseline"] < severity_threshold, "moca_severity_group"] = "low_moca"
@@ -250,6 +260,24 @@ def build_clinical_endpoints(
     subject_table["delta_moca_group"] = pd.Series(pd.NA, index=subject_table.index, dtype="string")
     subject_table.loc[subject_table["delta_moca"] < decline_threshold, "delta_moca_group"] = "decline"
     subject_table.loc[subject_table["delta_moca"] >= decline_threshold, "delta_moca_group"] = "stable_or_improved"
+    subject_table["moca_severity_group_extreme"] = pd.Series(pd.NA, index=subject_table.index, dtype="string")
+    subject_table.loc[
+        subject_table["moca_baseline"] < severity_threshold,
+        "moca_severity_group_extreme",
+    ] = "severe"
+    subject_table.loc[
+        subject_table["moca_baseline"] > mild_threshold,
+        "moca_severity_group_extreme",
+    ] = "mild"
+    subject_table["delta_moca_group_extreme"] = pd.Series(pd.NA, index=subject_table.index, dtype="string")
+    subject_table.loc[
+        subject_table["delta_moca"] < decline_threshold,
+        "delta_moca_group_extreme",
+    ] = "decline"
+    subject_table.loc[
+        subject_table["delta_moca"] > recovery_threshold,
+        "delta_moca_group_extreme",
+    ] = "recovery"
     subject_table["lesion_location_group"] = _derive_lesion_group(subject_table["lesion_location"])
 
     return ClinicalEndpointResult(

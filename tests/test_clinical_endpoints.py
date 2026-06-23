@@ -26,6 +26,8 @@ def _cfg() -> dict:
                 "lesion_location_col": "lesion_location",
                 "severity_threshold": 20,
                 "decline_threshold": 0,
+                "mild_threshold": 25,
+                "recovery_threshold": 2,
             }
         }
     }
@@ -94,6 +96,13 @@ def test_build_endpoints_maps_current_header_aliases_and_writes_outputs(tmp_path
     assert str(subject_table.loc["7", "lesion_location_group"]) == "right"
     assert str(subject_table.loc["38", "lesion_location_group"]) == "posterior"
     assert str(subject_table.loc["55", "lesion_location_group"]) == "posterior"
+
+    assert str(subject_table.loc["7", "moca_severity_group_extreme"]) == "severe"
+    assert str(subject_table.loc["38", "moca_severity_group_extreme"]) == "mild"
+    assert pd.isna(subject_table.loc["55", "moca_severity_group_extreme"])
+    assert str(subject_table.loc["38", "delta_moca_group_extreme"]) == "decline"
+    assert str(subject_table.loc["7", "delta_moca_group_extreme"]) == "recovery"
+    assert pd.isna(subject_table.loc["55", "delta_moca_group_extreme"])
 
     group_counts = result.clinical_group_counts
     assert int(
@@ -184,3 +193,74 @@ def test_build_endpoints_rejects_non_numeric_moca_columns(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="moca_baseline"):
         build_clinical_endpoints(cfg=_cfg(), clinical_csv=clinical_csv, output_dir=tmp_path / "out")
+
+
+def test_extreme_group_boundaries_and_counts(tmp_path: Path) -> None:
+    clinical_csv = _write_csv(
+        tmp_path,
+        [
+            {
+                "participant_id": "A",
+                "age_years": 60,
+                "gender": "male",
+                "diagnosis_category": "right_hemisphere",
+                "rbans_total_3m": 80,
+                "moca_total_baseline": 20,
+                "moca_total_3m": 24,
+                "aspects_score": 9,
+            },
+            {
+                "participant_id": "B",
+                "age_years": 61,
+                "gender": "female",
+                "diagnosis_category": "right_hemisphere",
+                "rbans_total_3m": 81,
+                "moca_total_baseline": 25,
+                "moca_total_3m": 25,
+                "aspects_score": 9,
+            },
+            {
+                "participant_id": "C",
+                "age_years": 62,
+                "gender": "male",
+                "diagnosis_category": "right_hemisphere",
+                "rbans_total_3m": 82,
+                "moca_total_baseline": 26,
+                "moca_total_3m": 29,
+                "aspects_score": 9,
+            },
+            {
+                "participant_id": "D",
+                "age_years": 63,
+                "gender": "female",
+                "diagnosis_category": "right_hemisphere",
+                "rbans_total_3m": 83,
+                "moca_total_baseline": 22,
+                "moca_total_3m": 20,
+                "aspects_score": 9,
+            },
+            {
+                "participant_id": "E",
+                "age_years": 64,
+                "gender": "male",
+                "diagnosis_category": "right_hemisphere",
+                "rbans_total_3m": 84,
+                "moca_total_baseline": 24,
+                "moca_total_3m": 27,
+                "aspects_score": 9,
+            },
+        ],
+    )
+
+    result = build_clinical_endpoints(cfg=_cfg(), clinical_csv=clinical_csv, output_dir=tmp_path / "out")
+    table = result.clinical_subject_table.set_index("subject_id")
+
+    assert pd.isna(table.loc["A", "moca_severity_group_extreme"])
+    assert pd.isna(table.loc["B", "moca_severity_group_extreme"])
+    assert str(table.loc["C", "moca_severity_group_extreme"]) == "mild"
+    assert str(table.loc["D", "delta_moca_group_extreme"]) == "decline"
+    assert str(table.loc["E", "delta_moca_group_extreme"]) == "recovery"
+
+    counts = result.clinical_group_counts
+    assert "moca_severity_group_extreme" in set(counts["group_variable"])
+    assert "delta_moca_group_extreme" in set(counts["group_variable"])
