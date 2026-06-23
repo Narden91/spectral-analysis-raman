@@ -113,7 +113,8 @@ def run_disease_only_cross_region_pipeline(
         integrated_outputs = run_integrated_candidates(
             feature_matrix_path=feature_matrix_path,
             pls_vip_path=pls_outputs.get("pls_vip_bands"),
-            splsda_bands_path=splsda_outputs.get("pls_l1da_selected_bands"),
+            pls_performance_path=pls_outputs.get("pls_regression_performance"),
+            splsda_bands_path=splsda_outputs.get("pls_l1da_selected_bands", ""),
             cfg=cfg,
         )
         outputs["integrated_candidates"] = integrated_outputs

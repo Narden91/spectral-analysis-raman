@@ -327,5 +327,43 @@ def run_candidate_region_detector(
         combined = _normalize_candidates("clinical_correlation_matrix", pd.DataFrame())
     path = target_dir / "candidate_regions_cluster_corrected.csv"
     combined.to_csv(path, index=False)
+    n_regions = int(len(combined))
+    if combined.empty:
+        n_supported = 0
+        n_fallback = 0
+    else:
+        n_supported = int(
+            (
+                combined.get("n_fdr_significant", pd.Series(0, index=combined.index)).fillna(0).astype(int).gt(0)
+                | combined.get("n_cluster_significant", pd.Series(0, index=combined.index))
+                .fillna(0)
+                .astype(int)
+                .gt(0)
+            ).sum()
+        )
+        n_fallback = int(
+            combined.get("selection_basis", pd.Series("", index=combined.index))
+            .astype("string")
+            .str.contains("fallback", na=False)
+            .sum()
+        )
+    provenance_path = target_dir / "candidate_region_provenance.md"
+    provenance_path.write_text(
+        "\n".join(
+            [
+                "# Candidate Region Provenance",
+                "",
+                f"Total candidate intervals: {n_regions}",
+                f"FDR- or cluster-supported intervals: {n_supported}",
+                f"Fallback-selected intervals: {n_fallback}",
+                "",
+                "`candidate_regions_cluster_corrected.csv` preserves legacy naming, but rows with "
+                "`selection_basis` containing `fallback` are largest-effect exploratory intervals, not "
+                "statistically significant regions.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
     logger.info("Unified candidate-region table written to %s", path)
-    return {"candidate_regions_cluster_corrected": path}
+    return {"candidate_regions_cluster_corrected": path, "candidate_region_provenance": provenance_path}

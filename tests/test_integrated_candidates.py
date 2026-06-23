@@ -93,6 +93,9 @@ def _covariate_models() -> pd.DataFrame:
             "candidate_region_id": ["1300_R1", "1300_R2"],
             "status": ["ok", "ok"],
             "coefficient": [0.5, -0.3],
+            "coef_p_value": [0.001, 0.004],
+            "coef_fdr_q": [0.002, 0.004],
+            "coef_significant_fdr": [True, True],
         }
     )
 
@@ -192,6 +195,8 @@ def test_run_integrated_candidates_produces_expected_outputs(input_paths: dict[s
     assert len(df) == 3
     assert set(df["candidate_region_id"]) == {"1300_R1", "1300_R2", "2850_R1"}
     assert "evidence_level" in df.columns
+    assert "selection_basis" in df.columns
+    assert "significance_supported" in df.columns
     assert "interpretation_note" in df.columns
     assert "biochemical_class" in df.columns
 
@@ -199,6 +204,9 @@ def test_run_integrated_candidates_produces_expected_outputs(input_paths: dict[s
     assert high["evidence_level"].iloc[0] == "High"
     assert bool(high["covariate_persisted"].iloc[0]) is True
     assert bool(high["pls_vip_coverage"].iloc[0]) is True
+
+    fallback = df.loc[df["candidate_region_id"] == "2850_R1"]
+    assert bool(fallback["significance_supported"].iloc[0]) is False
 
 
 def test_run_integrated_candidates_disabled_returns_empty(tmp_path: Path) -> None:

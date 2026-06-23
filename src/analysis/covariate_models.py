@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 from sklearn.linear_model import LogisticRegression
 
 from src import config, get_cross_region_phase_dir
@@ -51,6 +52,9 @@ def _empty_model_table() -> pd.DataFrame:
             "n_subjects",
             "n_events",
             "coefficient",
+            "coef_p_value",
+            "coef_fdr_q",
+            "coef_significant_fdr",
             "intercept",
             "r_squared",
             "accuracy",
@@ -107,10 +111,14 @@ def _encode_covariate(frame: pd.DataFrame, column: str) -> tuple[pd.Series | Non
 def _collect_covariates(
     frame: pd.DataFrame,
     requested_covariates: list[str],
+    *,
+    outcome_name: str | None = None,
 ) -> tuple[pd.DataFrame, list[str], list[str]]:
     encoded: dict[str, pd.Series] = {}
     missing: list[str] = []
     for covariate in requested_covariates:
+        if outcome_name is not None and covariate == outcome_name:
+            continue
         values, error = _encode_covariate(frame, covariate)
         if values is None:
             missing.append(covariate if error == "missing column" else f"{covariate} ({error})")
@@ -123,7 +131,7 @@ def _fit_ols(
     outcome: pd.Series,
     predictor: pd.Series,
     covariates: pd.DataFrame,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, float]:
     design = pd.concat([predictor.rename("predictor"), covariates], axis=1)
     design = design.dropna()
     y = outcome.loc[design.index]
@@ -134,7 +142,59 @@ def _fit_ols(
     ss_res = float(np.sum(residual**2))
     ss_tot = float(np.sum((y.to_numpy(dtype=float) - float(y.mean())) ** 2))
     r_squared = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-    return float(beta[1]), float(beta[0]), r_squared
+    rank = int(np.linalg.matrix_rank(design_matrix))
+    dof = len(design_matrix) - rank
+    p_value = np.nan
+    if dof > 0:
+        sigma2 = ss_res / dof
+        cov_beta = sigma2 * np.linalg.pinv(design_matrix.T @ design_matrix)
+        se = float(np.sqrt(max(cov_beta[1, 1], 0.0)))
+        if se > 0.0 and np.isfinite(se):
+            t_stat = float(beta[1] / se)
+            p_value = float(2.0 * stats.t.sf(abs(t_stat), dof))
+    return float(beta[1]), float(beta[0]), r_squared, p_value
+
+
+def _fit_logistic_wald(
+    outcome: pd.Series,
+    predictor: pd.Series,
+    covariates: pd.DataFrame,
+    *,
+    max_iter: int = 100,
+    tol: float = 1e-8,
+) -> tuple[float, float, float]:
+    """Fit unpenalized logistic regression and return predictor Wald p-value."""
+    design = pd.concat([predictor.rename("predictor"), covariates], axis=1)
+    design = design.dropna()
+    y = outcome.loc[design.index].to_numpy(dtype=float)
+    x = np.column_stack([np.ones(len(design)), design.to_numpy(dtype=float)])
+    beta = np.zeros(x.shape[1], dtype=float)
+    eps = 1e-9
+
+    for _ in range(max_iter):
+        linear = np.clip(x @ beta, -35.0, 35.0)
+        prob = 1.0 / (1.0 + np.exp(-linear))
+        weight = np.clip(prob * (1.0 - prob), eps, None)
+        hessian = x.T @ (x * weight[:, None])
+        gradient = x.T @ (y - prob)
+        step = np.linalg.pinv(hessian) @ gradient
+        beta_next = beta + step
+        if np.max(np.abs(step)) < tol:
+            beta = beta_next
+            break
+        beta = beta_next
+
+    linear = np.clip(x @ beta, -35.0, 35.0)
+    prob = 1.0 / (1.0 + np.exp(-linear))
+    weight = np.clip(prob * (1.0 - prob), eps, None)
+    hessian = x.T @ (x * weight[:, None])
+    cov_beta = np.linalg.pinv(hessian)
+    se = float(np.sqrt(max(cov_beta[1, 1], 0.0)))
+    p_value = np.nan
+    if se > 0.0 and np.isfinite(se):
+        z_stat = float(beta[1] / se)
+        p_value = float(2.0 * stats.norm.sf(abs(z_stat)))
+    return float(beta[1]), float(beta[0]), p_value
 
 
 def _fit_logistic(
@@ -143,14 +203,29 @@ def _fit_logistic(
     covariates: pd.DataFrame,
     *,
     random_state: int,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, float]:
     design = pd.concat([predictor.rename("predictor"), covariates], axis=1)
     design = design.dropna()
     y = outcome.loc[design.index].to_numpy(dtype=int)
     model = LogisticRegression(solver="liblinear", random_state=random_state)
     model.fit(design.to_numpy(dtype=float), y)
     accuracy = float(np.mean(model.predict(design.to_numpy(dtype=float)) == y))
-    return float(model.coef_[0][0]), float(model.intercept_[0]), accuracy
+    coefficient, intercept, p_value = _fit_logistic_wald(outcome, predictor, covariates)
+    return coefficient, intercept, accuracy, p_value
+
+
+def _fdr_bh(values: pd.Series) -> pd.Series:
+    p_values = pd.to_numeric(values, errors="coerce")
+    out = pd.Series(np.nan, index=values.index, dtype=float)
+    valid = p_values.dropna()
+    if valid.empty:
+        return out
+    ordered = valid.sort_values()
+    n = len(ordered)
+    adjusted = ordered.to_numpy(dtype=float) * n / np.arange(1, n + 1)
+    adjusted = np.minimum.accumulate(adjusted[::-1])[::-1]
+    out.loc[ordered.index] = np.clip(adjusted, 0.0, 1.0)
+    return out
 
 
 def _region_predictor(
@@ -319,6 +394,7 @@ def run_covariate_region_models(
         covariate_frame, available_covariates, missing_covariates = _collect_covariates(
             disease_only,
             requested_covariates,
+            outcome_name=outcome_label,
         )
         availability_rows.append(
             {
@@ -354,13 +430,14 @@ def run_covariate_region_models(
                 n_subjects = int(len(design))
                 n_events = int(design["outcome"].sum()) if outcome_type == "binary" else np.nan
                 coefficient = np.nan
+                coef_p_value = np.nan
                 intercept = np.nan
                 r_squared = np.nan
                 accuracy = np.nan
             else:
                 try:
                     if outcome_type == "continuous":
-                        coefficient, intercept, r_squared = _fit_ols(
+                        coefficient, intercept, r_squared, coef_p_value = _fit_ols(
                             design["outcome"],
                             design["predictor"],
                             design.drop(columns=["outcome", "predictor"]),
@@ -370,7 +447,7 @@ def run_covariate_region_models(
                     else:
                         if design["outcome"].nunique() < 2:
                             raise ValueError("binary outcome collapsed to one class")
-                        coefficient, intercept, accuracy = _fit_logistic(
+                        coefficient, intercept, accuracy, coef_p_value = _fit_logistic(
                             design["outcome"],
                             design["predictor"],
                             design.drop(columns=["outcome", "predictor"]),
@@ -382,6 +459,7 @@ def run_covariate_region_models(
                 except Exception as exc:
                     status = str(exc)
                     coefficient = np.nan
+                    coef_p_value = np.nan
                     intercept = np.nan
                     r_squared = np.nan
                     accuracy = np.nan
@@ -413,6 +491,9 @@ def run_covariate_region_models(
                     "n_subjects": n_subjects,
                     "n_events": n_events,
                     "coefficient": coefficient,
+                    "coef_p_value": coef_p_value,
+                    "coef_fdr_q": np.nan,
+                    "coef_significant_fdr": False,
                     "intercept": intercept,
                     "r_squared": r_squared,
                     "accuracy": accuracy,
@@ -423,6 +504,14 @@ def run_covariate_region_models(
             )
 
     models = pd.DataFrame(model_rows) if model_rows else _empty_model_table()
+    if not models.empty and "coef_p_value" in models.columns:
+        group_cols = ["source_analysis", "analysis_name", "outcome_type", "target", "group_variable"]
+        models["coef_fdr_q"] = (
+            models.groupby(group_cols, dropna=False)["coef_p_value"]
+            .transform(_fdr_bh)
+            .astype(float)
+        )
+        models["coef_significant_fdr"] = models["coef_fdr_q"].lt(0.05).fillna(False)
     availability = pd.DataFrame(availability_rows) if availability_rows else _empty_availability_table()
     models_path = target_dir / "covariate_adjusted_region_models.csv"
     availability_path = target_dir / "covariate_availability_report.csv"

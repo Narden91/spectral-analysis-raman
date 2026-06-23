@@ -28,6 +28,8 @@ _DEFAULT_COLUMNS = [
     "start_cm-1",
     "end_cm-1",
     "width_cm-1",
+    "selection_basis",
+    "significance_supported",
     "source_analyses",
     "n_supporting_sources",
     "fdr_significant",
@@ -57,6 +59,8 @@ def _integrated_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
 def _load_csv_if_exists(path: str | Path | None) -> pd.DataFrame | None:
     if path is None:
         return None
+    if isinstance(path, str) and not path.strip():
+        return None
     path = Path(path)
     if not path.exists():
         logger.warning("Expected input table not found: %s", path)
@@ -85,16 +89,45 @@ def _region_feature_names(feature_columns: list[str], region: pd.Series) -> list
 def _annotate_covariate_persistence(
     candidates: pd.DataFrame,
     covariate_models: pd.DataFrame | None,
+    *,
+    alpha: float = 0.05,
 ) -> pd.Series:
     if covariate_models is None or covariate_models.empty or "status" not in covariate_models.columns:
         return pd.Series(False, index=candidates.index, dtype=bool)
 
     ok_models = covariate_models.loc[covariate_models["status"].eq("ok")].copy()
+    if "predictor_type" in ok_models.columns:
+        ok_models = ok_models.loc[ok_models["predictor_type"].astype("string").eq("region")].copy()
     if ok_models.empty or "candidate_region_id" not in ok_models.columns:
+        return pd.Series(False, index=candidates.index, dtype=bool)
+
+    if "coef_significant_fdr" in ok_models.columns:
+        ok_models = ok_models.loc[ok_models["coef_significant_fdr"].fillna(False).astype(bool)].copy()
+    elif "coef_fdr_q" in ok_models.columns:
+        ok_models = ok_models.loc[pd.to_numeric(ok_models["coef_fdr_q"], errors="coerce").lt(alpha)].copy()
+    elif "coef_p_value" in ok_models.columns:
+        ok_models = ok_models.loc[pd.to_numeric(ok_models["coef_p_value"], errors="coerce").lt(alpha)].copy()
+    else:
+        logger.warning("Covariate model table lacks coefficient p-values; persistence cannot be assessed")
         return pd.Series(False, index=candidates.index, dtype=bool)
 
     persisted = set(ok_models["candidate_region_id"].dropna().astype(str).unique())
     return candidates["candidate_region_id"].astype(str).isin(persisted)
+
+
+def _significant_pls_targets(
+    pls_performance: pd.DataFrame | None,
+    *,
+    alpha: float,
+) -> set[str] | None:
+    if pls_performance is None or pls_performance.empty:
+        return None
+    required = {"target", "permutation_p_value"}
+    if not required.issubset(pls_performance.columns):
+        logger.warning("PLS performance table missing expected columns; skipping VIP gate")
+        return None
+    mask = pd.to_numeric(pls_performance["permutation_p_value"], errors="coerce").lt(alpha).fillna(False)
+    return set(pls_performance.loc[mask, "target"].astype(str).unique())
 
 
 def _annotate_pls_vip_coverage(
@@ -102,6 +135,7 @@ def _annotate_pls_vip_coverage(
     pls_vip: pd.DataFrame | None,
     feature_columns: list[str],
     vip_threshold: float,
+    significant_pls_targets: set[str] | None = None,
 ) -> pd.Series:
     if pls_vip is None or pls_vip.empty:
         return pd.Series(False, index=candidates.index, dtype=bool)
@@ -111,9 +145,12 @@ def _annotate_pls_vip_coverage(
         logger.warning("PLS VIP table missing expected columns; skipping VIP annotation")
         return pd.Series(False, index=candidates.index, dtype=bool)
 
-    vip_features = set(
-        pls_vip.loc[pls_vip["above_threshold"].fillna(False), "feature_name"].astype(str).unique()
-    )
+    eligible = pls_vip.loc[pls_vip["above_threshold"].fillna(False)].copy()
+    if significant_pls_targets is not None:
+        if not significant_pls_targets:
+            return pd.Series(False, index=candidates.index, dtype=bool)
+        eligible = eligible.loc[eligible["target"].astype(str).isin(significant_pls_targets)].copy()
+    vip_features = set(eligible["feature_name"].astype(str).unique())
     out = []
     for _, region in candidates.iterrows():
         region_features = set(_region_feature_names(feature_columns, region))
@@ -284,6 +321,8 @@ def _interpretation_note(row: pd.Series) -> str:
     parts: list[str] = []
     if bool(row.get("cluster_permutation_significant", False)):
         parts.append("cluster-permutation significant")
+    if not bool(row.get("significance_supported", False)):
+        parts.append("fallback-selected, not FDR- or cluster-significant")
     if bool(row.get("covariate_persisted", False)):
         parts.append("covariate-persisted")
     if bool(row.get("pls_vip_coverage", False)):
@@ -310,6 +349,7 @@ def run_integrated_candidates(
     candidate_regions_path: str | Path | None = None,
     covariate_models_path: str | Path | None = None,
     pls_vip_path: str | Path | None = None,
+    pls_performance_path: str | Path | None = None,
     splsda_bands_path: str | Path | None = None,
     feature_matrix_path: str | Path | None = None,
     output_dir: str | Path | None = None,
@@ -335,6 +375,8 @@ def run_integrated_candidates(
         covariate_models_path = get_cross_region_phase_dir("covariate_models") / "covariate_adjusted_region_models.csv"
     if pls_vip_path is None:
         pls_vip_path = get_cross_region_phase_dir("pls_regression") / "pls_vip_bands.csv"
+        if pls_performance_path is None:
+            pls_performance_path = get_cross_region_phase_dir("pls_regression") / "pls_regression_performance.csv"
     if splsda_bands_path is None:
         splsda_bands_path = get_cross_region_phase_dir("splsda") / "pls_l1da_selected_bands.csv"
 
@@ -348,6 +390,7 @@ def run_integrated_candidates(
 
     covariate_models = _load_csv_if_exists(covariate_models_path)
     pls_vip = _load_csv_if_exists(pls_vip_path)
+    pls_performance = _load_csv_if_exists(pls_performance_path)
     splsda_bands = _load_csv_if_exists(splsda_bands_path)
 
     feature_columns: list[str] = []
@@ -358,8 +401,13 @@ def run_integrated_candidates(
         feature_columns = []
 
     vip_threshold = float(integrated_cfg.get("vip_threshold", 1.0))
+    covariate_alpha = float(integrated_cfg.get("covariate_alpha", 0.05))
+    vip_gate_alpha = float(integrated_cfg.get("vip_gate_alpha", 0.05))
+    significant_pls_targets = _significant_pls_targets(pls_performance, alpha=vip_gate_alpha)
 
     candidates = candidates.copy()
+    if "selection_basis" not in candidates.columns:
+        candidates["selection_basis"] = pd.NA
     candidates["source_analyses"] = _source_analysis_list(candidates)
     candidates["n_supporting_sources"] = _count_supporting_sources(candidates)
     candidates["fdr_significant"] = (
@@ -368,8 +416,21 @@ def run_integrated_candidates(
     candidates["cluster_permutation_significant"] = (
         candidates.get("n_cluster_significant", pd.Series(0, index=candidates.index)).fillna(0).astype(int) > 0
     )
-    candidates["covariate_persisted"] = _annotate_covariate_persistence(candidates, covariate_models)
-    candidates["pls_vip_coverage"] = _annotate_pls_vip_coverage(candidates, pls_vip, feature_columns, vip_threshold)
+    candidates["significance_supported"] = (
+        candidates["fdr_significant"] | candidates["cluster_permutation_significant"]
+    )
+    candidates["covariate_persisted"] = _annotate_covariate_persistence(
+        candidates,
+        covariate_models,
+        alpha=covariate_alpha,
+    )
+    candidates["pls_vip_coverage"] = _annotate_pls_vip_coverage(
+        candidates,
+        pls_vip,
+        feature_columns,
+        vip_threshold,
+        significant_pls_targets=significant_pls_targets,
+    )
     candidates["splsda_selected"] = _annotate_splsda_selection(candidates, splsda_bands, feature_columns)
 
     loading_regions = _load_biological_pca_loading_regions()

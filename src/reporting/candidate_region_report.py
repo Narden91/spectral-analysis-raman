@@ -39,17 +39,27 @@ def _analysis_mode(cfg: dict[str, Any]) -> str:
     return str(cfg.get("analysis", {}).get("mode", "disease_vs_control"))
 
 
-def _classify_candidate(row: pd.Series) -> str:
+def _requirement_met(row: pd.Series, requirement: str) -> bool:
+    if requirement == "cluster_permutation":
+        return bool(row.get("cluster_permutation_significant", False))
+    return bool(row.get(requirement, False))
+
+
+def _classify_candidate(row: pd.Series, *, robust_requires: list[str] | None = None) -> str:
     fdr = bool(row.get("fdr_significant", False))
     cluster = bool(row.get("cluster_permutation_significant", False))
     covariate = bool(row.get("covariate_persisted", False))
+    significance_supported = bool(row.get("significance_supported", fdr or cluster))
     evidence = str(row.get("evidence_level", "Low"))
+    robust_requires = robust_requires or ["cluster_permutation", "covariate_persisted"]
 
     if (fdr or cluster) and not covariate:
         return "confounded"
-    if evidence == "High":
+    if evidence == "High" and significance_supported and all(
+        _requirement_met(row, requirement) for requirement in robust_requires
+    ):
         return "robust"
-    if evidence == "Medium":
+    if evidence == "Medium" and significance_supported:
         return "exploratory"
     return "unstable"
 
@@ -173,6 +183,8 @@ def _section_for_class(class_name: str, candidates: pd.DataFrame) -> str:
         "start_cm-1",
         "end_cm-1",
         "evidence_level",
+        "selection_basis",
+        "significance_supported",
         "n_supporting_sources",
         "covariate_persisted",
         "pls_vip_coverage",
@@ -195,6 +207,18 @@ def _build_report(
     figures: dict[str, Path | None],
     analysis_mode: str,
 ) -> str:
+    has_significant_regions = bool(candidates.get("significance_supported", pd.Series(dtype=bool)).fillna(False).any())
+    if has_significant_regions:
+        summary_note = (
+            "Candidate regions include at least one FDR- or cluster-permutation-supported interval. "
+            "Fallback regions remain exploratory context only."
+        )
+    else:
+        summary_note = (
+            "No statistically significant spectral regions were detected after FDR or cluster-permutation correction. "
+            "Any listed regions are fallback-selected largest-effect intervals and should be interpreted only as "
+            "hypothesis-generating context."
+        )
     lines = [
         "# Candidate Region Publication Report",
         "",
@@ -206,13 +230,15 @@ def _build_report(
         "",
         "## Summary",
         "",
+        summary_note,
+        "",
         dataframe_to_markdown(summary),
         "",
         "### Classification definitions",
         "",
-        "- **Robust**: High evidence (cluster-permutation significant, covariate-persisted, and supported by multivariate VIP/selection).",
+        "- **Robust**: High evidence satisfying configured robust requirements, including statistical support and covariate persistence.",
         "- **Exploratory**: Medium evidence (FDR-significant in multiple independent analyses but not fully covariate-persisted).",
-        "- **Unstable**: Low evidence (appears in only one analysis or only as exploratory multivariate feature).",
+        "- **Unstable**: Low evidence, fallback-selected, or unsupported by corrected inference.",
         "- **Confounded**: Significant before covariate adjustment but not after adjustment for age, sex, and available technical covariates.",
         "",
         "## Figures",
@@ -234,6 +260,8 @@ def _build_report(
         "",
         "Candidate regions were detected at the subject level across clinical correlations, "
         "longitudinal ΔMoCA analyses, and disease-internal stratification tests, with cluster-mass permutation correction. "
+        "When no corrected intervals were detected, fallback largest-effect intervals were retained only for transparent "
+        "hypothesis generation and are not treated as statistical findings. "
         "Covariate-adjusted models included age, sex, and available technical covariates where present. "
         "The minimal panel was selected by nested cross-validated ElasticNet / L1-penalized logistic regression "
         "with permutation testing and bootstrap confidence intervals.",
@@ -278,24 +306,27 @@ def run_candidate_region_report(
         integrated = pd.DataFrame(columns=[
             "candidate_region_id", "spectral_block", "start_cm-1", "end_cm-1",
             "evidence_level", "fdr_significant", "cluster_permutation_significant",
-            "covariate_persisted", "max_abs_effect", "integrated_abs_effect",
+            "selection_basis", "significance_supported", "covariate_persisted",
+            "max_abs_effect", "integrated_abs_effect",
             "n_supporting_sources", "pls_vip_coverage", "splsda_selected",
             "biochemical_class", "interpretation_note",
         ])
 
-    integrated["report_class"] = integrated.apply(_classify_candidate, axis=1)
+    if "significance_supported" not in integrated.columns:
+        integrated["significance_supported"] = (
+            integrated.get("fdr_significant", pd.Series(False, index=integrated.index)).fillna(False).astype(bool)
+            | integrated.get("cluster_permutation_significant", pd.Series(False, index=integrated.index))
+            .fillna(False)
+            .astype(bool)
+        )
+    if "selection_basis" not in integrated.columns:
+        integrated["selection_basis"] = pd.NA
 
-    # Optional: downgrade robust regions to unstable if minimal panel permutation did not support them.
-    if minimal_panel_path is not None:
-        minimal_panel = _load_csv_if_exists(minimal_panel_path)
-        if minimal_panel is not None and not minimal_panel.empty and "permutation_p_value" in minimal_panel.columns:
-            significant_endpoints = set(
-                minimal_panel.loc[
-                    pd.to_numeric(minimal_panel["permutation_p_value"], errors="coerce").lt(0.05).fillna(False),
-                    "endpoint",
-                ].astype(str).unique()
-            )
-            logger.debug("Minimal panel significant endpoints: %s", significant_endpoints)
+    robust_requires = [str(item) for item in report_cfg.get("robust_requires", [])]
+    integrated["report_class"] = integrated.apply(
+        lambda row: _classify_candidate(row, robust_requires=robust_requires),
+        axis=1,
+    )
 
     summary = _class_summary(integrated)
     figures: dict[str, Path | None] = {

@@ -124,7 +124,14 @@ def test_splsda_gates_on_pls_p_value(mock_load, synthetic_feature_matrix, mock_s
         cfg=mock_splsda_cfg,
     )
     
-    assert outputs == {}
+    assert set(outputs) == {
+        "pls_l1da_cv_performance",
+        "pls_l1da_selected_bands",
+        "pls_l1da_permutation_results",
+    }
+    bands_df = pd.read_csv(outputs["pls_l1da_selected_bands"])
+    assert bands_df.empty
+    assert "status" in bands_df.columns
 
 
 @patch("src.analysis.splsda.load_disease_feature_frame")

@@ -193,22 +193,64 @@ def run_splsda_classifier(
     
     if not bool(splsda_cfg.get("enabled", True)):
         return {}
-        
+
+    target_dir = Path(output_dir) if output_dir is not None else get_cross_region_phase_dir("splsda")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
     gate_p = float(splsda_cfg.get("gate_on_pls_p_value", 0.05))
     if pls_outputs is not None and "pls_permutation_results" in pls_outputs:
         try:
             pls_perm = pd.read_csv(pls_outputs["pls_permutation_results"])
             if pls_perm["permutation_p_value"].min() >= gate_p:
                 logger.info("Skipping PLS-L1DA: No PLS model passed permutation gate (p < %s)", gate_p)
-                return {}
+                perf_path = target_dir / "pls_l1da_cv_performance.csv"
+                bands_path = target_dir / "pls_l1da_selected_bands.csv"
+                perm_path = target_dir / "pls_l1da_permutation_results.csv"
+                pd.DataFrame(
+                    columns=[
+                        "group_variable",
+                        "balanced_accuracy",
+                        "roc_auc",
+                        "n_subjects",
+                        "n_per_class",
+                        "selected_n_components",
+                        "selected_C",
+                        "cv_strategy",
+                        "method_label",
+                        "status",
+                    ]
+                ).to_csv(perf_path, index=False)
+                pd.DataFrame(
+                    columns=[
+                        "group_variable",
+                        "feature_name",
+                        "spectral_block",
+                        "wavenumber",
+                        "loading_weight",
+                        "selected",
+                        "status",
+                    ]
+                ).to_csv(bands_path, index=False)
+                pd.DataFrame(
+                    columns=[
+                        "group_variable",
+                        "observed_balanced_accuracy",
+                        "observed_roc_auc",
+                        "permutation_p_value",
+                        "n_permutations",
+                        "status",
+                    ]
+                ).to_csv(perm_path, index=False)
+                return {
+                    "pls_l1da_cv_performance": perf_path,
+                    "pls_l1da_selected_bands": bands_path,
+                    "pls_l1da_permutation_results": perm_path,
+                }
         except Exception as e:
             logger.warning("Could not read PLS permutation results to check gate: %s", e)
 
     disease_only, feature_meta = load_disease_feature_frame(feature_matrix_path=feature_matrix_path)
     all_feature_columns = feature_columns(disease_only)
-
-    target_dir = Path(output_dir) if output_dir is not None else get_cross_region_phase_dir("splsda")
-    target_dir.mkdir(parents=True, exist_ok=True)
 
     targets = splsda_cfg.get("targets", [
         {"group_variable": "moca_severity_group", "ordered_groups": ["low_moca", "high_moca"]},
