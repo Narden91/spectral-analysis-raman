@@ -584,7 +584,7 @@ analysis:
 
 ### Phase E — Mandatory anchor test + robust group contrasts
 
-- [ ] **Implementation status:** not started — **START HERE (next chat)**
+- [x] **Implementation status:** completed
 
 - **Objective:** (1) Run the **single mandatory anchor test** first; (2) for all panel features × extreme contrasts, compute Mann–Whitney U, Cliff's δ, bootstrap CI, and BH-FDR.
 - **Why:** The anchor converts "exploratory only" into one falsifiable H₀/H₁. Robust contrasts on named indices provide graded evidence even when FDR fails.
@@ -599,7 +599,7 @@ analysis:
 
 ### Phase F — Permutation validation of contrasts
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Add a label-permutation p-value for each panel feature × contrast (Cliff's δ as the test statistic).
 - **Why:** Permutation gives an assumption-light null and double-checks FDR on a tiny n (reviewer §D.2). Reuse existing permutation conventions (`random_state`, `n_permutations`).
@@ -611,7 +611,7 @@ analysis:
 
 ### Phase G — Covariate control via partial Spearman
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** For continuous endpoints, compute partial Spearman correlation of each panel feature with the endpoint, controlling for age and sex.
 - **Why:** Reviewer §E — rank-based partial correlation removes age/sex dilution without distributional assumptions. This complements (does not replace) the existing regression-based `covariate_models.py`.
@@ -623,7 +623,7 @@ analysis:
 
 ### Phase H — Heterogeneity / variance-homogeneity testing
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Per panel feature × contrast, test equality of variances between groups (Levene and Brown–Forsythe).
 - **Why:** Reviewer §F — EV biology is heterogeneous; a difference in *spread* (not just mean) is biologically meaningful and currently untested in the repo.
@@ -862,7 +862,7 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 - [ ] Phases A–J, S, L, and K implemented, each with passing tests.
 - [x] Block-aware normalization invariants locked by test (Phase B).
 - [x] `preregistration.md` frozen before result tables exist (Phase A).
-- [ ] Mandatory anchor hypothesis (oxidative index vs ΔMoCA) tested in Phase E before panel FDR.
+- [x] Mandatory anchor hypothesis (oxidative index vs ΔMoCA) tested in Phase E before panel FDR.
 - [ ] Every panel result reports effect size + CI + FDR q + permutation p + partial-Spearman + variance test + achieved n.
 
 ### Tier 2 (structure-aware biochemical interpretability)
@@ -890,7 +890,7 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 
 **Quick scan:** each phase in §5 has an inline `- [ ]` / `- [x] **Implementation status**` checkbox. This section mirrors that summary.
 
-Track completed phases here. **Next iteration starts at Phase E.**
+Track completed phases here. **Next iteration starts at Phase I.**
 
 ### Tier 1 — Statistical core
 
@@ -898,10 +898,10 @@ Track completed phases here. **Next iteration starts at Phase E.**
 - [x] **Phase B** — Block-aware normalization regression guard (`tests/test_block_normalization.py`; no production change)
 - [x] **Phase C** — Band-integral helper + named-index panel (`src/analysis/band_features.py`; `build_panel_matrix` / `run_preregistered_panel`; refactored `biochemical_ratios.py`, `covariate_models.py`; tests in `tests/test_band_features.py`, `tests/test_preregistered_panel.py`)
 - [x] **Phase D** — Extreme-contrast endpoints (`mild_threshold` / `recovery_threshold` in config; `moca_severity_group_extreme`, `delta_moca_group_extreme` in `src/clinical/endpoints.py`; tests in `tests/test_clinical_endpoints.py`)
-- [ ] **Phase E** — Mandatory anchor test + robust group contrasts ← **START HERE**
-- [ ] **Phase F** — Permutation validation of contrasts
-- [ ] **Phase G** — Covariate control via partial Spearman
-- [ ] **Phase H** — Heterogeneity / variance-homogeneity testing
+- [x] **Phase E** — Mandatory anchor test + robust group contrasts (`statistics.cliffs_delta`; `robust_contrasts.run_anchor_test`; `panel_contrast_tests.csv`; tests in `tests/test_statistics_effectsizes.py`, `tests/test_robust_contrasts.py`)
+- [x] **Phase F** — Permutation validation of contrasts (`perm_p_value` in `panel_contrast_tests.csv`; seeded Cliff's δ label permutation)
+- [x] **Phase G** — Covariate control via partial Spearman (`statistics.partial_spearman`; `panel_continuous_associations.csv`)
+- [x] **Phase H** — Heterogeneity / variance-homogeneity testing (`statistics.variance_homogeneity_test`; `panel_variance_homogeneity.csv`)
 - [ ] **Phase I** — Clustering insight (reuse; optional UMAP supplement)
 - [ ] **Phase J** — Minimal interpretable model restricted to the panel
 - [ ] **Phase S** — Cross-endpoint consistency
@@ -924,6 +924,12 @@ Track completed phases here. **Next iteration starts at Phase E.**
 
 ### Notes (Phases A–D, 2026-06-23)
 
-- `run_preregistered_panel()` writes `05_confirmatory_panel/preregistration.md` and `panel_feature_matrix.csv` but is **not yet wired** into `disease_only_pipeline.py` (Phase V).
+- `run_preregistered_panel()` writes `05_confirmatory_panel/preregistration.md` and `panel_feature_matrix.csv`; as of Phases E-H it is wired into `disease_only_pipeline.py` before robust confirmatory statistics.
 - Path helpers registered; Tier-2 subdirs ready via `get_spectral_interpretability_dir()`.
 - Phase A–D tests: `uv run pytest tests/test_band_features.py tests/test_preregistered_panel.py tests/test_block_normalization.py tests/test_clinical_endpoints.py -v` (22 tests green with biochemical/covariate regression tests).
+
+### Notes (Phases E–H, 2026-06-24)
+
+- Confirmatory panel statistics are implemented in `src/analysis/robust_contrasts.py` and wired after `run_preregistered_panel()` in `src/analysis/disease_only_pipeline.py`.
+- New Tier-1 outputs: `primary_anchor_result.csv`, `panel_contrast_tests.csv`, `panel_continuous_associations.csv`, `panel_variance_homogeneity.csv`, plus compact effect-size/raincloud figures when valid contrasts exist.
+- Phase E–H tests: `uv run pytest tests/test_statistics_effectsizes.py tests/test_robust_contrasts.py tests/test_disease_only_pipeline.py -v` (9 tests green).

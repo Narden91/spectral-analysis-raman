@@ -40,6 +40,116 @@ def cohens_d(left: np.ndarray, right: np.ndarray) -> float:
     return float((np.mean(left) - np.mean(right)) / np.sqrt(pooled_var))
 
 
+def _finite_1d(values: np.ndarray | pd.Series) -> np.ndarray:
+    array = np.asarray(values, dtype=float).ravel()
+    return array[np.isfinite(array)]
+
+
+def cliffs_delta(left: np.ndarray | pd.Series, right: np.ndarray | pd.Series) -> float:
+    """Return Cliff's delta, oriented as left group minus right group."""
+    left_values = _finite_1d(left)
+    right_values = _finite_1d(right)
+    if left_values.size == 0 or right_values.size == 0:
+        return np.nan
+
+    differences = left_values[:, np.newaxis] - right_values[np.newaxis, :]
+    n_pairs = float(left_values.size * right_values.size)
+    return float((np.sum(differences > 0) - np.sum(differences < 0)) / n_pairs)
+
+
+def _rank_covariates(covars: np.ndarray | pd.DataFrame | pd.Series, valid: np.ndarray) -> np.ndarray:
+    if isinstance(covars, pd.Series):
+        covar_frame = covars.to_frame()
+    elif isinstance(covars, pd.DataFrame):
+        covar_frame = covars.copy()
+    else:
+        covar_array = np.asarray(covars)
+        if covar_array.ndim == 1:
+            covar_array = covar_array[:, np.newaxis]
+        covar_frame = pd.DataFrame(covar_array)
+
+    ranked_columns: list[np.ndarray] = []
+    for column in covar_frame.columns:
+        values = covar_frame.loc[valid, column]
+        numeric = pd.to_numeric(values, errors="coerce")
+        if numeric.notna().all():
+            encoded = numeric.to_numpy(dtype=float)
+        else:
+            encoded = pd.factorize(values.astype("string"), sort=True)[0].astype(float)
+        ranked = stats.rankdata(encoded, method="average")
+        if np.nanstd(ranked) > 0:
+            ranked_columns.append(ranked)
+
+    if not ranked_columns:
+        return np.empty((int(valid.sum()), 0), dtype=float)
+    return np.column_stack(ranked_columns)
+
+
+def partial_spearman(
+    x: np.ndarray | pd.Series,
+    y: np.ndarray | pd.Series,
+    covars: np.ndarray | pd.DataFrame | pd.Series,
+) -> tuple[float, float, int]:
+    """Partial Spearman correlation of x and y after residualizing rank covariates."""
+    x_series = pd.Series(x)
+    y_series = pd.Series(y)
+    x_numeric = pd.to_numeric(x_series, errors="coerce")
+    y_numeric = pd.to_numeric(y_series, errors="coerce")
+
+    covar_frame = covars.to_frame() if isinstance(covars, pd.Series) else pd.DataFrame(covars)
+    valid = x_numeric.notna() & y_numeric.notna()
+    for column in covar_frame.columns:
+        valid &= covar_frame[column].notna()
+    valid_array = valid.to_numpy(dtype=bool)
+    n = int(valid_array.sum())
+    if n < 3:
+        return np.nan, np.nan, n
+
+    x_rank = stats.rankdata(x_numeric.loc[valid_array].to_numpy(dtype=float), method="average")
+    y_rank = stats.rankdata(y_numeric.loc[valid_array].to_numpy(dtype=float), method="average")
+    covar_ranks = _rank_covariates(covar_frame, valid_array)
+
+    if covar_ranks.shape[1] == 0:
+        rho, p_value = stats.spearmanr(x_rank, y_rank)
+        return float(rho), float(p_value), n
+
+    design = np.column_stack([np.ones(n, dtype=float), covar_ranks])
+    rank = int(np.linalg.matrix_rank(design) - 1)
+    x_resid = x_rank - design @ np.linalg.lstsq(design, x_rank, rcond=None)[0]
+    y_resid = y_rank - design @ np.linalg.lstsq(design, y_rank, rcond=None)[0]
+
+    if np.std(x_resid) == 0 or np.std(y_resid) == 0:
+        return np.nan, np.nan, n
+
+    rho = float(np.corrcoef(x_resid, y_resid)[0, 1])
+    df = n - rank - 2
+    if df <= 0 or not np.isfinite(rho):
+        return rho, np.nan, n
+    clipped = float(np.clip(rho, -1.0 + 1e-12, 1.0 - 1e-12))
+    t_stat = clipped * np.sqrt(df / max(1.0 - clipped**2, 1e-12))
+    p_value = float(2.0 * stats.t.sf(abs(t_stat), df=df))
+    if abs(rho) >= 1.0:
+        p_value = 0.0
+    return rho, p_value, n
+
+
+def variance_homogeneity_test(
+    left: np.ndarray | pd.Series,
+    right: np.ndarray | pd.Series,
+    *,
+    center: str = "mean",
+) -> tuple[float, float]:
+    """Levene-family test for equal variances between two groups."""
+    if center not in {"mean", "median"}:
+        raise ValueError("center must be 'mean' or 'median'")
+    left_values = _finite_1d(left)
+    right_values = _finite_1d(right)
+    if left_values.size < 2 or right_values.size < 2:
+        return np.nan, np.nan
+    statistic, p_value = stats.levene(left_values, right_values, center=center)
+    return float(statistic), float(p_value)
+
+
 def _expected_whole_spectra_boundary() -> tuple[float, float]:
     bounds_cfg = config.get("data", {}).get("spectral_range_bounds", {})
     _, default_fingerprint_end = CANONICAL_REGION_BOUNDS["fingerprint"]

@@ -13,13 +13,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
-import warnings
 
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
-from sklearn.exceptions import ConvergenceWarning
-from sklearn.linear_model import ElasticNet, ElasticNetCV, LogisticRegression
+from sklearn.linear_model import ElasticNet, ElasticNetCV
 from sklearn.metrics import balanced_accuracy_score, mean_absolute_error, mean_squared_error, r2_score, roc_auc_score
 from sklearn.model_selection import KFold, LeaveOneOut, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
@@ -29,12 +27,12 @@ from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
 )
+from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
 
 logger = logging.getLogger(__name__)
 
 _ELASTICNET_MAX_ITER = 5_000
 _ELASTICNET_TOL = 1e-3
-_LOGISTIC_MAX_ITER = 10_000
 
 _DEFAULT_BINARY_TARGETS = (
     {"group_variable": "moca_severity_group", "ordered_groups": ("low_moca", "high_moca")},
@@ -177,22 +175,7 @@ def _elasticnet_model(random_state: int) -> ElasticNet:
 
 
 def _fit_elasticnet(model: ElasticNet | ElasticNetCV, X: np.ndarray, y: np.ndarray, context: str) -> None:
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", ConvergenceWarning)
-        model.fit(X, y)
-    for warning in caught:
-        logger.debug("%s convergence warning: %s", context, warning.message)
-
-
-def _l1_logistic_model(c: float, random_state: int) -> LogisticRegression:
-    return LogisticRegression(
-        solver="liblinear",
-        C=c,
-        l1_ratio=1.0,
-        class_weight="balanced",
-        random_state=random_state,
-        max_iter=_LOGISTIC_MAX_ITER,
-    )
+    fit_with_convergence_capture(model, X, y, context=context)
 
 
 def _normalize_n_jobs(n_jobs: int) -> int:
@@ -263,8 +246,8 @@ def _bootstrap_coefficients(
             model = _elasticnet_model(random_state)
             _fit_elasticnet(model, X_boot_scaled, y_boot, "bootstrap ElasticNet")
             return np.asarray(model.coef_, dtype=float)
-        model = _l1_logistic_model(1.0, random_state)
-        model.fit(X_boot_scaled, y_boot)
+        model = l1_logistic_model(c=1.0, random_state=random_state)
+        fit_with_convergence_capture(model, X_boot_scaled, y_boot, context="bootstrap L1 logistic")
         return np.asarray(model.coef_.ravel(), dtype=float)
     except Exception:
         return None
@@ -357,16 +340,21 @@ def _nested_cv_logistic_l1(
         for c in c_values:
             scores = []
             for in_train, in_test in inner_cv.split(X_train_scaled, y_train):
-                clf = _l1_logistic_model(c, random_state)
-                clf.fit(X_train_scaled[in_train], y_train[in_train])
+                clf = l1_logistic_model(c=c, random_state=random_state)
+                fit_with_convergence_capture(
+                    clf,
+                    X_train_scaled[in_train],
+                    y_train[in_train],
+                    context="minimal panel inner CV",
+                )
                 scores.append(balanced_accuracy_score(y_train[in_test], clf.predict(X_train_scaled[in_test])))
             mean_score = float(np.mean(scores))
             if mean_score > best_score:
                 best_score = mean_score
                 best_c = c
 
-        final_clf = _l1_logistic_model(best_c, random_state)
-        final_clf.fit(X_train_scaled, y_train)
+        final_clf = l1_logistic_model(c=best_c, random_state=random_state)
+        fit_with_convergence_capture(final_clf, X_train_scaled, y_train, context="minimal panel outer CV")
         y_pred[test_idx] = final_clf.predict(X_test_scaled)
         if len(final_clf.classes_) == 2:
             y_prob[test_idx] = final_clf.predict_proba(X_test_scaled)[:, 1]
@@ -523,14 +511,19 @@ def _select_panel(
             for c in [0.01, 0.1, 1.0, 10.0, 100.0]:
                 scores = []
                 for in_train, in_test in inner_cv.split(X_train_scaled, y_train):
-                    clf = _l1_logistic_model(c, random_state)
-                    clf.fit(X_train_scaled[in_train], y_train[in_train])
+                    clf = l1_logistic_model(c=c, random_state=random_state)
+                    fit_with_convergence_capture(
+                        clf,
+                        X_train_scaled[in_train],
+                        y_train[in_train],
+                        context="minimal panel permutation inner CV",
+                    )
                     scores.append(balanced_accuracy_score(y_train[in_test], clf.predict(X_train_scaled[in_test])))
                 if np.mean(scores) > best_score:
                     best_score = np.mean(scores)
                     best_c = c
-            model = _l1_logistic_model(best_c, random_state)
-            model.fit(X_train_scaled, y_train)
+            model = l1_logistic_model(c=best_c, random_state=random_state)
+            fit_with_convergence_capture(model, X_train_scaled, y_train, context="minimal panel permutation")
             coefs = model.coef_.reshape(-1, 1)
         coef_matrix = np.concatenate([coef_matrix, coefs], axis=1)
 

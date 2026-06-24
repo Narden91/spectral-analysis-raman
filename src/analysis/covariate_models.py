@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy import stats
-from sklearn.linear_model import LogisticRegression
 
 from src import config, get_cross_region_phase_dir
 from src.analysis.clinical_feature_associations import (
@@ -16,6 +15,7 @@ from src.analysis.clinical_feature_associations import (
     load_disease_feature_frame,
 )
 from src.analysis.band_features import band_mean, infer_block_from_upper, ratio_from_integrals
+from src.analysis.sklearn_utils import covariate_logistic_model, fit_with_convergence_capture
 from src.analysis.spectral_regions import candidate_region_feature_names
 
 logger = logging.getLogger(__name__)
@@ -208,8 +208,13 @@ def _fit_logistic(
     design = pd.concat([predictor.rename("predictor"), covariates], axis=1)
     design = design.dropna()
     y = outcome.loc[design.index].to_numpy(dtype=int)
-    model = LogisticRegression(solver="liblinear", random_state=random_state)
-    model.fit(design.to_numpy(dtype=float), y)
+    model = covariate_logistic_model(random_state=random_state)
+    fit_with_convergence_capture(
+        model,
+        design.to_numpy(dtype=float),
+        y,
+        context="covariate logistic",
+    )
     accuracy = float(np.mean(model.predict(design.to_numpy(dtype=float)) == y))
     coefficient, intercept, p_value = _fit_logistic_wald(outcome, predictor, covariates)
     return coefficient, intercept, accuracy, p_value

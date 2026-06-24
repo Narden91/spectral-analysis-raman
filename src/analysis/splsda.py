@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.cross_decomposition import PLSRegression
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
@@ -19,10 +18,9 @@ from src.analysis.clinical_feature_associations import (
     feature_metadata,
     load_disease_feature_frame,
 )
+from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
 
 logger = logging.getLogger(__name__)
-
-_LOGISTIC_MAX_ITER = 10_000
 
 
 def _cfg(cfg: dict | None = None) -> dict:
@@ -65,17 +63,6 @@ def _remove_orthogonal_component(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     
     X_ortho_removed = X - np.outer(t_ortho, p_ortho)
     return X_ortho_removed
-
-
-def _l1_logistic_model(c: float, random_state: int) -> LogisticRegression:
-    return LogisticRegression(
-        solver="liblinear",
-        C=c,
-        l1_ratio=1.0,
-        class_weight="balanced",
-        random_state=random_state,
-        max_iter=_LOGISTIC_MAX_ITER,
-    )
 
 
 def _tune_pls_l1da(
@@ -121,8 +108,8 @@ def _tune_pls_l1da(
                 X_tr_pls = pls.transform(X_tr)
                 X_te_pls = pls.transform(X_te)
                 
-                clf = _l1_logistic_model(c, random_state)
-                clf.fit(X_tr_pls, y_tr)
+                clf = l1_logistic_model(c=c, random_state=random_state)
+                fit_with_convergence_capture(clf, X_tr_pls, y_tr, context="sPLS-DA inner CV")
                 
                 preds = clf.predict(X_te_pls)
                 scores.append(balanced_accuracy_score(y_te, preds))
@@ -170,8 +157,8 @@ def _permutation_test(
             X_train_pls = pls.transform(X_train_scaled)
             X_test_pls = pls.transform(X_test_scaled)
             
-            clf = _l1_logistic_model(best_c, random_state)
-            clf.fit(X_train_pls, y_train)
+            clf = l1_logistic_model(c=best_c, random_state=random_state)
+            fit_with_convergence_capture(clf, X_train_pls, y_train, context="sPLS-DA permutation CV")
             
             y_pred[test_idx] = clf.predict(X_test_pls)
             
@@ -326,8 +313,8 @@ def run_splsda_classifier(
             X_train_pls = pls.transform(X_train_scaled)
             X_test_pls = pls.transform(X_test_scaled)
             
-            clf = _l1_logistic_model(best_c, random_state)
-            clf.fit(X_train_pls, y_train)
+            clf = l1_logistic_model(c=best_c, random_state=random_state)
+            fit_with_convergence_capture(clf, X_train_pls, y_train, context="sPLS-DA outer CV")
             
             y_pred[test_idx] = clf.predict(X_test_pls)
             if len(clf.classes_) == 2:
@@ -350,8 +337,8 @@ def run_splsda_classifier(
         final_pls.fit(X_scaled, y)
         X_scaled_pls = final_pls.transform(X_scaled)
         
-        final_clf = _l1_logistic_model(final_c, random_state)
-        final_clf.fit(X_scaled_pls, y)
+        final_clf = l1_logistic_model(c=final_c, random_state=random_state)
+        fit_with_convergence_capture(final_clf, X_scaled_pls, y, context="sPLS-DA final fit")
         
         log_reg_coefs = final_clf.coef_.ravel()
         pls_loadings = final_pls.x_loadings_

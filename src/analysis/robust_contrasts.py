@@ -1,0 +1,589 @@
+"""Robust statistics for the pre-registered confirmatory panel."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+from src import config, get_confirmatory_panel_dir
+from src.analysis.clinical_feature_associations import filter_disease_subjects, load_subject_feature_matrix
+from src.analysis.preregistered_panel import panel_cfg
+from src.analysis.statistics import (
+    cliffs_delta,
+    cohens_d,
+    fdr_correction,
+    partial_spearman,
+    variance_homogeneity_test,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    return config if cfg is None else cfg
+
+
+def _load_panel_and_clinical(
+    *,
+    feature_matrix_path: str | Path | None,
+    panel_matrix_path: str | Path,
+) -> pd.DataFrame:
+    clinical = filter_disease_subjects(load_subject_feature_matrix(feature_matrix_path=feature_matrix_path))
+    panel = pd.read_csv(panel_matrix_path)
+    if "subject_id" not in panel.columns:
+        raise ValueError("Panel feature matrix is missing subject_id")
+
+    clinical["subject_id"] = clinical["subject_id"].astype(str)
+    panel["subject_id"] = panel["subject_id"].astype(str)
+    return clinical.merge(panel, on="subject_id", how="inner", validate="one_to_one")
+
+
+def _panel_features(frame: pd.DataFrame, panel: dict[str, Any]) -> list[str]:
+    registered = list(panel.get("indices", {}).keys()) + [
+        name
+        for name in panel.get("integrals", {})
+        if name != "lipid_carbonyl_1720_fallback"
+    ]
+    return [feature for feature in registered if feature in frame.columns]
+
+
+def _feature_family(feature: str, panel: dict[str, Any]) -> str:
+    if feature in panel.get("indices", {}):
+        return "named_index"
+    if feature in panel.get("integrals", {}):
+        return "integral"
+    return "shape_or_external"
+
+
+def _p_values(frame: pd.DataFrame, column: str) -> np.ndarray:
+    if column not in frame.columns:
+        return np.full(len(frame), np.nan, dtype=float)
+    return frame[column].to_numpy(dtype=float)
+
+
+def _bootstrap_ci(
+    left: np.ndarray,
+    right: np.ndarray,
+    statistic_fn,
+    *,
+    n_bootstrap: int,
+    random_state: int,
+) -> tuple[float, float]:
+    left = left[np.isfinite(left)]
+    right = right[np.isfinite(right)]
+    if left.size == 0 or right.size == 0 or n_bootstrap <= 0:
+        return np.nan, np.nan
+
+    rng = np.random.default_rng(random_state)
+    estimates = np.empty(n_bootstrap, dtype=float)
+    for i in range(n_bootstrap):
+        boot_left = rng.choice(left, size=left.size, replace=True)
+        boot_right = rng.choice(right, size=right.size, replace=True)
+        estimates[i] = statistic_fn(boot_left, boot_right)
+    finite = estimates[np.isfinite(estimates)]
+    if finite.size == 0:
+        return np.nan, np.nan
+    lower, upper = np.percentile(finite, [2.5, 97.5])
+    return float(lower), float(upper)
+
+
+def _bootstrap_partial_spearman_ci(
+    frame: pd.DataFrame,
+    *,
+    feature: str,
+    endpoint: str,
+    covariates: list[str],
+    n_bootstrap: int,
+    random_state: int,
+) -> tuple[float, float]:
+    columns = [feature, endpoint, *covariates]
+    complete = frame[columns].dropna()
+    if len(complete) < 3 or n_bootstrap <= 0:
+        return np.nan, np.nan
+
+    rng = np.random.default_rng(random_state)
+    estimates = np.empty(n_bootstrap, dtype=float)
+    for i in range(n_bootstrap):
+        sample = complete.iloc[rng.integers(0, len(complete), size=len(complete))]
+        estimates[i] = partial_spearman(
+            sample[feature],
+            sample[endpoint],
+            sample[covariates],
+        )[0]
+    finite = estimates[np.isfinite(estimates)]
+    if finite.size == 0:
+        return np.nan, np.nan
+    lower, upper = np.percentile(finite, [2.5, 97.5])
+    return float(lower), float(upper)
+
+
+def _permutation_p_value(
+    left: np.ndarray,
+    right: np.ndarray,
+    *,
+    n_permutations: int,
+    random_state: int,
+) -> float:
+    left = left[np.isfinite(left)]
+    right = right[np.isfinite(right)]
+    if left.size == 0 or right.size == 0 or n_permutations <= 0:
+        return np.nan
+
+    observed = abs(cliffs_delta(left, right))
+    pooled = np.concatenate([left, right])
+    n_left = left.size
+    rng = np.random.default_rng(random_state)
+    exceedances = 0
+    for _ in range(n_permutations):
+        permuted = rng.permutation(pooled)
+        permuted_delta = abs(cliffs_delta(permuted[:n_left], permuted[n_left:]))
+        if permuted_delta >= observed - 1e-12:
+            exceedances += 1
+    return float((exceedances + 1) / (n_permutations + 1))
+
+
+def _permutation_partial_spearman_p_value(
+    frame: pd.DataFrame,
+    *,
+    feature: str,
+    endpoint: str,
+    covariates: list[str],
+    n_permutations: int,
+    random_state: int,
+) -> float:
+    columns = [feature, endpoint, *covariates]
+    complete = frame[columns].dropna()
+    if len(complete) < 3 or n_permutations <= 0:
+        return np.nan
+
+    observed = abs(partial_spearman(complete[feature], complete[endpoint], complete[covariates])[0])
+    if not np.isfinite(observed):
+        return np.nan
+
+    rng = np.random.default_rng(random_state)
+    exceedances = 0
+    endpoint_values = complete[endpoint].to_numpy(dtype=float)
+    for _ in range(n_permutations):
+        shuffled = complete.copy()
+        shuffled[endpoint] = rng.permutation(endpoint_values)
+        permuted = abs(partial_spearman(shuffled[feature], shuffled[endpoint], shuffled[covariates])[0])
+        if np.isfinite(permuted) and permuted >= observed - 1e-12:
+            exceedances += 1
+    return float((exceedances + 1) / (n_permutations + 1))
+
+
+def run_anchor_test(
+    frame: pd.DataFrame,
+    *,
+    cfg: dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    cfg = _cfg(cfg)
+    panel = panel_cfg(cfg)
+    primary = panel.get("primary_hypothesis", {})
+    feature = str(primary.get("feature", "oxidative_index"))
+    endpoint = str(primary.get("endpoint", "delta_moca"))
+    covariates = [str(item) for item in primary.get("covariates", panel.get("covariates", []))]
+    n_bootstrap = int(panel.get("n_bootstrap", 2000))
+    n_permutations = int(panel.get("n_permutations", 1000))
+    random_state = int(panel.get("random_state", 42))
+
+    row: dict[str, object] = {
+        "analysis_order": 1,
+        "feature_name": feature,
+        "endpoint": endpoint,
+        "test": "partial_spearman",
+        "covariates": ",".join(covariates),
+        "direction": primary.get("direction", "negative"),
+        "status": "ok",
+    }
+    required = [feature, endpoint, *covariates]
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        row["status"] = f"missing columns: {','.join(missing)}"
+        return pd.DataFrame([row])
+
+    rho, p_value, n = partial_spearman(frame[feature], frame[endpoint], frame[covariates])
+    ci_lower, ci_upper = _bootstrap_partial_spearman_ci(
+        frame,
+        feature=feature,
+        endpoint=endpoint,
+        covariates=covariates,
+        n_bootstrap=n_bootstrap,
+        random_state=random_state,
+    )
+    perm_p = _permutation_partial_spearman_p_value(
+        frame,
+        feature=feature,
+        endpoint=endpoint,
+        covariates=covariates,
+        n_permutations=n_permutations,
+        random_state=random_state,
+    )
+    row.update(
+        {
+            "rho": rho,
+            "p_value": p_value,
+            "bootstrap_ci_lower": ci_lower,
+            "bootstrap_ci_upper": ci_upper,
+            "perm_p_value": perm_p,
+            "n": n,
+        }
+    )
+
+    trajectory = next(
+        (
+            contrast
+            for contrast in panel.get("endpoints", {}).get("contrasts", [])
+            if str(contrast.get("name")) == "trajectory_extreme"
+        ),
+        None,
+    )
+    if trajectory is not None and feature in frame.columns and str(trajectory.get("group_variable")) in frame.columns:
+        group_column = str(trajectory["group_variable"])
+        left_label, right_label = [str(item) for item in trajectory.get("ordered_groups", [])[:2]]
+        left = frame.loc[frame[group_column].astype("string") == left_label, feature].to_numpy(dtype=float)
+        right = frame.loc[frame[group_column].astype("string") == right_label, feature].to_numpy(dtype=float)
+        row["trajectory_cliffs_delta"] = cliffs_delta(left, right)
+        row["trajectory_n_group_a"] = int(np.isfinite(left).sum())
+        row["trajectory_n_group_b"] = int(np.isfinite(right).sum())
+
+    return pd.DataFrame([row])
+
+
+def run_panel_contrasts(
+    frame: pd.DataFrame,
+    *,
+    cfg: dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    cfg = _cfg(cfg)
+    panel = panel_cfg(cfg)
+    features = _panel_features(frame, panel)
+    n_bootstrap = int(panel.get("n_bootstrap", 2000))
+    n_permutations = int(panel.get("n_permutations", 1000))
+    random_state = int(panel.get("random_state", 42))
+    min_n = int(panel.get("min_subjects_per_group", 5))
+
+    rows: list[dict[str, object]] = []
+    for contrast in panel.get("endpoints", {}).get("contrasts", []):
+        contrast_name = str(contrast.get("name", "contrast"))
+        group_column = str(contrast.get("group_variable", ""))
+        ordered_groups = [str(item) for item in contrast.get("ordered_groups", [])]
+        if len(ordered_groups) != 2 or group_column not in frame.columns:
+            continue
+        left_label, right_label = ordered_groups
+        groups = frame[group_column].astype("string")
+        for feature_index, feature in enumerate(features):
+            left = frame.loc[groups == left_label, feature].to_numpy(dtype=float)
+            right = frame.loc[groups == right_label, feature].to_numpy(dtype=float)
+            left = left[np.isfinite(left)]
+            right = right[np.isfinite(right)]
+            status = "ok" if left.size >= min_n and right.size >= min_n else "insufficient sample size"
+            row = {
+                "contrast_name": contrast_name,
+                "group_variable": group_column,
+                "group_a": left_label,
+                "group_b": right_label,
+                "feature_name": feature,
+                "feature_family": _feature_family(feature, panel),
+                "n_group_a": int(left.size),
+                "n_group_b": int(right.size),
+                "status": status,
+            }
+            if status == "ok":
+                test = stats.mannwhitneyu(left, right, alternative="two-sided")
+                ci_lower, ci_upper = _bootstrap_ci(
+                    left,
+                    right,
+                    cliffs_delta,
+                    n_bootstrap=n_bootstrap,
+                    random_state=random_state + feature_index,
+                )
+                row.update(
+                    {
+                        "u_statistic": float(test.statistic),
+                        "p_value": float(test.pvalue),
+                        "cliffs_delta": cliffs_delta(left, right),
+                        "cohens_d": cohens_d(left, right),
+                        "bootstrap_ci_lower": ci_lower,
+                        "bootstrap_ci_upper": ci_upper,
+                        "perm_p_value": _permutation_p_value(
+                            left,
+                            right,
+                            n_permutations=n_permutations,
+                            random_state=random_state + feature_index,
+                        ),
+                        "mean_group_a": float(np.mean(left)),
+                        "mean_group_b": float(np.mean(right)),
+                    }
+                )
+            rows.append(row)
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    q_values, significant = fdr_correction(
+        _p_values(result, "p_value"),
+        alpha=float(panel.get("fdr_alpha", 0.05)),
+    )
+    result["fdr_q"] = q_values
+    result["significant_fdr"] = significant
+    return result
+
+
+def run_continuous_associations(
+    frame: pd.DataFrame,
+    *,
+    cfg: dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    cfg = _cfg(cfg)
+    panel = panel_cfg(cfg)
+    features = _panel_features(frame, panel)
+    endpoints = [str(item) for item in panel.get("endpoints", {}).get("continuous", [])]
+    covariates = [str(item) for item in panel.get("covariates", [])]
+    min_subjects = int(panel.get("min_subjects_per_group", 5))
+
+    rows: list[dict[str, object]] = []
+    for endpoint in endpoints:
+        for feature in features:
+            row = {
+                "endpoint": endpoint,
+                "feature_name": feature,
+                "feature_family": _feature_family(feature, panel),
+                "covariates": ",".join(covariates),
+                "status": "ok",
+            }
+            required = [feature, endpoint, *covariates]
+            missing = [column for column in required if column not in frame.columns]
+            if missing:
+                row["status"] = f"missing columns: {','.join(missing)}"
+                rows.append(row)
+                continue
+
+            complete = frame[required].dropna()
+            row["n"] = int(len(complete))
+            if len(complete) < min_subjects:
+                row["status"] = "insufficient sample size"
+                rows.append(row)
+                continue
+
+            raw = stats.spearmanr(complete[feature], complete[endpoint])
+            rho, p_value, n = partial_spearman(complete[feature], complete[endpoint], complete[covariates])
+            row.update(
+                {
+                    "raw_spearman_rho": float(raw.statistic),
+                    "raw_spearman_p_value": float(raw.pvalue),
+                    "partial_spearman_rho": rho,
+                    "partial_spearman_p_value": p_value,
+                    "n": n,
+                }
+            )
+            rows.append(row)
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    raw_q, raw_significant = fdr_correction(
+        _p_values(result, "raw_spearman_p_value"),
+        alpha=float(panel.get("fdr_alpha", 0.05)),
+    )
+    partial_q, partial_significant = fdr_correction(
+        _p_values(result, "partial_spearman_p_value"),
+        alpha=float(panel.get("fdr_alpha", 0.05)),
+    )
+    result["raw_spearman_fdr_q"] = raw_q
+    result["raw_spearman_significant_fdr"] = raw_significant
+    result["partial_spearman_fdr_q"] = partial_q
+    result["partial_spearman_significant_fdr"] = partial_significant
+    return result
+
+
+def run_variance_homogeneity(
+    frame: pd.DataFrame,
+    *,
+    cfg: dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    cfg = _cfg(cfg)
+    panel = panel_cfg(cfg)
+    features = _panel_features(frame, panel)
+    min_n = int(panel.get("min_subjects_per_group", 5))
+
+    rows: list[dict[str, object]] = []
+    for contrast in panel.get("endpoints", {}).get("contrasts", []):
+        contrast_name = str(contrast.get("name", "contrast"))
+        group_column = str(contrast.get("group_variable", ""))
+        ordered_groups = [str(item) for item in contrast.get("ordered_groups", [])]
+        if len(ordered_groups) != 2 or group_column not in frame.columns:
+            continue
+        left_label, right_label = ordered_groups
+        groups = frame[group_column].astype("string")
+        for feature in features:
+            left = frame.loc[groups == left_label, feature].to_numpy(dtype=float)
+            right = frame.loc[groups == right_label, feature].to_numpy(dtype=float)
+            left = left[np.isfinite(left)]
+            right = right[np.isfinite(right)]
+            status = "ok" if left.size >= min_n and right.size >= min_n else "insufficient sample size"
+            row = {
+                "contrast_name": contrast_name,
+                "group_variable": group_column,
+                "group_a": left_label,
+                "group_b": right_label,
+                "feature_name": feature,
+                "feature_family": _feature_family(feature, panel),
+                "n_group_a": int(left.size),
+                "n_group_b": int(right.size),
+                "variance_group_a": float(np.var(left, ddof=1)) if left.size > 1 else np.nan,
+                "variance_group_b": float(np.var(right, ddof=1)) if right.size > 1 else np.nan,
+                "status": status,
+            }
+            if status == "ok":
+                levene_stat, levene_p = variance_homogeneity_test(left, right, center="mean")
+                bf_stat, bf_p = variance_homogeneity_test(left, right, center="median")
+                row.update(
+                    {
+                        "levene_statistic": levene_stat,
+                        "levene_p_value": levene_p,
+                        "brown_forsythe_statistic": bf_stat,
+                        "brown_forsythe_p_value": bf_p,
+                    }
+                )
+            rows.append(row)
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    levene_q, levene_sig = fdr_correction(
+        _p_values(result, "levene_p_value"),
+        alpha=float(panel.get("fdr_alpha", 0.05)),
+    )
+    bf_q, bf_sig = fdr_correction(
+        _p_values(result, "brown_forsythe_p_value"),
+        alpha=float(panel.get("fdr_alpha", 0.05)),
+    )
+    result["levene_fdr_q"] = levene_q
+    result["levene_significant_fdr"] = levene_sig
+    result["brown_forsythe_fdr_q"] = bf_q
+    result["brown_forsythe_significant_fdr"] = bf_sig
+    return result
+
+
+def _plot_effect_sizes(contrasts: pd.DataFrame, output_dir: Path) -> Path | None:
+    ok = contrasts.loc[contrasts.get("status", "") == "ok"].copy()
+    if ok.empty or "cliffs_delta" not in ok.columns:
+        return None
+    ok["label"] = ok["contrast_name"].astype(str) + " | " + ok["feature_name"].astype(str)
+    ok = ok.sort_values("cliffs_delta")
+
+    fig, ax = plt.subplots(figsize=(8, max(3.5, 0.32 * len(ok))))
+    y = np.arange(len(ok))
+    xerr = np.vstack(
+        [
+            ok["cliffs_delta"].to_numpy(dtype=float) - ok["bootstrap_ci_lower"].to_numpy(dtype=float),
+            ok["bootstrap_ci_upper"].to_numpy(dtype=float) - ok["cliffs_delta"].to_numpy(dtype=float),
+        ]
+    )
+    ax.errorbar(ok["cliffs_delta"], y, xerr=xerr, fmt="o", color="#0072B2", ecolor="#999999", capsize=3)
+    ax.axvline(0.0, color="#333333", linewidth=1)
+    ax.set_yticks(y)
+    ax.set_yticklabels(ok["label"])
+    ax.set_xlabel("Cliff's delta (group A - group B)")
+    ax.set_title("Pre-registered panel effect sizes")
+    fig.tight_layout()
+
+    figures_dir = output_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    path = figures_dir / "panel_effect_sizes.png"
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+    return path
+
+
+def _plot_raincloud_surrogate(frame: pd.DataFrame, contrasts: pd.DataFrame, output_dir: Path) -> Path | None:
+    ok = contrasts.loc[contrasts.get("status", "") == "ok"].copy()
+    if ok.empty:
+        return None
+    contrast = ok.iloc[0]
+    feature = str(contrast["feature_name"])
+    group_column = str(contrast["group_variable"])
+    groups = [str(contrast["group_a"]), str(contrast["group_b"])]
+    values = [
+        frame.loc[frame[group_column].astype("string") == group, feature].dropna().to_numpy(dtype=float)
+        for group in groups
+    ]
+    if any(value.size == 0 for value in values):
+        return None
+
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.violinplot(values, showmeans=False, showmedians=True)
+    for idx, value in enumerate(values, start=1):
+        jitter = np.linspace(-0.06, 0.06, value.size) if value.size > 1 else np.array([0.0])
+        ax.scatter(np.full(value.size, idx) + jitter, value, alpha=0.75, color="#0072B2")
+    ax.set_xticks([1, 2])
+    ax.set_xticklabels(groups)
+    ax.set_ylabel(feature)
+    ax.set_title(f"{feature} by {group_column}")
+    fig.tight_layout()
+
+    figures_dir = output_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    path = figures_dir / "panel_rainclouds.png"
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+    return path
+
+
+def run_confirmatory_panel_statistics(
+    *,
+    feature_matrix_path: str | Path | None = None,
+    panel_matrix_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    cfg = _cfg(cfg)
+    panel = panel_cfg(cfg)
+    if not bool(panel.get("enabled", True)):
+        return {}
+
+    target_dir = Path(output_dir) if output_dir is not None else get_confirmatory_panel_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    panel_path = Path(panel_matrix_path) if panel_matrix_path is not None else target_dir / "panel_feature_matrix.csv"
+    frame = _load_panel_and_clinical(
+        feature_matrix_path=feature_matrix_path,
+        panel_matrix_path=panel_path,
+    )
+
+    outputs: dict[str, Path] = {}
+    anchor = run_anchor_test(frame, cfg=cfg)
+    anchor_path = target_dir / "primary_anchor_result.csv"
+    anchor.to_csv(anchor_path, index=False)
+    outputs["primary_anchor_result"] = anchor_path
+
+    contrasts = run_panel_contrasts(frame, cfg=cfg)
+    contrasts_path = target_dir / "panel_contrast_tests.csv"
+    contrasts.to_csv(contrasts_path, index=False)
+    outputs["panel_contrast_tests"] = contrasts_path
+
+    continuous = run_continuous_associations(frame, cfg=cfg)
+    continuous_path = target_dir / "panel_continuous_associations.csv"
+    continuous.to_csv(continuous_path, index=False)
+    outputs["panel_continuous_associations"] = continuous_path
+
+    variance = run_variance_homogeneity(frame, cfg=cfg)
+    variance_path = target_dir / "panel_variance_homogeneity.csv"
+    variance.to_csv(variance_path, index=False)
+    outputs["panel_variance_homogeneity"] = variance_path
+
+    effect_plot = _plot_effect_sizes(contrasts, target_dir)
+    if effect_plot is not None:
+        outputs["panel_effect_sizes"] = effect_plot
+    raincloud_plot = _plot_raincloud_surrogate(frame, contrasts, target_dir)
+    if raincloud_plot is not None:
+        outputs["panel_rainclouds"] = raincloud_plot
+
+    logger.info("Confirmatory panel statistics written to %s", target_dir)
+    return outputs

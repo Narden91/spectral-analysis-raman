@@ -15,6 +15,8 @@ from src.analysis.integrated_candidates import run_integrated_candidates
 from src.analysis.longitudinal_moca import run_longitudinal_moca
 from src.analysis.minimal_panel import run_minimal_panel
 from src.analysis.pls_regression import run_pls_regression
+from src.analysis.preregistered_panel import run_preregistered_panel
+from src.analysis.robust_contrasts import run_confirmatory_panel_statistics
 from src.analysis.spectral_regions import run_candidate_region_detector
 from src.analysis.splsda import run_splsda_classifier
 from src.reporting.candidate_region_report import run_candidate_region_report
@@ -104,6 +106,22 @@ def run_disease_only_cross_region_pipeline(
         logger.info("Starting biochemical ratio analysis (Phase 10)")
         outputs["biochemical_ratios"] = run_biochemical_ratios(
             feature_matrix_path=feature_matrix_path,
+            cfg=cfg,
+        )
+
+    preregistered_outputs: dict[str, Path] = {}
+    if _phase_enabled(cfg, "preregistered_panel"):
+        logger.info("Starting pre-registered confirmatory panel")
+        preregistered_outputs = run_preregistered_panel(
+            feature_matrix_path=feature_matrix_path,
+            cfg=cfg,
+        )
+        outputs["preregistered_panel"] = preregistered_outputs
+
+        logger.info("Starting robust confirmatory panel statistics (Phases E-H)")
+        outputs["confirmatory_panel"] = run_confirmatory_panel_statistics(
+            feature_matrix_path=feature_matrix_path,
+            panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
             cfg=cfg,
         )
 

@@ -82,6 +82,17 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
         assert kwargs["splsda_bands_path"] == Path("selected.csv")
         return {"integrated_candidate_regions": Path("integrated.csv")}
 
+    def preregistered_runner(**kwargs):
+        calls.append("preregistered")
+        assert kwargs["feature_matrix_path"] == feature_matrix_path
+        return {"panel_feature_matrix": Path("panel_features.csv")}
+
+    def confirmatory_runner(**kwargs):
+        calls.append("confirmatory")
+        assert kwargs["feature_matrix_path"] == feature_matrix_path
+        assert kwargs["panel_matrix_path"] == Path("panel_features.csv")
+        return {"panel_contrast_tests": Path("contrasts.csv")}
+
     def subgroup_runner(**kwargs):
         calls.append("subgroups")
         assert kwargs["feature_matrix_path"] == feature_matrix_path
@@ -105,6 +116,8 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
     monkeypatch.setattr(pipeline, "run_pls_regression", pls_runner)
     monkeypatch.setattr(pipeline, "run_splsda_classifier", splsda_runner)
     monkeypatch.setattr(pipeline, "run_biochemical_ratios", biochemical_runner)
+    monkeypatch.setattr(pipeline, "run_preregistered_panel", preregistered_runner)
+    monkeypatch.setattr(pipeline, "run_confirmatory_panel_statistics", confirmatory_runner)
     monkeypatch.setattr(pipeline, "run_integrated_candidates", integrated_runner)
     monkeypatch.setattr(pipeline, "run_disease_subgroups", subgroup_runner)
     monkeypatch.setattr(pipeline, "run_minimal_panel", panel_runner)
@@ -121,6 +134,7 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
             pls_regression=True,
             splsda=True,
             biochemical_ratios=True,
+            preregistered_panel=True,
             integrated_candidates=True,
             disease_subgroups=True,
             minimal_panel=True,
@@ -137,6 +151,8 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
         "pls",
         "splsda",
         "biochemical",
+        "preregistered",
+        "confirmatory",
         "integrated",
         "subgroups",
         "panel",
@@ -175,6 +191,7 @@ def test_disease_only_pipeline_respects_disabled_phases(
             pls_regression=False,
             splsda=False,
             biochemical_ratios=False,
+            preregistered_panel=False,
             integrated_candidates=False,
             disease_subgroups=False,
             minimal_panel=False,
