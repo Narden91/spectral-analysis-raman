@@ -159,6 +159,10 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
     monkeypatch.setattr(pipeline, "run_minimal_panel", panel_runner)
     monkeypatch.setattr(pipeline, "run_panel_report_section", panel_report_runner)
     monkeypatch.setattr(pipeline, "run_candidate_region_report", report_runner)
+    monkeypatch.setattr(pipeline, "run_spectral_shape", record("spectral_shape"))
+    monkeypatch.setattr(pipeline, "run_nmf_decomposition", record("nmf_decomposition"))
+    monkeypatch.setattr(pipeline, "run_spectral_descriptors", record("spectral_descriptors"))
+    monkeypatch.setattr(pipeline, "run_discriminant_spectra", record("discriminant_spectra"))
 
     outputs = pipeline.run_disease_only_cross_region_pipeline(
         feature_matrix_path=feature_matrix_path,
@@ -181,6 +185,10 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
             panel_minimal_model=True,
             panel_report=True,
             publication_report=True,
+            spectral_shape=True,
+            nmf_decomposition=True,
+            spectral_descriptors=True,
+            discriminant_spectra=True,
         ),
     )
 
@@ -204,6 +212,10 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
         "panel_minimal",
         "panel_report",
         "report",
+        "spectral_shape",
+        "nmf_decomposition",
+        "spectral_descriptors",
+        "discriminant_spectra",
     ]
     assert outputs["clinical_correlation_matrix"] == {"clinical": Path("clinical.csv")}
     assert outputs["candidate_regions"] == {
@@ -248,6 +260,10 @@ def test_disease_only_pipeline_respects_disabled_phases(
             panel_minimal_model=False,
             panel_report=False,
             publication_report=False,
+            spectral_shape=False,
+            nmf_decomposition=False,
+            spectral_descriptors=False,
+            discriminant_spectra=False,
         ),
     )
 

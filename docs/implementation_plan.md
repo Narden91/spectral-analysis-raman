@@ -718,7 +718,7 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase M — Spectral-shape analysis (shift + FWHM + asymmetry)
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Fit local Gaussian or pseudo-Voigt peaks at 1720, 1555, 1525; extract centroid, FWHM, and **peak asymmetry** per subject.
 - **Why:** Reviewer §1 — **directly mitigates weak intensity-only signal**; shape differences (C=O shift, amide width, carotenoid asymmetry) may be detectable when integrals are flat.
@@ -735,7 +735,7 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase N — NMF decomposition (latent biochemical components)
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Decompose fingerprint-region spectra (optionally whole) into 3–5 NMF components; correlate subject weights with ΔMoCA and severity groups.
 - **Why:** Reviewer §2 — converts high-dimensional noise into low-dimensional lipid/protein/carotenoid-like profiles.
@@ -752,7 +752,7 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase O — Spectral entropy / dispersion fingerprint
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Compute per-subject spectral entropy over the fingerprint region and associate with endpoints.
 - **Why:** Reviewer §3 — strongest missing EV biology signal; high entropy = disordered EV population; captures distributional change missed by means.
@@ -767,7 +767,7 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase P — Difference-spectrum signatures (publication requirement)
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Compute Δspectrum = mean(severe) − mean(mild) and mean(decline) − mean(recovery); smooth, annotate peaks, produce journal figure.
 - **Why:** Reviewer §5 — required for publication-quality interpretation; visual biochemical signature when tabular stats are weak.
@@ -889,10 +889,10 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 
 - [ ] Phases M–U implemented (M, N, O, P, Q required; R optional), each with passing tests.
 - [ ] Tier-2 outputs are descriptive with effect sizes + FDR; only the Phase A/E anchor is uncorrected confirmatory.
-- [ ] Peak shifts reported with bootstrap CIs and flagged against the calibration floor (Phase M).
-- [ ] NMF reports a stability metric, sparsity, component spectra figures, and is labeled exploratory (Phase N).
-- [ ] Spectral entropy uses a fixed documented normalization + a second dispersion metric (Phase O).
-- [ ] Difference/signed-effect figures separate fingerprint and CH blocks (Phase P).
+- [x] Peak shifts reported with bootstrap CIs and flagged against the calibration floor (Phase M).
+- [x] NMF reports a stability metric, sparsity, component spectra figures, and is labeled exploratory (Phase N).
+- [x] Spectral entropy uses a fixed documented normalization + a second dispersion metric (Phase O).
+- [x] Difference/signed-effect figures separate fingerprint and CH blocks (Phase P).
 - [x] `feature_robustness_ranking.csv` aggregates effect + CI + perm + endpoint consistency (Phase L).
 - [ ] Four-domain narrative report links Tier-1 and Tier-2 artifacts (Phase K).
 - [ ] 4–5 journal figures assembled and indexed in the report (Phase U).
@@ -930,10 +930,10 @@ Track completed phases here. **Next iteration starts at Phase I.**
 
 ### Tier 2 — Structure-aware interpretability
 
-- [ ] **Phase M** — Spectral-shape analysis (shift + FWHM + asymmetry)
-- [ ] **Phase N** — NMF decomposition
-- [ ] **Phase O** — Spectral entropy / dispersion fingerprint
-- [ ] **Phase P** — Difference-spectrum signatures
+- [x] **Phase M** — Spectral-shape analysis (`src/analysis/spectral_shape.py`; SNR gate + calibration floor + bootstrap CIs; `tests/test_spectral_shape.py`)
+- [x] **Phase N** — NMF decomposition (`src/analysis/nmf_decomposition.py`; multi-seed stability + sparsity + component annotation; `tests/test_nmf_decomposition.py`)
+- [x] **Phase O** — Spectral entropy / dispersion fingerprint (`src/analysis/spectral_descriptors.py`; Shannon entropy + Gini coefficient + associations; `tests/test_spectral_descriptors.py`)
+- [x] **Phase P** — Difference-spectrum signatures (`src/analysis/discriminant_spectra.py`; block-separated difference spectra + signed-effect map + annotated figures; `tests/test_discriminant_spectra.py`)
 - [ ] **Phase Q** — Cross-feature coupling + biochemical regimes
 - [ ] **Phase R** — Index-space clustering (optional)
 - [ ] **Phase U** — Journal figure set
@@ -953,3 +953,12 @@ Track completed phases here. **Next iteration starts at Phase I.**
 - Confirmatory panel statistics are implemented in `src/analysis/robust_contrasts.py` and wired after `run_preregistered_panel()` in `src/analysis/disease_only_pipeline.py`.
 - New Tier-1 outputs: `primary_anchor_result.csv`, `panel_contrast_tests.csv`, `panel_continuous_associations.csv`, `panel_variance_homogeneity.csv`, plus compact effect-size/raincloud figures when valid contrasts exist.
 - Phase E–H tests: `uv run pytest tests/test_statistics_effectsizes.py tests/test_robust_contrasts.py tests/test_disease_only_pipeline.py -v` (9 tests green).
+
+### Notes (Phases M–P, 2026-06-24)
+
+- **Phase M** (`src/analysis/spectral_shape.py`): Gaussian peak fitting via `scipy.optimize.curve_fit`; SNR gate + calibration-floor flag per spec; per-subject centroid/FWHM/asymmetry; bootstrap CIs on population-level medians; partial-Spearman associations + BH-FDR; summary copy to `05_confirmatory_panel/panel_peak_shape_features.csv`. 11 tests green.
+- **Phase N** (`src/analysis/nmf_decomposition.py`): `sklearn.decomposition.NMF` with L1 sparsity, `n_init` multi-seed initialization; best solution selected by minimum reconstruction error; stability metric = error_std/error_mean; conservative band-overlap annotation ("carotenoid-like / lipoprotein-associated" for ~1525); component-spectra figure; weight–endpoint Spearman + partial Spearman + FDR. 8 tests green.
+- **Phase O** (`src/analysis/spectral_descriptors.py`): Shannon entropy on per-subject shift-to-non-negative SNV intensities; Gini coefficient as second dispersion metric; both documented with normalization note; partial-Spearman vs endpoints + BH-FDR; distribution figure. 15 tests green.
+- **Phase P** (`src/analysis/discriminant_spectra.py`): Per-block difference spectra (group_A_mean − group_B_mean) for registered contrasts; per-wavenumber Cohen's d + signed-effect map; fingerprint and CH-stretch panels rendered separately; known-band annotation via `get_raman_bands()`; `difference_spectrum.csv` + `signed_effect_map.csv`. 8 tests green.
+- All four phases wired into `src/analysis/disease_only_pipeline.py` after existing phases, each behind `_phase_enabled` gates (keys: `spectral_shape`, `nmf_decomposition`, `spectral_descriptors`, `discriminant_spectra`).
+- Full suite: `uv run pytest -v` → 145/145 green.

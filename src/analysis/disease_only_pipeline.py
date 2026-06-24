@@ -28,6 +28,10 @@ from src.analysis.robust_contrasts import run_confirmatory_panel_statistics
 from src.analysis.robustness_ranking import run_robustness_ranking
 from src.analysis.spectral_regions import run_candidate_region_detector
 from src.analysis.splsda import run_splsda_classifier
+from src.analysis.discriminant_spectra import run_discriminant_spectra
+from src.analysis.nmf_decomposition import run_nmf_decomposition
+from src.analysis.spectral_descriptors import run_spectral_descriptors
+from src.analysis.spectral_shape import run_spectral_shape
 from src.reporting.candidate_region_report import run_candidate_region_report, run_panel_report_section
 
 logger = logging.getLogger(__name__)
@@ -276,6 +280,42 @@ def run_disease_only_cross_region_pipeline(
                 integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
                 minimal_panel_path=panel_outputs.get("minimal_candidate_panel"),
                 panel_report_section_path=panel_report_outputs.get("panel_report_section"),
+                cfg=cfg,
+            )
+
+    # -------------------------------------------------------------------
+    # Tier 2 — Structure-aware biochemical interpretability (Phases M–P)
+    # -------------------------------------------------------------------
+
+    if _phase_enabled(cfg, "spectral_shape"):
+        logger.info("Starting spectral-shape analysis (Phase M)")
+        with _phase_timer(phase_timings, "spectral_shape", "Spectral-shape analysis"):
+            outputs["spectral_shape"] = run_spectral_shape(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
+
+    if _phase_enabled(cfg, "nmf_decomposition"):
+        logger.info("Starting NMF decomposition (Phase N)")
+        with _phase_timer(phase_timings, "nmf_decomposition", "NMF decomposition"):
+            outputs["nmf_decomposition"] = run_nmf_decomposition(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
+
+    if _phase_enabled(cfg, "spectral_descriptors"):
+        logger.info("Starting spectral entropy / dispersion (Phase O)")
+        with _phase_timer(phase_timings, "spectral_descriptors", "Spectral entropy / dispersion"):
+            outputs["spectral_descriptors"] = run_spectral_descriptors(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
+
+    if _phase_enabled(cfg, "discriminant_spectra"):
+        logger.info("Starting difference-spectrum signatures (Phase P)")
+        with _phase_timer(phase_timings, "discriminant_spectra", "Difference-spectrum signatures"):
+            outputs["discriminant_spectra"] = run_discriminant_spectra(
+                feature_matrix_path=feature_matrix_path,
                 cfg=cfg,
             )
 
