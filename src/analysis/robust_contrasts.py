@@ -13,6 +13,7 @@ from scipy import stats
 
 from src import config, get_confirmatory_panel_dir
 from src.analysis.clinical_feature_associations import filter_disease_subjects, load_subject_feature_matrix
+from src.analysis.io_utils import write_csv_atomic
 from src.analysis.preregistered_panel import panel_cfg
 from src.analysis.statistics import (
     cliffs_delta,
@@ -629,22 +630,22 @@ def run_confirmatory_panel_statistics(
     outputs: dict[str, Path] = {}
     anchor = run_anchor_test(frame, cfg=cfg)
     anchor_path = target_dir / "primary_anchor_result.csv"
-    anchor.to_csv(anchor_path, index=False)
+    write_csv_atomic(anchor, anchor_path, index=False)
     outputs["primary_anchor_result"] = anchor_path
 
     contrasts = run_panel_contrasts(frame, cfg=cfg)
     contrasts_path = target_dir / "panel_contrast_tests.csv"
-    contrasts.to_csv(contrasts_path, index=False)
+    write_csv_atomic(contrasts, contrasts_path, index=False)
     outputs["panel_contrast_tests"] = contrasts_path
 
     continuous = run_continuous_associations(frame, cfg=cfg)
     continuous_path = target_dir / "panel_continuous_associations.csv"
-    continuous.to_csv(continuous_path, index=False)
+    write_csv_atomic(continuous, continuous_path, index=False)
     outputs["panel_continuous_associations"] = continuous_path
 
     variance = run_variance_homogeneity(frame, cfg=cfg)
     variance_path = target_dir / "panel_variance_homogeneity.csv"
-    variance.to_csv(variance_path, index=False)
+    write_csv_atomic(variance, variance_path, index=False)
     outputs["panel_variance_homogeneity"] = variance_path
 
     effect_plot = _plot_effect_sizes(contrasts, target_dir)

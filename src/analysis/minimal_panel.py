@@ -22,11 +22,12 @@ from sklearn.metrics import balanced_accuracy_score, mean_absolute_error, mean_s
 from sklearn.model_selection import KFold, LeaveOneOut, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from src import config, get_cross_region_phase_dir
+from src import config, get_confirmatory_panel_dir, get_cross_region_phase_dir
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
 )
+from src.analysis.io_utils import write_csv_atomic
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,27 @@ def _load_integrated_candidates(path: str | Path | None) -> pd.DataFrame | None:
     if df.empty:
         logger.info("Integrated candidate table is empty")
     return df
+
+
+def _load_preregistered_panel_pool(
+    disease_only: pd.DataFrame,
+    panel_matrix_path: str | Path | None,
+) -> pd.DataFrame:
+    path = Path(panel_matrix_path) if panel_matrix_path is not None else get_confirmatory_panel_dir() / "panel_feature_matrix.csv"
+    if not path.exists():
+        logger.warning("Pre-registered panel feature matrix not found: %s", path)
+        return pd.DataFrame(index=disease_only.index)
+    panel = pd.read_csv(path)
+    if "subject_id" not in panel.columns:
+        raise ValueError("Pre-registered panel feature matrix is missing subject_id")
+
+    panel = panel.copy()
+    panel["subject_id"] = panel["subject_id"].astype(str)
+    aligned = panel.set_index("subject_id").reindex(disease_only["subject_id"].astype(str))
+    pool = aligned.drop(columns=["subject_id"], errors="ignore")
+    pool = pool.apply(pd.to_numeric, errors="coerce")
+    pool.index = disease_only.index
+    return pool.dropna(axis=1, how="all")
 
 
 def _region_feature_names(feature_columns: list[str], region: pd.Series) -> list[str]:
@@ -545,6 +567,10 @@ def _select_panel(
 
 
 def _feature_source_and_description(feature_name: str, cfg: dict[str, Any]) -> tuple[str, str]:
+    if feature_name in cfg.get("analysis", {}).get("preregistered_panel", {}).get("indices", {}):
+        return "preregistered_index", feature_name
+    if feature_name in cfg.get("analysis", {}).get("preregistered_panel", {}).get("integrals", {}):
+        return "preregistered_integral", feature_name
     if feature_name.startswith("region__"):
         return "candidate_region", feature_name.replace("region__", "")
     if feature_name.startswith("ratio__"):
@@ -559,6 +585,7 @@ def run_minimal_panel(
     *,
     feature_matrix_path: str | Path | None = None,
     integrated_candidates_path: str | Path | None = None,
+    panel_matrix_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
@@ -568,38 +595,46 @@ def run_minimal_panel(
     if not bool(panel_cfg.get("enabled", True)):
         return {}
 
-    target_dir = (
-        Path(output_dir)
-        if output_dir is not None
-        else get_cross_region_phase_dir("minimal_panel")
+    feature_source = str(panel_cfg.get("feature_source", "candidate_regions"))
+    is_preregistered_source = feature_source == "preregistered_panel"
+    target_dir = Path(output_dir) if output_dir is not None else (
+        get_confirmatory_panel_dir() if is_preregistered_source else get_cross_region_phase_dir("minimal_panel")
     )
     target_dir.mkdir(parents=True, exist_ok=True)
 
     disease_only, _feature_meta = load_disease_feature_frame(feature_matrix_path=feature_matrix_path)
     all_feature_columns = feature_columns(disease_only)
 
-    if integrated_candidates_path is None:
-        integrated_candidates_path = get_cross_region_phase_dir("integrated_candidates") / "integrated_candidate_regions.csv"
-    integrated = _load_integrated_candidates(integrated_candidates_path)
+    if is_preregistered_source:
+        pool = _load_preregistered_panel_pool(disease_only, panel_matrix_path)
+    else:
+        if integrated_candidates_path is None:
+            integrated_candidates_path = get_cross_region_phase_dir("integrated_candidates") / "integrated_candidate_regions.csv"
+        integrated = _load_integrated_candidates(integrated_candidates_path)
+        pool = _build_feature_pool(disease_only, all_feature_columns, integrated, cfg)
 
-    pool = _build_feature_pool(disease_only, all_feature_columns, integrated, cfg)
+    output_stem = "panel_minimal_model" if is_preregistered_source else "minimal_panel"
+    selected_filename = "panel_minimal_model_features.csv" if is_preregistered_source else "minimal_candidate_panel.csv"
+    performance_filename = f"{output_stem}_performance.csv" if is_preregistered_source else "minimal_panel_cv_performance.csv"
+    coefficients_filename = f"{output_stem}_coefficients.csv" if is_preregistered_source else "minimal_panel_coefficients.csv"
+
     if pool.empty:
         logger.warning("No candidate panel features available; writing empty outputs")
-        pd.DataFrame(columns=[
+        write_csv_atomic(pd.DataFrame(columns=[
             "endpoint", "endpoint_type", "feature_name", "feature_source", "feature_description",
             "selection_frequency", "mean_absolute_coefficient", "panel_selected",
-        ]).to_csv(target_dir / "minimal_candidate_panel.csv", index=False)
-        pd.DataFrame(columns=[
+        ]), target_dir / selected_filename, index=False)
+        write_csv_atomic(pd.DataFrame(columns=[
             "endpoint", "endpoint_type", "metric", "value", "n_subjects", "permutation_p_value",
             "n_permutations", "cv_strategy", "compute_backend", "gpu_status",
-        ]).to_csv(target_dir / "minimal_panel_cv_performance.csv", index=False)
-        pd.DataFrame(columns=[
+        ]), target_dir / performance_filename, index=False)
+        write_csv_atomic(pd.DataFrame(columns=[
             "endpoint", "feature_name", "mean_coefficient", "ci_low", "ci_high", "n_bootstrap_used",
-        ]).to_csv(target_dir / "minimal_panel_coefficients.csv", index=False)
+        ]), target_dir / coefficients_filename, index=False)
         return {
-            "minimal_candidate_panel": target_dir / "minimal_candidate_panel.csv",
-            "minimal_panel_cv_performance": target_dir / "minimal_panel_cv_performance.csv",
-            "minimal_panel_coefficients": target_dir / "minimal_panel_coefficients.csv",
+            ("panel_minimal_model_features" if is_preregistered_source else "minimal_candidate_panel"): target_dir / selected_filename,
+            ("panel_minimal_model_performance" if is_preregistered_source else "minimal_panel_cv_performance"): target_dir / performance_filename,
+            ("panel_minimal_model_coefficients" if is_preregistered_source else "minimal_panel_coefficients"): target_dir / coefficients_filename,
         }
 
     max_features = int(panel_cfg.get("max_features", 10))
@@ -655,7 +690,7 @@ def run_minimal_panel(
             n_inner_splits=n_inner_splits,
             random_state=random_state,
         )
-        p_value, null_mean, null_std = _permutation_test_continuous(
+        p_value, _, _ = _permutation_test_continuous(
             X_selected,
             y_arr,
             n_outer_splits=n_outer_splits,
@@ -759,7 +794,7 @@ def run_minimal_panel(
             n_inner_splits=n_inner_splits,
             random_state=random_state,
         )
-        p_value, null_mean, null_std = _permutation_test_binary(
+        p_value, _, _ = _permutation_test_binary(
             X_selected,
             y_arr,
             n_outer_splits=n_outer_splits,
@@ -846,17 +881,17 @@ def run_minimal_panel(
         ],
     )
 
-    panel_path = target_dir / "minimal_candidate_panel.csv"
-    perf_path = target_dir / "minimal_panel_cv_performance.csv"
-    coef_path = target_dir / "minimal_panel_coefficients.csv"
+    panel_path = target_dir / selected_filename
+    perf_path = target_dir / performance_filename
+    coef_path = target_dir / coefficients_filename
 
-    panel_df.to_csv(panel_path, index=False)
-    perf_df.to_csv(perf_path, index=False)
-    coef_df.to_csv(coef_path, index=False)
+    write_csv_atomic(panel_df, panel_path, index=False)
+    write_csv_atomic(perf_df, perf_path, index=False)
+    write_csv_atomic(coef_df, coef_path, index=False)
 
     logger.info("Minimal candidate panel outputs written to %s", target_dir)
     return {
-        "minimal_candidate_panel": panel_path,
-        "minimal_panel_cv_performance": perf_path,
-        "minimal_panel_coefficients": coef_path,
+        ("panel_minimal_model_features" if is_preregistered_source else "minimal_candidate_panel"): panel_path,
+        ("panel_minimal_model_performance" if is_preregistered_source else "minimal_panel_cv_performance"): perf_path,
+        ("panel_minimal_model_coefficients" if is_preregistered_source else "minimal_panel_coefficients"): coef_path,
     }

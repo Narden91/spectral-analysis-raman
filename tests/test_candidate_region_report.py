@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.reporting.candidate_region_report import run_candidate_region_report
+from src.reporting.candidate_region_report import build_panel_report_section, run_candidate_region_report, run_panel_report_section
 
 
 def _integrated_candidates() -> pd.DataFrame:
@@ -62,6 +62,51 @@ def test_run_candidate_region_report_produces_outputs(tmp_path: Path) -> None:
     assert summary["n_regions"].sum() == 4
 
     assert any(outputs["candidate_region_figures"].glob("*.png"))
+
+
+def test_build_panel_report_section_contains_four_domains_without_blocked_terms() -> None:
+    ranking = pd.DataFrame(
+        {
+            "feature_name": ["oxidative_index", "membrane_integrity_index", "protein_remodeling_index"],
+            "evidence_tier": ["strong_trend", "moderate_trend", "weak_or_unstable"],
+            "robust_score": [3, 2, 1],
+            "max_abs_cliffs_delta": [0.8, 0.4, 0.2],
+        }
+    )
+
+    text = build_panel_report_section(ranking=ranking)
+
+    for section in [
+        "Membrane Remodeling",
+        "Protein Structural Heterogeneity",
+        "Oxidative Imbalance",
+        "System-Level EV Disruption",
+    ]:
+        assert section in text
+    assert "carotenoid-like / lipoprotein-associated" in text
+    blocked = ["biomarker", "diagnostic", "predictive", "causal"]
+    assert not any(term in text.lower() for term in blocked)
+
+
+def test_run_panel_report_section_writes_section_and_readme(tmp_path: Path) -> None:
+    ranking_path = tmp_path / "feature_robustness_ranking.csv"
+    pd.DataFrame(
+        {
+            "feature_name": ["oxidative_index"],
+            "evidence_tier": ["strong_trend"],
+            "robust_score": [4],
+            "max_abs_cliffs_delta": [0.9],
+        }
+    ).to_csv(ranking_path, index=False)
+
+    outputs = run_panel_report_section(
+        robustness_ranking_path=ranking_path,
+        output_dir=tmp_path,
+        cfg={"analysis": {"panel_report": {"enabled": True}}},
+    )
+
+    assert outputs["panel_report_section"].exists()
+    assert outputs["panel_report_readme"].exists()
 
 
 def test_run_candidate_region_report_disabled_returns_empty(tmp_path: Path) -> None:

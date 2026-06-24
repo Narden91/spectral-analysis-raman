@@ -135,6 +135,54 @@ def test_run_minimal_panel_produces_expected_outputs(input_paths: dict[str, Path
     assert "ci_high" in coef.columns
 
 
+def test_run_minimal_panel_accepts_preregistered_panel_source(input_paths: dict[str, Path], tmp_path: Path) -> None:
+    panel_matrix = _feature_matrix()[["subject_id"]].copy()
+    panel_matrix["oxidative_index"] = _feature_matrix()["delta_moca"] + np.linspace(0, 1, len(panel_matrix))
+    panel_matrix["membrane_integrity_index"] = -_feature_matrix()["delta_moca"]
+    panel_matrix["protein_remodeling_index"] = np.linspace(0, 1, len(panel_matrix))
+    panel_path = tmp_path / "panel_feature_matrix.csv"
+    panel_matrix.to_csv(panel_path, index=False)
+
+    outputs = run_minimal_panel(
+        feature_matrix_path=input_paths["feature_matrix"],
+        panel_matrix_path=panel_path,
+        output_dir=tmp_path / "confirmatory",
+        cfg={
+            "analysis": {
+                "minimal_panel": {
+                    "enabled": True,
+                    "feature_source": "preregistered_panel",
+                    "max_features": 3,
+                    "min_features": 2,
+                    "n_outer_splits": 3,
+                    "n_inner_splits": 2,
+                    "n_permutations": 10,
+                    "n_bootstrap": 10,
+                    "n_jobs": 1,
+                    "detect_gpu": False,
+                    "random_state": 42,
+                    "continuous_targets": ["delta_moca"],
+                    "binary_targets": [],
+                },
+                "preregistered_panel": {
+                    "indices": {
+                        "oxidative_index": ["carotenoid_1525", "lipid_carbonyl_1720"],
+                        "membrane_integrity_index": ["ch_bulk_2885", "lipid_carbonyl_1720"],
+                        "protein_remodeling_index": ["protein_1555", "structural_protein_925", "structural_protein_980"],
+                    },
+                    "integrals": {},
+                },
+            }
+        },
+    )
+
+    assert "panel_minimal_model_performance" in outputs
+    assert "panel_minimal_model_coefficients" in outputs
+    assert outputs["panel_minimal_model_performance"].name == "panel_minimal_model_performance.csv"
+    features = pd.read_csv(outputs["panel_minimal_model_features"])
+    assert set(features["feature_source"]) <= {"preregistered_index"}
+
+
 def test_run_minimal_panel_disabled_returns_empty(tmp_path: Path) -> None:
     outputs = run_minimal_panel(
         output_dir=tmp_path,

@@ -91,7 +91,22 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
         calls.append("confirmatory")
         assert kwargs["feature_matrix_path"] == feature_matrix_path
         assert kwargs["panel_matrix_path"] == Path("panel_features.csv")
-        return {"panel_contrast_tests": Path("contrasts.csv")}
+        return {
+            "primary_anchor_result": Path("anchor.csv"),
+            "panel_contrast_tests": Path("contrasts.csv"),
+            "panel_continuous_associations": Path("continuous.csv"),
+        }
+
+    def endpoint_consistency_runner(**kwargs):
+        calls.append("endpoint_consistency")
+        assert kwargs["associations_path"] == Path("continuous.csv")
+        return {"endpoint_consistency": Path("endpoint_consistency.csv")}
+
+    def robustness_runner(**kwargs):
+        calls.append("robustness")
+        assert kwargs["contrasts_path"] == Path("contrasts.csv")
+        assert kwargs["consistency_path"] == Path("endpoint_consistency.csv")
+        return {"feature_robustness_ranking": Path("ranking.csv")}
 
     def subgroup_runner(**kwargs):
         calls.append("subgroups")
@@ -99,16 +114,34 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
         assert kwargs["integrated_candidates_path"] == Path("integrated.csv")
         return {"disease_subgroup_assignments": Path("subgroups.csv")}
 
+    def panel_cluster_runner(**kwargs):
+        calls.append("panel_cluster")
+        assert kwargs["feature_matrix_path"] == feature_matrix_path
+        assert kwargs["panel_matrix_path"] == Path("panel_features.csv")
+        assert kwargs["subgroup_assignments_path"] == Path("subgroups.csv")
+        return {"panel_cluster_summary": Path("cluster_summary.csv")}
+
     def panel_runner(**kwargs):
+        if kwargs.get("panel_matrix_path") == Path("panel_features.csv"):
+            calls.append("panel_minimal")
+            assert kwargs["output_dir"] is not None
+            return {"panel_minimal_model_features": Path("panel_minimal.csv")}
         calls.append("panel")
         assert kwargs["feature_matrix_path"] == feature_matrix_path
         assert kwargs["integrated_candidates_path"] == Path("integrated.csv")
         return {"minimal_candidate_panel": Path("panel.csv")}
 
+    def panel_report_runner(**kwargs):
+        calls.append("panel_report")
+        assert kwargs["robustness_ranking_path"] == Path("ranking.csv")
+        assert kwargs["anchor_result_path"] == Path("anchor.csv")
+        return {"panel_report_section": Path("panel_report_section.md")}
+
     def report_runner(**kwargs):
         calls.append("report")
         assert kwargs["integrated_candidates_path"] == Path("integrated.csv")
         assert kwargs["minimal_panel_path"] == Path("panel.csv")
+        assert kwargs["panel_report_section_path"] == Path("panel_report_section.md")
         return {}
 
     monkeypatch.setattr(pipeline, "run_candidate_region_detector", candidate_runner)
@@ -118,9 +151,13 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
     monkeypatch.setattr(pipeline, "run_biochemical_ratios", biochemical_runner)
     monkeypatch.setattr(pipeline, "run_preregistered_panel", preregistered_runner)
     monkeypatch.setattr(pipeline, "run_confirmatory_panel_statistics", confirmatory_runner)
+    monkeypatch.setattr(pipeline, "run_endpoint_consistency", endpoint_consistency_runner)
+    monkeypatch.setattr(pipeline, "run_robustness_ranking", robustness_runner)
     monkeypatch.setattr(pipeline, "run_integrated_candidates", integrated_runner)
     monkeypatch.setattr(pipeline, "run_disease_subgroups", subgroup_runner)
+    monkeypatch.setattr(pipeline, "run_panel_cluster_summary", panel_cluster_runner)
     monkeypatch.setattr(pipeline, "run_minimal_panel", panel_runner)
+    monkeypatch.setattr(pipeline, "run_panel_report_section", panel_report_runner)
     monkeypatch.setattr(pipeline, "run_candidate_region_report", report_runner)
 
     outputs = pipeline.run_disease_only_cross_region_pipeline(
@@ -135,9 +172,14 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
             splsda=True,
             biochemical_ratios=True,
             preregistered_panel=True,
+            endpoint_consistency=True,
+            robustness_ranking=True,
             integrated_candidates=True,
             disease_subgroups=True,
+            panel_cluster_summary=True,
             minimal_panel=True,
+            panel_minimal_model=True,
+            panel_report=True,
             publication_report=True,
         ),
     )
@@ -153,9 +195,14 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
         "biochemical",
         "preregistered",
         "confirmatory",
+        "endpoint_consistency",
+        "robustness",
         "integrated",
         "subgroups",
+        "panel_cluster",
         "panel",
+        "panel_minimal",
+        "panel_report",
         "report",
     ]
     assert outputs["clinical_correlation_matrix"] == {"clinical": Path("clinical.csv")}
@@ -192,9 +239,14 @@ def test_disease_only_pipeline_respects_disabled_phases(
             splsda=False,
             biochemical_ratios=False,
             preregistered_panel=False,
+            endpoint_consistency=False,
+            robustness_ranking=False,
             integrated_candidates=False,
             disease_subgroups=False,
+            panel_cluster_summary=False,
             minimal_panel=False,
+            panel_minimal_model=False,
+            panel_report=False,
             publication_report=False,
         ),
     )

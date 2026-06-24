@@ -163,6 +163,9 @@ analysis:
     max_clusters: 4
     n_bootstrap: 100
     random_state: 42
+  panel_cluster_summary:
+    enabled: true
+    endpoints: [moca_baseline, moca_3m, delta_moca]
   minimal_panel:
     enabled: true
     max_features: 10
@@ -182,6 +185,18 @@ analysis:
         ordered_groups: [decline, stable_or_improved]
     vip_threshold: 1.0
     require_pls_gate: true
+    feature_source: candidate_regions
+  panel_minimal_model:
+    enabled: true
+    feature_source: preregistered_panel
+    max_features: 5
+    min_features: 3
+  endpoint_consistency:
+    enabled: true
+  robustness_ranking:
+    enabled: true
+  panel_report:
+    enabled: true
   publication_report:
     enabled: true
     robust_requires:

@@ -19,6 +19,7 @@ from src.analysis.band_features import (
     count_window_channels,
 )
 from src.analysis.clinical_feature_associations import feature_columns, load_disease_feature_frame
+from src.analysis.io_utils import write_csv_atomic, write_text_atomic
 from src.data_preparation.manifest import config_hash
 
 logger = logging.getLogger(__name__)
@@ -102,7 +103,7 @@ def write_preregistration_snapshot(
         lines.append("")
 
     path = target_dir / "preregistration.md"
-    path.write_text("\n".join(lines), encoding="utf-8")
+    write_text_atomic(path, "\n".join(lines))
     logger.info("Wrote pre-registration snapshot to %s", path)
     return path
 
@@ -241,7 +242,7 @@ def run_preregistered_panel(
         export[column] = panel_matrix[column]
 
     matrix_path = target_dir / "panel_feature_matrix.csv"
-    export.to_csv(matrix_path, index=False)
+    write_csv_atomic(export, matrix_path, index=False)
 
     logger.info("Pre-registered panel matrix written to %s", matrix_path)
     return {

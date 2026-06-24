@@ -19,8 +19,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src import config, get_cross_region_phase_dir
+from src import config, get_confirmatory_panel_dir, get_cross_region_phase_dir
 from src.analysis._reporting import dataframe_to_markdown
+from src.analysis.io_utils import load_csv_or_empty, write_csv_atomic, write_text_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -75,15 +76,128 @@ def _format_region(row: pd.Series) -> str:
 
 
 def _load_csv_if_exists(path: str | Path | None) -> pd.DataFrame | None:
-    if path is None:
-        return None
-    path = Path(path)
-    if not path.exists():
-        return None
-    try:
-        return pd.read_csv(path)
-    except pd.errors.EmptyDataError:
-        return None
+    frame = load_csv_or_empty(path)
+    return None if frame.empty else frame
+
+
+def _panel_tier_counts(ranking: pd.DataFrame) -> pd.DataFrame:
+    if ranking.empty or "evidence_tier" not in ranking.columns:
+        return pd.DataFrame(
+            {
+                "evidence_tier": ["strong_trend", "moderate_trend", "weak_or_unstable"],
+                "n_features": [0, 0, 0],
+            }
+        )
+    counts = ranking["evidence_tier"].value_counts()
+    return pd.DataFrame(
+        {
+            "evidence_tier": ["strong_trend", "moderate_trend", "weak_or_unstable"],
+            "n_features": [int(counts.get(tier, 0)) for tier in ["strong_trend", "moderate_trend", "weak_or_unstable"]],
+        }
+    )
+
+
+def _top_feature_line(ranking: pd.DataFrame, feature_names: list[str]) -> str:
+    if ranking.empty or "feature_name" not in ranking.columns:
+        return "No ranked panel feature available yet."
+    subset = ranking.loc[ranking["feature_name"].isin(feature_names)].copy()
+    if subset.empty:
+        return "No ranked panel feature available yet."
+    row = subset.sort_values(["robust_score", "max_abs_cliffs_delta", "feature_name"], ascending=[False, False, True]).iloc[0]
+    return (
+        f"Highest-ranked available feature: `{row['feature_name']}` "
+        f"({row['evidence_tier']}, robust_score={int(row['robust_score'])})."
+    )
+
+
+def build_panel_report_section(
+    *,
+    ranking: pd.DataFrame,
+    anchor: pd.DataFrame | None = None,
+) -> str:
+    """Build the Phase K four-domain panel narrative."""
+    anchor_note = "Anchor result not available yet."
+    if anchor is not None and not anchor.empty:
+        row = anchor.iloc[0]
+        anchor_note = (
+            f"Anchor feature `{row.get('feature_name', 'oxidative_index')}` vs "
+            f"`{row.get('endpoint', 'delta_moca')}`: rho={row.get('rho', pd.NA)}, "
+            f"permutation p={row.get('perm_p_value', pd.NA)}."
+        )
+
+    tier_counts = _panel_tier_counts(ranking)
+    lines = [
+        "# Pre-registered Panel Report Section",
+        "",
+        "This section summarizes region-overlapping, tentatively assigned Raman panel features. "
+        "It reports graded exploratory evidence only and avoids clinical classification claims.",
+        "",
+        "## Robustness Summary",
+        "",
+        dataframe_to_markdown(tier_counts),
+        "",
+        "## Membrane Remodeling",
+        "",
+        _top_feature_line(ranking, ["membrane_integrity_index", "lipid_carbonyl_1720", "ch_bulk_2885"]),
+        "Interpretation is limited to regions overlapping lipid carbonyl and CH-stretch bands.",
+        "",
+        "## Protein Structural Heterogeneity",
+        "",
+        _top_feature_line(
+            ranking,
+            ["protein_remodeling_index", "tyrosine_environment_index", "protein_1555", "structural_protein_925", "structural_protein_980"],
+        ),
+        "Interpretation is limited to regions overlapping protein-associated bands; weak bands require cautious reading.",
+        "",
+        "## Oxidative Imbalance",
+        "",
+        _top_feature_line(ranking, ["oxidative_index", "carotenoid_1525", "carotenoid_cc_1156", "lipid_carbonyl_1720"]),
+        anchor_note,
+        "Carotenoid language is restricted to carotenoid-like / lipoprotein-associated signals.",
+        "",
+        "## System-Level EV Disruption",
+        "",
+        _top_feature_line(ranking, ranking["feature_name"].astype(str).tolist() if "feature_name" in ranking.columns else []),
+        "This domain integrates variance heterogeneity, endpoint consistency, and feature coupling when those artifacts are present.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def run_panel_report_section(
+    *,
+    robustness_ranking_path: str | Path | None = None,
+    anchor_result_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    """Write the Phase K four-domain confirmatory-panel report section."""
+    cfg = _cfg(cfg)
+    phase_cfg = cfg.get("analysis", {}).get("panel_report", {})
+    if not bool(phase_cfg.get("enabled", True)):
+        return {}
+
+    target_dir = Path(output_dir) if output_dir is not None else get_confirmatory_panel_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    ranking = _load_csv_if_exists(robustness_ranking_path or target_dir / "feature_robustness_ranking.csv")
+    anchor = _load_csv_if_exists(anchor_result_path or target_dir / "primary_anchor_result.csv")
+    text = build_panel_report_section(
+        ranking=ranking if ranking is not None else pd.DataFrame(),
+        anchor=anchor,
+    )
+
+    section_path = target_dir / "panel_report_section.md"
+    readme_path = target_dir / "README.md"
+    write_text_atomic(section_path, text)
+    write_text_atomic(
+        readme_path,
+        "# Confirmatory Panel Outputs\n\n"
+        "- `preregistration.md`: frozen panel and anchor hypothesis.\n"
+        "- `panel_feature_matrix.csv`: subject-level pre-registered features.\n"
+        "- `feature_robustness_ranking.csv`: graded Phase L evidence score.\n"
+        "- `panel_report_section.md`: four-domain conservative synthesis.\n",
+    )
+    return {"panel_report_section": section_path, "panel_report_readme": readme_path}
 
 
 def _plot_overview(
@@ -138,10 +252,9 @@ def _plot_forest(
     robust_df = robust_df.sort_values("integrated_abs_effect", ascending=True).copy()
     labels = robust_df.apply(_format_region, axis=1)
     effects = robust_df["max_abs_effect"].to_numpy(dtype=float)
-    errors = effects * 0.1  # placeholder symmetric error for visualization
 
     fig, ax = plt.subplots(figsize=(10, max(4, len(robust_df) * 0.5)))
-    ax.errorbar(effects, np.arange(len(robust_df)), xerr=errors, fmt="o", color="#2A9D8F", ecolor="#264653")
+    ax.scatter(effects, np.arange(len(robust_df)), color="#2A9D8F")
     ax.set_yticks(np.arange(len(robust_df)))
     ax.set_yticklabels(labels, fontsize=8)
     ax.set_xlabel("Max |effect|")
@@ -206,6 +319,7 @@ def _build_report(
     summary: pd.DataFrame,
     figures: dict[str, Path | None],
     analysis_mode: str,
+    panel_report_section_path: Path | None = None,
 ) -> str:
     has_significant_regions = bool(candidates.get("significance_supported", pd.Series(dtype=bool)).fillna(False).any())
     if has_significant_regions:
@@ -250,6 +364,15 @@ def _build_report(
     if all(p is None for p in figures.values()):
         lines.append("No figures generated.")
     lines.append("")
+    if panel_report_section_path is not None:
+        lines.extend(
+            [
+                "## Pre-registered Panel Section",
+                "",
+                f"Four-domain confirmatory-panel synthesis: `{panel_report_section_path}`",
+                "",
+            ]
+        )
 
     for class_name in _CLASS_ORDER:
         lines.append(_section_for_class(class_name, candidates))
@@ -274,6 +397,7 @@ def run_candidate_region_report(
     *,
     integrated_candidates_path: str | Path | None = None,
     minimal_panel_path: str | Path | None = None,
+    panel_report_section_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
@@ -339,12 +463,13 @@ def run_candidate_region_report(
         summary,
         figures,
         _analysis_mode(cfg),
+        Path(panel_report_section_path) if panel_report_section_path is not None else None,
     )
 
     report_path = target_dir / "candidate_region_report.md"
     summary_path = target_dir / "candidate_region_summary.csv"
-    report_path.write_text(report_text, encoding="utf-8")
-    summary.to_csv(summary_path, index=False)
+    write_text_atomic(report_path, report_text)
+    write_csv_atomic(summary, summary_path, index=False)
 
     logger.info("Publication report written to %s", target_dir)
     return {

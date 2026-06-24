@@ -635,7 +635,7 @@ analysis:
 
 ### Phase I — Clustering insight (reuse; optional UMAP+k-means)
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Relate panel features to existing exploratory subgroups; optionally add a UMAP+k-means supplementary view.
 - **Why:** Reviewer §G. The repo's `disease_subgroups.py` (Ward + Gap statistic + bootstrap ARI) is already more rigorous than bare UMAP+k-means, so reuse it first and treat UMAP+k-means as an optional, clearly-labeled supplement.
@@ -647,7 +647,7 @@ analysis:
 
 ### Phase J — Minimal interpretable model restricted to the panel
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Run the existing nested-CV ElasticNet / L1-logistic minimal-model machinery using only the pre-registered panel features (3–5 inputs), with permutation and bootstrap CIs.
 - **Why:** Reviewer §H is already implemented in `minimal_panel.py`; the only addition is a panel-restricted feature source so the "minimal model" is genuinely the pre-registered panel rather than data-driven candidates.
@@ -659,7 +659,7 @@ analysis:
 
 ### Phase S — Cross-endpoint consistency (Tier 1 bridge)
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Test whether each feature shows the **same sign** across moca_baseline, moca_3m, and ΔMoCA.
 - **Why:** Reviewer §8 — consistent features = biologically meaningful trends; feeds robustness score (Phase L).
@@ -671,7 +671,7 @@ analysis:
 
 ### Phase L — Graded robustness ranking (Tier 1 capstone)
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Replace binary significance with a **graded evidence score** per feature, enabling a non-null narrative when FDR fails.
 - **Why:** Reviewer §7 — "nothing significant" becomes "strongest trends ranked by converging evidence."
@@ -782,7 +782,7 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase K — Four-domain biochemical narrative + report (Tier 1 synthesis)
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Write `panel_report_section.md` organized into **four mandatory narrative domains**, each synthesizing Tier-1 + Tier-2 evidence (effect size, CI, robustness score, shape/NMF/entropy where available):
   1. **Membrane remodeling** — regions overlapping lipid carbonyl (~1720) + CH (2850–2950); include `membrane_integrity_index`, peak shifts at 1720, difference-spectrum lipid panels.
@@ -859,7 +859,7 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 
 ### Tier 1 (statistical core)
 
-- [ ] Phases A–J, S, L, and K implemented, each with passing tests.
+- [x] Phases A–J, S, L, and K implemented, each with passing tests.
 - [x] Block-aware normalization invariants locked by test (Phase B).
 - [x] `preregistration.md` frozen before result tables exist (Phase A).
 - [x] Mandatory anchor hypothesis (oxidative index vs ΔMoCA) tested in Phase E before panel FDR.
@@ -873,16 +873,16 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 - [ ] NMF reports a stability metric, sparsity, component spectra figures, and is labeled exploratory (Phase N).
 - [ ] Spectral entropy uses a fixed documented normalization + a second dispersion metric (Phase O).
 - [ ] Difference/signed-effect figures separate fingerprint and CH blocks (Phase P).
-- [ ] `feature_robustness_ranking.csv` aggregates effect + CI + perm + endpoint consistency (Phase L).
+- [x] `feature_robustness_ranking.csv` aggregates effect + CI + perm + endpoint consistency (Phase L).
 - [ ] Four-domain narrative report links Tier-1 and Tier-2 artifacts (Phase K).
 - [ ] 4–5 journal figures assembled and indexed in the report (Phase U).
 
 ### Cross-cutting
 
-- [ ] `uv run pytest -v` green; `uv run pytest tests/test_biological_pca.py` green.
+- [x] `uv run pytest -v` green; `uv run pytest tests/test_biological_pca.py` green.
 - [ ] Disease-only smoke run completes and writes `Results_intra_disease/05_confirmatory_panel/` and `Results_intra_disease/06_spectral_interpretability/` as sibling folders alongside `04_cross_region_summary/`, plus run manifests.
 - [ ] All reports/captions contain no diagnostic / predictive / biomarker / causal language (enforced by test).
-- [ ] No new top-level entry point; outputs routed through existing helpers; generated artifacts git-ignored.
+- [x] No new top-level entry point; outputs routed through existing helpers; generated artifacts git-ignored.
 
 ---
 
@@ -902,11 +902,11 @@ Track completed phases here. **Next iteration starts at Phase I.**
 - [x] **Phase F** — Permutation validation of contrasts (`perm_p_value` in `panel_contrast_tests.csv`; seeded Cliff's δ label permutation)
 - [x] **Phase G** — Covariate control via partial Spearman (`statistics.partial_spearman`; `panel_continuous_associations.csv`)
 - [x] **Phase H** — Heterogeneity / variance-homogeneity testing (`statistics.variance_homogeneity_test`; `panel_variance_homogeneity.csv`)
-- [ ] **Phase I** — Clustering insight (reuse; optional UMAP supplement)
-- [ ] **Phase J** — Minimal interpretable model restricted to the panel
-- [ ] **Phase S** — Cross-endpoint consistency
-- [ ] **Phase L** — Graded robustness ranking
-- [ ] **Phase K** — Four-domain biochemical narrative report
+- [x] **Phase I** — Clustering insight (reuse; optional UMAP supplement)
+- [x] **Phase J** — Minimal interpretable model restricted to the panel
+- [x] **Phase S** — Cross-endpoint consistency
+- [x] **Phase L** — Graded robustness ranking
+- [x] **Phase K** — Four-domain biochemical narrative report
 
 ### Tier 2 — Structure-aware interpretability
 
