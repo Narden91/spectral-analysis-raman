@@ -52,9 +52,11 @@ def cliffs_delta(left: np.ndarray | pd.Series, right: np.ndarray | pd.Series) ->
     if left_values.size == 0 or right_values.size == 0:
         return np.nan
 
-    differences = left_values[:, np.newaxis] - right_values[np.newaxis, :]
+    sorted_right = np.sort(right_values)
+    less = np.searchsorted(sorted_right, left_values, side="left")
+    greater = right_values.size - np.searchsorted(sorted_right, left_values, side="right")
     n_pairs = float(left_values.size * right_values.size)
-    return float((np.sum(differences > 0) - np.sum(differences < 0)) / n_pairs)
+    return float((np.sum(less) - np.sum(greater)) / n_pairs)
 
 
 def _rank_covariates(covars: np.ndarray | pd.DataFrame | pd.Series, valid: np.ndarray) -> np.ndarray:
@@ -115,8 +117,10 @@ def partial_spearman(
 
     design = np.column_stack([np.ones(n, dtype=float), covar_ranks])
     rank = int(np.linalg.matrix_rank(design) - 1)
-    x_resid = x_rank - design @ np.linalg.lstsq(design, x_rank, rcond=None)[0]
-    y_resid = y_rank - design @ np.linalg.lstsq(design, y_rank, rcond=None)[0]
+    outcomes = np.column_stack([x_rank, y_rank])
+    fitted = design @ np.linalg.lstsq(design, outcomes, rcond=None)[0]
+    x_resid = x_rank - fitted[:, 0]
+    y_resid = y_rank - fitted[:, 1]
 
     if np.std(x_resid) == 0 or np.std(y_resid) == 0:
         return np.nan, np.nan, n

@@ -29,6 +29,14 @@ def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     return config if cfg is None else cfg
 
 
+def _resampling_settings(panel: dict[str, Any]) -> tuple[int, int, int]:
+    return (
+        int(panel.get("n_bootstrap", 2000)),
+        int(panel.get("n_permutations", 1000)),
+        int(panel.get("random_state", 42)),
+    )
+
+
 def _load_panel_and_clinical(
     *,
     feature_matrix_path: str | Path | None,
@@ -61,10 +69,80 @@ def _feature_family(feature: str, panel: dict[str, Any]) -> str:
     return "shape_or_external"
 
 
+def _contrast_specs(panel: dict[str, Any]) -> list[tuple[str, str, str, str]]:
+    specs: list[tuple[str, str, str, str]] = []
+    for contrast in panel.get("endpoints", {}).get("contrasts", []):
+        ordered_groups = [str(item) for item in contrast.get("ordered_groups", [])]
+        if len(ordered_groups) != 2:
+            continue
+        specs.append(
+            (
+                str(contrast.get("name", "contrast")),
+                str(contrast.get("group_variable", "")),
+                ordered_groups[0],
+                ordered_groups[1],
+            )
+        )
+    return specs
+
+
+def _feature_group_values(
+    frame: pd.DataFrame,
+    *,
+    group_column: str,
+    left_label: str,
+    right_label: str,
+    feature: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    groups = frame[group_column].astype("string")
+    left = frame.loc[groups == left_label, feature].to_numpy(dtype=float)
+    right = frame.loc[groups == right_label, feature].to_numpy(dtype=float)
+    return left[np.isfinite(left)], right[np.isfinite(right)]
+
+
+def _base_contrast_row(
+    *,
+    contrast_name: str,
+    group_column: str,
+    left_label: str,
+    right_label: str,
+    feature: str,
+    feature_family: str,
+    left: np.ndarray,
+    right: np.ndarray,
+    min_n: int,
+) -> dict[str, object]:
+    return {
+        "contrast_name": contrast_name,
+        "group_variable": group_column,
+        "group_a": left_label,
+        "group_b": right_label,
+        "feature_name": feature,
+        "feature_family": feature_family,
+        "n_group_a": int(left.size),
+        "n_group_b": int(right.size),
+        "status": "ok" if left.size >= min_n and right.size >= min_n else "insufficient sample size",
+    }
+
+
 def _p_values(frame: pd.DataFrame, column: str) -> np.ndarray:
     if column not in frame.columns:
         return np.full(len(frame), np.nan, dtype=float)
     return frame[column].to_numpy(dtype=float)
+
+
+def _add_fdr_columns(
+    frame: pd.DataFrame,
+    *,
+    p_column: str,
+    q_column: str,
+    significant_column: str,
+    alpha: float,
+) -> pd.DataFrame:
+    q_values, significant = fdr_correction(_p_values(frame, p_column), alpha=alpha)
+    frame[q_column] = q_values
+    frame[significant_column] = significant
+    return frame
 
 
 def _bootstrap_ci(
@@ -189,9 +267,7 @@ def run_anchor_test(
     feature = str(primary.get("feature", "oxidative_index"))
     endpoint = str(primary.get("endpoint", "delta_moca"))
     covariates = [str(item) for item in primary.get("covariates", panel.get("covariates", []))]
-    n_bootstrap = int(panel.get("n_bootstrap", 2000))
-    n_permutations = int(panel.get("n_permutations", 1000))
-    random_state = int(panel.get("random_state", 42))
+    n_bootstrap, n_permutations, random_state = _resampling_settings(panel)
 
     row: dict[str, object] = {
         "analysis_order": 1,
@@ -236,22 +312,19 @@ def run_anchor_test(
         }
     )
 
-    trajectory = next(
-        (
-            contrast
-            for contrast in panel.get("endpoints", {}).get("contrasts", [])
-            if str(contrast.get("name")) == "trajectory_extreme"
-        ),
-        None,
-    )
-    if trajectory is not None and feature in frame.columns and str(trajectory.get("group_variable")) in frame.columns:
-        group_column = str(trajectory["group_variable"])
-        left_label, right_label = [str(item) for item in trajectory.get("ordered_groups", [])[:2]]
-        left = frame.loc[frame[group_column].astype("string") == left_label, feature].to_numpy(dtype=float)
-        right = frame.loc[frame[group_column].astype("string") == right_label, feature].to_numpy(dtype=float)
+    trajectory = next((spec for spec in _contrast_specs(panel) if spec[0] == "trajectory_extreme"), None)
+    if trajectory is not None and feature in frame.columns and trajectory[1] in frame.columns:
+        _, group_column, left_label, right_label = trajectory
+        left, right = _feature_group_values(
+            frame,
+            group_column=group_column,
+            left_label=left_label,
+            right_label=right_label,
+            feature=feature,
+        )
         row["trajectory_cliffs_delta"] = cliffs_delta(left, right)
-        row["trajectory_n_group_a"] = int(np.isfinite(left).sum())
-        row["trajectory_n_group_b"] = int(np.isfinite(right).sum())
+        row["trajectory_n_group_a"] = int(left.size)
+        row["trajectory_n_group_b"] = int(right.size)
 
     return pd.DataFrame([row])
 
@@ -264,38 +337,33 @@ def run_panel_contrasts(
     cfg = _cfg(cfg)
     panel = panel_cfg(cfg)
     features = _panel_features(frame, panel)
-    n_bootstrap = int(panel.get("n_bootstrap", 2000))
-    n_permutations = int(panel.get("n_permutations", 1000))
-    random_state = int(panel.get("random_state", 42))
+    n_bootstrap, n_permutations, random_state = _resampling_settings(panel)
     min_n = int(panel.get("min_subjects_per_group", 5))
 
     rows: list[dict[str, object]] = []
-    for contrast in panel.get("endpoints", {}).get("contrasts", []):
-        contrast_name = str(contrast.get("name", "contrast"))
-        group_column = str(contrast.get("group_variable", ""))
-        ordered_groups = [str(item) for item in contrast.get("ordered_groups", [])]
-        if len(ordered_groups) != 2 or group_column not in frame.columns:
+    for contrast_name, group_column, left_label, right_label in _contrast_specs(panel):
+        if group_column not in frame.columns:
             continue
-        left_label, right_label = ordered_groups
-        groups = frame[group_column].astype("string")
         for feature_index, feature in enumerate(features):
-            left = frame.loc[groups == left_label, feature].to_numpy(dtype=float)
-            right = frame.loc[groups == right_label, feature].to_numpy(dtype=float)
-            left = left[np.isfinite(left)]
-            right = right[np.isfinite(right)]
-            status = "ok" if left.size >= min_n and right.size >= min_n else "insufficient sample size"
-            row = {
-                "contrast_name": contrast_name,
-                "group_variable": group_column,
-                "group_a": left_label,
-                "group_b": right_label,
-                "feature_name": feature,
-                "feature_family": _feature_family(feature, panel),
-                "n_group_a": int(left.size),
-                "n_group_b": int(right.size),
-                "status": status,
-            }
-            if status == "ok":
+            left, right = _feature_group_values(
+                frame,
+                group_column=group_column,
+                left_label=left_label,
+                right_label=right_label,
+                feature=feature,
+            )
+            row = _base_contrast_row(
+                contrast_name=contrast_name,
+                group_column=group_column,
+                left_label=left_label,
+                right_label=right_label,
+                feature=feature,
+                feature_family=_feature_family(feature, panel),
+                left=left,
+                right=right,
+                min_n=min_n,
+            )
+            if row["status"] == "ok":
                 test = stats.mannwhitneyu(left, right, alternative="two-sided")
                 ci_lower, ci_upper = _bootstrap_ci(
                     left,
@@ -327,13 +395,13 @@ def run_panel_contrasts(
     result = pd.DataFrame(rows)
     if result.empty:
         return result
-    q_values, significant = fdr_correction(
-        _p_values(result, "p_value"),
+    return _add_fdr_columns(
+        result,
+        p_column="p_value",
+        q_column="fdr_q",
+        significant_column="significant_fdr",
         alpha=float(panel.get("fdr_alpha", 0.05)),
     )
-    result["fdr_q"] = q_values
-    result["significant_fdr"] = significant
-    return result
 
 
 def run_continuous_associations(
@@ -388,19 +456,21 @@ def run_continuous_associations(
     result = pd.DataFrame(rows)
     if result.empty:
         return result
-    raw_q, raw_significant = fdr_correction(
-        _p_values(result, "raw_spearman_p_value"),
-        alpha=float(panel.get("fdr_alpha", 0.05)),
+    fdr_alpha = float(panel.get("fdr_alpha", 0.05))
+    result = _add_fdr_columns(
+        result,
+        p_column="raw_spearman_p_value",
+        q_column="raw_spearman_fdr_q",
+        significant_column="raw_spearman_significant_fdr",
+        alpha=fdr_alpha,
     )
-    partial_q, partial_significant = fdr_correction(
-        _p_values(result, "partial_spearman_p_value"),
-        alpha=float(panel.get("fdr_alpha", 0.05)),
+    return _add_fdr_columns(
+        result,
+        p_column="partial_spearman_p_value",
+        q_column="partial_spearman_fdr_q",
+        significant_column="partial_spearman_significant_fdr",
+        alpha=fdr_alpha,
     )
-    result["raw_spearman_fdr_q"] = raw_q
-    result["raw_spearman_significant_fdr"] = raw_significant
-    result["partial_spearman_fdr_q"] = partial_q
-    result["partial_spearman_significant_fdr"] = partial_significant
-    return result
 
 
 def run_variance_homogeneity(
@@ -414,34 +484,31 @@ def run_variance_homogeneity(
     min_n = int(panel.get("min_subjects_per_group", 5))
 
     rows: list[dict[str, object]] = []
-    for contrast in panel.get("endpoints", {}).get("contrasts", []):
-        contrast_name = str(contrast.get("name", "contrast"))
-        group_column = str(contrast.get("group_variable", ""))
-        ordered_groups = [str(item) for item in contrast.get("ordered_groups", [])]
-        if len(ordered_groups) != 2 or group_column not in frame.columns:
+    for contrast_name, group_column, left_label, right_label in _contrast_specs(panel):
+        if group_column not in frame.columns:
             continue
-        left_label, right_label = ordered_groups
-        groups = frame[group_column].astype("string")
         for feature in features:
-            left = frame.loc[groups == left_label, feature].to_numpy(dtype=float)
-            right = frame.loc[groups == right_label, feature].to_numpy(dtype=float)
-            left = left[np.isfinite(left)]
-            right = right[np.isfinite(right)]
-            status = "ok" if left.size >= min_n and right.size >= min_n else "insufficient sample size"
-            row = {
-                "contrast_name": contrast_name,
-                "group_variable": group_column,
-                "group_a": left_label,
-                "group_b": right_label,
-                "feature_name": feature,
-                "feature_family": _feature_family(feature, panel),
-                "n_group_a": int(left.size),
-                "n_group_b": int(right.size),
-                "variance_group_a": float(np.var(left, ddof=1)) if left.size > 1 else np.nan,
-                "variance_group_b": float(np.var(right, ddof=1)) if right.size > 1 else np.nan,
-                "status": status,
-            }
-            if status == "ok":
+            left, right = _feature_group_values(
+                frame,
+                group_column=group_column,
+                left_label=left_label,
+                right_label=right_label,
+                feature=feature,
+            )
+            row = _base_contrast_row(
+                contrast_name=contrast_name,
+                group_column=group_column,
+                left_label=left_label,
+                right_label=right_label,
+                feature=feature,
+                feature_family=_feature_family(feature, panel),
+                left=left,
+                right=right,
+                min_n=min_n,
+            )
+            row["variance_group_a"] = float(np.var(left, ddof=1)) if left.size > 1 else np.nan
+            row["variance_group_b"] = float(np.var(right, ddof=1)) if right.size > 1 else np.nan
+            if row["status"] == "ok":
                 levene_stat, levene_p = variance_homogeneity_test(left, right, center="mean")
                 bf_stat, bf_p = variance_homogeneity_test(left, right, center="median")
                 row.update(
@@ -457,19 +524,21 @@ def run_variance_homogeneity(
     result = pd.DataFrame(rows)
     if result.empty:
         return result
-    levene_q, levene_sig = fdr_correction(
-        _p_values(result, "levene_p_value"),
-        alpha=float(panel.get("fdr_alpha", 0.05)),
+    fdr_alpha = float(panel.get("fdr_alpha", 0.05))
+    result = _add_fdr_columns(
+        result,
+        p_column="levene_p_value",
+        q_column="levene_fdr_q",
+        significant_column="levene_significant_fdr",
+        alpha=fdr_alpha,
     )
-    bf_q, bf_sig = fdr_correction(
-        _p_values(result, "brown_forsythe_p_value"),
-        alpha=float(panel.get("fdr_alpha", 0.05)),
+    return _add_fdr_columns(
+        result,
+        p_column="brown_forsythe_p_value",
+        q_column="brown_forsythe_fdr_q",
+        significant_column="brown_forsythe_significant_fdr",
+        alpha=fdr_alpha,
     )
-    result["levene_fdr_q"] = levene_q
-    result["levene_significant_fdr"] = levene_sig
-    result["brown_forsythe_fdr_q"] = bf_q
-    result["brown_forsythe_significant_fdr"] = bf_sig
-    return result
 
 
 def _plot_effect_sizes(contrasts: pd.DataFrame, output_dir: Path) -> Path | None:
