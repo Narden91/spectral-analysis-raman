@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupKFold, KFold, LeaveOneGroupOut, LeaveOneOut
@@ -113,32 +114,21 @@ def _permutation_test(
     observed_r2: float,
     n_permutations: int,
     random_state: int,
+    n_jobs: int = 1,
 ) -> tuple[float, float, float]:
     """Perform permutation test on the PLS model using the fixed optimal component count."""
+    n_jobs = 1 if n_jobs == 0 else n_jobs
     rng = np.random.default_rng(random_state)
-    null_r2: list[float] = []
-
-    for _ in range(n_permutations):
-        y_perm = rng.permutation(y)
-        y_pred = np.zeros_like(y, dtype=float)
-
-        cv_kwargs = {"groups": groups} if groups is not None and not isinstance(cv_strategy, (KFold, LeaveOneOut)) else {}
-        for train_idx, test_idx in cv_strategy.split(X, y_perm, **cv_kwargs):
-            X_train, y_train = X[train_idx], y_perm[train_idx]
-            X_test, y_test = X[test_idx], y_perm[test_idx]
-
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
-
-            model = PLSRegression(n_components=min(best_c, X_train.shape[0] - 2), scale=False)
-            model.fit(X_train_scaled, y_train)
-            y_pred[test_idx] = model.predict(X_test_scaled).ravel()
-
-        ss_res = np.sum((y_perm - y_pred) ** 2)
-        ss_tot = np.sum((y_perm - np.mean(y_perm)) ** 2)
-        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
-        null_r2.append(r2)
+    if n_jobs != 1:
+        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
+        null_r2 = Parallel(n_jobs=n_jobs)(
+            delayed(_permuted_pls_r2)(X, y, cv_strategy, groups, best_c, int(seed))
+            for seed in seeds
+        )
+    else:
+        null_r2 = []
+        for _ in range(n_permutations):
+            null_r2.append(_permuted_pls_r2_with_rng(X, y, cv_strategy, groups, best_c, rng))
 
     null_r2_arr = np.array(null_r2)
     finite_null = null_r2_arr[np.isfinite(null_r2_arr)]
@@ -147,6 +137,47 @@ def _permutation_test(
 
     p_value = float(np.mean(finite_null >= observed_r2))
     return p_value, float(np.mean(finite_null)), float(np.std(finite_null))
+
+
+def _permuted_pls_r2(
+    X: np.ndarray,
+    y: np.ndarray,
+    cv_strategy: object,
+    groups: np.ndarray | None,
+    best_c: int,
+    seed: int,
+) -> float:
+    rng = np.random.default_rng(seed)
+    return _permuted_pls_r2_with_rng(X, y, cv_strategy, groups, best_c, rng)
+
+
+def _permuted_pls_r2_with_rng(
+    X: np.ndarray,
+    y: np.ndarray,
+    cv_strategy: object,
+    groups: np.ndarray | None,
+    best_c: int,
+    rng: np.random.Generator,
+) -> float:
+    y_perm = rng.permutation(y)
+    y_pred = np.zeros_like(y, dtype=float)
+
+    cv_kwargs = {"groups": groups} if groups is not None and not isinstance(cv_strategy, (KFold, LeaveOneOut)) else {}
+    for train_idx, test_idx in cv_strategy.split(X, y_perm, **cv_kwargs):
+        X_train, y_train = X[train_idx], y_perm[train_idx]
+        X_test = X[test_idx]
+
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+
+        model = PLSRegression(n_components=min(best_c, X_train.shape[0] - 2), scale=False)
+        model.fit(X_train_scaled, y_train)
+        y_pred[test_idx] = model.predict(X_test_scaled).ravel()
+
+    ss_res = np.sum((y_perm - y_pred) ** 2)
+    ss_tot = np.sum((y_perm - np.mean(y_perm)) ** 2)
+    return float(1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
 
 
 def run_pls_regression(
@@ -173,6 +204,7 @@ def run_pls_regression(
     min_subjects = int(pls_cfg.get("min_subjects", 10))
     vip_threshold = float(pls_cfg.get("vip_threshold", 1.0))
     n_permutations = int(pls_cfg.get("n_permutations", 1000))
+    n_jobs = int(pls_cfg.get("n_jobs", 1))
     random_state = int(pls_cfg.get("random_state", 42))
 
     perf_rows: list[dict[str, object]] = []
@@ -262,7 +294,7 @@ def run_pls_regression(
         observed_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
         p_value, null_mean, null_std = _permutation_test(
-            X, y, cv_strategy, groups, final_c, observed_r2, n_permutations, random_state
+            X, y, cv_strategy, groups, final_c, observed_r2, n_permutations, random_state, n_jobs=n_jobs
         )
 
         perf_rows.append({

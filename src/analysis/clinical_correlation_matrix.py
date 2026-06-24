@@ -149,6 +149,7 @@ def run_clinical_correlation_matrix(
     min_subjects = int(matrix_cfg.get("min_subjects", 5))
     cluster_alpha = float(matrix_cfg.get("cluster_alpha", 0.05))
     n_permutations = int(matrix_cfg.get("n_permutations", 1000))
+    n_jobs = int(matrix_cfg.get("n_jobs", 1))
     random_state = int(matrix_cfg.get("random_state", 42))
 
     target_dir = (
@@ -177,6 +178,7 @@ def run_clinical_correlation_matrix(
             n_permutations=n_permutations,
             cluster_alpha=cluster_alpha,
             random_state=random_state,
+            n_jobs=n_jobs,
         )
         correlation_frames.append(tests)
 

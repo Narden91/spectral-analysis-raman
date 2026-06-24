@@ -132,7 +132,30 @@ uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range both
 Notes:
 *   `--analysis-mode` overrides `analysis.mode` from config.
 *   `config/eda_disease_control.yaml` and `config/eda_disease_only.yaml` are thin wrappers over `config/eda.yaml`.
+*   `config/eda_disease_fast.yaml` is a **development-only** overlay on `eda_disease_only.yaml` that lowers permutation/bootstrap counts and CV cost so cross-region phases finish quickly. Do **not** use it for final scientific outputs.
 *   Output root selection is derived from the resolved EDA mode, not from `data.subject_group` or wrapper-specific output paths.
+
+#### Fast iteration (disease-only cross-region phases)
+
+For day-to-day development after Biological PCA, prefer the fast profile:
+
+```bash
+uv run scripts/run_eda.py --config config/eda_disease_fast.yaml --range both --max-subjects 8
+```
+
+Production disease-only runs should use `config/eda_disease_only.yaml` (full resampling counts from `config/eda.yaml`).
+
+After each EDA run, inspect per-phase wall time at:
+
+```text
+Results_intra_disease/00_run_metadata/disease_only_cross_region_phase_timing.csv
+```
+
+Resampling-heavy steps parallelize across CPU cores via `n_jobs` in config (default `-1` in `config/eda.yaml`). Set `n_jobs: 1` to force the serial path. GPU acceleration is **not** part of the analysis pipeline; optional CUDA readiness can be checked with:
+
+```bash
+uv run scripts/check_gpu_readiness.py
+```
 
 ### 3. Spectral Plotting & QC Visualization
 Generate post-preprocessing waveforms and individual scan layouts for diagnostic audit:

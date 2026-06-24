@@ -32,3 +32,7 @@ filterwarnings = [
 dev = [
     "pytest>=9.0.2",
 ]
+gpu = [
+    # CUDA 13.x wheels; matches driver CUDA UMD 13.x (RTX 5080). [ctk] bundles runtime libs.
+    "cupy-cuda13x[ctk]>=14.0.0",
+]

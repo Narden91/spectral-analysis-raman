@@ -180,6 +180,7 @@ def run_longitudinal_moca(
     min_subjects = int(longitudinal_cfg.get("min_subjects", 5))
     cluster_alpha = float(longitudinal_cfg.get("cluster_alpha", 0.05))
     n_permutations = int(longitudinal_cfg.get("n_permutations", 1000))
+    n_jobs = int(longitudinal_cfg.get("n_jobs", 1))
     random_state = int(longitudinal_cfg.get("random_state", 42))
 
     delta_associations = compute_spearman_feature_tests(
@@ -197,6 +198,7 @@ def run_longitudinal_moca(
             n_permutations=n_permutations,
             cluster_alpha=cluster_alpha,
             random_state=random_state,
+            n_jobs=n_jobs,
         )
     else:
         delta_associations = pd.DataFrame(
@@ -236,6 +238,7 @@ def run_longitudinal_moca(
             n_permutations=n_permutations,
             cluster_alpha=cluster_alpha,
             random_state=random_state,
+            n_jobs=n_jobs,
         )
     elif group_comparison.empty:
         group_comparison = _empty_group_table()

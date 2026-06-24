@@ -1,5 +1,25 @@
 # Biologically-Constrained Intra-Disease Raman Analysis — Step-by-Step Implementation Plan
 
+> **Agent onboarding — read before editing or extending this plan**
+>
+> The disease-only cross-region orchestrator (`src/analysis/disease_only_pipeline.py`)
+> has been optimized for **CPU-first, config-driven** iteration. Keep these
+> constraints in mind so you do not break scientific behavior or mis-document
+> outputs.
+>
+> | Topic | Current behavior | Caveat |
+> |---|---|---|
+> | **Fast dev profile** | `config/eda_disease_fast.yaml` lowers `n_permutations`, bootstrap counts, and CV splits while keeping the full phase graph | **Not for final/manuscript outputs.** Use `config/eda_disease_only.yaml` (or `config/eda.yaml` with `analysis.mode: disease_only`) for production runs. |
+> | **Smoke / iteration command** | `uv run scripts/run_eda.py --config config/eda_disease_fast.yaml --range both --max-subjects 8` | Still runs Biological PCA and all enabled cross-region phases; only resampling cost is reduced. |
+> | **CPU parallelism** | Resampling-heavy phases accept `n_jobs` in config (`-1` = all cores). Wired in cluster permutation, PLS/sPLS-DA permutation tests, confirmatory-panel bootstrap/permutation, and minimal panel. | Default `config/eda.yaml` sets `n_jobs: -1`. Set `n_jobs: 1` to force the serial reference path (debugging). Parallel workers use **deterministic per-draw seeds** derived from each phase `random_state`. |
+> | **Phase timing baseline** | After cross-region phases, writes `00_run_metadata/disease_only_cross_region_phase_timing.csv` under the active EDA root (`Results_intra_disease/` or `Results_control_vs_disease/`) | Timing is metadata only; it is **not** returned from `run_disease_only_cross_region_pipeline()` outputs. Use it to find hotspots before adding new acceleration. |
+> | **Feature-matrix I/O cache** | `load_subject_feature_matrix()` caches Parquet reads in-process keyed by resolved path + file mtime/size | Safe within one run; invalidates when the matrix file changes. Do not assume cross-process/shared cache. |
+> | **GPU / NVIDIA** | **No GPU acceleration in the analysis pipeline today.** `scripts/check_gpu_readiness.py` is an optional CuPy probe + CPU-vs-GPU numeric equivalence gate for future work. Minimal-panel outputs may log `gpu_status`; compute backend remains `sklearn_cpu`. | Do **not** swap sklearn/scipy statistical paths for cuML/GPU solvers without explicit equivalence tests and reviewer-visible documentation. liblinear-locked classifiers and custom permutation tests block naive GPU drop-in. |
+> | **Typical hotspot** | `confirmatory_panel` (Phases E–H resampling on the pre-registered panel) often dominates wall time even in the fast profile | Lowering `preregistered_panel.n_bootstrap` / `n_permutations` in a dev overlay is the highest-leverage config knob; parallel `n_jobs` is the highest-leverage code knob already shipped. |
+>
+> Authoritative repo guidance also lives in `CLAUDE.md`, `README.md`, and
+> `.cursor/skills/spectral-analysis-repo/`.
+
 This document is a phase-by-phase implementation checklist for evolving the
 intra-disease (`disease_only`) layer of the Raman spectral-analysis pipeline
 from a high-dimensional *statistical discovery* workflow into a

@@ -9,6 +9,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from scipy import stats
 
 from src import config, get_confirmatory_panel_dir
@@ -30,11 +31,12 @@ def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     return config if cfg is None else cfg
 
 
-def _resampling_settings(panel: dict[str, Any]) -> tuple[int, int, int]:
+def _resampling_settings(panel: dict[str, Any]) -> tuple[int, int, int, int]:
     return (
         int(panel.get("n_bootstrap", 2000)),
         int(panel.get("n_permutations", 1000)),
         int(panel.get("random_state", 42)),
+        int(panel.get("n_jobs", 1)),
     )
 
 
@@ -153,6 +155,7 @@ def _bootstrap_ci(
     *,
     n_bootstrap: int,
     random_state: int,
+    n_jobs: int = 1,
 ) -> tuple[float, float]:
     left = left[np.isfinite(left)]
     right = right[np.isfinite(right)]
@@ -160,11 +163,22 @@ def _bootstrap_ci(
         return np.nan, np.nan
 
     rng = np.random.default_rng(random_state)
-    estimates = np.empty(n_bootstrap, dtype=float)
-    for i in range(n_bootstrap):
-        boot_left = rng.choice(left, size=left.size, replace=True)
-        boot_right = rng.choice(right, size=right.size, replace=True)
-        estimates[i] = statistic_fn(boot_left, boot_right)
+    n_jobs = 1 if n_jobs == 0 else n_jobs
+    if n_jobs != 1:
+        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_bootstrap, dtype=np.int64)
+        estimates = np.array(
+            Parallel(n_jobs=n_jobs)(
+                delayed(_bootstrap_two_group_statistic)(left, right, statistic_fn, int(seed))
+                for seed in seeds
+            ),
+            dtype=float,
+        )
+    else:
+        estimates = np.empty(n_bootstrap, dtype=float)
+        for i in range(n_bootstrap):
+            boot_left = rng.choice(left, size=left.size, replace=True)
+            boot_right = rng.choice(right, size=right.size, replace=True)
+            estimates[i] = statistic_fn(boot_left, boot_right)
     finite = estimates[np.isfinite(estimates)]
     if finite.size == 0:
         return np.nan, np.nan
@@ -180,6 +194,7 @@ def _bootstrap_partial_spearman_ci(
     covariates: list[str],
     n_bootstrap: int,
     random_state: int,
+    n_jobs: int = 1,
 ) -> tuple[float, float]:
     columns = [feature, endpoint, *covariates]
     complete = frame[columns].dropna()
@@ -187,14 +202,31 @@ def _bootstrap_partial_spearman_ci(
         return np.nan, np.nan
 
     rng = np.random.default_rng(random_state)
-    estimates = np.empty(n_bootstrap, dtype=float)
-    for i in range(n_bootstrap):
-        sample = complete.iloc[rng.integers(0, len(complete), size=len(complete))]
-        estimates[i] = partial_spearman(
-            sample[feature],
-            sample[endpoint],
-            sample[covariates],
-        )[0]
+    n_jobs = 1 if n_jobs == 0 else n_jobs
+    if n_jobs != 1:
+        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_bootstrap, dtype=np.int64)
+        estimates = np.array(
+            Parallel(n_jobs=n_jobs)(
+                delayed(_bootstrap_partial_spearman_statistic)(
+                    complete,
+                    feature,
+                    endpoint,
+                    covariates,
+                    int(seed),
+                )
+                for seed in seeds
+            ),
+            dtype=float,
+        )
+    else:
+        estimates = np.empty(n_bootstrap, dtype=float)
+        for i in range(n_bootstrap):
+            sample = complete.iloc[rng.integers(0, len(complete), size=len(complete))]
+            estimates[i] = partial_spearman(
+                sample[feature],
+                sample[endpoint],
+                sample[covariates],
+            )[0]
     finite = estimates[np.isfinite(estimates)]
     if finite.size == 0:
         return np.nan, np.nan
@@ -208,6 +240,7 @@ def _permutation_p_value(
     *,
     n_permutations: int,
     random_state: int,
+    n_jobs: int = 1,
 ) -> float:
     left = left[np.isfinite(left)]
     right = right[np.isfinite(right)]
@@ -218,12 +251,22 @@ def _permutation_p_value(
     pooled = np.concatenate([left, right])
     n_left = left.size
     rng = np.random.default_rng(random_state)
-    exceedances = 0
-    for _ in range(n_permutations):
-        permuted = rng.permutation(pooled)
-        permuted_delta = abs(cliffs_delta(permuted[:n_left], permuted[n_left:]))
-        if permuted_delta >= observed - 1e-12:
-            exceedances += 1
+    n_jobs = 1 if n_jobs == 0 else n_jobs
+    if n_jobs != 1:
+        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
+        exceedances = sum(
+            Parallel(n_jobs=n_jobs)(
+                delayed(_permuted_cliffs_delta_exceeds)(pooled, n_left, observed, int(seed))
+                for seed in seeds
+            )
+        )
+    else:
+        exceedances = 0
+        for _ in range(n_permutations):
+            permuted = rng.permutation(pooled)
+            permuted_delta = abs(cliffs_delta(permuted[:n_left], permuted[n_left:]))
+            if permuted_delta >= observed - 1e-12:
+                exceedances += 1
     return float((exceedances + 1) / (n_permutations + 1))
 
 
@@ -235,6 +278,7 @@ def _permutation_partial_spearman_p_value(
     covariates: list[str],
     n_permutations: int,
     random_state: int,
+    n_jobs: int = 1,
 ) -> float:
     columns = [feature, endpoint, *covariates]
     complete = frame[columns].dropna()
@@ -246,15 +290,85 @@ def _permutation_partial_spearman_p_value(
         return np.nan
 
     rng = np.random.default_rng(random_state)
-    exceedances = 0
     endpoint_values = complete[endpoint].to_numpy(dtype=float)
-    for _ in range(n_permutations):
-        shuffled = complete.copy()
-        shuffled[endpoint] = rng.permutation(endpoint_values)
-        permuted = abs(partial_spearman(shuffled[feature], shuffled[endpoint], shuffled[covariates])[0])
-        if np.isfinite(permuted) and permuted >= observed - 1e-12:
-            exceedances += 1
+    n_jobs = 1 if n_jobs == 0 else n_jobs
+    if n_jobs != 1:
+        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
+        exceedances = sum(
+            Parallel(n_jobs=n_jobs)(
+                delayed(_permuted_partial_spearman_exceeds)(
+                    complete,
+                    feature,
+                    endpoint,
+                    covariates,
+                    endpoint_values,
+                    observed,
+                    int(seed),
+                )
+                for seed in seeds
+            )
+        )
+    else:
+        exceedances = 0
+        for _ in range(n_permutations):
+            shuffled = complete.copy()
+            shuffled[endpoint] = rng.permutation(endpoint_values)
+            permuted = abs(partial_spearman(shuffled[feature], shuffled[endpoint], shuffled[covariates])[0])
+            if np.isfinite(permuted) and permuted >= observed - 1e-12:
+                exceedances += 1
     return float((exceedances + 1) / (n_permutations + 1))
+
+
+def _bootstrap_two_group_statistic(
+    left: np.ndarray,
+    right: np.ndarray,
+    statistic_fn,
+    seed: int,
+) -> float:
+    rng = np.random.default_rng(seed)
+    boot_left = rng.choice(left, size=left.size, replace=True)
+    boot_right = rng.choice(right, size=right.size, replace=True)
+    return float(statistic_fn(boot_left, boot_right))
+
+
+def _bootstrap_partial_spearman_statistic(
+    complete: pd.DataFrame,
+    feature: str,
+    endpoint: str,
+    covariates: list[str],
+    seed: int,
+) -> float:
+    rng = np.random.default_rng(seed)
+    sample = complete.iloc[rng.integers(0, len(complete), size=len(complete))]
+    return float(partial_spearman(sample[feature], sample[endpoint], sample[covariates])[0])
+
+
+def _permuted_cliffs_delta_exceeds(
+    pooled: np.ndarray,
+    n_left: int,
+    observed: float,
+    seed: int,
+) -> bool:
+    rng = np.random.default_rng(seed)
+    permuted = rng.permutation(pooled)
+    permuted_delta = abs(cliffs_delta(permuted[:n_left], permuted[n_left:]))
+    return bool(permuted_delta >= observed - 1e-12)
+
+
+def _permuted_partial_spearman_exceeds(
+    complete: pd.DataFrame,
+    feature: str,
+    endpoint: str,
+    covariates: list[str],
+    endpoint_values: np.ndarray,
+    observed: float,
+    seed: int,
+) -> bool:
+    rng = np.random.default_rng(seed)
+    shuffled = complete.copy()
+    shuffled[endpoint] = rng.permutation(endpoint_values)
+    permuted = abs(partial_spearman(shuffled[feature], shuffled[endpoint], shuffled[covariates])[0])
+    return bool(np.isfinite(permuted) and permuted >= observed - 1e-12)
 
 
 def run_anchor_test(
@@ -268,7 +382,7 @@ def run_anchor_test(
     feature = str(primary.get("feature", "oxidative_index"))
     endpoint = str(primary.get("endpoint", "delta_moca"))
     covariates = [str(item) for item in primary.get("covariates", panel.get("covariates", []))]
-    n_bootstrap, n_permutations, random_state = _resampling_settings(panel)
+    n_bootstrap, n_permutations, random_state, n_jobs = _resampling_settings(panel)
 
     row: dict[str, object] = {
         "analysis_order": 1,
@@ -293,6 +407,7 @@ def run_anchor_test(
         covariates=covariates,
         n_bootstrap=n_bootstrap,
         random_state=random_state,
+        n_jobs=n_jobs,
     )
     perm_p = _permutation_partial_spearman_p_value(
         frame,
@@ -301,6 +416,7 @@ def run_anchor_test(
         covariates=covariates,
         n_permutations=n_permutations,
         random_state=random_state,
+        n_jobs=n_jobs,
     )
     row.update(
         {
@@ -338,7 +454,7 @@ def run_panel_contrasts(
     cfg = _cfg(cfg)
     panel = panel_cfg(cfg)
     features = _panel_features(frame, panel)
-    n_bootstrap, n_permutations, random_state = _resampling_settings(panel)
+    n_bootstrap, n_permutations, random_state, n_jobs = _resampling_settings(panel)
     min_n = int(panel.get("min_subjects_per_group", 5))
 
     rows: list[dict[str, object]] = []
@@ -372,6 +488,7 @@ def run_panel_contrasts(
                     cliffs_delta,
                     n_bootstrap=n_bootstrap,
                     random_state=random_state + feature_index,
+                    n_jobs=n_jobs,
                 )
                 row.update(
                     {
@@ -386,6 +503,7 @@ def run_panel_contrasts(
                             right,
                             n_permutations=n_permutations,
                             random_state=random_state + feature_index,
+                            n_jobs=n_jobs,
                         ),
                         "mean_group_a": float(np.mean(left)),
                         "mean_group_b": float(np.mean(right)),

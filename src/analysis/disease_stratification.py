@@ -89,6 +89,7 @@ def _apply_cluster_permutation(
     n_permutations: int,
     cluster_alpha: float,
     random_state: int,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
     return apply_binary_cluster_permutation(
         tests,
@@ -98,6 +99,7 @@ def _apply_cluster_permutation(
         n_permutations=n_permutations,
         cluster_alpha=cluster_alpha,
         random_state=random_state,
+        n_jobs=n_jobs,
     )
 
 
@@ -277,6 +279,7 @@ def run_disease_stratification(
     min_subjects = int(strat_cfg.get("min_subjects_per_group", 5))
     cluster_alpha = float(strat_cfg.get("cluster_alpha", 0.05))
     n_permutations = int(strat_cfg.get("n_permutations", 1000))
+    n_jobs = int(strat_cfg.get("n_jobs", 1))
     random_state = int(strat_cfg.get("random_state", 42))
 
     test_frames: list[pd.DataFrame] = []
@@ -299,6 +302,7 @@ def run_disease_stratification(
             n_permutations=n_permutations,
             cluster_alpha=cluster_alpha,
             random_state=random_state,
+            n_jobs=n_jobs,
         )
         test_frames.append(tests)
         count_frames.append(counts)

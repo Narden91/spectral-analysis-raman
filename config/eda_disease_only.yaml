@@ -3,6 +3,9 @@
 # clean clinical CSV. Condition/diagnosis labels are context here, not the
 # grouping variable; intra-disease analysis restricts to disease subjects
 # by construction (see src/analysis/intra_disease.py).
+#
+# Fast dev overlay (reduced permutations/CV): config/eda_disease_fast.yaml
+# Production / manuscript runs: use this file, not the fast overlay.
 # ---------------------------------------------------------------------------
 _extends: eda.yaml
 

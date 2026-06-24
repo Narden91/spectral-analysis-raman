@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -26,16 +27,27 @@ def _cfg(cfg: dict | None = None) -> dict:
     return config if cfg is None else cfg
 
 
-def load_subject_feature_matrix(
-    *,
-    feature_matrix_path: str | Path | None = None,
-) -> pd.DataFrame:
-    path = (
+def _feature_matrix_path(feature_matrix_path: str | Path | None = None) -> Path:
+    return (
         Path(feature_matrix_path)
         if feature_matrix_path is not None
         else get_cross_region_phase_dir("subject_features") / "subject_feature_matrix_whole.parquet"
     )
-    frame = pd.read_parquet(path)
+
+
+@lru_cache(maxsize=4)
+def _read_subject_feature_matrix_cached(path: str, mtime_ns: int, size: int) -> pd.DataFrame:
+    logger.debug("Reading subject feature matrix from %s", path)
+    return pd.read_parquet(path)
+
+
+def load_subject_feature_matrix(
+    *,
+    feature_matrix_path: str | Path | None = None,
+) -> pd.DataFrame:
+    path = _feature_matrix_path(feature_matrix_path)
+    stat = path.stat()
+    frame = _read_subject_feature_matrix_cached(str(path.resolve()), stat.st_mtime_ns, stat.st_size).copy()
     if "subject_id" not in frame.columns:
         raise ValueError("Subject feature matrix is missing subject_id")
     frame = frame.copy()

@@ -6,6 +6,12 @@
 # settings.  Create a copy (e.g. config/eda_custom.yaml) with
 #   _extends: eda.yaml
 # to override specific keys for a particular experiment.
+#
+# Performance notes (disease-only cross-region phases):
+# - Resampling-heavy blocks use n_jobs: -1 (all CPU cores) by default.
+# - For fast dev iteration (NOT final science), use config/eda_disease_fast.yaml.
+# - Phase timing CSV: <eda_root>/00_run_metadata/disease_only_cross_region_phase_timing.csv
+# - See README.md, CLAUDE.md, and docs/implementation_plan.md (agent onboarding).
 # ---------------------------------------------------------------------------
 _extends: settings.yaml
 
@@ -84,6 +90,7 @@ analysis:
     min_subjects_per_group: 5  # int: skip formal testing when any stratum falls below this size
     cluster_alpha: 0.05  # float: uncorrected cluster-forming threshold
     n_permutations: 1000  # int: label permutations for cluster-mass correction
+    n_jobs: -1  # int: joblib workers for permutation tests; -1 uses all cores
     random_state: 42  # int: reproducibility seed for permutation testing
     candidate_region_min_width_cm: 8.0  # float: minimum merged region width
     candidate_region_merge_gap_cm: 6.0  # float: maximum within-region gap
@@ -95,6 +102,7 @@ analysis:
     fdr_alpha: 0.05  # float: BH-FDR significance threshold
     cluster_alpha: 0.05  # float: uncorrected cluster-forming threshold
     n_permutations: 1000  # int: target permutations for cluster-mass correction
+    n_jobs: -1  # int: joblib workers for permutation tests; -1 uses all cores
     random_state: 42  # int: reproducibility seed for permutation testing
     candidate_region_min_width_cm: 8.0  # float: minimum merged region width
     candidate_region_merge_gap_cm: 6.0  # float: maximum within-region gap
@@ -105,6 +113,7 @@ analysis:
     fdr_alpha: 0.05  # float: BH-FDR significance threshold
     cluster_alpha: 0.05  # float: uncorrected cluster-forming threshold
     n_permutations: 1000  # int: permutations for cluster-mass correction
+    n_jobs: -1  # int: joblib workers for permutation tests; -1 uses all cores
     random_state: 42  # int: reproducibility seed for permutation testing
     candidate_region_min_width_cm: 8.0  # float: minimum merged region width
     candidate_region_merge_gap_cm: 6.0  # float: maximum within-region gap
@@ -129,6 +138,7 @@ analysis:
     min_subjects: 10
     vip_threshold: 1.0
     n_permutations: 1000
+    n_jobs: -1
     random_state: 42
   splsda:
     enabled: true
@@ -146,6 +156,7 @@ analysis:
     n_inner_splits: 3
     min_subjects_per_group: 3
     n_permutations: 500
+    n_jobs: -1
     random_state: 42
     emit_oplsda: false
   biochemical_ratios:
@@ -208,6 +219,7 @@ analysis:
     fdr_alpha: 0.05
     n_permutations: 1000
     n_bootstrap: 2000
+    n_jobs: -1
     random_state: 42
     min_subjects_per_group: 5
     min_snr_for_peak_fit: 5.0

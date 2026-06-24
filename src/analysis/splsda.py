@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
@@ -133,39 +134,102 @@ def _permutation_test(
     observed_bal_acc: float,
     n_permutations: int,
     random_state: int,
+    n_jobs: int = 1,
 ) -> float:
+    n_jobs = 1 if n_jobs == 0 else n_jobs
     rng = np.random.default_rng(random_state)
-    null_scores = []
-    
-    for _ in range(n_permutations):
-        y_perm = rng.permutation(y)
-        y_pred = np.zeros_like(y, dtype=int)
-        
-        cv_kwargs = {"groups": groups} if groups is not None else {}
-        for train_idx, test_idx in cv_strategy.split(X, y_perm, **cv_kwargs):
-            X_train, y_train = X[train_idx], y_perm[train_idx]
-            X_test, y_test = X[test_idx], y_perm[test_idx]
-            
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
-            
-            n_c = min(best_n_comp, X_train.shape[0] - 2)
-            pls = PLSRegression(n_components=max(1, n_c), scale=False)
-            pls.fit(X_train_scaled, y_train)
-            
-            X_train_pls = pls.transform(X_train_scaled)
-            X_test_pls = pls.transform(X_test_scaled)
-            
-            clf = l1_logistic_model(c=best_c, random_state=random_state)
-            fit_with_convergence_capture(clf, X_train_pls, y_train, context="sPLS-DA permutation CV")
-            
-            y_pred[test_idx] = clf.predict(X_test_pls)
-            
-        null_scores.append(balanced_accuracy_score(y_perm, y_pred))
-        
+    if n_jobs != 1:
+        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
+        null_scores = Parallel(n_jobs=n_jobs)(
+            delayed(_permuted_splsda_score)(
+                X,
+                y,
+                cv_strategy,
+                groups,
+                best_n_comp,
+                best_c,
+                random_state,
+                int(seed),
+            )
+            for seed in seeds
+        )
+    else:
+        null_scores = [
+            _permuted_splsda_score_with_rng(
+                X,
+                y,
+                cv_strategy,
+                groups,
+                best_n_comp,
+                best_c,
+                random_state,
+                rng,
+            )
+            for _ in range(n_permutations)
+        ]
+
     null_scores = np.array(null_scores)
     return float(np.mean(null_scores >= observed_bal_acc))
+
+
+def _permuted_splsda_score(
+    X: np.ndarray,
+    y: np.ndarray,
+    cv_strategy: object,
+    groups: np.ndarray | None,
+    best_n_comp: int,
+    best_c: float,
+    random_state: int,
+    seed: int,
+) -> float:
+    rng = np.random.default_rng(seed)
+    return _permuted_splsda_score_with_rng(
+        X,
+        y,
+        cv_strategy,
+        groups,
+        best_n_comp,
+        best_c,
+        random_state,
+        rng,
+    )
+
+
+def _permuted_splsda_score_with_rng(
+    X: np.ndarray,
+    y: np.ndarray,
+    cv_strategy: object,
+    groups: np.ndarray | None,
+    best_n_comp: int,
+    best_c: float,
+    random_state: int,
+    rng: np.random.Generator,
+) -> float:
+    y_perm = rng.permutation(y)
+    y_pred = np.zeros_like(y, dtype=int)
+
+    cv_kwargs = {"groups": groups} if groups is not None else {}
+    for train_idx, test_idx in cv_strategy.split(X, y_perm, **cv_kwargs):
+        X_train, y_train = X[train_idx], y_perm[train_idx]
+        X_test = X[test_idx]
+
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+
+        n_c = min(best_n_comp, X_train.shape[0] - 2)
+        pls = PLSRegression(n_components=max(1, n_c), scale=False)
+        pls.fit(X_train_scaled, y_train)
+
+        X_train_pls = pls.transform(X_train_scaled)
+        X_test_pls = pls.transform(X_test_scaled)
+
+        clf = l1_logistic_model(c=best_c, random_state=random_state)
+        fit_with_convergence_capture(clf, X_train_pls, y_train, context="sPLS-DA permutation CV")
+
+        y_pred[test_idx] = clf.predict(X_test_pls)
+
+    return float(balanced_accuracy_score(y_perm, y_pred))
 
 
 def run_splsda_classifier(
@@ -249,6 +313,7 @@ def run_splsda_classifier(
     n_inner_splits = int(splsda_cfg.get("n_inner_splits", 3))
     min_subjects_per_group = int(splsda_cfg.get("min_subjects_per_group", 3))
     n_permutations = int(splsda_cfg.get("n_permutations", 500))
+    n_jobs = int(splsda_cfg.get("n_jobs", 1))
     random_state = int(splsda_cfg.get("random_state", 42))
     emit_oplsda = bool(splsda_cfg.get("emit_oplsda", False))
 
@@ -355,7 +420,18 @@ def run_splsda_classifier(
                 "selected": bool(overall_weights[i] != 0.0)
             })
             
-        p_value = _permutation_test(X, y, cv_strategy, groups, final_n, final_c, bal_acc, n_permutations, random_state)
+        p_value = _permutation_test(
+            X,
+            y,
+            cv_strategy,
+            groups,
+            final_n,
+            final_c,
+            bal_acc,
+            n_permutations,
+            random_state,
+            n_jobs=n_jobs,
+        )
         
         perf_rows.append({
             "group_variable": group_var,

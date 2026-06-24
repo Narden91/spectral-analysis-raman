@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from scipy import stats
+
+
+def _normalize_n_jobs(n_jobs: int) -> int:
+    return 1 if n_jobs == 0 else n_jobs
 
 
 def _rank_biserial_effect(
@@ -117,27 +122,54 @@ def _binary_cluster_maxima(
     n_permutations: int,
     cluster_alpha: float,
     rng: np.random.Generator,
+    n_jobs: int = 1,
 ) -> np.ndarray:
+    n_jobs = _normalize_n_jobs(n_jobs)
+    if n_jobs != 1:
+        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
+        return np.array(
+            Parallel(n_jobs=n_jobs)(
+                delayed(_binary_cluster_maximum)(values, labels, cluster_alpha, int(seed))
+                for seed in seeds
+            ),
+            dtype=float,
+        )
+
     maxima = np.zeros(n_permutations, dtype=float)
     n_left = int((labels == 0).sum())
     for perm_index in range(n_permutations):
         order = rng.permutation(len(labels))
-        left = values[order[:n_left]]
-        right = values[order[n_left:]]
-        test_result = stats.mannwhitneyu(
-            left,
-            right,
-            axis=0,
-            alternative="two-sided",
-        )
-        p_values = np.asarray(test_result.pvalue, dtype=float)
-        effects = np.asarray(
-            _rank_biserial_effect(left, right, np.asarray(test_result.statistic, dtype=float)),
-            dtype=float,
-        )
-        clusters = find_signed_clusters(effects, p_values, alpha=cluster_alpha)
-        maxima[perm_index] = max((mass for _, _, mass in clusters), default=0.0)
+        maxima[perm_index] = _binary_cluster_mass_for_order(values, order, int((labels == 0).sum()), cluster_alpha)
     return maxima
+
+
+def _binary_cluster_maximum(values: np.ndarray, labels: np.ndarray, cluster_alpha: float, seed: int) -> float:
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(labels))
+    return _binary_cluster_mass_for_order(values, order, int((labels == 0).sum()), cluster_alpha)
+
+
+def _binary_cluster_mass_for_order(
+    values: np.ndarray,
+    order: np.ndarray,
+    n_left: int,
+    cluster_alpha: float,
+) -> float:
+    left = values[order[:n_left]]
+    right = values[order[n_left:]]
+    test_result = stats.mannwhitneyu(
+        left,
+        right,
+        axis=0,
+        alternative="two-sided",
+    )
+    p_values = np.asarray(test_result.pvalue, dtype=float)
+    effects = np.asarray(
+        _rank_biserial_effect(left, right, np.asarray(test_result.statistic, dtype=float)),
+        dtype=float,
+    )
+    clusters = find_signed_clusters(effects, p_values, alpha=cluster_alpha)
+    return max((mass for _, _, mass in clusters), default=0.0)
 
 
 def _spearman_cluster_maxima(
@@ -147,23 +179,77 @@ def _spearman_cluster_maxima(
     n_permutations: int,
     cluster_alpha: float,
     rng: np.random.Generator,
+    n_jobs: int = 1,
 ) -> np.ndarray:
     maxima = np.zeros(n_permutations, dtype=float)
     prepared_columns, centered_features, feature_denoms = _prepare_ranked_features(values)
     ranked_target = stats.rankdata(target_values, method="average")
     centered_target = ranked_target - float(np.mean(ranked_target))
 
+    n_jobs = _normalize_n_jobs(n_jobs)
+    if n_jobs != 1:
+        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
+        return np.array(
+            Parallel(n_jobs=n_jobs)(
+                delayed(_spearman_cluster_maximum)(
+                    prepared_columns,
+                    centered_features,
+                    feature_denoms,
+                    centered_target,
+                    cluster_alpha,
+                    int(seed),
+                )
+                for seed in seeds
+            ),
+            dtype=float,
+        )
+
     for perm_index in range(n_permutations):
         permuted_target = centered_target[rng.permutation(len(centered_target))]
-        rho, p_values = _prepared_spearman(
+        maxima[perm_index] = _spearman_cluster_mass_for_target(
             prepared_columns,
             centered_features,
             feature_denoms,
             permuted_target,
+            cluster_alpha,
         )
-        clusters = find_signed_clusters(rho, p_values, alpha=cluster_alpha)
-        maxima[perm_index] = max((mass for _, _, mass in clusters), default=0.0)
     return maxima
+
+
+def _spearman_cluster_maximum(
+    prepared_columns: np.ndarray,
+    centered_features: np.ndarray,
+    feature_denoms: np.ndarray,
+    centered_target: np.ndarray,
+    cluster_alpha: float,
+    seed: int,
+) -> float:
+    rng = np.random.default_rng(seed)
+    permuted_target = centered_target[rng.permutation(len(centered_target))]
+    return _spearman_cluster_mass_for_target(
+        prepared_columns,
+        centered_features,
+        feature_denoms,
+        permuted_target,
+        cluster_alpha,
+    )
+
+
+def _spearman_cluster_mass_for_target(
+    prepared_columns: np.ndarray,
+    centered_features: np.ndarray,
+    feature_denoms: np.ndarray,
+    permuted_target: np.ndarray,
+    cluster_alpha: float,
+) -> float:
+    rho, p_values = _prepared_spearman(
+        prepared_columns,
+        centered_features,
+        feature_denoms,
+        permuted_target,
+    )
+    clusters = find_signed_clusters(rho, p_values, alpha=cluster_alpha)
+    return max((mass for _, _, mass in clusters), default=0.0)
 
 
 def apply_spearman_cluster_permutation(
@@ -174,6 +260,7 @@ def apply_spearman_cluster_permutation(
     n_permutations: int,
     cluster_alpha: float,
     random_state: int,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
     if tests.empty or tests["status"].ne("ok").all():
         return tests
@@ -203,6 +290,7 @@ def apply_spearman_cluster_permutation(
             n_permutations=n_permutations,
             cluster_alpha=cluster_alpha,
             rng=rng,
+            n_jobs=n_jobs,
         )
         for cluster_index, (start, stop, mass) in enumerate(clusters, start=1):
             corrected = float((1 + np.sum(maxima >= mass)) / (n_permutations + 1))
@@ -222,6 +310,7 @@ def apply_binary_cluster_permutation(
     n_permutations: int,
     cluster_alpha: float,
     random_state: int,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
     if tests.empty or tests["status"].ne("ok").all():
         return tests
@@ -250,6 +339,7 @@ def apply_binary_cluster_permutation(
             n_permutations=n_permutations,
             cluster_alpha=cluster_alpha,
             rng=rng,
+            n_jobs=n_jobs,
         )
         for cluster_index, (start, stop, mass) in enumerate(clusters, start=1):
             corrected = float((1 + np.sum(maxima >= mass)) / (n_permutations + 1))
