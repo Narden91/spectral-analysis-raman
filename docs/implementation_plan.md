@@ -467,7 +467,11 @@ pipeline wiring, tests, manifests, reproducibility                     [Phase V]
 Each phase lists: **Objective**, **Why (scientific rationale)**, **Changes**,
 **Deliverables**, **Tests**, **Validation**, **Claim boundaries**.
 
+Each phase opens with an **Implementation status** checkbox (`[x]` = done, `[ ]` = pending).
+
 ### Phase A — Pre-registration config block
+
+- [x] **Implementation status:** completed
 
 - **Objective:** Encode the fixed hypotheses (windows, ratios, endpoints, tests, correction) in `config/eda.yaml` and emit them as a frozen, human-readable `preregistration.md` before any test runs.
 - **Why:** Pre-specification shrinks the testing family and documents intent before seeing results (guards against HARKing / p-hacking). It does *not* remove multiplicity (see §0), so the block also fixes the correction method.
@@ -534,6 +538,8 @@ analysis:
 
 ### Phase B — Verify and lock block-aware normalization
 
+- [x] **Implementation status:** completed
+
 - **Objective:** Confirm (and lock with a test) that fingerprint and CH are normalized **separately** and that whole-spectrum concatenation does **not** re-normalize across blocks.
 - **Why:** This is the reviewer's headline point. The repo already does it (`fingerprint→SNV`, `ch_stretch→area`, cross-fusion `none`), so the correct engineering action is a regression guard, not a rewrite.
 - **Changes:** No production change expected. Add an assertion-style test only.
@@ -546,6 +552,8 @@ analysis:
 - **Claim boundaries:** none.
 
 ### Phase C — Band-integral helper + named-index panel (primary features)
+
+- [x] **Implementation status:** completed
 
 - **Objective:** (1) Factor duplicated trapezoidal band-integral logic into `band_features.py`; (2) build the pre-registered panel where **named biochemical indices are primary endpoints**, not secondary derived ratios.
 - **Why:** Reviewer §4 — generic ratios dilute signal; named indices (`membrane_integrity`, `oxidative_index`, `protein_remodeling`, `tyrosine_environment`) are focused, interpretable, and publishable. Moving them into Phase C ensures all downstream statistics (Phases E–L) operate on the same primary feature set.
@@ -561,6 +569,8 @@ analysis:
 
 ### Phase D — Extreme-contrast endpoint redesign (additive)
 
+- [x] **Implementation status:** completed
+
 - **Objective:** Add extreme-contrast endpoint columns alongside the existing adjacent-split groups.
 - **Why:** Stronger contrasts raise effect size (reviewer §C) but reduce n (see §0). Adding, not replacing, lets the analysis report both and quantify the power tradeoff.
 - **Changes:** In `config/eda.yaml analysis.clinical_endpoints` add `mild_threshold: 25` and `recovery_threshold: 2`. In `src/clinical/endpoints.py:build_clinical_endpoints` add:
@@ -573,6 +583,8 @@ analysis:
 - **Claim boundaries:** groups are operational cut-offs for contrast, not clinical diagnoses.
 
 ### Phase E — Mandatory anchor test + robust group contrasts
+
+- [ ] **Implementation status:** not started — **START HERE (next chat)**
 
 - **Objective:** (1) Run the **single mandatory anchor test** first; (2) for all panel features × extreme contrasts, compute Mann–Whitney U, Cliff's δ, bootstrap CI, and BH-FDR.
 - **Why:** The anchor converts "exploratory only" into one falsifiable H₀/H₁. Robust contrasts on named indices provide graded evidence even when FDR fails.
@@ -587,6 +599,8 @@ analysis:
 
 ### Phase F — Permutation validation of contrasts
 
+- [ ] **Implementation status:** not started
+
 - **Objective:** Add a label-permutation p-value for each panel feature × contrast (Cliff's δ as the test statistic).
 - **Why:** Permutation gives an assumption-light null and double-checks FDR on a tiny n (reviewer §D.2). Reuse existing permutation conventions (`random_state`, `n_permutations`).
 - **Changes:** In `robust_contrasts.py`, add a seeded permutation loop shuffling the contrast labels and recomputing |Cliff's δ|; add `perm_p_value` column to `panel_contrast_tests.csv`. Prefer reusing helpers from `src/statistics/cluster_permutation.py` where structurally applicable.
@@ -596,6 +610,8 @@ analysis:
 - **Claim boundaries:** permutation p does not establish causality or generalization.
 
 ### Phase G — Covariate control via partial Spearman
+
+- [ ] **Implementation status:** not started
 
 - **Objective:** For continuous endpoints, compute partial Spearman correlation of each panel feature with the endpoint, controlling for age and sex.
 - **Why:** Reviewer §E — rank-based partial correlation removes age/sex dilution without distributional assumptions. This complements (does not replace) the existing regression-based `covariate_models.py`.
@@ -607,6 +623,8 @@ analysis:
 
 ### Phase H — Heterogeneity / variance-homogeneity testing
 
+- [ ] **Implementation status:** not started
+
 - **Objective:** Per panel feature × contrast, test equality of variances between groups (Levene and Brown–Forsythe).
 - **Why:** Reviewer §F — EV biology is heterogeneous; a difference in *spread* (not just mean) is biologically meaningful and currently untested in the repo.
 - **Changes:** Add `statistics.variance_homogeneity_test(a, b, center="mean"|"median")` wrapping `scipy.stats.levene` (mean center = Levene; median center = Brown–Forsythe). Emit `panel_variance_homogeneity.csv` with both statistics, p-values, per-group variances, and BH-FDR.
@@ -616,6 +634,8 @@ analysis:
 - **Claim boundaries:** variance differences are descriptive heterogeneity signals, not subtype proof.
 
 ### Phase I — Clustering insight (reuse; optional UMAP+k-means)
+
+- [ ] **Implementation status:** not started
 
 - **Objective:** Relate panel features to existing exploratory subgroups; optionally add a UMAP+k-means supplementary view.
 - **Why:** Reviewer §G. The repo's `disease_subgroups.py` (Ward + Gap statistic + bootstrap ARI) is already more rigorous than bare UMAP+k-means, so reuse it first and treat UMAP+k-means as an optional, clearly-labeled supplement.
@@ -627,6 +647,8 @@ analysis:
 
 ### Phase J — Minimal interpretable model restricted to the panel
 
+- [ ] **Implementation status:** not started
+
 - **Objective:** Run the existing nested-CV ElasticNet / L1-logistic minimal-model machinery using only the pre-registered panel features (3–5 inputs), with permutation and bootstrap CIs.
 - **Why:** Reviewer §H is already implemented in `minimal_panel.py`; the only addition is a panel-restricted feature source so the "minimal model" is genuinely the pre-registered panel rather than data-driven candidates.
 - **Changes:** Add an optional `feature_source: preregistered_panel` path to `minimal_panel.run_minimal_panel` (or a thin wrapper) that feeds `panel_feature_matrix.csv`; keep nested CV, permutation, bootstrap, and the PLS-gate logic. Write `panel_minimal_model_performance.csv`.
@@ -637,6 +659,8 @@ analysis:
 
 ### Phase S — Cross-endpoint consistency (Tier 1 bridge)
 
+- [ ] **Implementation status:** not started
+
 - **Objective:** Test whether each feature shows the **same sign** across moca_baseline, moca_3m, and ΔMoCA.
 - **Why:** Reviewer §8 — consistent features = biologically meaningful trends; feeds robustness score (Phase L).
 - **Changes:** `endpoint_consistency.py`: per feature, count endpoints with same-sign partial Spearman ρ; flag `consistent` if ≥ `min_endpoint_agreement`. Output to `06_spectral_interpretability/endpoint_consistency/` **and** expose a summary column consumed by Phase L.
@@ -646,6 +670,8 @@ analysis:
 - **Claim boundaries:** consistency increases credibility; not external replication.
 
 ### Phase L — Graded robustness ranking (Tier 1 capstone)
+
+- [ ] **Implementation status:** not started
 
 - **Objective:** Replace binary significance with a **graded evidence score** per feature, enabling a non-null narrative when FDR fails.
 - **Why:** Reviewer §7 — "nothing significant" becomes "strongest trends ranked by converging evidence."
@@ -672,6 +698,8 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase M — Spectral-shape analysis (shift + FWHM + asymmetry)
 
+- [ ] **Implementation status:** not started
+
 - **Objective:** Fit local Gaussian or pseudo-Voigt peaks at 1720, 1555, 1525; extract centroid, FWHM, and **peak asymmetry** per subject.
 - **Why:** Reviewer §1 — **directly mitigates weak intensity-only signal**; shape differences (C=O shift, amide width, carotenoid asymmetry) may be detectable when integrals are flat.
 - **Changes:** Create `spectral_shape.py`:
@@ -686,6 +714,8 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 - **Claim boundaries:** shifts above calibration floor with CI only; asymmetry is descriptive shape, not mechanism.
 
 ### Phase N — NMF decomposition (latent biochemical components)
+
+- [ ] **Implementation status:** not started
 
 - **Objective:** Decompose fingerprint-region spectra (optionally whole) into 3–5 NMF components; correlate subject weights with ΔMoCA and severity groups.
 - **Why:** Reviewer §2 — converts high-dimensional noise into low-dimensional lipid/protein/carotenoid-like profiles.
@@ -702,6 +732,8 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase O — Spectral entropy / dispersion fingerprint
 
+- [ ] **Implementation status:** not started
+
 - **Objective:** Compute per-subject spectral entropy over the fingerprint region and associate with endpoints.
 - **Why:** Reviewer §3 — strongest missing EV biology signal; high entropy = disordered EV population; captures distributional change missed by means.
 - **Changes:** In `spectral_descriptors.py`:
@@ -715,6 +747,8 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase P — Difference-spectrum signatures (publication requirement)
 
+- [ ] **Implementation status:** not started
+
 - **Objective:** Compute Δspectrum = mean(severe) − mean(mild) and mean(decline) − mean(recovery); smooth, annotate peaks, produce journal figure.
 - **Why:** Reviewer §5 — required for publication-quality interpretation; visual biochemical signature when tabular stats are weak.
 - **Changes:** `discriminant_spectra.py`: block-separated difference spectra; annotate with `get_raman_bands()`; signed-effect map (`sign(Δ)×|effect|` per wavenumber).
@@ -724,6 +758,8 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 - **Claim boundaries:** descriptive contrasts; annotated peaks are region-overlapping assignments.
 
 ### Phase Q — Cross-feature coupling + biochemical regimes
+
+- [ ] **Implementation status:** not started
 
 - **Objective:** Quantify coupling between band integrals/indices and assign biochemical regimes per subject.
 - **Why:** Reviewer §6 — EV remodeling is coupled, not independent; multivariate structure stronger than isolated features.
@@ -736,6 +772,8 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase R — Index-space clustering (optional supplement)
 
+- [ ] **Implementation status:** not started (optional)
+
 - **Objective:** Cluster subjects on named indices only; test clusters vs MoCA and lesion type.
 - **Why:** Reviewer §7 (original) — interpretable disease states without black-box spectral clustering.
 - **Changes:** Reuse `disease_subgroups.py` Ward + Gap + bootstrap ARI on standardized index matrix. Lower priority than Phases M–Q.
@@ -743,6 +781,8 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 - **Claim boundaries:** exploratory clusters, not validated subtypes.
 
 ### Phase K — Four-domain biochemical narrative + report (Tier 1 synthesis)
+
+- [ ] **Implementation status:** not started
 
 - **Objective:** Write `panel_report_section.md` organized into **four mandatory narrative domains**, each synthesizing Tier-1 + Tier-2 evidence (effect size, CI, robustness score, shape/NMF/entropy where available):
   1. **Membrane remodeling** — regions overlapping lipid carbonyl (~1720) + CH (2850–2950); include `membrane_integrity_index`, peak shifts at 1720, difference-spectrum lipid panels.
@@ -758,6 +798,8 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase U — Journal figure set (*Spectrochimica Acta A*)
 
+- [ ] **Implementation status:** not started
+
 - **Objective:** Assemble 5 publication figures from Tier-1 + Tier-2 outputs.
 - **Proposed set:**
   1. Cohort overview + named-index rainclouds by contrast
@@ -769,6 +811,8 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 - **Claim boundaries:** captions use region-overlapping language only.
 
 ### Phase V — Pipeline wiring, tests, reproducibility
+
+- [ ] **Implementation status:** not started
 
 - **Objective:** Wire all new phases into `disease_only_pipeline.py` behind `_phase_enabled` gates, ensure manifests/snapshots are emitted, and run the full suite.
 - **Why:** Keep one orchestrator, reproducible artifacts, and green tests (`CLAUDE.md` §3, §8).
@@ -844,6 +888,8 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 
 ## 8. Implementation Progress
 
+**Quick scan:** each phase in §5 has an inline `- [ ]` / `- [x] **Implementation status**` checkbox. This section mirrors that summary.
+
 Track completed phases here. **Next iteration starts at Phase E.**
 
 ### Tier 1 — Statistical core
@@ -852,7 +898,7 @@ Track completed phases here. **Next iteration starts at Phase E.**
 - [x] **Phase B** — Block-aware normalization regression guard (`tests/test_block_normalization.py`; no production change)
 - [x] **Phase C** — Band-integral helper + named-index panel (`src/analysis/band_features.py`; `build_panel_matrix` / `run_preregistered_panel`; refactored `biochemical_ratios.py`, `covariate_models.py`; tests in `tests/test_band_features.py`, `tests/test_preregistered_panel.py`)
 - [x] **Phase D** — Extreme-contrast endpoints (`mild_threshold` / `recovery_threshold` in config; `moca_severity_group_extreme`, `delta_moca_group_extreme` in `src/clinical/endpoints.py`; tests in `tests/test_clinical_endpoints.py`)
-- [ ] **Phase E** — Mandatory anchor test + robust group contrasts
+- [ ] **Phase E** — Mandatory anchor test + robust group contrasts ← **START HERE**
 - [ ] **Phase F** — Permutation validation of contrasts
 - [ ] **Phase G** — Covariate control via partial Spearman
 - [ ] **Phase H** — Heterogeneity / variance-homogeneity testing
