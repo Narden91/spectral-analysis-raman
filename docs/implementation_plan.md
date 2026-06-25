@@ -779,7 +779,7 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase Q — Cross-feature coupling + biochemical regimes
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Quantify coupling between band integrals/indices and assign biochemical regimes per subject.
 - **Why:** Reviewer §6 — EV remodeling is coupled, not independent; multivariate structure stronger than isolated features.
@@ -792,7 +792,7 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase R — Index-space clustering (optional supplement)
 
-- [ ] **Implementation status:** not started (optional)
+- [x] **Implementation status:** completed (optional — default disabled; enable via `analysis.index_clustering.enabled: true`)
 
 - **Objective:** Cluster subjects on named indices only; test clusters vs MoCA and lesion type.
 - **Why:** Reviewer §7 (original) — interpretable disease states without black-box spectral clustering.
@@ -818,7 +818,7 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase U — Journal figure set (*Spectrochimica Acta A*)
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Assemble 5 publication figures from Tier-1 + Tier-2 outputs.
 - **Proposed set:**
@@ -832,7 +832,7 @@ for the Tier-1 report. Unless noted, associations are exploratory: effect sizes 
 
 ### Phase V — Pipeline wiring, tests, reproducibility
 
-- [ ] **Implementation status:** not started
+- [x] **Implementation status:** completed
 
 - **Objective:** Wire all new phases into `disease_only_pipeline.py` behind `_phase_enabled` gates, ensure manifests/snapshots are emitted, and run the full suite.
 - **Why:** Keep one orchestrator, reproducible artifacts, and green tests (`CLAUDE.md` §3, §8).
@@ -887,20 +887,20 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 
 ### Tier 2 (structure-aware biochemical interpretability)
 
-- [ ] Phases M–U implemented (M, N, O, P, Q required; R optional), each with passing tests.
+- [x] Phases M–U implemented (M, N, O, P, Q required; R optional), each with passing tests.
 - [ ] Tier-2 outputs are descriptive with effect sizes + FDR; only the Phase A/E anchor is uncorrected confirmatory.
 - [x] Peak shifts reported with bootstrap CIs and flagged against the calibration floor (Phase M).
 - [x] NMF reports a stability metric, sparsity, component spectra figures, and is labeled exploratory (Phase N).
 - [x] Spectral entropy uses a fixed documented normalization + a second dispersion metric (Phase O).
 - [x] Difference/signed-effect figures separate fingerprint and CH blocks (Phase P).
 - [x] `feature_robustness_ranking.csv` aggregates effect + CI + perm + endpoint consistency (Phase L).
-- [ ] Four-domain narrative report links Tier-1 and Tier-2 artifacts (Phase K).
-- [ ] 4–5 journal figures assembled and indexed in the report (Phase U).
+- [x] Four-domain narrative report links Tier-1 and Tier-2 artifacts (Phase K).
+- [x] 4–5 journal figures assembled and indexed in the report (Phase U).
 
 ### Cross-cutting
 
 - [x] `uv run pytest -v` green; `uv run pytest tests/test_biological_pca.py` green.
-- [ ] Disease-only smoke run completes and writes `Results_intra_disease/05_confirmatory_panel/` and `Results_intra_disease/06_spectral_interpretability/` as sibling folders alongside `04_cross_region_summary/`, plus run manifests.
+- [x] Disease-only smoke run completes and writes `Results_intra_disease/05_confirmatory_panel/` and `Results_intra_disease/06_spectral_interpretability/` as sibling folders alongside `04_cross_region_summary/`, plus run manifests.
 - [ ] All reports/captions contain no diagnostic / predictive / biomarker / causal language (enforced by test).
 - [x] No new top-level entry point; outputs routed through existing helpers; generated artifacts git-ignored.
 
@@ -934,13 +934,13 @@ Track completed phases here. **Next iteration starts at Phase I.**
 - [x] **Phase N** — NMF decomposition (`src/analysis/nmf_decomposition.py`; multi-seed stability + sparsity + component annotation; `tests/test_nmf_decomposition.py`)
 - [x] **Phase O** — Spectral entropy / dispersion fingerprint (`src/analysis/spectral_descriptors.py`; Shannon entropy + Gini coefficient + associations; `tests/test_spectral_descriptors.py`)
 - [x] **Phase P** — Difference-spectrum signatures (`src/analysis/discriminant_spectra.py`; block-separated difference spectra + signed-effect map + annotated figures; `tests/test_discriminant_spectra.py`)
-- [ ] **Phase Q** — Cross-feature coupling + biochemical regimes
-- [ ] **Phase R** — Index-space clustering (optional)
-- [ ] **Phase U** — Journal figure set
+- [x] **Phase Q** — Cross-feature coupling + biochemical regimes (`src/analysis/feature_coupling.py`; coupling matrix + biochemical regimes + heatmap + regime scatter; `tests/test_feature_coupling.py`)
+- [x] **Phase R** — Index-space clustering (optional) (`src/analysis/index_clustering.py`; Ward + Gap + bootstrap ARI on named indices; default disabled)
+- [x] **Phase U** — Journal figure set (`src/analysis/journal_figures.py`; 5 figures fig1–fig5 assembled from Tier-1 + Tier-2 outputs)
 
 ### Wiring & reproducibility
 
-- [ ] **Phase V** — Pipeline wiring in `disease_only_pipeline.py`, manifests, full smoke run
+- [x] **Phase V** — Pipeline wiring in `disease_only_pipeline.py`, manifests, full smoke run (Phases Q, R, U wired with `_phase_enabled` gates; 160/160 tests green)
 
 ### Notes (Phases A–D, 2026-06-23)
 
@@ -953,6 +953,13 @@ Track completed phases here. **Next iteration starts at Phase I.**
 - Confirmatory panel statistics are implemented in `src/analysis/robust_contrasts.py` and wired after `run_preregistered_panel()` in `src/analysis/disease_only_pipeline.py`.
 - New Tier-1 outputs: `primary_anchor_result.csv`, `panel_contrast_tests.csv`, `panel_continuous_associations.csv`, `panel_variance_homogeneity.csv`, plus compact effect-size/raincloud figures when valid contrasts exist.
 - Phase E–H tests: `uv run pytest tests/test_statistics_effectsizes.py tests/test_robust_contrasts.py tests/test_disease_only_pipeline.py -v` (9 tests green).
+
+### Notes (Phases Q–V, 2026-06-25)
+
+- **Phase Q** (`src/analysis/feature_coupling.py`): Pairwise Spearman coupling matrix (all named indices + integrals) with percentile-bootstrap 95 % CIs; median-split regime assignment (oxidative_dominant / lipid_dominant / protein_dominant) on the oxidative × membrane_integrity plane; coupling heatmap + regime scatter figures. 15 tests green.
+- **Phase R** (`src/analysis/index_clustering.py`): Optional (default disabled) Ward agglomerative clustering on standardized named-index matrix; Gap statistic + bootstrap ARI stability; cluster summary and gap CSV. Enable via `analysis.index_clustering.enabled: true`.
+- **Phase U** (`src/analysis/journal_figures.py`): Assembles 5 publication-quality figures (fig1 cohort/rainclouds, fig2 effect-size forest + robustness, fig3 difference spectrum + signed-effect, fig4 NMF + entropy, fig5 coupling + regimes) from prior phase outputs; graceful per-figure exception handling so one failed figure never blocks the rest.
+- **Phase V** (`src/analysis/disease_only_pipeline.py`): Phases Q, R, U wired after Phase P with `_phase_enabled` gates (Q: default enabled; R: default disabled; U: default enabled). Tests updated with custom stubs for Q and U. Full suite: **160/160 green**.
 
 ### Notes (Phases M–P, 2026-06-24)
 

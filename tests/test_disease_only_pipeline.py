@@ -164,6 +164,19 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
     monkeypatch.setattr(pipeline, "run_spectral_descriptors", record("spectral_descriptors"))
     monkeypatch.setattr(pipeline, "run_discriminant_spectra", record("discriminant_spectra"))
 
+    def feature_coupling_runner(**kwargs):
+        calls.append("feature_coupling")
+        assert kwargs["panel_matrix_path"] == Path("panel_features.csv")
+        return {}
+
+    def journal_figures_runner(**kwargs):
+        calls.append("journal_figures")
+        assert kwargs["panel_matrix_path"] == Path("panel_features.csv")
+        return {}
+
+    monkeypatch.setattr(pipeline, "run_feature_coupling", feature_coupling_runner)
+    monkeypatch.setattr(pipeline, "run_journal_figures", journal_figures_runner)
+
     outputs = pipeline.run_disease_only_cross_region_pipeline(
         feature_matrix_path=feature_matrix_path,
         cfg=_cfg_with_enabled_phases(
@@ -189,6 +202,8 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
             nmf_decomposition=True,
             spectral_descriptors=True,
             discriminant_spectra=True,
+            feature_coupling=True,
+            journal_figures=True,
         ),
     )
 
@@ -216,6 +231,8 @@ def test_disease_only_pipeline_runs_enabled_phases_in_order(
         "nmf_decomposition",
         "spectral_descriptors",
         "discriminant_spectra",
+        "feature_coupling",
+        "journal_figures",
     ]
     assert outputs["clinical_correlation_matrix"] == {"clinical": Path("clinical.csv")}
     assert outputs["candidate_regions"] == {
@@ -264,6 +281,8 @@ def test_disease_only_pipeline_respects_disabled_phases(
             nmf_decomposition=False,
             spectral_descriptors=False,
             discriminant_spectra=False,
+            feature_coupling=False,
+            journal_figures=False,
         ),
     )
 

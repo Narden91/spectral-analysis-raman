@@ -29,6 +29,9 @@ from src.analysis.robustness_ranking import run_robustness_ranking
 from src.analysis.spectral_regions import run_candidate_region_detector
 from src.analysis.splsda import run_splsda_classifier
 from src.analysis.discriminant_spectra import run_discriminant_spectra
+from src.analysis.feature_coupling import run_feature_coupling
+from src.analysis.index_clustering import run_index_clustering
+from src.analysis.journal_figures import run_journal_figures
 from src.analysis.nmf_decomposition import run_nmf_decomposition
 from src.analysis.spectral_descriptors import run_spectral_descriptors
 from src.analysis.spectral_shape import run_spectral_shape
@@ -316,6 +319,31 @@ def run_disease_only_cross_region_pipeline(
         with _phase_timer(phase_timings, "discriminant_spectra", "Difference-spectrum signatures"):
             outputs["discriminant_spectra"] = run_discriminant_spectra(
                 feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
+
+    if preregistered_outputs and _phase_enabled(cfg, "feature_coupling"):
+        logger.info("Starting cross-feature coupling + biochemical regimes (Phase Q)")
+        with _phase_timer(phase_timings, "feature_coupling", "Cross-feature coupling"):
+            outputs["feature_coupling"] = run_feature_coupling(
+                panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
+                cfg=cfg,
+            )
+
+    if preregistered_outputs and _phase_enabled(cfg, "index_clustering", default=False):
+        logger.info("Starting index-space clustering (Phase R — optional)")
+        with _phase_timer(phase_timings, "index_clustering", "Index-space clustering"):
+            outputs["index_clustering"] = run_index_clustering(
+                panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
+                cfg=cfg,
+            )
+
+    if _phase_enabled(cfg, "journal_figures"):
+        logger.info("Starting journal figure set (Phase U)")
+        with _phase_timer(phase_timings, "journal_figures", "Journal figure set"):
+            outputs["journal_figures"] = run_journal_figures(
+                panel_matrix_path=preregistered_outputs.get("panel_feature_matrix")
+                if preregistered_outputs else None,
                 cfg=cfg,
             )
 
