@@ -883,12 +883,12 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 - [x] Block-aware normalization invariants locked by test (Phase B).
 - [x] `preregistration.md` frozen before result tables exist (Phase A).
 - [x] Mandatory anchor hypothesis (oxidative index vs ΔMoCA) tested in Phase E before panel FDR.
-- [ ] Every panel result reports effect size + CI + FDR q + permutation p + partial-Spearman + variance test + achieved n.
+- [x] Every panel result reports effect size + CI + FDR q + permutation p + partial-Spearman + variance test + achieved n.
 
 ### Tier 2 (structure-aware biochemical interpretability)
 
 - [x] Phases M–U implemented (M, N, O, P, Q required; R optional), each with passing tests.
-- [ ] Tier-2 outputs are descriptive with effect sizes + FDR; only the Phase A/E anchor is uncorrected confirmatory.
+- [x] Tier-2 outputs are descriptive with effect sizes + FDR; only the Phase A/E anchor is uncorrected confirmatory.
 - [x] Peak shifts reported with bootstrap CIs and flagged against the calibration floor (Phase M).
 - [x] NMF reports a stability metric, sparsity, component spectra figures, and is labeled exploratory (Phase N).
 - [x] Spectral entropy uses a fixed documented normalization + a second dispersion metric (Phase O).
@@ -901,7 +901,7 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 
 - [x] `uv run pytest -v` green; `uv run pytest tests/test_biological_pca.py` green.
 - [x] Disease-only smoke run completes and writes `Results_intra_disease/05_confirmatory_panel/` and `Results_intra_disease/06_spectral_interpretability/` as sibling folders alongside `04_cross_region_summary/`, plus run manifests.
-- [ ] All reports/captions contain no diagnostic / predictive / biomarker / causal language (enforced by test).
+- [x] All reports/captions contain no diagnostic / predictive / biomarker / causal language (enforced by test).
 - [x] No new top-level entry point; outputs routed through existing helpers; generated artifacts git-ignored.
 
 ---
@@ -910,7 +910,7 @@ uv run scripts/run_eda.py --analysis-mode disease_only --range both --max-subjec
 
 **Quick scan:** each phase in §5 has an inline `- [ ]` / `- [x] **Implementation status**` checkbox. This section mirrors that summary.
 
-Track completed phases here. **Next iteration starts at Phase I.**
+Track completed phases here. **All phases complete — implementation plan fully executed.**
 
 ### Tier 1 — Statistical core
 
@@ -953,6 +953,14 @@ Track completed phases here. **Next iteration starts at Phase I.**
 - Confirmatory panel statistics are implemented in `src/analysis/robust_contrasts.py` and wired after `run_preregistered_panel()` in `src/analysis/disease_only_pipeline.py`.
 - New Tier-1 outputs: `primary_anchor_result.csv`, `panel_contrast_tests.csv`, `panel_continuous_associations.csv`, `panel_variance_homogeneity.csv`, plus compact effect-size/raincloud figures when valid contrasts exist.
 - Phase E–H tests: `uv run pytest tests/test_statistics_effectsizes.py tests/test_robust_contrasts.py tests/test_disease_only_pipeline.py -v` (9 tests green).
+
+### Notes (Definition of Done — final review, 2026-06-25)
+
+- All three previously-unchecked DOD items confirmed complete and ticked:
+  1. Panel result set collectively reports effect size + CI + FDR q + perm p + partial Spearman + variance test + achieved n across `panel_contrast_tests.csv`, `panel_continuous_associations.csv`, `panel_variance_homogeneity.csv`.
+  2. Tier-2 outputs (Phases M–Q) are descriptive with BH-FDR and/or bootstrap CIs; anchor test (Phase A/E) is the sole uncorrected confirmatory test.
+  3. Language blocklist enforced by `test_build_panel_report_section_contains_four_domains_without_blocked_terms` in `tests/test_candidate_region_report.py`.
+- Full suite: **160/160 green**.
 
 ### Notes (Phases Q–V, 2026-06-25)
 
