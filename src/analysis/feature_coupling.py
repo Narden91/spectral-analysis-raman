@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from src import config, get_spectral_interpretability_dir
+from src import config, get_confirmatory_panel_dir, get_spectral_interpretability_dir
 from src.analysis.io_utils import load_csv_or_empty, write_csv_atomic
 from src.analysis.preregistered_panel import panel_cfg
 
@@ -30,6 +30,13 @@ logger = logging.getLogger(__name__)
 _OXIDATIVE_COL = "oxidative_index"
 _MEMBRANE_COL = "membrane_integrity_index"
 _PROTEIN_COL = "protein_remodeling_index"
+
+REGIME_PALETTE: dict[str, str] = {
+    "oxidative_dominant": "#D55E00",
+    "lipid_dominant": "#0072B2",
+    "protein_dominant": "#009E73",
+    "unknown": "#AAAAAA",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -53,13 +60,11 @@ def _spearman_with_bootstrap(
     rho = float(stats.spearmanr(xf, yf).statistic)
     if n_bootstrap <= 0:
         return rho, np.nan, np.nan
-    boot = np.empty(n_bootstrap)
-    for i in range(n_bootstrap):
-        idx = rng.integers(0, n, size=n)
-        boot[i] = float(stats.spearmanr(xf[idx], yf[idx]).statistic)
-    ci_lower = float(np.nanpercentile(boot, 2.5))
-    ci_upper = float(np.nanpercentile(boot, 97.5))
-    return rho, ci_lower, ci_upper
+    boot = np.array([
+        float(stats.spearmanr(xf[rng.integers(0, n, size=n)], yf[rng.integers(0, n, size=n)]).statistic)
+        for _ in range(n_bootstrap)
+    ])
+    return rho, float(np.nanpercentile(boot, 2.5)), float(np.nanpercentile(boot, 97.5))
 
 
 def compute_coupling_matrix(
@@ -85,9 +90,8 @@ def compute_coupling_matrix(
     arr = feature_frame[cols].to_numpy(dtype=float)
     rows: list[dict[str, object]] = []
     for i, col_a in enumerate(cols):
-        for j, col_b in enumerate(cols):
-            if j <= i:
-                continue
+        for j in range(i + 1, len(cols)):
+            col_b = cols[j]
             x, y = arr[:, i], arr[:, j]
             n_valid = int(np.sum(np.isfinite(x) & np.isfinite(y)))
             rho, ci_lo, ci_hi = _spearman_with_bootstrap(x, y, n_bootstrap=n_bootstrap, rng=rng)
@@ -101,6 +105,25 @@ def compute_coupling_matrix(
             })
 
     return pd.DataFrame(rows)
+
+
+def coupling_df_to_matrix(coupling: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
+    """Convert long-form coupling DataFrame to symmetric numpy matrix + feature list.
+
+    Returns (matrix, features) where matrix[i, j] = Spearman ρ for features[i] vs features[j].
+    """
+    features = sorted(set(coupling["feature_a"]) | set(coupling["feature_b"]))
+    n = len(features)
+    idx = {f: i for i, f in enumerate(features)}
+    mat = np.full((n, n), np.nan)
+    for _, row in coupling.iterrows():
+        i, j = idx[str(row["feature_a"])], idx[str(row["feature_b"])]
+        rho = float(row["spearman_rho"])
+        if np.isfinite(rho):
+            mat[i, j] = rho
+            mat[j, i] = rho
+    np.fill_diagonal(mat, 1.0)
+    return mat, features
 
 
 # ---------------------------------------------------------------------------
@@ -133,24 +156,21 @@ def assign_biochemical_regimes(
 
     ox = result[oxidative_col].to_numpy(dtype=float) if has_ox else np.full(len(result), np.nan)
     mem = result[membrane_col].to_numpy(dtype=float) if has_mem else np.full(len(result), np.nan)
-
     ox_med = float(np.nanmedian(ox))
     mem_med = float(np.nanmedian(mem))
 
-    regimes: list[str] = []
-    for o_val, m_val in zip(ox, mem):
+    def _classify(o_val: float, m_val: float) -> str:
         if not np.isfinite(o_val) and not np.isfinite(m_val):
-            regimes.append("unknown")
-        elif not np.isfinite(o_val):
-            regimes.append("lipid_dominant" if m_val >= mem_med else "protein_dominant")
-        elif o_val >= ox_med:
-            regimes.append("oxidative_dominant")
-        elif np.isfinite(m_val) and m_val >= mem_med:
-            regimes.append("lipid_dominant")
-        else:
-            regimes.append("protein_dominant")
+            return "unknown"
+        if not np.isfinite(o_val):
+            return "lipid_dominant" if (np.isfinite(m_val) and m_val >= mem_med) else "protein_dominant"
+        if o_val >= ox_med:
+            return "oxidative_dominant"
+        if np.isfinite(m_val) and m_val >= mem_med:
+            return "lipid_dominant"
+        return "protein_dominant"
 
-    result["biochemical_regime"] = regimes
+    result["biochemical_regime"] = [_classify(o, m) for o, m in zip(ox, mem)]
     return result
 
 
@@ -159,47 +179,28 @@ def assign_biochemical_regimes(
 # ---------------------------------------------------------------------------
 
 
-def _plot_coupling_heatmap(
-    coupling: pd.DataFrame,
-    *,
-    output_path: Path,
-) -> None:
+def _plot_coupling_heatmap(coupling: pd.DataFrame, *, output_path: Path) -> None:
     """Symmetric coupling heatmap of Spearman rho values."""
     if coupling.empty or "feature_a" not in coupling.columns:
         return
-
-    features = sorted(set(coupling["feature_a"]) | set(coupling["feature_b"]))
+    mat, features = coupling_df_to_matrix(coupling)
     n = len(features)
     if n < 2:
         return
 
-    idx = {f: i for i, f in enumerate(features)}
-    mat = np.full((n, n), np.nan)
-    for _, row in coupling.iterrows():
-        i = idx[str(row["feature_a"])]
-        j = idx[str(row["feature_b"])]
-        rho = float(row["spearman_rho"]) if np.isfinite(float(row["spearman_rho"])) else np.nan
-        mat[i, j] = rho
-        mat[j, i] = rho
-    np.fill_diagonal(mat, 1.0)
-
     fig, ax = plt.subplots(figsize=(max(4, n * 0.9), max(3.5, n * 0.85)))
     im = ax.imshow(mat, vmin=-1.0, vmax=1.0, cmap="RdBu_r", aspect="auto")
     plt.colorbar(im, ax=ax, label="Spearman ρ")
+    labels = [f.replace("_", "\n") for f in features]
     ax.set_xticks(range(n))
     ax.set_yticks(range(n))
-    labels = [f.replace("_", "\n") for f in features]
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
     ax.set_yticklabels(labels, fontsize=7)
-
-    # Annotate cells
     for i in range(n):
         for j in range(n):
-            val = mat[i, j]
-            if np.isfinite(val):
-                ax.text(j, i, f"{val:.2f}", ha="center", va="center",
-                        fontsize=6, color="white" if abs(val) > 0.6 else "black")
-
+            if np.isfinite(mat[i, j]):
+                ax.text(j, i, f"{mat[i, j]:.2f}", ha="center", va="center",
+                        fontsize=6, color="white" if abs(mat[i, j]) > 0.6 else "black")
     ax.set_title("Feature coupling — Spearman ρ (bootstrapped 95 % CI)")
     fig.tight_layout()
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
@@ -219,24 +220,14 @@ def _plot_regime_scatter(
     if oxidative_col not in regimes.columns or membrane_col not in regimes.columns:
         return
 
-    palette = {
-        "oxidative_dominant": "#D55E00",
-        "lipid_dominant": "#0072B2",
-        "protein_dominant": "#009E73",
-        "unknown": "#AAAAAA",
-    }
     fig, ax = plt.subplots(figsize=(5, 4))
     for regime, group in regimes.groupby("biochemical_regime"):
-        color = palette.get(str(regime), "#888888")
         ax.scatter(
             group[membrane_col].to_numpy(dtype=float),
             group[oxidative_col].to_numpy(dtype=float),
             label=str(regime).replace("_", " "),
-            color=color,
-            alpha=0.75,
-            edgecolors="white",
-            linewidths=0.5,
-            s=50,
+            color=REGIME_PALETTE.get(str(regime), "#888888"),
+            alpha=0.75, edgecolors="white", linewidths=0.5, s=50,
         )
     ax.set_xlabel(membrane_col.replace("_", " ") + " (a.u.)")
     ax.set_ylabel(oxidative_col.replace("_", " ") + " (a.u.)")
@@ -270,26 +261,22 @@ def run_feature_coupling(
         Path(output_dir) if output_dir is not None
         else get_spectral_interpretability_dir("coupling")
     )
-    target_dir.mkdir(parents=True, exist_ok=True)
     figures_dir = target_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load panel feature matrix (integrals + named indices)
-    matrix_path = (
-        Path(panel_matrix_path)
-        if panel_matrix_path is not None
-        else _default_panel_path()
+    resolved_matrix = (
+        Path(panel_matrix_path) if panel_matrix_path is not None
+        else get_confirmatory_panel_dir() / "panel_feature_matrix.csv"
     )
-    frame = load_csv_or_empty(matrix_path)
+    frame = load_csv_or_empty(resolved_matrix)
     if frame.empty:
-        logger.warning("Phase Q: panel feature matrix not found at %s; skipping", matrix_path)
+        logger.warning("Phase Q: panel feature matrix not found at %s; skipping", resolved_matrix)
         return {}
 
-    # Feature columns: indices listed first, then integrals
-    index_names = list(panel.get("indices", {}).keys())
-    integral_names = list(panel.get("integrals", {}).keys())
-    # Keep only those actually in the frame (no fallback columns)
-    feature_cols = [c for c in index_names + integral_names if c in frame.columns]
+    feature_cols = [
+        c for c in list(panel.get("indices", {}).keys()) + list(panel.get("integrals", {}).keys())
+        if c in frame.columns
+    ]
     if len(feature_cols) < 2:
         logger.warning("Phase Q: fewer than 2 feature columns found; skipping")
         return {}
@@ -297,51 +284,31 @@ def run_feature_coupling(
     n_bootstrap = int(phase_cfg.get("n_bootstrap", panel.get("n_bootstrap", 500)))
     random_state = int(phase_cfg.get("random_state", panel.get("random_state", 42)))
 
-    # 1. Coupling matrix
-    coupling = compute_coupling_matrix(
-        frame, feature_cols,
-        n_bootstrap=n_bootstrap,
-        random_state=random_state,
-    )
+    coupling = compute_coupling_matrix(frame, feature_cols, n_bootstrap=n_bootstrap, random_state=random_state)
     coupling_path = target_dir / "feature_coupling_matrix.csv"
     write_csv_atomic(coupling, coupling_path, index=False)
 
-    # 2. Biochemical regimes
+    regime_input_cols = ["subject_id"] + feature_cols if "subject_id" in frame.columns else feature_cols
     regimes = assign_biochemical_regimes(
-        frame[["subject_id"] + [c for c in feature_cols if c in frame.columns]]
-        if "subject_id" in frame.columns
-        else frame[feature_cols],
+        frame[[c for c in regime_input_cols if c in frame.columns]],
         oxidative_col=_OXIDATIVE_COL,
         membrane_col=_MEMBRANE_COL,
     )
-    regime_cols = ["subject_id", _OXIDATIVE_COL, _MEMBRANE_COL, _PROTEIN_COL, "biochemical_regime"]
-    regime_out_cols = [c for c in regime_cols if c in regimes.columns]
+    regime_out_cols = [c for c in ["subject_id", _OXIDATIVE_COL, _MEMBRANE_COL, _PROTEIN_COL, "biochemical_regime"]
+                       if c in regimes.columns]
     regimes_path = target_dir / "ratio_ratio_regimes.csv"
     write_csv_atomic(regimes[regime_out_cols], regimes_path, index=False)
 
-    outputs: dict[str, Path] = {
-        "feature_coupling_matrix": coupling_path,
-        "ratio_ratio_regimes": regimes_path,
-    }
-
-    # 3. Figures
     heatmap_path = figures_dir / "feature_coupling_heatmap.png"
     _plot_coupling_heatmap(coupling, output_path=heatmap_path)
-    outputs["feature_coupling_heatmap"] = heatmap_path
 
     regime_plot_path = figures_dir / "ratio_ratio_regime_plot.png"
-    _plot_regime_scatter(
-        regimes,
-        oxidative_col=_OXIDATIVE_COL,
-        membrane_col=_MEMBRANE_COL,
-        output_path=regime_plot_path,
-    )
-    outputs["ratio_ratio_regime_plot"] = regime_plot_path
+    _plot_regime_scatter(regimes, oxidative_col=_OXIDATIVE_COL, membrane_col=_MEMBRANE_COL, output_path=regime_plot_path)
 
     logger.info("Phase Q outputs written to %s", target_dir)
-    return outputs
-
-
-def _default_panel_path() -> Path:
-    from src import get_confirmatory_panel_dir
-    return get_confirmatory_panel_dir() / "panel_feature_matrix.csv"
+    return {
+        "feature_coupling_matrix": coupling_path,
+        "ratio_ratio_regimes": regimes_path,
+        "feature_coupling_heatmap": heatmap_path,
+        "ratio_ratio_regime_plot": regime_plot_path,
+    }
