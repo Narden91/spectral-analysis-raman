@@ -210,21 +210,186 @@ def _parallel_values(n_jobs: int, calls: list[Any]) -> list[Any]:
     return Parallel(n_jobs=n_jobs)(delayed(func)(*args) for func, args in calls)
 
 
-def _permuted_continuous_r2(
+def _nested_cv_elasticnet_with_selection(
     X: np.ndarray,
     y: np.ndarray,
+    feature_names: list[str],
+    *,
     n_outer_splits: int,
     n_inner_splits: int,
     random_state: int,
+    max_features: int,
+    min_features: int,
+) -> tuple[np.ndarray, dict[str, Any], dict[str, float]]:
+    """Nested CV with feature selection *inside* each outer training fold.
+
+    Selection on the full dataset before CV is classic data leakage: the held-out
+    test subjects' labels influenced which features were chosen, biasing CV metrics
+    and the permutation null downward.  Here selection runs only on X_train so
+    X_test subjects are never seen during feature selection.
+    """
+    n_samples = X.shape[0]
+    outer_cv = _cv_strategy(n_samples, n_outer_splits, random_state)
+    y_pred = np.zeros_like(y, dtype=float)
+    selected_alphas: list[float] = []
+    selected_l1_ratios: list[float] = []
+
+    for train_idx, test_idx in outer_cv.split(X):
+        X_train, y_train = X[train_idx], y[train_idx]
+        X_test = X[test_idx]
+
+        # Select features on training fold only — test fold is never seen here.
+        selected_fold, _, _ = _select_panel(
+            X_train, y_train, feature_names,
+            n_outer_splits=max(2, min(n_inner_splits, len(X_train))),
+            n_inner_splits=max(2, min(n_inner_splits - 1, len(X_train) - 1)),
+            random_state=random_state,
+            max_features=max_features,
+            min_features=min_features,
+            task="continuous",
+        )
+        sel_idx = [feature_names.index(s) for s in selected_fold]
+        X_train_sel = X_train[:, sel_idx]
+        X_test_sel = X_test[:, sel_idx]
+
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train_sel)
+        X_test_scaled = scaler.transform(X_test_sel)
+
+        inner_cv = KFold(n_splits=min(n_inner_splits, len(X_train_sel)), shuffle=True, random_state=random_state)
+        model = _elasticnet_cv_model(inner_cv, random_state)
+        _fit_elasticnet(model, X_train_scaled, y_train, "leakage-free nested ElasticNetCV")
+        y_pred[test_idx] = model.predict(X_test_scaled)
+        selected_alphas.append(float(model.alpha_))
+        selected_l1_ratios.append(float(model.l1_ratio_))
+
+    perf = {
+        "r2": float(r2_score(y, y_pred)),
+        "rmse": float(np.sqrt(mean_squared_error(y, y_pred))),
+        "mae": float(mean_absolute_error(y, y_pred)),
+    }
+    cv_info = {
+        "selected_alphas": selected_alphas,
+        "selected_l1_ratios": selected_l1_ratios,
+        "cv_strategy": type(outer_cv).__name__,
+        "selection": "within_fold",
+    }
+    return y_pred, cv_info, perf
+
+
+def _nested_cv_logistic_l1_with_selection(
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: list[str],
+    *,
+    n_outer_splits: int,
+    n_inner_splits: int,
+    random_state: int,
+    max_features: int,
+    min_features: int,
+    c_values: list[float] | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any], dict[str, float]]:
+    """Nested CV (binary) with feature selection inside each outer training fold."""
+    if c_values is None:
+        c_values = [0.01, 0.1, 1.0, 10.0, 100.0]
+    n_samples = X.shape[0]
+    class_counts = np.bincount(y)
+    n_splits = min(n_outer_splits, max(2, class_counts.min()))
+    outer_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+
+    y_pred = np.zeros_like(y, dtype=int)
+    y_prob = np.zeros_like(y, dtype=float)
+    selected_cs: list[float] = []
+
+    for train_idx, test_idx in outer_cv.split(X, y):
+        X_train, y_train = X[train_idx], y[train_idx]
+        X_test = X[test_idx]
+
+        selected_fold, _, _ = _select_panel(
+            X_train, y_train, feature_names,
+            n_outer_splits=max(2, min(n_inner_splits, np.bincount(y_train).min())),
+            n_inner_splits=max(2, min(n_inner_splits - 1, np.bincount(y_train).min())),
+            random_state=random_state,
+            max_features=max_features,
+            min_features=min_features,
+            task="binary",
+        )
+        sel_idx = [feature_names.index(s) for s in selected_fold]
+        X_train_sel = X_train[:, sel_idx]
+        X_test_sel = X_test[:, sel_idx]
+
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train_sel)
+        X_test_scaled = scaler.transform(X_test_sel)
+
+        inner_splits = min(n_inner_splits, np.bincount(y_train).min())
+        inner_cv = StratifiedKFold(n_splits=max(2, inner_splits), shuffle=True, random_state=random_state)
+        best_c = c_values[0]
+        best_score = -1.0
+        for c in c_values:
+            scores = []
+            for in_train, in_test in inner_cv.split(X_train_scaled, y_train):
+                clf = l1_logistic_model(c=c, random_state=random_state)
+                fit_with_convergence_capture(
+                    clf,
+                    X_train_scaled[in_train],
+                    y_train[in_train],
+                    context="leakage-free minimal panel inner CV",
+                )
+                scores.append(balanced_accuracy_score(y_train[in_test], clf.predict(X_train_scaled[in_test])))
+            mean_score = float(np.mean(scores))
+            if mean_score > best_score:
+                best_score = mean_score
+                best_c = c
+
+        final_clf = l1_logistic_model(c=best_c, random_state=random_state)
+        fit_with_convergence_capture(final_clf, X_train_scaled, y_train, context="leakage-free minimal panel outer CV")
+        y_pred[test_idx] = final_clf.predict(X_test_scaled)
+        if len(final_clf.classes_) == 2:
+            y_prob[test_idx] = final_clf.predict_proba(X_test_scaled)[:, 1]
+        else:
+            y_prob[test_idx] = y_pred[test_idx]
+        selected_cs.append(best_c)
+
+    perf = {
+        "balanced_accuracy": float(balanced_accuracy_score(y, y_pred)),
+    }
+    try:
+        perf["roc_auc"] = float(roc_auc_score(y, y_prob))
+    except ValueError:
+        perf["roc_auc"] = np.nan
+
+    cv_info = {
+        "selected_C": selected_cs,
+        "cv_strategy": type(outer_cv).__name__,
+        "selection": "within_fold",
+    }
+    return y_pred, y_prob, cv_info, perf
+
+
+def _permuted_continuous_r2(
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: list[str],
+    n_outer_splits: int,
+    n_inner_splits: int,
+    random_state: int,
+    max_features: int,
+    min_features: int,
 ) -> float:
     rng = np.random.default_rng(random_state)
     y_perm = y[rng.permutation(len(y))]
-    _, _, perf = _nested_cv_elasticnet(
+    # Feature selection must be re-applied under permuted labels so the null
+    # distribution is not conditional on selection performed on observed labels.
+    _, _, perf = _nested_cv_elasticnet_with_selection(
         X,
         y_perm,
+        feature_names,
         n_outer_splits=n_outer_splits,
         n_inner_splits=n_inner_splits,
         random_state=random_state,
+        max_features=max_features,
+        min_features=min_features,
     )
     return float(perf["r2"])
 
@@ -232,19 +397,25 @@ def _permuted_continuous_r2(
 def _permuted_binary_balanced_accuracy(
     X: np.ndarray,
     y: np.ndarray,
+    feature_names: list[str],
     n_outer_splits: int,
     n_inner_splits: int,
     random_state: int,
     c_values: list[float] | None,
+    max_features: int,
+    min_features: int,
 ) -> float:
     rng = np.random.default_rng(random_state)
     y_perm = y[rng.permutation(len(y))]
-    _, _, _, perf = _nested_cv_logistic_l1(
+    _, _, _, perf = _nested_cv_logistic_l1_with_selection(
         X,
         y_perm,
+        feature_names,
         n_outer_splits=n_outer_splits,
         n_inner_splits=n_inner_splits,
         random_state=random_state,
+        max_features=max_features,
+        min_features=min_features,
         c_values=c_values,
     )
     return float(perf["balanced_accuracy"])
@@ -402,6 +573,7 @@ def _nested_cv_logistic_l1(
 def _permutation_test_continuous(
     X: np.ndarray,
     y: np.ndarray,
+    feature_names: list[str],
     *,
     n_outer_splits: int,
     n_inner_splits: int,
@@ -409,13 +581,15 @@ def _permutation_test_continuous(
     random_state: int,
     observed_r2: float,
     n_jobs: int,
+    max_features: int,
+    min_features: int,
 ) -> tuple[float, float, float]:
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
     calls = [
         (
             _permuted_continuous_r2,
-            (X, y, n_outer_splits, n_inner_splits, int(seed)),
+            (X, y, feature_names, n_outer_splits, n_inner_splits, int(seed), max_features, min_features),
         )
         for seed in seeds
     ]
@@ -431,6 +605,7 @@ def _permutation_test_continuous(
 def _permutation_test_binary(
     X: np.ndarray,
     y: np.ndarray,
+    feature_names: list[str],
     *,
     n_outer_splits: int,
     n_inner_splits: int,
@@ -439,13 +614,15 @@ def _permutation_test_binary(
     observed_balanced_accuracy: float,
     n_jobs: int,
     c_values: list[float] | None = None,
+    max_features: int = 10,
+    min_features: int = 5,
 ) -> tuple[float, float, float]:
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
     calls = [
         (
             _permuted_binary_balanced_accuracy,
-            (X, y, n_outer_splits, n_inner_splits, int(seed), c_values),
+            (X, y, feature_names, n_outer_splits, n_inner_splits, int(seed), c_values, max_features, min_features),
         )
         for seed in seeds
     ]
@@ -670,6 +847,9 @@ def run_minimal_panel(
         X = X_full[valid]
         y_arr = y.loc[valid].to_numpy(dtype=float)
 
+        # _select_panel on full data is kept ONLY for reporting selection frequency.
+        # Performance metrics and p-values use _with_selection variants that fold
+        # feature selection inside each outer training fold (no leakage).
         selected, selection_df, _ = _select_panel(
             X, y_arr, feature_names,
             n_outer_splits=n_outer_splits,
@@ -680,26 +860,32 @@ def run_minimal_panel(
             task="continuous",
         )
 
-        selected_indices = [feature_names.index(s) for s in selected]
-        X_selected = X[:, selected_indices]
-
-        _, cv_info, perf = _nested_cv_elasticnet(
-            X_selected,
+        _, cv_info, perf = _nested_cv_elasticnet_with_selection(
+            X,
             y_arr,
+            feature_names,
             n_outer_splits=n_outer_splits,
             n_inner_splits=n_inner_splits,
             random_state=random_state,
+            max_features=max_features,
+            min_features=min_features,
         )
         p_value, _, _ = _permutation_test_continuous(
-            X_selected,
+            X,
             y_arr,
+            feature_names,
             n_outer_splits=n_outer_splits,
             n_inner_splits=n_inner_splits,
             n_permutations=n_permutations,
             random_state=random_state,
             observed_r2=perf["r2"],
             n_jobs=n_jobs,
+            max_features=max_features,
+            min_features=min_features,
         )
+        # Bootstrap CIs on coefficients from the reported (full-data-selected) panel.
+        selected_indices = [feature_names.index(s) for s in selected]
+        X_selected = X[:, selected_indices]
         ci_df = _bootstrap_coefficient_ci(
             X_selected,
             y_arr,
@@ -774,8 +960,10 @@ def run_minimal_panel(
         X = X[valid]
         y_arr = y.loc[valid].to_numpy(dtype=int)
 
+        pool_feature_names = pool_subset.columns.tolist()
+        # _select_panel on full data is kept ONLY for reporting selection frequency.
         selected, selection_df, _ = _select_panel(
-            X, y_arr, pool_subset.columns.tolist(),
+            X, y_arr, pool_feature_names,
             n_outer_splits=n_outer_splits,
             n_inner_splits=n_inner_splits,
             random_state=random_state,
@@ -784,26 +972,32 @@ def run_minimal_panel(
             task="binary",
         )
 
-        selected_indices = [pool_subset.columns.get_loc(s) for s in selected]
-        X_selected = X[:, selected_indices]
-
-        _, _, cv_info, perf = _nested_cv_logistic_l1(
-            X_selected,
+        _, _, cv_info, perf = _nested_cv_logistic_l1_with_selection(
+            X,
             y_arr,
+            pool_feature_names,
             n_outer_splits=n_outer_splits,
             n_inner_splits=n_inner_splits,
             random_state=random_state,
+            max_features=max_features,
+            min_features=min_features,
         )
         p_value, _, _ = _permutation_test_binary(
-            X_selected,
+            X,
             y_arr,
+            pool_feature_names,
             n_outer_splits=n_outer_splits,
             n_inner_splits=n_inner_splits,
             n_permutations=n_permutations,
             random_state=random_state,
             observed_balanced_accuracy=perf["balanced_accuracy"],
             n_jobs=n_jobs,
+            max_features=max_features,
+            min_features=min_features,
         )
+        # Bootstrap CIs on the reported (full-data-selected) panel.
+        selected_indices = [pool_subset.columns.get_loc(s) for s in selected]
+        X_selected = X[:, selected_indices]
         ci_df = _bootstrap_coefficient_ci(
             X_selected,
             y_arr,

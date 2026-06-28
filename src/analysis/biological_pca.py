@@ -57,6 +57,12 @@ FORBIDDEN_INTERPRETATION_PHRASES = (
     "diagnoses disease",
     "disease separation",
     "biomarker",
+    "reflects disease",
+    "disease signature",
+    "associates with disease",
+    "is diagnostic",
+    "this predicts",
+    "proves causal",
 )
 
 
@@ -682,7 +688,7 @@ def _loading_region_cfg(cfg: dict) -> tuple[float, float, float]:
 def _region_label(row: pd.Series) -> str:
     block = str(row.get("spectral_block", "single"))
     prefix = f"{block} " if block not in {"", "single", "nan"} else ""
-    return f"{prefix}{row['start_cm-1']:.1f}-{row['end_cm-1']:.1f} cm-1"
+    return f"{prefix}{row['start_cm-1']:.1f}–{row['end_cm-1']:.1f} cm⁻¹"
 
 
 def _extract_loading_regions_for_series(
@@ -1272,7 +1278,7 @@ def _plot_loadings(result: ModelResult, output_dir: Path, pcs: list[str] | None 
                     label=pc,
                 )
             ax.axhline(0, color="black", linestyle="--", linewidth=0.5)
-            ax.set_xlabel("Raman shift (cm-1)")
+            ax.set_xlabel(r"Raman shift (cm$^{-1}$)")
             ax.set_ylabel("Loading")
             ax.set_title(f"{result.name} {block} loadings", fontsize=12, loc="center")
             _place_outside_legend(ax, title=f"PC ({block})")
@@ -1673,8 +1679,20 @@ def _write_outputs(
 
         if result.name == "PCA_whole":
             block_contrib = _build_pca_whole_block_contributions(result)
+            # Always write so readers can check for block-dominance artefacts.
+            block_contrib.to_csv(model_dir / "pca_whole_block_contributions.csv", index=False)
             if not block_contrib.empty:
-                block_contrib.to_csv(model_dir / "pca_whole_block_contributions.csv", index=False)
+                for pc_col in [c for c in block_contrib.columns if c.endswith("_var_share")]:
+                    dominant = block_contrib.loc[block_contrib[pc_col].idxmax(), "spectral_block"] if not block_contrib.empty else "unknown"
+                    share = block_contrib[pc_col].max() if not block_contrib.empty else float("nan")
+                    if share > 0.75:
+                        logger.warning(
+                            "PCA_whole %s: block '%s' accounts for %.0f%% of variance — potential "
+                            "scale-dominance artefact; inspect pca_whole_block_contributions.csv",
+                            pc_col.replace("_var_share", ""),
+                            dominant,
+                            share * 100,
+                        )
 
         pcs = [pc for pc in CANONICAL_PCS if pc in result.explained_variance["PC"].tolist()]
         _plot_scores_pair(result, model_dir, "PC1", "PC2", "scores_pc1_pc2.png")

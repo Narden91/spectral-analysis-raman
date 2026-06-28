@@ -237,9 +237,24 @@ def compute_spearman_feature_tests(
     )
     q_values, significant = fdr_correction(p_values, alpha=fdr_alpha)
 
+    # Fisher Z-transform 95% CI for each Spearman rho.
+    # z = arctanh(rho), SE(z) = 1/sqrt(n-3), CI on z then back-transformed.
+    rho_ci_low = np.full_like(rho, np.nan)
+    rho_ci_high = np.full_like(rho, np.nan)
+    if n_valid >= 5:
+        finite_rho = np.isfinite(rho)
+        rho_clipped = np.clip(rho[finite_rho], -1.0 + 1e-10, 1.0 - 1e-10)
+        z = np.arctanh(rho_clipped)
+        se_z = 1.0 / np.sqrt(max(n_valid - 3, 1))
+        z_crit = 1.96
+        rho_ci_low[finite_rho] = np.tanh(z - z_crit * se_z)
+        rho_ci_high[finite_rho] = np.tanh(z + z_crit * se_z)
+
     tests = feature_meta.copy()
     tests.insert(0, "target", target)
     tests["rho"] = rho
+    tests["rho_ci_low"] = rho_ci_low
+    tests["rho_ci_high"] = rho_ci_high
     tests["p_value"] = p_values
     tests["fdr_q"] = q_values
     tests["significant_fdr"] = significant

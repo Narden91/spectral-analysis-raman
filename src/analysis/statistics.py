@@ -419,7 +419,10 @@ def run_pca(
         means = np.nanmean(spectra, axis=0, keepdims=True)
         spectra_processed = spectra - means
 
-    pca = PCA(n_components=n_components, random_state=random_state)
+    # svd_solver="full" is deterministic regardless of matrix size; "auto" may
+    # select the randomized solver for large matrices, introducing variance even
+    # with a fixed random_state across sklearn versions.
+    pca = PCA(n_components=n_components, random_state=random_state, svd_solver="full")
     scores = pca.fit_transform(spectra_processed)
 
     # Deterministic sign convention: flip each PC so the loading with the largest

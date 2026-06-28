@@ -8,7 +8,9 @@ from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from scipy import stats as scipy_stats
 
 from src import config, get_confirmatory_panel_dir, get_run_metadata_dir
 from src.analysis.biochemical_ratios import run_biochemical_ratios
@@ -72,6 +74,81 @@ def _write_phase_timings(timings: list[dict[str, object]]) -> Path | None:
     path = get_run_metadata_dir() / "disease_only_cross_region_phase_timing.csv"
     write_csv_atomic(pd.DataFrame(timings), path, index=False)
     return path
+
+
+def _bh_fdr(p_values: np.ndarray) -> np.ndarray:
+    """Benjamini–Hochberg FDR correction. Returns q-values (same length as input)."""
+    n = len(p_values)
+    if n == 0:
+        return np.array([], dtype=float)
+    order = np.argsort(p_values)
+    ranks = np.empty(n, dtype=float)
+    ranks[order] = np.arange(1, n + 1, dtype=float)
+    q = p_values * n / ranks
+    # Enforce monotonicity: q[i] = min(q[i], q[i+1], ..., q[n-1])
+    q_sorted = q[order]
+    for i in range(n - 2, -1, -1):
+        q_sorted[i] = min(q_sorted[i], q_sorted[i + 1])
+    q[order] = np.minimum(q_sorted, 1.0)
+    return q
+
+
+def _collect_cross_phase_multiplicity(
+    outputs: dict[str, dict[str, Path]],
+) -> pd.DataFrame | None:
+    """Collect all cluster-level p-values across discovery phases and apply BH-FDR.
+
+    The primary statistical control is within-phase cluster permutation correction.
+    This function provides a secondary, descriptive family-wide FDR view across all
+    phases, spectral blocks, and clinical endpoints — reported for transparency.
+
+    Phase 9 (sPLS-DA) outputs are excluded because the gate makes them non-exchangeable
+    with the unconditional Phase 1-5 tests.
+    """
+    source_keys: list[tuple[str, str, str]] = [
+        ("clinical_correlation_matrix", "clinical_correlation_matrix", "Phase1_ClinicalCorr"),
+        ("longitudinal_moca", "delta_moca_associations", "Phase2_LongitudinalMoCA"),
+        ("disease_stratification", "stratification_wavenumber_tests", "Phase3_Stratification"),
+    ]
+    records: list[dict] = []
+    for phase_output_key, file_key, phase_label in source_keys:
+        phase_outputs = outputs.get(phase_output_key, {})
+        csv_path = phase_outputs.get(file_key)
+        if csv_path is None or not Path(csv_path).exists():
+            continue
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception:
+            continue
+        if "cluster_p_value" not in df.columns:
+            continue
+        cluster_rows = df[df["cluster_p_value"].notna()].copy()
+        if cluster_rows.empty:
+            continue
+        cluster_rows = cluster_rows.drop_duplicates(
+            subset=["cluster_id"] if "cluster_id" in cluster_rows.columns else None,
+            keep="first",
+        )
+        for _, row in cluster_rows.iterrows():
+            records.append({
+                "phase": phase_label,
+                "spectral_block": row.get("spectral_block", pd.NA),
+                "cluster_id": row.get("cluster_id", pd.NA),
+                "target": row.get("target", row.get("endpoint", pd.NA)),
+                "cluster_p_value": float(row["cluster_p_value"]),
+            })
+
+    if not records:
+        return None
+
+    summary = pd.DataFrame(records)
+    finite_mask = summary["cluster_p_value"].notna() & np.isfinite(summary["cluster_p_value"])
+    q = np.full(len(summary), np.nan)
+    if finite_mask.any():
+        q[finite_mask] = _bh_fdr(summary.loc[finite_mask, "cluster_p_value"].to_numpy(dtype=float))
+    summary["cross_phase_fdr_q"] = q
+    summary["cross_phase_significant_fdr05"] = summary["cross_phase_fdr_q"] < 0.05
+    return summary.sort_values("cluster_p_value").reset_index(drop=True)
 
 
 def _cfg_for_preregistered_minimal_panel(cfg: dict) -> dict:
@@ -346,6 +423,22 @@ def run_disease_only_cross_region_pipeline(
                 if preregistered_outputs else None,
                 cfg=cfg,
             )
+
+    # Cross-phase multiplicity summary (secondary, descriptive BH-FDR across all
+    # discovery phases).  The primary control is within-phase cluster permutation.
+    try:
+        multiplicity_df = _collect_cross_phase_multiplicity(outputs)
+        if multiplicity_df is not None and not multiplicity_df.empty:
+            multiplicity_path = get_run_metadata_dir() / "cross_phase_multiplicity_summary.csv"
+            write_csv_atomic(multiplicity_df, multiplicity_path, index=False)
+            outputs["cross_phase_multiplicity"] = {"cross_phase_multiplicity_summary": multiplicity_path}
+            logger.info(
+                "Cross-phase multiplicity summary written: %d cluster entries, %d survive BH-FDR q<0.05",
+                len(multiplicity_df),
+                int(multiplicity_df["cross_phase_significant_fdr05"].sum()),
+            )
+    except Exception as exc:
+        logger.warning("Cross-phase multiplicity summary failed (non-fatal): %s", exc)
 
     _write_phase_timings(phase_timings)
     return outputs

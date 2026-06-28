@@ -291,14 +291,17 @@ def process_area(
 
     valid_1300_bc = np.asarray(spectra_1300[combined_mask], dtype=float)
     valid_2850_bc = np.asarray(spectra_2850[combined_mask], dtype=float)
-    valid_1300 = normalize_spectra(spectra_1300[combined_mask], mode="eda")
-    valid_2850 = normalize_spectra(spectra_2850[combined_mask], mode="eda")
+    # Pass region= so each block uses its configured per-region normalization method
+    # (fingerprint → SNV, ch_stretch → area) rather than the generic mode="eda" fallback,
+    # which applied SNV to both blocks and corrupted CH-stretch intensity scales.
+    valid_1300 = normalize_spectra(spectra_1300[combined_mask], region="fingerprint")
+    valid_2850 = normalize_spectra(spectra_2850[combined_mask], region="ch_stretch")
 
     pixel_vectors_bc = concatenate_regions(valid_1300_bc, valid_2850_bc, weight_by_channels=False)
     pixel_vectors = concatenate_regions(
         valid_1300,
         valid_2850,
-        weight_by_channels=True,
+        weight_by_channels=False,
     )
 
     summary = summarize_area_pixels(pixel_vectors)
