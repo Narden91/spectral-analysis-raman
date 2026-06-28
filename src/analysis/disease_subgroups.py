@@ -16,7 +16,10 @@ from src import config, get_cross_region_phase_dir
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
+    load_subject_feature_matrix,
+    filter_disease_subjects,
 )
+from src.analysis.discriminant_spectra import run_subgroup_mean_spectra
 
 logger = logging.getLogger(__name__)
 
@@ -227,15 +230,18 @@ def _empty_outputs(target_dir: Path) -> dict[str, Path]:
     gap_path = target_dir / "disease_subgroup_gap_statistic.csv"
     stability_path = target_dir / "disease_subgroup_stability.csv"
     feature_path = target_dir / "disease_subgroup_feature_matrix.csv"
+    mean_spectra_path = target_dir / "subgroup_mean_spectra.csv"
     pd.DataFrame(columns=["subject_id", "subgroup_label", "n_clusters"]).to_csv(assignments_path, index=False)
     pd.DataFrame(columns=["n_clusters", "observed_log_dispersion", "reference_log_dispersion_mean", "reference_log_dispersion_sd", "gap", "n_bootstrap"]).to_csv(gap_path, index=False)
     pd.DataFrame(columns=["selected_n_clusters", "mean_bootstrap_ari", "sd_bootstrap_ari", "n_bootstrap_requested", "n_bootstrap_used"]).to_csv(stability_path, index=False)
     pd.DataFrame(columns=["subject_id"]).to_csv(feature_path, index=False)
+    pd.DataFrame(columns=["block", "subgroup_label", "n_subjects", "wavenumber", "mean_intensity", "std_intensity", "nearest_band"]).to_csv(mean_spectra_path, index=False)
     return {
         "disease_subgroup_assignments": assignments_path,
         "disease_subgroup_gap_statistic": gap_path,
         "disease_subgroup_stability": stability_path,
         "disease_subgroup_feature_matrix": feature_path,
+        "subgroup_mean_spectra": mean_spectra_path,
     }
 
 
@@ -325,10 +331,27 @@ def run_disease_subgroups(
     stability.to_csv(stability_path, index=False)
     output_features.to_csv(feature_path, index=False)
 
+    # Emit per-subgroup mean spectra (reviewer request: "show the average spectrum per ML group")
+    subgroup_cfg_emit = bool(subgroup_cfg.get("emit_cluster_mean_spectra", True))
+    if subgroup_cfg_emit:
+        full_frame = filter_disease_subjects(load_subject_feature_matrix(feature_matrix_path=feature_matrix_path))
+        annotated = full_frame.merge(
+            assignments[["subject_id", "subgroup_label"]],
+            on="subject_id",
+            how="inner",
+        )
+        if not annotated.empty:
+            mean_spectra_outputs = run_subgroup_mean_spectra(annotated, "subgroup_label", target_dir)
+        else:
+            mean_spectra_outputs = {}
+    else:
+        mean_spectra_outputs = {}
+
     logger.info("Disease subgroup outputs written to %s", target_dir)
     return {
         "disease_subgroup_assignments": assignments_path,
         "disease_subgroup_gap_statistic": gap_path,
         "disease_subgroup_stability": stability_path,
         "disease_subgroup_feature_matrix": feature_path,
+        **mean_spectra_outputs,
     }

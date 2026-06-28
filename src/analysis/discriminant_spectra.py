@@ -293,3 +293,130 @@ def run_discriminant_spectra(
 
     logger.info("Phase P outputs written to %s", target_dir)
     return outputs
+
+
+# ---------------------------------------------------------------------------
+# Subgroup mean spectra (Phase 12 extension)
+# ---------------------------------------------------------------------------
+
+
+def compute_subgroup_mean_spectra(
+    frame: pd.DataFrame,
+    subgroup_column: str,
+    block: str,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Return (wavenumbers, {label: spectra_matrix}) for every subgroup in *block*.
+
+    Only rows whose *subgroup_column* is non-null are included.
+    """
+    col_wn = block_columns(list(frame.columns), block)
+    if not col_wn:
+        return np.array([]), {}
+    spec_cols = [c for c, _ in col_wn]
+    wavenumbers = np.array([wn for _, wn in col_wn], dtype=float)
+
+    labels_series = frame[subgroup_column].astype("string")
+    unique_labels = sorted(labels_series.dropna().unique().tolist())
+    groups: dict[str, np.ndarray] = {}
+    for label in unique_labels:
+        mask = labels_series.eq(label).fillna(False).to_numpy(dtype=bool)
+        X = frame.loc[mask, spec_cols].to_numpy(dtype=float)
+        if X.shape[0] > 0:
+            groups[label] = X
+    return wavenumbers, groups
+
+
+def _plot_subgroup_mean_spectra(
+    wavenumbers: np.ndarray,
+    groups: dict[str, np.ndarray],
+    *,
+    block: str,
+    output_dir: Path,
+    ci_alpha: float = 0.20,
+) -> Path:
+    """Overlay mean ± 95% CI spectra for each subgroup in one figure per block."""
+    import matplotlib.pyplot as plt
+
+    _SUBGROUP_PALETTE = [
+        "#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00",
+    ]
+
+    figures_dir = output_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    for i, (label, X) in enumerate(sorted(groups.items())):
+        color = _SUBGROUP_PALETTE[i % len(_SUBGROUP_PALETTE)]
+        mean = np.nanmean(X, axis=0)
+        ax.plot(wavenumbers, mean, color=color, linewidth=1.5, label=f"{label} (n={X.shape[0]})")
+        if X.shape[0] > 2:
+            sem = np.nanstd(X, axis=0, ddof=1) / np.sqrt(X.shape[0])
+            ax.fill_between(wavenumbers, mean - 1.96 * sem, mean + 1.96 * sem, color=color, alpha=ci_alpha)
+
+    raman_bands = get_raman_bands()
+    block_lo = 700.0 if block == "1300" else 2400.0
+    block_hi = 1900.0 if block == "1300" else 3200.0
+    for band_name, centre in raman_bands.items():
+        if block_lo <= centre <= block_hi:
+            ax.axvline(centre, color="#999999", linewidth=0.5, linestyle=":")
+            ax.text(centre, ax.get_ylim()[0], band_name, rotation=90, fontsize=5,
+                    va="bottom", ha="center", color="#666666")
+
+    block_label = "Fingerprint (1300 block)" if block == "1300" else "CH-stretch (2850 block)"
+    ax.set_title(f"Ward subgroup mean spectra — {block_label}", fontsize=10)
+    ax.set_xlabel("Raman shift (cm⁻¹)", fontsize=9)
+    ax.set_ylabel("Norm. intensity (a.u.)", fontsize=9)
+    ax.legend(fontsize=8, loc="upper right")
+    fig.tight_layout()
+
+    fname = f"subgroup_mean_spectra_{block}.png"
+    path = figures_dir / fname
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def run_subgroup_mean_spectra(
+    frame: pd.DataFrame,
+    subgroup_column: str,
+    output_dir: Path,
+) -> dict[str, Path]:
+    """Compute and plot per-subgroup mean spectra for both spectral blocks.
+
+    Called from Phase 12 after subgroup assignments are produced.
+    Writes ``subgroup_mean_spectra.csv`` + one figure per block.
+    """
+    outputs: dict[str, Path] = {}
+    all_rows: list[pd.DataFrame] = []
+
+    for block in _BLOCKS:
+        wavenumbers, groups = compute_subgroup_mean_spectra(frame, subgroup_column, block)
+        if not groups:
+            logger.info("run_subgroup_mean_spectra: no spectra found for block %s", block)
+            continue
+
+        fig_path = _plot_subgroup_mean_spectra(wavenumbers, groups, block=block, output_dir=output_dir)
+        outputs[f"subgroup_mean_spectra_fig_{block}"] = fig_path
+
+        for label, X in sorted(groups.items()):
+            mean = np.nanmean(X, axis=0)
+            std = np.nanstd(X, axis=0, ddof=1) if X.shape[0] > 1 else np.full(wavenumbers.size, np.nan)
+            band_labels = _annotate_wavenumbers(wavenumbers)
+            block_df = pd.DataFrame({
+                "block": block,
+                "subgroup_label": label,
+                "n_subjects": X.shape[0],
+                "wavenumber": wavenumbers,
+                "mean_intensity": mean,
+                "std_intensity": std,
+                "nearest_band": band_labels,
+            })
+            all_rows.append(block_df)
+
+    csv_path = output_dir / "subgroup_mean_spectra.csv"
+    combined = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
+    write_csv_atomic(combined, csv_path, index=False)
+    outputs["subgroup_mean_spectra"] = csv_path
+
+    logger.info("Subgroup mean spectra written to %s", output_dir)
+    return outputs

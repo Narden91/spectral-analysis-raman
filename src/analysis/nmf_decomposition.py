@@ -14,6 +14,7 @@ for the 1525 cm⁻¹ region per the conservative claim-boundary rule.
 from __future__ import annotations
 
 import logging
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import NMF
+from sklearn.exceptions import ConvergenceWarning
 
 from src import config, get_spectral_interpretability_dir
 from src.analysis._tier2_utils import compute_spearman_associations
@@ -102,10 +104,12 @@ def _fit_nmf_multi_init(
                 l1_ratio=1.0,
                 alpha_W=alpha_w,
                 alpha_H=alpha_h,
-                max_iter=500,
+                max_iter=1000,
                 random_state=int(seed),
             )
-            W = model.fit_transform(X)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ConvergenceWarning)
+                W = model.fit_transform(X)
             errors.append(_reconstruction_error(X, W, model.components_))
             solutions.append((W, model.components_))
         except Exception as exc:
