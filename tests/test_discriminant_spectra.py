@@ -43,6 +43,30 @@ def _make_frame(
 # ---------------------------------------------------------------------------
 
 
+def test_group_spectra_handles_na_middle_group():
+    """Extreme contrasts leave pd.NA for excluded middle subjects."""
+    rng = np.random.default_rng(42)
+    wn = np.linspace(1200.0, 1700.0, 30)
+    rows: dict[str, list] = {
+        "subject_id": [f"S{i:02d}" for i in range(6)],
+        "delta_moca_group_extreme": ["decline", "decline", pd.NA, pd.NA, "recovery", "recovery"],
+    }
+    for w in wn:
+        rows[f"1300__{w:.1f}"] = rng.standard_normal(6).tolist()
+    df = pd.DataFrame(rows)
+
+    wavenumbers, X_left, X_right = _group_spectra(
+        df,
+        group_column="delta_moca_group_extreme",
+        left_label="decline",
+        right_label="recovery",
+        block="1300",
+    )
+    assert wavenumbers.size == 30
+    assert X_left.shape[0] == 2
+    assert X_right.shape[0] == 2
+
+
 def test_group_spectra_shapes():
     df = _make_frame()
     wavenumbers, X_left, X_right = _group_spectra(

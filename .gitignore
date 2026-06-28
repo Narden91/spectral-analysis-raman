@@ -29,20 +29,21 @@ catboost_info/
 .github/
 .claude/
 .cursor/
+paper/
 notebook/
 doc/Analysis_*
 legacy_results/
-doc/manuscript*
-doc/manuscript/build/
-doc/manuscript/figures/*
-doc/ml_results_report/figures/*
-doc/ml_results_report/tables/*
-doc/ml_results_report/report*
+# doc/manuscript*
+# doc/manuscript/build/
+# doc/manuscript/figures/*
+# doc/ml_results_report/figures/*
+# doc/ml_results_report/tables/*
+# doc/ml_results_report/report*
 
-!doc/ml_results_report/build_report.py
+# !doc/ml_results_report/build_report.py
 presentation/
 CLAUDE.md
-doc/Test_A
+# doc/Test_A
 
 # Latex auxiliary files
 *.aux

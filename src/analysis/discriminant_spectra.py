@@ -58,8 +58,10 @@ def _group_spectra(
     wavenumbers = np.array([wn for _, wn in col_wn], dtype=float)
 
     groups = frame[group_column].astype("string")
-    mask_left = (groups == left_label).to_numpy(dtype=bool)
-    mask_right = (groups == right_label).to_numpy(dtype=bool)
+    # Extreme-contrast columns use pd.NA for excluded middle subjects; fillna(False)
+    # before bool conversion to avoid Arrow/pandas NA ambiguity errors.
+    mask_left = groups.eq(left_label).fillna(False).to_numpy(dtype=bool)
+    mask_right = groups.eq(right_label).fillna(False).to_numpy(dtype=bool)
 
     X_left = frame.loc[mask_left, spec_cols].to_numpy(dtype=float)
     X_right = frame.loc[mask_right, spec_cols].to_numpy(dtype=float)

@@ -243,6 +243,38 @@ def _fig3_difference_spectrum(difference_spectrum_path: Path, output_path: Path)
 def _plot_nmf_components(ax: plt.Axes, components: pd.DataFrame) -> bool:
     if "wavenumber" not in components.columns:
         return False
+
+    # Phase N writes long-form loadings: component, wavenumber, loading.
+    if "loading" in components.columns and "component" in components.columns:
+        comp_ids = sorted(components["component"].dropna().astype(str).unique())
+        if not comp_ids:
+            return False
+        plotted = False
+        for i, comp_id in enumerate(comp_ids):
+            sub = components.loc[components["component"].astype(str) == comp_id].dropna(
+                subset=["wavenumber", "loading"]
+            )
+            if sub.empty:
+                continue
+            wn = sub["wavenumber"].to_numpy(dtype=float)
+            sort_idx = np.argsort(wn)
+            ax.plot(
+                wn[sort_idx],
+                sub["loading"].to_numpy(dtype=float)[sort_idx],
+                color=_COLORS[i % len(_COLORS)],
+                linewidth=1.2,
+                label=comp_id.replace("_", " "),
+            )
+            plotted = True
+        if not plotted:
+            return False
+        ax.set_xlabel("Raman shift (cm⁻¹)")
+        ax.set_ylabel("Component loading (a.u.)")
+        ax.set_title("NMF latent components (fingerprint)")
+        ax.legend(fontsize=7)
+        return True
+
+    # Wide-form fallback: component_1, component_2, … as numeric columns.
     comp_cols = [c for c in components.columns if c.startswith("component_")]
     if not comp_cols:
         comp_cols = [c for c in components.columns if c not in {"wavenumber", "block", "nearest_band"}][:5]
@@ -252,7 +284,7 @@ def _plot_nmf_components(ax: plt.Axes, components: pd.DataFrame) -> bool:
         sub = components.dropna(subset=["wavenumber", col])
         wn = sub["wavenumber"].to_numpy(dtype=float)
         sort_idx = np.argsort(wn)
-        ax.plot(wn[sort_idx], sub[col].to_numpy(dtype=float)[sort_idx],
+        ax.plot(wn[sort_idx], pd.to_numeric(sub[col], errors="coerce").to_numpy(dtype=float)[sort_idx],
                 color=_COLORS[i % len(_COLORS)], linewidth=1.2, label=f"NMF {i + 1}")
     ax.set_xlabel("Raman shift (cm⁻¹)")
     ax.set_ylabel("Component loading (a.u.)")

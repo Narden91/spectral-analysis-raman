@@ -333,6 +333,7 @@ def plot_condition_region(
         linewidth=2.0,
         label=f"Control (n={control.shape[0]})",
     )
+    ax.fill_between(wavenumbers, mean_control, alpha=0.08, color=CONDITION_COLORS["control"])
     ax.plot(
         wavenumbers,
         mean_disease,
@@ -340,6 +341,7 @@ def plot_condition_region(
         linewidth=2.0,
         label=f"Disease (n={disease.shape[0]})",
     )
+    ax.fill_between(wavenumbers, mean_disease, alpha=0.08, color=CONDITION_COLORS["disease"])
     _set_spectrum_limits(ax, [wavenumbers], [mean_control, mean_disease], top_pad=0.18)
     peak_cfg = plot_cfg.get("peak_detection", {})
     _annotate_peaks(ax, wavenumbers, mean_control, wavenumbers, CONDITION_COLORS["control"], peak_cfg)
@@ -374,6 +376,7 @@ def plot_gender_condition_region(
         linewidth=2.0,
         label=f"Control (n={control.shape[0]})",
     )
+    ax.fill_between(wavenumbers, mean_control, alpha=0.08, color=control_color)
     ax.plot(
         wavenumbers,
         mean_disease,
@@ -381,6 +384,7 @@ def plot_gender_condition_region(
         linewidth=2.0,
         label=f"Disease (n={disease.shape[0]})",
     )
+    ax.fill_between(wavenumbers, mean_disease, alpha=0.08, color=disease_color)
     _set_spectrum_limits(ax, [wavenumbers], [mean_control, mean_disease], top_pad=0.18)
     peak_cfg = plot_cfg.get("peak_detection", {})
     _annotate_peaks(ax, wavenumbers, mean_control, wavenumbers, control_color, peak_cfg)
@@ -416,6 +420,7 @@ def plot_individual_region(
         linewidth=mean_linewidth,
         label=f"{_condition_name(condition)} mean (n={spectra.shape[0]})",
     )
+    ax.fill_between(wavenumbers, mean_spectrum, alpha=0.08, color=color)
     _set_spectrum_limits(
         ax,
         [wavenumbers],
@@ -475,6 +480,7 @@ def plot_individual_by_gender_region(
             linewidth=mean_linewidth,
             label=f"{label} mean (n={spectra.shape[0]})",
         )
+        ax.fill_between(wavenumbers, mean_spectrum, alpha=0.08, color=color)
         _set_spectrum_limits(ax, [wavenumbers], [spectra, mean_spectrum], top_pad=0.18)
         _annotate_peaks(ax, wavenumbers, mean_spectrum, wavenumbers, color, plot_cfg.get("peak_detection", {}))
         _finalize_axis(ax, title=label)
@@ -527,6 +533,7 @@ def plot_global_comparison(
                 label=str(label) if (label is not None and region == first_region) else None,
             )
             if annotate:
+                ax.fill_between(display_axes[region], y, alpha=0.08, color=color)
                 annotated_segments.append(
                     (
                         np.asarray(display_axes[region], dtype=float),
@@ -592,6 +599,7 @@ def plot_cohort_mean_spectra_grid(
                 linewidth=1.8,
                 label=_region_title(region),
             )
+            ax.fill_between(display_axes[region], y_disp, alpha=0.08, color=color)
             if _region_title(region) not in legend_labels:
                 legend_handles.append(line)
                 legend_labels.append(_region_title(region))
@@ -635,6 +643,7 @@ def plot_region_mean_spectrum(
     mean_spectrum = _mean_signal(spectra)
     color = REGION_COLORS.get(_region_key(region), "#334155")
     ax.plot(wavenumbers, mean_spectrum, color=color, linewidth=2.0)
+    ax.fill_between(wavenumbers, mean_spectrum, alpha=0.08, color=color)
     _set_spectrum_limits(ax, [wavenumbers], [mean_spectrum], top_pad=0.18)
     _annotate_peaks(ax, wavenumbers, mean_spectrum, wavenumbers, color, plot_cfg.get("peak_detection", {}))
     _finalize_axis(ax, title=f"Mean spectrum - {_region_title(region)}")
