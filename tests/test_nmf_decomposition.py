@@ -1,7 +1,6 @@
 """Tests for Phase N: NMF decomposition."""
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from src.analysis.nmf_decomposition import (
@@ -9,7 +8,6 @@ from src.analysis.nmf_decomposition import (
     _fit_nmf_multi_init,
     _reconstruction_error,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

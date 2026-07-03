@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from pathlib import Path
 from typing import Any
-import warnings
 
 import numpy as np
 import pandas as pd

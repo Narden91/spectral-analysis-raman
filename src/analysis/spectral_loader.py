@@ -8,9 +8,9 @@ analysis-ready matrices.
 Uses thread-parallel I/O for faster loading from disk.
 """
 
-import logging
 import hashlib
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
@@ -18,7 +18,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-
+from src import _output_dir
+from src import config as _cfg
 from src.data_preparation.loaders import (
     load_area_summaries,
     load_whole_area_store,
@@ -26,9 +27,7 @@ from src.data_preparation.loaders import (
 from src.data_preparation.store import get_active_data_source
 from src.io.file_crawler import disambiguate_subject_ids
 from src.io.txt_reader import read_txt_spectrum
-from src.preprocessing.cache import load_subject_mean
 from src.preprocessing.pipeline import resolve_region_key
-from src import config as _cfg, _output_dir
 
 logger = logging.getLogger(__name__)
 
@@ -231,17 +230,17 @@ def _compute_area_median_spectra_from_index(
         df_index["spectral_range_cm-1"] == range_val
     )
     subject_rows = df_index[mask]
-    
+
     if subject_rows.empty:
         return np.array([]), np.array([])
-        
+
     from src.preprocessing.cache import build_area_cache
     from src.preprocessing.pipeline import retention_guard_config
-    
+
     all_area_medians = []
     wavenumbers = None
     total_valid_pixels = 0
-    
+
     for _, row in subject_rows.iterrows():
         cached = build_area_cache(
             filepath=row["filepath"],
@@ -259,15 +258,15 @@ def _compute_area_median_spectra_from_index(
             area_median = np.nanmedian(cached.spectra, axis=0)
             all_area_medians.append(area_median)
             total_valid_pixels += cached.spectra.shape[0]
-            
+
     if not all_area_medians or wavenumbers is None:
         return np.array([]), np.array([])
-        
+
     area_matrix = np.vstack(all_area_medians)
     guards = retention_guard_config()
     if total_valid_pixels < guards["min_pixels_per_subject"]:
         return wavenumbers, np.array([])
-        
+
     return wavenumbers, area_matrix
 
 

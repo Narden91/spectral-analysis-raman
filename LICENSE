@@ -1,0 +1,22 @@
+﻿# Academic Use License
+
+This software and its associated documentation are provided for academic, non-commercial research purposes only.
+
+## Permitted Uses
+1. Academic research
+2. Reproducibility of published findings
+3. Educational purposes
+
+## Restrictions
+1. You may not use this software for any commercial purpose.
+2. You may not use this software for clinical diagnosis or predictive biomarker development. The pipeline is strictly for exploratory data analysis (EDA).
+3. Redistribution is permitted only under these same terms.
+
+## Disclaimer
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

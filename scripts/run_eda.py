@@ -26,17 +26,12 @@ _spec.loader.exec_module(_cli_util)
 _cli_util.apply_config_override("config/eda.yaml", ROOT)
 
 from src import (
+    _output_dir,
     config,
     get_biological_pca_canonical_dir,
     get_run_metadata_dir,
     setup_logging,
-    _output_dir,
-    _range_label,
 )
-from src.data_preparation import data_source_summary, resolve_data_source, write_analysis_provenance
-from src.clinical.endpoints import build_and_write_clinical_endpoints
-from src.terminal_output import print_kv_table, print_status
-
 from src.analysis._single_range import _VALID_RANGES
 from src.analysis.biological_pca import run_biological_pca
 from src.analysis.disease_only_pipeline import run_disease_only_cross_region_pipeline
@@ -48,6 +43,9 @@ from src.analysis.eda_mode import (
     validate_eda_mode_config,
 )
 from src.analysis.run_eda import run_eda
+from src.clinical.endpoints import build_and_write_clinical_endpoints
+from src.data_preparation import data_source_summary, resolve_data_source, write_analysis_provenance
+from src.terminal_output import print_kv_table, print_status
 
 logger = logging.getLogger(__name__)
 

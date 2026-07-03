@@ -4,8 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.analysis.cohort import build_cohort_summary, save_cohort_summary
-
+from src.analysis.cohort import build_cohort_summary
 
 COHORT_TABLE_KEYS = (
     "group_counts",

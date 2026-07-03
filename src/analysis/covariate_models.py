@@ -10,11 +10,11 @@ import pandas as pd
 from scipy import stats
 
 from src import config, get_cross_region_phase_dir
+from src.analysis.band_features import band_mean, infer_block_from_upper, ratio_from_integrals
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
 )
-from src.analysis.band_features import band_mean, infer_block_from_upper, ratio_from_integrals
 from src.analysis.sklearn_utils import covariate_logistic_model, fit_with_convergence_capture
 from src.analysis.spectral_regions import candidate_region_feature_names
 

@@ -8,18 +8,18 @@ instrument artefacts, and make every step configurable from YAML.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import logging
+import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
-import warnings
 
 import numpy as np
 import pandas as pd
 from pybaselines.smooth import snip
 from pybaselines.utils import ParameterWarning
-from pybaselines.whittaker import asls, arpls
+from pybaselines.whittaker import arpls, asls
 from scipy.interpolate import interp1d
 from scipy.ndimage import median_filter
 from scipy.signal import find_peaks, savgol_filter

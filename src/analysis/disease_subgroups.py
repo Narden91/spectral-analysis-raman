@@ -15,9 +15,9 @@ from sklearn.preprocessing import StandardScaler
 from src import config, get_cross_region_phase_dir
 from src.analysis.clinical_feature_associations import (
     feature_columns,
+    filter_disease_subjects,
     load_disease_feature_frame,
     load_subject_feature_matrix,
-    filter_disease_subjects,
 )
 from src.analysis.discriminant_spectra import run_subgroup_mean_spectra
 

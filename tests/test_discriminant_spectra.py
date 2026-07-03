@@ -2,14 +2,12 @@
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.analysis.discriminant_spectra import (
     _annotate_wavenumbers,
     _group_spectra,
     compute_difference_spectrum,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

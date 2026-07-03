@@ -3,7 +3,6 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
-from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 
 from src.analysis.sklearn_utils import (

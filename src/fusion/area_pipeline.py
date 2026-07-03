@@ -13,7 +13,7 @@ from typing import Optional
 
 import numpy as np
 
-from src import config, _output_dir
+from src import _output_dir, config
 from src.constants import CANONICAL_REGION_BOUNDS
 from src.fusion.area_summary import summarize_area_pixels
 from src.fusion.concatenate import concatenate_regions

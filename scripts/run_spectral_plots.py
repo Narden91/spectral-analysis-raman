@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-from pathlib import Path
 import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(

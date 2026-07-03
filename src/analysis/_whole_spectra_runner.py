@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 
 from src import (
-    WHOLE_SPECTRA_PHASE_DIRS,
     config,
     get_whole_spectra_phase_dir,
     whole_spectra_split_index,
@@ -16,8 +15,8 @@ from src import (
 from src.analysis._single_range import (
     _estimate_variance_decomposition,
     _log_phase,
-    _write_pca_pc1_dominance_report,
     _save_fig,
+    _write_pca_pc1_dominance_report,
 )
 from src.analysis.eda_mode import resolve_eda_analysis_mode
 from src.analysis.joint_dr import joint_pca_mfa

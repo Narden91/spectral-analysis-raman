@@ -1,16 +1,17 @@
 import logging
 import os
-import yaml
 from pathlib import Path
 
 import numpy as np
-
+import yaml
 
 if not hasattr(np, "trapz") and hasattr(np, "trapezoid"):
     np.trapz = np.trapezoid
 if not hasattr(np, "in1d") and hasattr(np, "isin"):
     np.in1d = np.isin
 
+
+__version__ = "0.1.0"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -197,8 +198,6 @@ def get_output_root(track: str) -> Path:
     out_cfg = config.get("output", {})
     if track == "eda":
         return Path(out_cfg.get("eda_root", out_cfg.get("project_name", "outputs")))
-    if track == "ml":
-        return Path(out_cfg.get("ml_root", Path(out_cfg.get("project_name", "outputs")) / "ml"))
     raise ValueError(f"Unknown output track: {track}")
 
 

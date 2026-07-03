@@ -9,7 +9,13 @@ A professional, high-performance Python pipeline for extracellular-vesicle (EV) 
 *   **Robust Preprocessing**: Custom multi-stage pipeline including cosmic-ray removal, arPLS/AsLS/SNIP baseline correction, Savitzky-Golay smoothing, edge-trimming, and region-specific normalization.
 *   **Hierarchical Data Model**: Natively handles nested structures: $\text{Subject} \rightarrow \text{Sample (Slide)} \rightarrow \text{Spot (Area)} \rightarrow \text{Pixels}$.
 *   **Subject-Level Biological PCA**: Aggregates spectral data at the subject level to avoid pseudoreplication, projecting fingerprint (1300 cm⁻¹), CH-stretch (2850 cm⁻¹), and concatenated whole-spectrum spaces.
-*   **Clinical Correlation**: Computes non-parametric Spearman correlations between spectral features and clinical endpoints (e.g., MoCA baseline scores) for disease-only cohorts.
+*   **Clinical Correlation**: Outputs are generated in `outputs/eda/intra_disease/`:
+- `01_clinical_correlation_matrix/`: Broad spectral feature correlations with clinical endpoints.
+- `02_longitudinal_moca/`: Associations specifically targeting ΔMoCA.
+- `03_disease_stratification/`: Spectral profiles across disease severity sub-groups.
+- `04_minimal_panel/`: ElasticNet feature reduction attempts.
+- `05_confirmatory_panel/`: (Tier-1) Robust statistics and permutation testing on pre-registered features.
+- `06_spectral_interpretability/`: (Tier-2) Tools for spectral shape extraction, Feature Coupling (regimes), NMF decomposition, and entropy descriptors.
 *   **Rich Visualizations**: Generates publication-ready scree plots, score pairgrids, loading summaries, group-mean waveforms, and individual QC grids.
 *   **Data Integrity & Validation**: Fully manifest-driven data storage using Parquet for tabular metadata, NPZ for dense arrays, and JSON for schema/config snapshots.
 
@@ -73,7 +79,7 @@ Clone the repository and install the pipeline in editable mode:
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/spectral-analysis-raman.git
+git clone https://github.com/Narden91/spectral-analysis-raman.git
 cd spectral-analysis-raman
 
 # Create virtual environment and install dependencies

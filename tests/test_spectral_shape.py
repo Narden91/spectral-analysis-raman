@@ -4,14 +4,12 @@ import numpy as np
 import pytest
 
 from src.analysis.spectral_shape import (
-    _empirical_asymmetry,
     _r_squared,
     _snr_from_fit,
     compute_shape_summary,
     extract_peak_shape_features,
     fit_local_peak,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

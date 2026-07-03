@@ -16,17 +16,17 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from src import config, get_output_root, whole_spectra_split_index
-from src.data_preparation.loaders import load_clinical_subjects, load_file_index
 from src.analysis.spectral_loader import build_group_matrix, build_whole_spectra_group_matrices
 from src.constants import CANONICAL_REGION_CHANNELS
+from src.data_preparation.loaders import load_clinical_subjects, load_file_index
 from src.metadata.clinical import merge_index_with_clinical
 from src.visualization.spectral_summary_plots import (
     plot_cohort_mean_spectra_grid,
     plot_condition_region,
     plot_gender_condition_region,
     plot_global_comparison,
-    plot_individual_region,
     plot_individual_by_gender_region,
+    plot_individual_region,
     plot_qc_metric_distribution,
     plot_region_mean_spectrum,
     plot_whole_spectra_per_cohort,

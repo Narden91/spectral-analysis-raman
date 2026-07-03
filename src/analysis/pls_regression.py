@@ -9,14 +9,13 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from sklearn.cross_decomposition import PLSRegression
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import GroupKFold, KFold, LeaveOneGroupOut, LeaveOneOut
 from sklearn.preprocessing import StandardScaler
 
 from src import config, get_cross_region_phase_dir
 from src.analysis.clinical_feature_associations import (
     feature_columns,
-    feature_metadata,
     load_disease_feature_frame,
 )
 
@@ -92,7 +91,7 @@ def _tune_pls_components(
         for in_tr, in_te in inner_cv.split(X_train_scaled):
             X_in_tr, y_in_tr = X_train_scaled[in_tr], y_train[in_tr]
             X_in_te, y_in_te = X_train_scaled[in_te], y_train[in_te]
-            
+
             inner_model = PLSRegression(n_components=c, scale=False)
             inner_model.fit(X_in_tr, y_in_tr)
             preds = inner_model.predict(X_in_te).ravel()
@@ -246,7 +245,7 @@ def run_pls_regression(
                 best_c = _tune_pls_components(X_train_scaled, y_train, component_grid, random_state)
             else:
                 best_c = min(component_grid[-1], X_train_scaled.shape[1], X_train_scaled.shape[0] - 2)
-            
+
             fold_selected_components.append(best_c)
 
             model = PLSRegression(n_components=best_c, scale=False)
@@ -265,9 +264,9 @@ def run_pls_regression(
         final_model.fit(X_scaled, y)
 
         vip_scores = _calculate_vip(final_model)
-        
+
         # Calculate raw coefficients (mapping scaled variables back to original space)
-        # y is not scaled by StandardScaler in our code, PLSRegression might scale it internally, 
+        # y is not scaled by StandardScaler in our code, PLSRegression might scale it internally,
         # but coef_ relates X_scaled to y.
         raw_coefs = final_model.coef_.ravel() / final_scaler.scale_
 

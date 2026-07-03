@@ -1,20 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
-import json
 import logging
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import yaml
 
-from src import config as global_config, resolve_project_path
+from src import config as global_config
+from src import resolve_project_path
 from src.data_preparation.cohorts import build_materialized_cohorts, write_cohort_tables
 from src.data_preparation.manifest import (
     MANIFEST_VERSION,

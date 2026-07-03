@@ -5,7 +5,6 @@ import argparse
 import importlib.util
 import logging
 import shutil
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

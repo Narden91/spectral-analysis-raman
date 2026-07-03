@@ -15,28 +15,28 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from src import config, get_confirmatory_panel_dir, get_run_metadata_dir
 from src.analysis.biochemical_ratios import run_biochemical_ratios
 from src.analysis.clinical_correlation_matrix import run_clinical_correlation_matrix
-from src.analysis.covariate_models import run_covariate_region_models
-from src.analysis.disease_subgroups import run_disease_subgroups
-from src.analysis.disease_stratification import run_disease_stratification
 from src.analysis.cluster_panel_summary import run_panel_cluster_summary
+from src.analysis.covariate_models import run_covariate_region_models
+from src.analysis.discriminant_spectra import run_discriminant_spectra
+from src.analysis.disease_stratification import run_disease_stratification
+from src.analysis.disease_subgroups import run_disease_subgroups
 from src.analysis.endpoint_consistency import run_endpoint_consistency
+from src.analysis.feature_coupling import run_feature_coupling
+from src.analysis.index_clustering import run_index_clustering
 from src.analysis.integrated_candidates import run_integrated_candidates
 from src.analysis.io_utils import write_csv_atomic
+from src.analysis.journal_figures import run_journal_figures
 from src.analysis.longitudinal_moca import run_longitudinal_moca
 from src.analysis.minimal_panel import run_minimal_panel
+from src.analysis.nmf_decomposition import run_nmf_decomposition
 from src.analysis.pls_regression import run_pls_regression
 from src.analysis.preregistered_panel import run_preregistered_panel
 from src.analysis.robust_contrasts import run_confirmatory_panel_statistics
 from src.analysis.robustness_ranking import run_robustness_ranking
-from src.analysis.spectral_regions import run_candidate_region_detector
-from src.analysis.splsda import run_splsda_classifier
-from src.analysis.discriminant_spectra import run_discriminant_spectra
-from src.analysis.feature_coupling import run_feature_coupling
-from src.analysis.index_clustering import run_index_clustering
-from src.analysis.journal_figures import run_journal_figures
-from src.analysis.nmf_decomposition import run_nmf_decomposition
 from src.analysis.spectral_descriptors import run_spectral_descriptors
+from src.analysis.spectral_regions import run_candidate_region_detector
 from src.analysis.spectral_shape import run_spectral_shape
+from src.analysis.splsda import run_splsda_classifier
 from src.reporting.candidate_region_report import run_candidate_region_report, run_panel_report_section
 
 logger = logging.getLogger(__name__)

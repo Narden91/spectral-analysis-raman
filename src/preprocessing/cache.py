@@ -26,7 +26,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from src import config as _cfg, resolve_project_path
+from src import config as _cfg
+from src import resolve_project_path
 from src.io.txt_reader import read_txt_spectrum
 from src.preprocessing.pipeline import flatten_spectra_rows, retention_guard_config, run_preprocessing
 

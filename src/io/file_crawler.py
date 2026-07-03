@@ -1,13 +1,12 @@
 import logging
-import re
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import pandas as pd
 
-from src.metadata.parser import parse_filename
 from src import config, resolve_project_path
+from src.metadata.parser import parse_filename
 
 logger = logging.getLogger(__name__)
 

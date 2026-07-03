@@ -6,7 +6,6 @@ loop used by spectral_shape, nmf_decomposition, and spectral_descriptors.
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 from scipy import stats as scipy_stats
 

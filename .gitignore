@@ -60,3 +60,16 @@ presentation/
 *.bcf
 *.acn
 *.acr
+
+# Manuscript LaTeX artifacts
+manuscript/*.aux
+manuscript/*.bbl
+manuscript/*.blg
+manuscript/*.fdb_latexmk
+manuscript/*.fls
+manuscript/*.log
+manuscript/*.out
+manuscript/*.synctex.gz
+manuscript/*.spl
+manuscript/*.toc
+

@@ -2,13 +2,11 @@
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.analysis.feature_coupling import (
     assign_biochemical_regimes,
     compute_coupling_matrix,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

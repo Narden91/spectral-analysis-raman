@@ -21,10 +21,11 @@ The codebase follows a modular structure:
 - `src/metadata/`: filename metadata parsing.
 - `src/data_preparation/`: parsed and preprocessed store materialization, validation, loading, and cohorts.
 - `src/preprocessing/`: Raman preprocessing and QC.
-- `src/aggregation/`: subject and area aggregation helpers.
+- `src/clinical/`: clinical endpoint definitions and mappings.
 - `src/fusion/`: cross-range and area-level fusion helpers.
 - `src/analysis/`: EDA, PCA, whole-spectra analysis, and Biological PCA.
 - `src/visualization/`: plotting and report figures.
+- `src/reporting/`: candidate region provenance and manuscript reports.
 
 Configuration is YAML-based. Track configs use `_extends`; `config/eda.yaml` owns EDA and Biological PCA settings.
 

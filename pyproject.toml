@@ -6,9 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "adjusttext>=1.4.0",
-    "dash>=4.0.0",
-    "ipykernel>=7.2.0",
-    "jupyter>=1.1.1",
     "markdown>=3.5",
     "matplotlib>=3.10.8",
     "numpy>=2.4.2",
@@ -32,7 +29,26 @@ filterwarnings = [
 dev = [
     "pytest>=9.0.2",
 ]
+notebook = [
+    "dash>=4.0.0",
+    "ipykernel>=7.2.0",
+    "jupyter>=1.1.1",
+]
 gpu = [
     # CUDA 13.x wheels; matches driver CUDA UMD 13.x (RTX 5080). [ctk] bundles runtime libs.
     "cupy-cuda13x[ctk]>=14.0.0",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = false
+ignore_missing_imports = true
+

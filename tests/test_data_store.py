@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -10,9 +10,14 @@ import pytest
 
 import src
 from src.analysis.spectral_loader import build_group_matrix
-from src.data_preparation.materialize import build_parsed_store, build_preprocessed_store
-from src.data_preparation.store import DataSource, get_active_data_source, resolve_data_source, write_analysis_provenance
 from src.data_preparation import validation as validation_module
+from src.data_preparation.materialize import build_parsed_store, build_preprocessed_store
+from src.data_preparation.store import (
+    DataSource,
+    get_active_data_source,
+    resolve_data_source,
+    write_analysis_provenance,
+)
 from src.data_preparation.validation import validate_store
 
 

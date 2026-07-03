@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from src import config as global_config, resolve_project_path
+from src import config as global_config
+from src import resolve_project_path
 from src.data_preparation.manifest import config_hash, iso_utc_now
 from src.data_preparation.materialize import build_parsed_store, build_preprocessed_store
-from src.data_preparation.validation import ValidationResult, validate_store
+from src.data_preparation.validation import validate_store
 
 
 @dataclass(frozen=True)

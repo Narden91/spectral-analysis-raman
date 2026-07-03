@@ -1,27 +1,29 @@
 """Visualization helpers for Raman spectroscopy EDA."""
 
-from typing import Optional
 import logging
 import math
 import warnings
+from typing import Optional
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from src.visualization.theme import (
-    POINT_EDGE_COLOR,
     GROUP_COLORS,
     GROUP_LABELS,
+    POINT_EDGE_COLOR,
+    SUBJECT_SCATTER_SIZE,
     WHOLE_SPECTRA_NEUTRAL,
     WHOLE_SPECTRA_RANGE_COLORS,
     WHOLE_SPECTRA_RANGE_LABELS,
-    SUBJECT_SCATTER_SIZE,
-    finalize_axis as _finalize_axis,
     set_gallery_theme,
+)
+from src.visualization.theme import (
+    finalize_axis as _finalize_axis,
 )
 
 set_gallery_theme()
@@ -81,7 +83,7 @@ def plot_group_mean_spectra(
         label = GROUP_LABELS.get(key, key)
         linestyle = "--" if "control" in key.lower() else "-"
         mean = np.nanmean(spectra, axis=0)
-        
+
         plot_mean = np.insert(mean, gap_idx + 1, np.nan) if has_gap else mean
         ax.plot(
             plot_wavenumbers,

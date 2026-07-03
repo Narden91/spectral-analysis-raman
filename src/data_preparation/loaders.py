@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
 from src import config as global_config
 from src.data_preparation.materialize import _prepare_file_index, _read_raw_measurement_vectors
 from src.data_preparation.store import DataSource, get_active_data_source, resolve_data_source
-from src.io.file_crawler import disambiguate_subject_ids
 from src.metadata.clinical import load_clinical_data
 
 

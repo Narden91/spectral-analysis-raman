@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -11,9 +11,9 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 from scipy.interpolate import interp1d
 from scipy.spatial import ConvexHull
 
@@ -24,8 +24,8 @@ from src import (
     get_cross_region_summary_dir,
     resolve_project_path,
 )
-from src.analysis.subject_features import write_subject_feature_exports
 from src.analysis.statistics import run_pca
+from src.analysis.subject_features import write_subject_feature_exports
 from src.data_preparation.loaders import (
     load_area_summaries,
     load_clinical_subjects,

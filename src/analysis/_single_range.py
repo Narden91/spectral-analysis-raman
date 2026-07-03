@@ -15,39 +15,27 @@ state, column batch effects, lipoprotein contamination, and sample volume.
 import logging
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
 import matplotlib
 import matplotlib.figure
+import numpy as np
+import pandas as pd
 
 matplotlib.use("Agg")  # non-interactive backend for batch processing
 import matplotlib.pyplot as plt
 
 from src import (
     config,
-    get_eda_phase_dir,
     get_biological_pca_canonical_dir,
+    get_eda_phase_dir,
     get_single_range_phase_dirs,
 )
-from src.analysis.spectral_loader import (
-    build_group_matrix,
-    build_whole_spectra_group_matrices,
-    load_subject_spectra,
-    wave_axes_compatible,
-)
-from src.data_preparation.loaders import load_clinical_subjects, load_file_index
-from src.data_preparation.store import get_active_data_source
 from src.analysis.cohort import build_cohort_summary
-from src.metadata.clinical import merge_index_with_clinical
-from src.analysis.statistics import (
-    run_pca,
-    rank_wavenumbers_per_pc,
-    build_pca_loading_interpretation,
-    extract_band_intensities,
-    compare_band_intensities_between_groups,
-    test_normality,
+from src.analysis.eda_mode import (
+    filter_index_for_eda_mode,
+    group_configs_for_eda_mode,
+    resolve_eda_analysis_mode,
+    validate_eda_mode_config,
 )
-from src.analysis.robustness import run_region_robustness, write_region_influence_report
 from src.analysis.intra_disease import (
     build_disease_subject_mean_matrix,
     compute_intra_disease_correlations,
@@ -55,27 +43,39 @@ from src.analysis.intra_disease import (
     summarize_correlation_regions,
     summarize_significant_targets,
 )
-from src.analysis.eda_mode import (
-    filter_index_for_eda_mode,
-    group_configs_for_eda_mode,
-    resolve_eda_analysis_mode,
-    validate_eda_mode_config,
+from src.analysis.robustness import run_region_robustness, write_region_influence_report
+from src.analysis.spectral_loader import (
+    build_group_matrix,
+    build_whole_spectra_group_matrices,
+    load_subject_spectra,
+    wave_axes_compatible,
 )
-from src.preprocessing.pipeline import preprocess_spectra, apply_region_weights
+from src.analysis.statistics import (
+    build_pca_loading_interpretation,
+    compare_band_intensities_between_groups,
+    extract_band_intensities,
+    rank_wavenumbers_per_pc,
+    run_pca,
+    test_normality,
+)
+from src.data_preparation.loaders import load_clinical_subjects, load_file_index
+from src.data_preparation.store import get_active_data_source
+from src.metadata.clinical import merge_index_with_clinical
+from src.preprocessing.pipeline import apply_region_weights, preprocess_spectra
+from src.visualization.advanced_plots import plot_all_bands_raincloud
 from src.visualization.eda_plots import (
     GROUP_COLORS,
-    plot_pca_scores,
-    plot_pca_loadings,
-    plot_scree,
     plot_band_boxplots,
-    plot_group_mean_spectra,
-    plot_difference_spectra,
-    plot_variance_decomposition,
     plot_correlation_spectrum,
+    plot_difference_spectra,
+    plot_group_mean_spectra,
     plot_intra_disease_correlation_overview,
     plot_intra_disease_top_regions,
+    plot_pca_loadings,
+    plot_pca_scores,
+    plot_scree,
+    plot_variance_decomposition,
 )
-from src.visualization.advanced_plots import plot_all_bands_raincloud
 
 logger = logging.getLogger(__name__)
 
@@ -569,7 +569,7 @@ def _run_single_range_eda(
             int(config.get("analysis", {}).get("pca_n_components", 10)),
             pca_input.shape[0] - 1,
         )
-        
+
         if analysis_mode == "disease_only":
             from src.analysis.intra_disease import run_intra_disease_pca
             pca_result = run_intra_disease_pca(

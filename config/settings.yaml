@@ -2,7 +2,7 @@
 # Shared base configuration
 # ---------------------------------------------------------------------------
 # This file contains only cross-track defaults. Track-specific sections live in
-# config/eda.yaml, config/ml.yaml, config/dl.yaml, and config/plots.yaml.
+# config/eda.yaml and config/plots.yaml.
 
 # ---------------------------------------------------------------------------
 # Experiment tracking - controls multi-run iteration
@@ -150,11 +150,10 @@ preprocessing:
   # Normalization modes used by the preprocessing orchestrator.
   normalization:
     method: "snv"  # str: default normalization ("vector", "snv", "none", ...)
-    default_mode: "eda"  # str: selected mode key ("eda", "cross", "ml")
+    default_mode: "eda"  # str: selected mode key ("eda", "cross")
     modes:
       eda: "snv"  # str: normalization for EDA track
       cross: "none"  # str: normalization for cross-range fusion
-      ml: "robust"  # str: normalization for ML track
   artifacts:
     save_qc_tables: true  # bool: write per-area QC tables
     save_stage_arrays: false  # bool: save intermediate per-stage spectra

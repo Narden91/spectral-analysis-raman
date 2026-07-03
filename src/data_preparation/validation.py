@@ -14,7 +14,6 @@ from src.data_preparation.manifest import (
     load_manifest,
 )
 
-
 PARQUET_FILES = ("file_index.parquet", "clinical_subjects.parquet", "area_metadata.parquet")
 NPZ_FILES = (
     "spectra_1300.npz",

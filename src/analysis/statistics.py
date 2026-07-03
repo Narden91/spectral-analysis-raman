@@ -434,7 +434,7 @@ def run_pca(
     scores *= signs[np.newaxis, :]
 
     cumvar = np.cumsum(pca.explained_variance_ratio_)
-    
+
     pc1_variance_ratio = (
         float(pca.explained_variance_ratio_[0])
         if len(pca.explained_variance_ratio_) > 0

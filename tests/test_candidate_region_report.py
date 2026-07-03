@@ -7,7 +7,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.reporting.candidate_region_report import build_panel_report_section, run_candidate_region_report, run_panel_report_section
+from src.reporting.candidate_region_report import (
+    build_panel_report_section,
+    run_candidate_region_report,
+    run_panel_report_section,
+)
 
 
 def _integrated_candidates() -> pd.DataFrame:
