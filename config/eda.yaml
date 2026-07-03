@@ -213,6 +213,57 @@ analysis:
       - fdr_significant
       - cluster_permutation
       - covariate_persisted
+
+  # ---------------------------------------------------------------------------
+  # Tier-2 — Structure-aware spectral interpretability (Phases M–U)
+  # All phases write to Results_intra_disease/06_spectral_interpretability/<phase>/
+  # ---------------------------------------------------------------------------
+
+  spectral_shape:
+    # Phase M: per-subject Gaussian peak fit (centroid / FWHM / asymmetry)
+    # on pre-registered band windows; Spearman associations with endpoints.
+    # Parameters are inherited from preregistered_panel (min_snr_for_peak_fit,
+    # calibration_floor_cm, n_bootstrap, peak_shape_windows, covariates).
+    enabled: true
+
+  nmf_decomposition:
+    # Phase N: NMF latent components of the fingerprint region.
+    # NMF hyper-parameters (n_components, sparsity_alpha, n_init, apply_to)
+    # live under preregistered_panel.nmf in this file.
+    enabled: true
+
+  spectral_descriptors:
+    # Phase O: Shannon entropy and Gini dispersion per subject over the
+    # fingerprint block (1300__* columns). Endpoint Spearman associations
+    # use preregistered_panel endpoints / covariates.
+    enabled: true
+
+  discriminant_spectra:
+    # Phase P: mean-group difference spectra + signed Cohen's-d effect maps
+    # for each contrast defined in preregistered_panel.endpoints.contrasts.
+    enabled: true
+
+  feature_coupling:
+    # Phase Q: pairwise Spearman coupling matrix + bootstrap CIs across the
+    # pre-registered indices/integrals; ratio-ratio biochemical regime map.
+    enabled: true
+    n_bootstrap: 500  # int: bootstrap replicates for coupling CI estimation
+    random_state: 42  # int: reproducibility seed
+
+  index_clustering:
+    # Phase R: agglomerative Ward clustering of panel indices; Gap-statistic
+    # k selection; bootstrap ARI stability. Disabled by default — opt-in only.
+    enabled: false
+    max_k: 4        # int: maximum number of clusters to evaluate
+    n_gap_refs: 20  # int: null-distribution reference samples for Gap stat
+    n_bootstrap: 100  # int: bootstrap ARI replicates
+    random_state: 42  # int: reproducibility seed
+
+  journal_figures:
+    # Phase U: assembles 5 publication-quality figures from Tier-1/Tier-2
+    # outputs for Spectrochimica Acta A submission.
+    enabled: true
+
   preregistered_panel:
     enabled: true
     fdr_alpha: 0.05
