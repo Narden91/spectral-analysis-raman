@@ -2,7 +2,7 @@
 
 Selects a sparse panel of 5–10 spectral peaks/ratios associated with clinical
 endpoints using nested cross-validated ElasticNet / L1-logistic regression,
-permutation testing, and bootstrap confidence intervals.
+full-pipeline permutation testing, and bootstrap selection-stability summaries.
 
 All results are exploratory and subject-level; no diagnostic, predictive,
 causal, or biomarker claims are made.
@@ -68,11 +68,11 @@ def _load_preregistered_panel_pool(
 ) -> pd.DataFrame:
     path = Path(panel_matrix_path) if panel_matrix_path is not None else get_confirmatory_panel_dir() / "panel_feature_matrix.csv"
     if not path.exists():
-        logger.warning("Pre-registered panel feature matrix not found: %s", path)
+        logger.warning("Fixed-panel feature matrix not found: %s", path)
         return pd.DataFrame(index=disease_only.index)
     panel = pd.read_csv(path)
     if "subject_id" not in panel.columns:
-        raise ValueError("Pre-registered panel feature matrix is missing subject_id")
+        raise ValueError("Fixed-panel feature matrix is missing subject_id")
 
     panel = panel.copy()
     panel["subject_id"] = panel["subject_id"].astype(str)
@@ -141,9 +141,12 @@ def _build_feature_pool(
 ) -> pd.DataFrame:
     pool: dict[str, pd.Series] = {}
 
-    # Region-mean features from integrated candidate regions (High/Medium priority).
-    if integrated is not None and not integrated.empty and "evidence_level" in integrated.columns:
-        priority = integrated.loc[integrated["evidence_level"].isin({"High", "Medium"})].copy()
+    # Candidate-derived models require cluster-supported regions. FDR-only and
+    # fallback regions remain descriptive and never enter model selection.
+    if integrated is not None and not integrated.empty and "evidence_status" in integrated.columns:
+        priority = integrated.loc[
+            integrated["evidence_status"].eq("cluster_supported_exploratory")
+        ].copy()
         for _, region in priority.iterrows():
             columns = _region_feature_names(all_feature_columns, region)
             if not columns:
@@ -200,6 +203,81 @@ def _fit_elasticnet(model: ElasticNet | ElasticNetCV, X: np.ndarray, y: np.ndarr
     fit_with_convergence_capture(model, X, y, context=context)
 
 
+def _fit_tuned_elasticnet(
+    X: np.ndarray,
+    y: np.ndarray,
+    cv: KFold,
+    random_state: int,
+    context: str,
+) -> tuple[StandardScaler, ElasticNet]:
+    folds = list(cv.split(X))
+    best: tuple[float, float] | None = None
+    best_mse = float("inf")
+    for l1_ratio in (0.1, 0.5, 0.9, 1.0):
+        for alpha in np.logspace(-4, 1, 8):
+            fold_mse: list[float] = []
+            for train_idx, test_idx in folds:
+                scaler = StandardScaler()
+                X_train = scaler.fit_transform(X[train_idx])
+                X_test = scaler.transform(X[test_idx])
+                model = ElasticNet(
+                    alpha=float(alpha),
+                    l1_ratio=l1_ratio,
+                    random_state=random_state,
+                    max_iter=_ELASTICNET_MAX_ITER,
+                    tol=_ELASTICNET_TOL,
+                )
+                _fit_elasticnet(model, X_train, y[train_idx], context)
+                fold_mse.append(float(mean_squared_error(y[test_idx], model.predict(X_test))))
+            mean_mse = float(np.mean(fold_mse))
+            if mean_mse < best_mse:
+                best_mse = mean_mse
+                best = (float(alpha), l1_ratio)
+    assert best is not None
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    model = ElasticNet(
+        alpha=best[0],
+        l1_ratio=best[1],
+        random_state=random_state,
+        max_iter=_ELASTICNET_MAX_ITER,
+        tol=_ELASTICNET_TOL,
+    )
+    _fit_elasticnet(model, X_scaled, y, context)
+    return scaler, model
+
+
+def _fit_tuned_logistic(
+    X: np.ndarray,
+    y: np.ndarray,
+    cv: StratifiedKFold,
+    c_values: list[float],
+    random_state: int,
+    context: str,
+) -> tuple[StandardScaler, Any, float]:
+    folds = list(cv.split(X, y))
+    best_c = c_values[0]
+    best_score = -np.inf
+    for c in c_values:
+        scores: list[float] = []
+        for train_idx, test_idx in folds:
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X[train_idx])
+            X_test = scaler.transform(X[test_idx])
+            model = l1_logistic_model(c=c, random_state=random_state)
+            fit_with_convergence_capture(model, X_train, y[train_idx], context=context)
+            scores.append(float(balanced_accuracy_score(y[test_idx], model.predict(X_test))))
+        score = float(np.mean(scores))
+        if score > best_score:
+            best_score = score
+            best_c = c
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    model = l1_logistic_model(c=best_c, random_state=random_state)
+    fit_with_convergence_capture(model, X_scaled, y, context=context)
+    return scaler, model, best_c
+
+
 def _normalize_n_jobs(n_jobs: int) -> int:
     return 1 if n_jobs == 0 else n_jobs
 
@@ -252,16 +330,13 @@ def _nested_cv_elasticnet_with_selection(
         X_train_sel = X_train[:, sel_idx]
         X_test_sel = X_test[:, sel_idx]
 
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train_sel)
-        X_test_scaled = scaler.transform(X_test_sel)
-
         inner_cv = KFold(n_splits=min(n_inner_splits, len(X_train_sel)), shuffle=True, random_state=random_state)
-        model = _elasticnet_cv_model(inner_cv, random_state)
-        _fit_elasticnet(model, X_train_scaled, y_train, "leakage-free nested ElasticNetCV")
-        y_pred[test_idx] = model.predict(X_test_scaled)
-        selected_alphas.append(float(model.alpha_))
-        selected_l1_ratios.append(float(model.l1_ratio_))
+        scaler, model = _fit_tuned_elasticnet(
+            X_train_sel, y_train, inner_cv, random_state, "minimal panel inner CV"
+        )
+        y_pred[test_idx] = model.predict(scaler.transform(X_test_sel))
+        selected_alphas.append(float(model.alpha))
+        selected_l1_ratios.append(float(model.l1_ratio))
 
     perf = {
         "r2": float(r2_score(y, y_pred)),
@@ -292,7 +367,6 @@ def _nested_cv_logistic_l1_with_selection(
     """Nested CV (binary) with feature selection inside each outer training fold."""
     if c_values is None:
         c_values = [0.01, 0.1, 1.0, 10.0, 100.0]
-    n_samples = X.shape[0]
     class_counts = np.bincount(y)
     n_splits = min(n_outer_splits, max(2, class_counts.min()))
     outer_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
@@ -318,32 +392,12 @@ def _nested_cv_logistic_l1_with_selection(
         X_train_sel = X_train[:, sel_idx]
         X_test_sel = X_test[:, sel_idx]
 
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train_sel)
-        X_test_scaled = scaler.transform(X_test_sel)
-
         inner_splits = min(n_inner_splits, np.bincount(y_train).min())
         inner_cv = StratifiedKFold(n_splits=max(2, inner_splits), shuffle=True, random_state=random_state)
-        best_c = c_values[0]
-        best_score = -1.0
-        for c in c_values:
-            scores = []
-            for in_train, in_test in inner_cv.split(X_train_scaled, y_train):
-                clf = l1_logistic_model(c=c, random_state=random_state)
-                fit_with_convergence_capture(
-                    clf,
-                    X_train_scaled[in_train],
-                    y_train[in_train],
-                    context="leakage-free minimal panel inner CV",
-                )
-                scores.append(balanced_accuracy_score(y_train[in_test], clf.predict(X_train_scaled[in_test])))
-            mean_score = float(np.mean(scores))
-            if mean_score > best_score:
-                best_score = mean_score
-                best_c = c
-
-        final_clf = l1_logistic_model(c=best_c, random_state=random_state)
-        fit_with_convergence_capture(final_clf, X_train_scaled, y_train, context="leakage-free minimal panel outer CV")
+        scaler, final_clf, best_c = _fit_tuned_logistic(
+            X_train_sel, y_train, inner_cv, c_values, random_state, "minimal panel inner CV"
+        )
+        X_test_scaled = scaler.transform(X_test_sel)
         y_pred[test_idx] = final_clf.predict(X_test_scaled)
         if len(final_clf.classes_) == 2:
             y_prob[test_idx] = final_clf.predict_proba(X_test_scaled)[:, 1]
@@ -421,27 +475,40 @@ def _permuted_binary_balanced_accuracy(
     return float(perf["balanced_accuracy"])
 
 
-def _bootstrap_coefficients(
+def _bootstrap_stability_sample(
     X: np.ndarray,
     y: np.ndarray,
+    feature_names: list[str],
     task: str,
     random_state: int,
+    n_outer_splits: int,
+    n_inner_splits: int,
+    max_features: int,
+    min_features: int,
 ) -> np.ndarray | None:
     rng = np.random.default_rng(random_state)
     idx = rng.integers(0, X.shape[0], size=X.shape[0])
     X_boot, y_boot = X[idx], y[idx]
     if len(np.unique(y_boot)) < 2 and task == "binary":
         return None
-    scaler = StandardScaler()
-    X_boot_scaled = scaler.fit_transform(X_boot)
     try:
-        if task == "continuous":
-            model = _elasticnet_model(random_state)
-            _fit_elasticnet(model, X_boot_scaled, y_boot, "bootstrap ElasticNet")
-            return np.asarray(model.coef_, dtype=float)
-        model = l1_logistic_model(c=1.0, random_state=random_state)
-        fit_with_convergence_capture(model, X_boot_scaled, y_boot, context="bootstrap L1 logistic")
-        return np.asarray(model.coef_.ravel(), dtype=float)
+        selected, _selection, coefficient_folds = _select_panel(
+            X_boot,
+            y_boot,
+            feature_names,
+            n_outer_splits=n_outer_splits,
+            n_inner_splits=n_inner_splits,
+            random_state=random_state,
+            max_features=max_features,
+            min_features=min_features,
+            task=task,
+        )
+        mean_coefficients = coefficient_folds.mean(axis=0).to_numpy(dtype=float)
+        selected_set = set(selected)
+        return np.array(
+            [coef if name in selected_set else 0.0 for name, coef in zip(feature_names, mean_coefficients)],
+            dtype=float,
+        )
     except Exception:
         return None
 
@@ -509,7 +576,6 @@ def _nested_cv_logistic_l1(
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any], dict[str, float]]:
     if c_values is None:
         c_values = [0.01, 0.1, 1.0, 10.0, 100.0]
-    n_samples = X.shape[0]
     class_counts = np.bincount(y)
     n_splits = min(n_outer_splits, max(2, class_counts.min()))
     outer_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
@@ -598,7 +664,7 @@ def _permutation_test_continuous(
     finite = null_arr[np.isfinite(null_arr)]
     if len(finite) == 0:
         return np.nan, np.nan, np.nan
-    p_value = float(np.mean(finite >= observed_r2))
+    p_value = float((1 + np.sum(finite >= observed_r2)) / (len(finite) + 1))
     return p_value, float(np.mean(finite)), float(np.std(finite))
 
 
@@ -631,11 +697,11 @@ def _permutation_test_binary(
     finite = null_arr[np.isfinite(null_arr)]
     if len(finite) == 0:
         return np.nan, np.nan, np.nan
-    p_value = float(np.mean(finite >= observed_balanced_accuracy))
+    p_value = float((1 + np.sum(finite >= observed_balanced_accuracy)) / (len(finite) + 1))
     return p_value, float(np.mean(finite)), float(np.std(finite))
 
 
-def _bootstrap_coefficient_ci(
+def _bootstrap_stability_summary(
     X: np.ndarray,
     y: np.ndarray,
     feature_names: list[str],
@@ -644,12 +710,29 @@ def _bootstrap_coefficient_ci(
     random_state: int,
     task: str,
     n_jobs: int,
+    n_outer_splits: int,
+    n_inner_splits: int,
+    max_features: int,
+    min_features: int,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(random_state)
     coef_samples: dict[str, list[float]] = {name: [] for name in feature_names}
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_bootstrap, dtype=np.int64)
     calls = [
-        (_bootstrap_coefficients, (X, y, task, int(seed)))
+        (
+            _bootstrap_stability_sample,
+            (
+                X,
+                y,
+                feature_names,
+                task,
+                int(seed),
+                n_outer_splits,
+                n_inner_splits,
+                max_features,
+                min_features,
+            ),
+        )
         for seed in seeds
     ]
     for coefs in _parallel_values(n_jobs, calls):
@@ -663,10 +746,14 @@ def _bootstrap_coefficient_ci(
         samples = np.array(coef_samples[name], dtype=float)
         rows.append({
             "feature_name": name,
-            "ci_low": float(np.percentile(samples, 2.5)) if len(samples) else np.nan,
-            "ci_high": float(np.percentile(samples, 97.5)) if len(samples) else np.nan,
+            "stability_interval_low": float(np.percentile(samples, 2.5)) if len(samples) else np.nan,
+            "stability_interval_high": float(np.percentile(samples, 97.5)) if len(samples) else np.nan,
             "mean_coefficient": float(np.mean(samples)) if len(samples) else np.nan,
+            "bootstrap_selection_frequency": float(np.mean(np.abs(samples) > 1e-12)) if len(samples) else np.nan,
             "n_bootstrap_used": int(len(samples)),
+            "estimation_scope": "bootstrap_selection_stability",
+            "validated": False,
+            "status": "ok" if len(samples) else "missing_required_data",
         })
     return pd.DataFrame(rows)
 
@@ -695,34 +782,23 @@ def _select_panel(
     coef_matrix = np.zeros((len(feature_names), 0))
     for train_idx, _test_idx in outer_cv.split(X, y) if isinstance(outer_cv, StratifiedKFold) else outer_cv.split(X):
         X_train, y_train = X[train_idx], y[train_idx]
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
         if task == "continuous":
             inner_cv = KFold(n_splits=min(n_inner_splits, len(X_train)), shuffle=True, random_state=random_state)
-            model = _elasticnet_cv_model(inner_cv, random_state)
-            _fit_elasticnet(model, X_train_scaled, y_train, "panel-selection ElasticNetCV")
+            _scaler, model = _fit_tuned_elasticnet(
+                X_train, y_train, inner_cv, random_state, "panel-selection inner CV"
+            )
             coefs = model.coef_.reshape(-1, 1)
         else:
             inner_splits = min(n_inner_splits, np.bincount(y_train).min())
             inner_cv = StratifiedKFold(n_splits=max(2, inner_splits), shuffle=True, random_state=random_state)
-            best_c = 1.0
-            best_score = -1.0
-            for c in [0.01, 0.1, 1.0, 10.0, 100.0]:
-                scores = []
-                for in_train, in_test in inner_cv.split(X_train_scaled, y_train):
-                    clf = l1_logistic_model(c=c, random_state=random_state)
-                    fit_with_convergence_capture(
-                        clf,
-                        X_train_scaled[in_train],
-                        y_train[in_train],
-                        context="minimal panel permutation inner CV",
-                    )
-                    scores.append(balanced_accuracy_score(y_train[in_test], clf.predict(X_train_scaled[in_test])))
-                if np.mean(scores) > best_score:
-                    best_score = np.mean(scores)
-                    best_c = c
-            model = l1_logistic_model(c=best_c, random_state=random_state)
-            fit_with_convergence_capture(model, X_train_scaled, y_train, context="minimal panel permutation")
+            _scaler, model, _best_c = _fit_tuned_logistic(
+                X_train,
+                y_train,
+                inner_cv,
+                [0.01, 0.1, 1.0, 10.0, 100.0],
+                random_state,
+                "panel-selection inner CV",
+            )
             coefs = model.coef_.reshape(-1, 1)
         coef_matrix = np.concatenate([coef_matrix, coefs], axis=1)
 
@@ -788,7 +864,17 @@ def run_minimal_panel(
         if integrated_candidates_path is None:
             integrated_candidates_path = get_cross_region_phase_dir("integrated_candidates") / "integrated_candidate_regions.csv"
         integrated = _load_integrated_candidates(integrated_candidates_path)
-        pool = _build_feature_pool(disease_only, all_feature_columns, integrated, cfg)
+        has_cluster_support = (
+            integrated is not None
+            and not integrated.empty
+            and "evidence_status" in integrated.columns
+            and integrated["evidence_status"].eq("cluster_supported_exploratory").any()
+        )
+        pool = (
+            _build_feature_pool(disease_only, all_feature_columns, integrated, cfg)
+            if has_cluster_support
+            else pd.DataFrame(index=disease_only.index)
+        )
 
     output_stem = "panel_minimal_model" if is_preregistered_source else "minimal_panel"
     selected_filename = "panel_minimal_model_features.csv" if is_preregistered_source else "minimal_candidate_panel.csv"
@@ -796,17 +882,22 @@ def run_minimal_panel(
     coefficients_filename = f"{output_stem}_coefficients.csv" if is_preregistered_source else "minimal_panel_coefficients.csv"
 
     if pool.empty:
-        logger.warning("No candidate panel features available; writing empty outputs")
+        status = "missing_required_data" if is_preregistered_source else "not_tested_gate"
+        logger.warning("No eligible panel features available; writing status=%s outputs", status)
         write_csv_atomic(pd.DataFrame(columns=[
             "endpoint", "endpoint_type", "feature_name", "feature_source", "feature_description",
-            "selection_frequency", "mean_absolute_coefficient", "panel_selected",
+            "selection_frequency", "mean_absolute_coefficient", "panel_selected", "status",
         ]), target_dir / selected_filename, index=False)
+        write_csv_atomic(pd.DataFrame([{
+            "endpoint": pd.NA, "endpoint_type": pd.NA, "metric": pd.NA, "value": np.nan,
+            "n_subjects": 0, "permutation_p_value": np.nan, "n_permutations": 0,
+            "cv_strategy": pd.NA, "compute_backend": "sklearn_cpu", "gpu_status": "not_checked",
+            "inference_role": "exploratory", "status": status,
+        }]), target_dir / performance_filename, index=False)
         write_csv_atomic(pd.DataFrame(columns=[
-            "endpoint", "endpoint_type", "metric", "value", "n_subjects", "permutation_p_value",
-            "n_permutations", "cv_strategy", "compute_backend", "gpu_status",
-        ]), target_dir / performance_filename, index=False)
-        write_csv_atomic(pd.DataFrame(columns=[
-            "endpoint", "feature_name", "mean_coefficient", "ci_low", "ci_high", "n_bootstrap_used",
+            "endpoint", "feature_name", "mean_coefficient", "stability_interval_low",
+            "stability_interval_high", "bootstrap_selection_frequency", "n_bootstrap_used",
+            "estimation_scope", "validated", "status",
         ]), target_dir / coefficients_filename, index=False)
         return {
             ("panel_minimal_model_features" if is_preregistered_source else "minimal_candidate_panel"): target_dir / selected_filename,
@@ -883,17 +974,18 @@ def run_minimal_panel(
             max_features=max_features,
             min_features=min_features,
         )
-        # Bootstrap CIs on coefficients from the reported (full-data-selected) panel.
-        selected_indices = [feature_names.index(s) for s in selected]
-        X_selected = X[:, selected_indices]
-        ci_df = _bootstrap_coefficient_ci(
-            X_selected,
+        stability_df = _bootstrap_stability_summary(
+            X,
             y_arr,
-            selected,
+            feature_names,
             n_bootstrap=n_bootstrap,
             random_state=random_state,
             task="continuous",
             n_jobs=n_jobs,
+            n_outer_splits=n_outer_splits,
+            n_inner_splits=n_inner_splits,
+            max_features=max_features,
+            min_features=min_features,
         )
 
         for _, row in selection_df.iterrows():
@@ -907,6 +999,9 @@ def run_minimal_panel(
                 "selection_frequency": float(row["selection_frequency"]),
                 "mean_absolute_coefficient": float(row["mean_absolute_coefficient"]),
                 "panel_selected": bool(row["feature_name"] in selected),
+                "estimation_scope": "full_data_descriptive",
+                "validated": False,
+                "status": "ok",
             })
         perf_rows.append({
             "endpoint": target,
@@ -919,6 +1014,8 @@ def run_minimal_panel(
             "cv_strategy": cv_info["cv_strategy"],
             "compute_backend": "sklearn_cpu",
             "gpu_status": gpu_status,
+            "inference_role": "exploratory",
+            "status": "ok",
         })
         perf_rows.append({
             "endpoint": target,
@@ -931,15 +1028,21 @@ def run_minimal_panel(
             "cv_strategy": cv_info["cv_strategy"],
             "compute_backend": "sklearn_cpu",
             "gpu_status": gpu_status,
+            "inference_role": "exploratory",
+            "status": "ok",
         })
-        for _, row in ci_df.iterrows():
+        for _, row in stability_df.iterrows():
             coef_rows.append({
                 "endpoint": target,
                 "feature_name": row["feature_name"],
                 "mean_coefficient": row["mean_coefficient"],
-                "ci_low": row["ci_low"],
-                "ci_high": row["ci_high"],
+                "stability_interval_low": row["stability_interval_low"],
+                "stability_interval_high": row["stability_interval_high"],
+                "bootstrap_selection_frequency": row["bootstrap_selection_frequency"],
                 "n_bootstrap_used": row["n_bootstrap_used"],
+                "estimation_scope": row["estimation_scope"],
+                "validated": row["validated"],
+                "status": row["status"],
             })
 
     for target_def in binary_targets:
@@ -995,17 +1098,18 @@ def run_minimal_panel(
             max_features=max_features,
             min_features=min_features,
         )
-        # Bootstrap CIs on the reported (full-data-selected) panel.
-        selected_indices = [pool_subset.columns.get_loc(s) for s in selected]
-        X_selected = X[:, selected_indices]
-        ci_df = _bootstrap_coefficient_ci(
-            X_selected,
+        stability_df = _bootstrap_stability_summary(
+            X,
             y_arr,
-            selected,
+            pool_feature_names,
             n_bootstrap=n_bootstrap,
             random_state=random_state,
             task="binary",
             n_jobs=n_jobs,
+            n_outer_splits=n_outer_splits,
+            n_inner_splits=n_inner_splits,
+            max_features=max_features,
+            min_features=min_features,
         )
 
         for _, row in selection_df.iterrows():
@@ -1019,6 +1123,9 @@ def run_minimal_panel(
                 "selection_frequency": float(row["selection_frequency"]),
                 "mean_absolute_coefficient": float(row["mean_absolute_coefficient"]),
                 "panel_selected": bool(row["feature_name"] in selected),
+                "estimation_scope": "full_data_descriptive",
+                "validated": False,
+                "status": "ok",
             })
         perf_rows.append({
             "endpoint": group_var,
@@ -1031,6 +1138,8 @@ def run_minimal_panel(
             "cv_strategy": cv_info["cv_strategy"],
             "compute_backend": "sklearn_cpu",
             "gpu_status": gpu_status,
+            "inference_role": "exploratory",
+            "status": "ok",
         })
         perf_rows.append({
             "endpoint": group_var,
@@ -1043,15 +1152,21 @@ def run_minimal_panel(
             "cv_strategy": cv_info["cv_strategy"],
             "compute_backend": "sklearn_cpu",
             "gpu_status": gpu_status,
+            "inference_role": "exploratory",
+            "status": "ok",
         })
-        for _, row in ci_df.iterrows():
+        for _, row in stability_df.iterrows():
             coef_rows.append({
                 "endpoint": group_var,
                 "feature_name": row["feature_name"],
                 "mean_coefficient": row["mean_coefficient"],
-                "ci_low": row["ci_low"],
-                "ci_high": row["ci_high"],
+                "stability_interval_low": row["stability_interval_low"],
+                "stability_interval_high": row["stability_interval_high"],
+                "bootstrap_selection_frequency": row["bootstrap_selection_frequency"],
                 "n_bootstrap_used": row["n_bootstrap_used"],
+                "estimation_scope": row["estimation_scope"],
+                "validated": row["validated"],
+                "status": row["status"],
             })
 
     panel_df = pd.DataFrame(
@@ -1059,19 +1174,22 @@ def run_minimal_panel(
         columns=[
             "endpoint", "endpoint_type", "feature_name", "feature_source", "feature_description",
             "selection_frequency", "mean_absolute_coefficient", "panel_selected",
+            "estimation_scope", "validated", "status",
         ],
     )
     perf_df = pd.DataFrame(
         perf_rows,
         columns=[
             "endpoint", "endpoint_type", "metric", "value", "n_subjects", "permutation_p_value",
-            "n_permutations", "cv_strategy", "compute_backend", "gpu_status",
+            "n_permutations", "cv_strategy", "compute_backend", "gpu_status", "inference_role", "status",
         ],
     )
     coef_df = pd.DataFrame(
         coef_rows,
         columns=[
-            "endpoint", "feature_name", "mean_coefficient", "ci_low", "ci_high", "n_bootstrap_used",
+            "endpoint", "feature_name", "mean_coefficient", "stability_interval_low",
+            "stability_interval_high", "bootstrap_selection_frequency", "n_bootstrap_used",
+            "estimation_scope", "validated", "status",
         ],
     )
 

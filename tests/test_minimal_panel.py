@@ -52,7 +52,10 @@ def _integrated_candidates() -> pd.DataFrame:
             "spectral_block": ["1300", "2850"],
             "start_cm-1": [1238.0, 2838.0],
             "end_cm-1": [1252.0, 2852.0],
-            "evidence_level": ["High", "Medium"],
+            "evidence_status": [
+                "cluster_supported_exploratory",
+                "cluster_supported_exploratory",
+            ],
             "covariate_persisted": [True, False],
             "pls_vip_coverage": [True, False],
         }
@@ -131,8 +134,10 @@ def test_run_minimal_panel_produces_expected_outputs(input_paths: dict[str, Path
     assert "permutation_p_value" in perf.columns
 
     assert not coef.empty
-    assert "ci_low" in coef.columns
-    assert "ci_high" in coef.columns
+    assert "stability_interval_low" in coef.columns
+    assert "stability_interval_high" in coef.columns
+    assert "bootstrap_selection_frequency" in coef.columns
+    assert not coef["validated"].any()
 
 
 def test_run_minimal_panel_accepts_preregistered_panel_source(input_paths: dict[str, Path], tmp_path: Path) -> None:
@@ -181,6 +186,33 @@ def test_run_minimal_panel_accepts_preregistered_panel_source(input_paths: dict[
     assert outputs["panel_minimal_model_performance"].name == "panel_minimal_model_performance.csv"
     features = pd.read_csv(outputs["panel_minimal_model_features"])
     assert set(features["feature_source"]) <= {"preregistered_index"}
+
+
+def test_candidate_panel_skips_when_cluster_support_gate_fails(
+    input_paths: dict[str, Path],
+    tmp_path: Path,
+) -> None:
+    integrated = _integrated_candidates()
+    integrated["evidence_status"] = "effect_only_fallback"
+    integrated.to_csv(input_paths["integrated_candidates"], index=False)
+
+    outputs = run_minimal_panel(
+        feature_matrix_path=input_paths["feature_matrix"],
+        integrated_candidates_path=input_paths["integrated_candidates"],
+        output_dir=tmp_path / "gated",
+        cfg={
+            "analysis": {"minimal_panel": {"enabled": True}},
+            "whole_spectra": {
+                "bands": {"amide_iii_1260": [1235.0, 1255.0]},
+                "ratio_pairs": [],
+            },
+        },
+    )
+
+    performance = pd.read_csv(outputs["minimal_panel_cv_performance"])
+    selected = pd.read_csv(outputs["minimal_candidate_panel"])
+    assert performance.loc[0, "status"] == "not_tested_gate"
+    assert selected.empty
 
 
 def test_run_minimal_panel_disabled_returns_empty(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 
@@ -85,15 +86,19 @@ def build_candidate_regions(
 
     for group_values, block_df in working.groupby(group_keys, sort=False):
         ordered_full = block_df.sort_values("wavenumber").reset_index(drop=True)
-        sig_mask = pd.Series(False, index=ordered_full.index, dtype=bool)
-        if "significant_fdr" in ordered_full.columns:
-            sig_mask = sig_mask | ordered_full["significant_fdr"].astype("boolean").fillna(False).to_numpy(dtype=bool)
+        cluster_mask = pd.Series(False, index=ordered_full.index, dtype=bool)
         if "cluster_p_value" in ordered_full.columns:
-            sig_mask = sig_mask | ordered_full["cluster_p_value"].lt(0.05).fillna(False).to_numpy(dtype=bool)
+            cluster_mask = ordered_full["cluster_p_value"].lt(0.05).fillna(False)
+        fdr_mask = pd.Series(False, index=ordered_full.index, dtype=bool)
+        if "significant_fdr" in ordered_full.columns:
+            fdr_mask = ordered_full["significant_fdr"].astype("boolean").fillna(False).astype(bool)
 
-        if sig_mask.any():
-            ordered = ordered_full.loc[sig_mask].copy().reset_index(drop=True)
-            selection_basis = "significant_or_cluster"
+        if cluster_mask.any():
+            ordered = ordered_full.loc[cluster_mask].copy().reset_index(drop=True)
+            selection_basis = "cluster_supported"
+        elif fdr_mask.any():
+            ordered = ordered_full.loc[fdr_mask].copy().reset_index(drop=True)
+            selection_basis = "fdr_descriptive"
         else:
             abs_effect = ordered_full[effect_column].abs().to_numpy(dtype=float)
             finite = np.isfinite(abs_effect)
@@ -190,6 +195,7 @@ def _normalize_candidates(source_analysis: str, frame: pd.DataFrame) -> pd.DataF
             "group_a",
             "group_b",
             "spectral_block",
+            "source_region_id",
             "candidate_region_id",
             "selection_basis",
             "start_cm-1",
@@ -213,6 +219,10 @@ def _normalize_candidates(source_analysis: str, frame: pd.DataFrame) -> pd.DataF
     }
     normalized = normalized.rename(columns=rename_map)
     normalized["source_analysis"] = source_analysis
+    if "source_region_id" not in normalized.columns:
+        normalized["source_region_id"] = normalized.get(
+            "candidate_region_id", pd.Series(pd.NA, index=normalized.index)
+        )
     for column in [
         "analysis_name",
         "target",
@@ -252,6 +262,29 @@ def _normalize_candidates(source_analysis: str, frame: pd.DataFrame) -> pd.DataF
         )
         normalized["effect_metric"] = normalized["effect_metric"].fillna(fallback_metric)
 
+    def stable_region_id(row: pd.Series) -> str:
+        context = row.get("target")
+        if pd.isna(context):
+            context = row.get("contrast_name")
+        payload = "|".join(
+            [
+                source_analysis,
+                str(row.get("analysis_name", "")),
+                str(context if pd.notna(context) else ""),
+                str(row.get("spectral_block", "")),
+                f"{float(row.get('start_cm-1')):.6f}",
+                f"{float(row.get('end_cm-1')):.6f}",
+            ]
+        )
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        return (
+            f"{row.get('spectral_block')}_"
+            f"{float(row.get('start_cm-1')):.1f}_"
+            f"{float(row.get('end_cm-1')):.1f}_{digest}"
+        )
+
+    normalized["candidate_region_id"] = normalized.apply(stable_region_id, axis=1)
+
     ordered_columns = [
         "source_analysis",
         "analysis_name",
@@ -261,6 +294,7 @@ def _normalize_candidates(source_analysis: str, frame: pd.DataFrame) -> pd.DataF
         "group_a",
         "group_b",
         "spectral_block",
+        "source_region_id",
         "candidate_region_id",
         "selection_basis",
         "start_cm-1",

@@ -86,6 +86,22 @@ def test_coupling_matrix_bootstrap_ci_populated():
     assert float(row["bootstrap_ci_lower"]) <= float(row["bootstrap_ci_upper"])
 
 
+def test_coupling_bootstrap_resamples_subject_pairs() -> None:
+    x = np.arange(20, dtype=float)
+    frame = pd.DataFrame({"feat_a": x, "feat_b": 3.0 * x + 2.0})
+
+    result = compute_coupling_matrix(
+        frame,
+        ["feat_a", "feat_b"],
+        n_bootstrap=50,
+        random_state=7,
+    )
+
+    row = result.iloc[0]
+    assert np.isclose(float(row["bootstrap_ci_lower"]), 1.0)
+    assert np.isclose(float(row["bootstrap_ci_upper"]), 1.0)
+
+
 def test_coupling_matrix_too_few_features_returns_empty():
     frame = _make_index_frame()
     result = compute_coupling_matrix(frame, ["oxidative_index"], n_bootstrap=0)

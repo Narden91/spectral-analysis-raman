@@ -1,4 +1,4 @@
-"""Robust statistics for the pre-registered confirmatory panel."""
+"""Exploratory robust statistics for the provenance-aware fixed panel."""
 
 from __future__ import annotations
 
@@ -124,7 +124,16 @@ def _base_contrast_row(
         "feature_family": feature_family,
         "n_group_a": int(left.size),
         "n_group_b": int(right.size),
-        "status": "ok" if left.size >= min_n and right.size >= min_n else "insufficient sample size",
+        "status": "ok" if left.size >= min_n and right.size >= min_n else "insufficient_n",
+        "u_statistic": np.nan,
+        "p_value": np.nan,
+        "cliffs_delta": np.nan,
+        "cohens_d": np.nan,
+        "bootstrap_ci_lower": np.nan,
+        "bootstrap_ci_upper": np.nan,
+        "perm_p_value": np.nan,
+        "mean_group_a": np.nan,
+        "mean_group_b": np.nan,
     }
 
 
@@ -514,13 +523,21 @@ def run_panel_contrasts(
     result = pd.DataFrame(rows)
     if result.empty:
         return result
-    return _add_fdr_columns(
+    result = _add_fdr_columns(
         result,
         p_column="p_value",
         q_column="fdr_q",
         significant_column="significant_fdr",
         alpha=float(panel.get("fdr_alpha", 0.05)),
     )
+    result["raw_p"] = pd.to_numeric(
+        result.get("p_value", pd.Series(np.nan, index=result.index)), errors="coerce"
+    )
+    result["within_scan_p"] = result["raw_p"]
+    result["family_adjusted_p"] = result["fdr_q"]
+    result["family_id"] = "fixed_panel_group_contrasts"
+    result["inference_role"] = "exploratory"
+    return result
 
 
 def run_continuous_associations(
@@ -533,7 +550,7 @@ def run_continuous_associations(
     features = _panel_features(frame, panel)
     endpoints = [str(item) for item in panel.get("endpoints", {}).get("continuous", [])]
     covariates = [str(item) for item in panel.get("covariates", [])]
-    min_subjects = int(panel.get("min_subjects_per_group", 5))
+    min_subjects = int(panel.get("min_subjects_continuous", 20))
 
     rows: list[dict[str, object]] = []
     for endpoint in endpoints:
@@ -548,14 +565,15 @@ def run_continuous_associations(
             required = [feature, endpoint, *covariates]
             missing = [column for column in required if column not in frame.columns]
             if missing:
-                row["status"] = f"missing columns: {','.join(missing)}"
+                row["status"] = "missing_required_data"
+                row["missing_columns"] = ",".join(missing)
                 rows.append(row)
                 continue
 
             complete = frame[required].dropna()
             row["n"] = int(len(complete))
             if len(complete) < min_subjects:
-                row["status"] = "insufficient sample size"
+                row["status"] = "insufficient_n"
                 rows.append(row)
                 continue
 
@@ -583,13 +601,23 @@ def run_continuous_associations(
         significant_column="raw_spearman_significant_fdr",
         alpha=fdr_alpha,
     )
-    return _add_fdr_columns(
+    result = _add_fdr_columns(
         result,
         p_column="partial_spearman_p_value",
         q_column="partial_spearman_fdr_q",
         significant_column="partial_spearman_significant_fdr",
         alpha=fdr_alpha,
     )
+    result["raw_p"] = pd.to_numeric(
+        result.get("partial_spearman_p_value", pd.Series(np.nan, index=result.index)), errors="coerce"
+    )
+    result["within_scan_p"] = result["raw_p"]
+    result["family_adjusted_p"] = pd.to_numeric(
+        result.get("partial_spearman_fdr_q", pd.Series(np.nan, index=result.index)), errors="coerce"
+    )
+    result["family_id"] = "fixed_panel_partial_spearman"
+    result["inference_role"] = "exploratory"
+    return result
 
 
 def run_variance_homogeneity(
@@ -680,7 +708,7 @@ def _plot_effect_sizes(contrasts: pd.DataFrame, output_dir: Path) -> Path | None
     ax.set_yticks(y)
     ax.set_yticklabels(ok["label"])
     ax.set_xlabel("Cliff's delta (group A - group B)")
-    ax.set_title("Pre-registered panel effect sizes")
+    ax.set_title("Fixed post hoc panel effect sizes")
     fig.tight_layout()
 
     figures_dir = output_dir / "figures"
@@ -773,5 +801,5 @@ def run_confirmatory_panel_statistics(
     if raincloud_plot is not None:
         outputs["panel_rainclouds"] = raincloud_plot
 
-    logger.info("Confirmatory panel statistics written to %s", target_dir)
+    logger.info("Exploratory fixed-panel statistics written to %s", target_dir)
     return outputs

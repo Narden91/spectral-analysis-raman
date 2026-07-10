@@ -25,13 +25,17 @@ def _validate_split_index(split_index: int, n_features: int) -> int:
 
 def _first_eigenvalue(block: np.ndarray) -> float:
     centered = block - np.nanmean(block, axis=0, keepdims=True)
-    if centered.shape[0] < 2 or np.nanvar(centered) == 0:
-        return 1.0
+    if centered.shape[0] < 2:
+        raise ValueError("MFA block requires at least two observations")
+    variance_scale = float(np.nansum(np.nanvar(centered, axis=0, ddof=1)))
+    tolerance = np.finfo(float).eps * max(variance_scale, 1.0) * max(centered.shape)
+    if not np.isfinite(variance_scale) or variance_scale <= tolerance:
+        raise ValueError("MFA block is numerically degenerate")
     first_component = PCA(n_components=1).fit(centered)
     eigenvalue = float(first_component.explained_variance_[0])
-    if not np.isfinite(eigenvalue) or eigenvalue <= 0:
-        return 1.0
-    return max(eigenvalue, 1.0)
+    if not np.isfinite(eigenvalue) or eigenvalue <= tolerance:
+        raise ValueError("MFA first eigenvalue is numerically degenerate")
+    return eigenvalue
 
 
 def joint_pca_mfa(
@@ -73,6 +77,12 @@ def joint_pca_mfa(
         "fingerprint": float(1.0 / np.sqrt(fingerprint_eigenvalue)),
         "ch_stretch": float(1.0 / np.sqrt(ch_eigenvalue)),
     }
+    result["block_eigenvalues"] = {
+        "fingerprint": fingerprint_eigenvalue,
+        "ch_stretch": ch_eigenvalue,
+    }
+    result["method"] = "mfa_first_eigenvalue_scaling_v1"
+    result["split_index"] = split_index
     result["scaled_blocks"] = {
         "fingerprint": fingerprint_scaled,
         "ch_stretch": ch_scaled,

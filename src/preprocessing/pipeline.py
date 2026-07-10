@@ -780,6 +780,7 @@ def spectral_quality_mask(
     peak_window: Optional[int] = None,
     noise_channels: Optional[int] = None,
     min_area_percentile: Optional[float] = None,
+    min_integrated_signal: Optional[float] = None,
     wavenumbers: Optional[np.ndarray] = None,
     region: Optional[str] = None,
 ) -> tuple[np.ndarray, dict[str, float]]:
@@ -789,7 +790,9 @@ def spectral_quality_mask(
     snr_thr = float(snr_threshold if snr_threshold is not None else qf_cfg.get("snr_threshold", 5.0))
     pwin = int(peak_window if peak_window is not None else qf_cfg.get("peak_window", 5))
     noise_n = int(noise_channels if noise_channels is not None else qf_cfg.get("noise_channels", 20))
-    area_pct = float(min_area_percentile if min_area_percentile is not None else qf_cfg.get("min_area_percentile", 10))
+    configured_floor = min_integrated_signal
+    if configured_floor is None:
+        configured_floor = qf_cfg.get("min_integrated_signal")
 
     anchor_idx = _resolve_anchor_index(spectra, wavenumbers, region, pwin)
     lo = max(0, anchor_idx - pwin)
@@ -799,13 +802,15 @@ def spectral_quality_mask(
     noise_std[noise_std == 0] = 1e-10
     snr = signal / noise_std
     area = np.trapezoid(np.abs(spectra), axis=1, dx=1.0)
-    area_threshold = float(np.nanpercentile(area, area_pct))
+    area_threshold = float(configured_floor) if configured_floor is not None else float("nan")
+    area_ok = area > area_threshold if configured_floor is not None else np.ones_like(area, dtype=bool)
     valid = np.isfinite(snr) & np.isfinite(area)
-    mask = valid & (snr > snr_thr) & (area > area_threshold)
+    mask = valid & (snr > snr_thr) & area_ok
     stats = {
         "anchor_index": float(anchor_idx),
         "area_threshold": area_threshold,
         "snr_median": float(np.nanmedian(snr)),
+        "signal_area_median": float(np.nanmedian(area)),
         "n_valid": float(mask.sum()),
     }
     return mask, stats
@@ -1038,6 +1043,17 @@ def _apply_quality_filter(
     trim: Optional[int],
     trim_cm: Optional[float],
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    qf_cfg = _spectral_quality_cfg()
+    peak_window = int(qf_cfg.get("peak_window", 5))
+    noise_channels = int(qf_cfg.get("noise_channels", 20))
+    anchor_index = _resolve_anchor_index(result, wavenumbers, region_key, peak_window)
+    lower = max(0, anchor_index - peak_window)
+    upper = min(result.shape[1], anchor_index + peak_window + 1)
+    signal = np.nanmax(result[:, lower:upper], axis=1)
+    noise = np.nanstd(_noise_window(result, noise_channels), axis=1)
+    noise[noise == 0] = 1e-10
+    metrics_df.loc[:, "post_baseline_snr"] = signal / noise
+    metrics_df.loc[:, "post_baseline_signal_area"] = np.trapezoid(np.abs(result), axis=1)
     quality_mask, quality_stats = _spectral_quality_mask_with_edge_guard(
         result,
         wavenumbers=wavenumbers,
@@ -1131,19 +1147,18 @@ def _apply_baseline_stage(
         stage_arrays["baseline"] = baselines
         stage_arrays["baseline_corrected"] = result.copy()
 
-    neg_mask = result < 0
-    clipped_fraction = neg_mask.sum(axis=1) / max(result.shape[1], 1)
-    result = np.maximum(result, 0.0)
-    if "clipped_fraction" in metrics_df.columns:
-        metrics_df.loc[:, "clipped_fraction"] = clipped_fraction
-    n_clipped = int((clipped_fraction > 0).sum())
-    if n_clipped > 0:
-        logger.debug(
-            "Baseline clip: %d/%d spectra had negative channels (mean clipped fraction %.4f)",
-            n_clipped,
-            len(clipped_fraction),
-            float(clipped_fraction[clipped_fraction > 0].mean()),
-        )
+    negative = np.minimum(result, 0.0)
+    negative_fraction = np.mean(result < 0, axis=1)
+    absolute_area = np.sum(np.abs(result), axis=1)
+    negative_area = np.sum(np.abs(negative), axis=1)
+    negative_area_fraction = np.divide(
+        negative_area,
+        absolute_area,
+        out=np.zeros_like(negative_area),
+        where=absolute_area > 0,
+    )
+    metrics_df.loc[:, "negative_fraction"] = negative_fraction
+    metrics_df.loc[:, "negative_area_fraction"] = negative_area_fraction
     return result, metrics_df
 
 
@@ -1318,25 +1333,6 @@ def run_preprocessing(
             metrics_df.loc[:, "n_suppressed_cosmic_channels"] = 0
             metrics_df.loc[:, "fraction_corrected"] = 0.0
 
-    # Quality filter runs on post-cosmic-ray / pre-baseline / pre-edge-trim spectra.
-    # SNR and area metrics therefore reflect raw intensities including fluorescence
-    # background.  An edge-trim-aware preview is used to avoid false rejection from
-    # noisy frame edges, but the area floor is still computed on the full raw range.
-    # This is intentional: baseline-corrected SNR is unavailable at rejection time.
-    if options.quality_enabled and result.size > 0:
-        result, retained_mask, metrics_df, flags_df, quality_stats = _apply_quality_filter(
-            result,
-            retained_mask,
-            metrics_df,
-            flags_df,
-            wavenumbers=wn,
-            region_key=region_key,
-            trim=trim,
-            trim_cm=trim_cm,
-        )
-    else:
-        quality_stats = {}
-
     result, wn = _apply_edge_trim(result, wn, trim=trim, trim_cm=trim_cm)
 
     if correct_bl and result.size > 0:
@@ -1349,15 +1345,19 @@ def run_preprocessing(
             ranges_cfg=ranges_cfg,
         )
 
-    clip_qc_cfg = pre_cfg.get("quality_filter", {}).get("baseline_clip", {})
-    if result.size > 0:
-        result, metrics_df, flags_df, retained_mask = _apply_baseline_clip_qc(
+    if options.quality_enabled and result.size > 0:
+        result, retained_mask, metrics_df, flags_df, quality_stats = _apply_quality_filter(
             result,
+            retained_mask,
             metrics_df,
             flags_df,
-            retained_mask,
-            clip_cfg=clip_qc_cfg,
+            wavenumbers=wn,
+            region_key=region_key,
+            trim=0,
+            trim_cm=0.0,
         )
+    else:
+        quality_stats = {}
 
     spike_cfg = pre_cfg.get("spike_repair", {})
     if bool(spike_cfg.get("enabled", True)) and result.size > 0:

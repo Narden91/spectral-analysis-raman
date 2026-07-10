@@ -94,3 +94,47 @@ def test_smooth_spectra_skips_tiny_channel_counts() -> None:
 
     assert np.array_equal(smooth_spectra(one_channel), one_channel)
     assert np.array_equal(smooth_spectra(two_channels), two_channels)
+
+
+def test_baseline_correction_preserves_signed_residuals(
+    monkeypatch: pytest.MonkeyPatch,
+    preprocessing_config_guard: None,
+) -> None:
+    corrected = np.array([[1.0, -0.5, 2.0, -0.25, 1.0]], dtype=float)
+
+    def fake_baseline(spectra, **kwargs):
+        baseline = np.asarray(spectra, dtype=float) - corrected
+        return corrected.copy(), baseline
+
+    monkeypatch.setattr("src.preprocessing.pipeline.correct_baseline", fake_baseline)
+    result = run_preprocessing(
+        np.full((1, 5), 10.0),
+        np.arange(1000.0, 1005.0),
+        region="fingerprint",
+        screen_dead=False,
+        suppress_cosmic=False,
+        correct_bl=True,
+        smooth=False,
+        filter_quality=False,
+        normalize=False,
+        trim=0,
+    )
+
+    assert np.array_equal(result.spectra, corrected)
+    assert np.isclose(float(result.qc_metrics.loc[0, "negative_fraction"]), 0.4)
+    assert float(result.qc_metrics.loc[0, "negative_area_fraction"]) > 0
+
+
+def test_spectral_quality_has_no_batch_relative_area_rejection() -> None:
+    wavenumbers = np.arange(1000.0, 1010.0)
+    spectra = np.vstack([np.linspace(0.0, 1.0, 10), np.linspace(0.0, 100.0, 10)])
+    mask, stats = spectral_quality_mask(
+        spectra,
+        snr_threshold=-1.0,
+        min_area_percentile=99.0,
+        min_integrated_signal=None,
+        wavenumbers=wavenumbers,
+        region="fingerprint",
+    )
+    assert mask.all()
+    assert np.isnan(stats["area_threshold"])

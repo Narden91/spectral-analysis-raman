@@ -1,4 +1,4 @@
-"""Phase I: summarize pre-registered panel features by exploratory subgroup."""
+"""Phase I: summarize fixed post hoc panel features by exploratory subgroup."""
 
 from __future__ import annotations
 

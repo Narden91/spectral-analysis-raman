@@ -58,6 +58,7 @@ class ClinicalEndpointResult:
     clinical_endpoint_summary: pd.DataFrame
     clinical_missingness_report: pd.DataFrame
     clinical_group_counts: pd.DataFrame
+    clinical_complete_case_comparison: pd.DataFrame
     clinical_column_map: dict[str, str]
 
 
@@ -188,6 +189,39 @@ def _group_counts(subject_table: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _complete_case_comparison(subject_table: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    endpoints = ("moca_baseline", "moca_3m", "delta_moca", "rbans_total")
+    covariates = ("age", "sex", "diagnosis", "lesion_location_group")
+    for endpoint in endpoints:
+        included = subject_table[endpoint].notna()
+        for covariate in covariates:
+            values = subject_table[covariate]
+            numeric = pd.to_numeric(values, errors="coerce")
+            is_numeric = numeric.notna().sum() == values.notna().sum()
+            if is_numeric:
+                included_summary = float(numeric.loc[included].median()) if numeric.loc[included].notna().any() else pd.NA
+                excluded_summary = float(numeric.loc[~included].median()) if numeric.loc[~included].notna().any() else pd.NA
+                summary_type = "median"
+            else:
+                included_summary = values.loc[included].dropna().astype(str).value_counts(normalize=True).to_dict()
+                excluded_summary = values.loc[~included].dropna().astype(str).value_counts(normalize=True).to_dict()
+                summary_type = "proportions"
+            rows.append(
+                {
+                    "endpoint": endpoint,
+                    "covariate": covariate,
+                    "n_included": int(included.sum()),
+                    "n_excluded": int((~included).sum()),
+                    "summary_type": summary_type,
+                    "included_summary": json.dumps(included_summary, sort_keys=True, default=str),
+                    "excluded_summary": json.dumps(excluded_summary, sort_keys=True, default=str),
+                    "inference_role": "missingness_sensitivity",
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def _summary_table(subject_table: pd.DataFrame, source_path: Path, endpoint_cfg: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -287,6 +321,7 @@ def build_clinical_endpoints(
         clinical_endpoint_summary=_summary_table(subject_table, source_path, endpoint_cfg),
         clinical_missingness_report=_missingness_report(subject_table),
         clinical_group_counts=_group_counts(subject_table),
+        clinical_complete_case_comparison=_complete_case_comparison(subject_table),
         clinical_column_map=resolved_columns,
     )
 
@@ -298,6 +333,7 @@ def write_clinical_endpoint_outputs(result: ClinicalEndpointResult) -> dict[str,
         "clinical_subject_table.csv": result.clinical_subject_table,
         "clinical_missingness_report.csv": result.clinical_missingness_report,
         "clinical_group_counts.csv": result.clinical_group_counts,
+        "clinical_complete_case_comparison.csv": result.clinical_complete_case_comparison,
     }
     written: dict[str, Path] = {}
     for filename, table in outputs.items():

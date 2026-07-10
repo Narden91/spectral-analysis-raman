@@ -57,13 +57,20 @@ def _spearman_with_bootstrap(
     n = int(xf.size)
     if n < 4:
         return np.nan, np.nan, np.nan
+    if np.std(xf) == 0 or np.std(yf) == 0:
+        return np.nan, np.nan, np.nan
     rho = float(stats.spearmanr(xf, yf).statistic)
     if n_bootstrap <= 0:
         return rho, np.nan, np.nan
-    boot = np.array([
-        float(stats.spearmanr(xf[rng.integers(0, n, size=n)], yf[rng.integers(0, n, size=n)]).statistic)
-        for _ in range(n_bootstrap)
-    ])
+    boot_values: list[float] = []
+    for _ in range(n_bootstrap):
+        indices = rng.integers(0, n, size=n)
+        x_boot, y_boot = xf[indices], yf[indices]
+        if np.std(x_boot) == 0 or np.std(y_boot) == 0:
+            boot_values.append(np.nan)
+        else:
+            boot_values.append(float(stats.spearmanr(x_boot, y_boot).statistic))
+    boot = np.asarray(boot_values, dtype=float)
     return rho, float(np.nanpercentile(boot, 2.5)), float(np.nanpercentile(boot, 97.5))
 
 
@@ -156,8 +163,10 @@ def assign_biochemical_regimes(
 
     ox = result[oxidative_col].to_numpy(dtype=float) if has_ox else np.full(len(result), np.nan)
     mem = result[membrane_col].to_numpy(dtype=float) if has_mem else np.full(len(result), np.nan)
-    ox_med = float(np.nanmedian(ox))
-    mem_med = float(np.nanmedian(mem))
+    ox_finite = ox[np.isfinite(ox)]
+    mem_finite = mem[np.isfinite(mem)]
+    ox_med = float(np.median(ox_finite)) if ox_finite.size else np.nan
+    mem_med = float(np.median(mem_finite)) if mem_finite.size else np.nan
 
     def _classify(o_val: float, m_val: float) -> str:
         if not np.isfinite(o_val) and not np.isfinite(m_val):

@@ -24,6 +24,7 @@ from src import (
     get_cross_region_summary_dir,
     resolve_project_path,
 )
+from src.analysis.joint_dr import joint_pca_mfa
 from src.analysis.statistics import run_pca
 from src.analysis.subject_features import write_subject_feature_exports
 from src.data_preparation.loaders import (
@@ -90,6 +91,7 @@ class ModelResult:
     band_contributions: pd.DataFrame
     biochemical_summary: pd.DataFrame
     pc1_warning: str | None = None
+    method_metadata: dict[str, object] = field(default_factory=dict)
 
 
 def select_subjects(subject_ids: Iterable[object], max_subjects: int | None = None) -> list[str]:
@@ -820,7 +822,6 @@ def compute_loading_regions(model_name: str, loadings_df: pd.DataFrame, cfg: dic
         ascending=[True, True, False],
     ).reset_index(drop=True)
     region_ids: list[str] = []
-    region_labels: list[str] = []
     for pc, group in regions.groupby("PC", sort=False):
         for rank, idx in enumerate(group.index, start=1):
             region_ids.append((idx, f"{pc}_R{rank}"))
@@ -1032,13 +1033,31 @@ def fit_biological_pca_models(inputs: SubjectInputs, cfg: dict | None = None) ->
         model_cfg = bp_cfg["models"][model_name]
         axis, matrix, blocks = _model_axis_and_matrix(model_name, model_cfg, inputs)
         _validate_component_count(model_name, matrix, n_components)
-        pca_result = run_pca(
-            matrix,
-            n_components=n_components,
-            scale=scale,
-            log_summary=False,
-            warn_on_high_pc1=False,
-        )
+        if model_name == "PCA_whole":
+            split_index = inputs.matrices["1300"].shape[1]
+            pca_result = joint_pca_mfa(matrix, split_index, n_components)
+            method_metadata = {
+                "method": pca_result["method"],
+                "method_version": 1,
+                "split_index": split_index,
+                "fingerprint_first_eigenvalue": pca_result["block_eigenvalues"]["fingerprint"],
+                "ch_stretch_first_eigenvalue": pca_result["block_eigenvalues"]["ch_stretch"],
+                "fingerprint_scaling_factor": pca_result["scaling_factors"]["fingerprint"],
+                "ch_stretch_scaling_factor": pca_result["scaling_factors"]["ch_stretch"],
+                "fingerprint_channels": split_index,
+                "ch_stretch_channels": matrix.shape[1] - split_index,
+                "fingerprint_normalization": "snv",
+                "ch_stretch_normalization": "area",
+            }
+        else:
+            pca_result = run_pca(
+                matrix,
+                n_components=n_components,
+                scale=scale,
+                log_summary=False,
+                warn_on_high_pc1=False,
+            )
+            method_metadata = {"method": "mean_centered_pca", "method_version": 1}
         scores = _scores_frame(model_name, inputs.subjects, pca_result["scores"], inputs.subject_spectra)
         loadings = _loadings_frame(model_name, axis, blocks, pca_result["loadings"], inputs, cfg)
         explained = _explained_variance_frame(model_name, pca_result)
@@ -1078,6 +1097,7 @@ def fit_biological_pca_models(inputs: SubjectInputs, cfg: dict | None = None) ->
                 band_contributions=compatibility_contributions,
                 biochemical_summary=compatibility_summary,
                 pc1_warning=pc1_warning,
+                method_metadata=method_metadata,
             )
         )
     return results
@@ -1487,8 +1507,8 @@ def _write_interpretation_md(result: ModelResult, output_dir: Path) -> None:
 def _build_pca_whole_block_contributions(result: ModelResult) -> pd.DataFrame:
     """Compute per-PC loading variance share for each spectral block in PCA_whole.
 
-    Unweighted block concatenation means blocks with more total variance dominate.
-    This table surfaces the imbalance so readers know which block drives each PC.
+    MFA scaling equalizes each block's leading eigenvalue before joint PCA, but
+    individual PCs may still have legitimate block-dominant loading shares.
     Rows: one per (PC, spectral_block). Columns: PC, spectral_block, n_features,
     sum_sq_loading, block_variance_share.
     """
@@ -1632,6 +1652,7 @@ def _write_outputs(
     inputs: SubjectInputs,
     results: list[ModelResult],
     features: pd.DataFrame,
+    cfg: dict,
 ) -> dict[str, Path]:
     cross_region_dir = get_cross_region_summary_dir()
     subject_features_dir = get_cross_region_phase_dir("subject_features")
@@ -1648,12 +1669,37 @@ def _write_outputs(
         for d in (inputs.excluded_subjects or [])
     ]
     retention_df = pd.DataFrame(included_rows + excluded_rows).sort_values("subject_id").reset_index(drop=True)
+    retention_detail = inputs.subject_region_counts.merge(
+        inputs.subject_spectra[[c for c in ("subject_id", "condition", "gender") if c in inputs.subject_spectra]],
+        on="subject_id",
+        how="left",
+    )
+    retention_rows: list[dict[str, object]] = []
+    for stratum in ("condition", "gender"):
+        if stratum not in retention_detail.columns:
+            continue
+        grouped = retention_detail.groupby(["spectral_range", stratum], dropna=False, sort=True)
+        for (spectral_range, level), group in grouped:
+            n_input = int(group["n_pixels"].sum())
+            n_retained = int(group["n_retained_pixels"].sum())
+            retention_rows.append(
+                {
+                    "spectral_block": spectral_range,
+                    "stratum": stratum,
+                    "level": level,
+                    "n_input": n_input,
+                    "n_retained": n_retained,
+                    "retention_fraction": n_retained / n_input if n_input else np.nan,
+                }
+            )
+    retention_by_stratum = pd.DataFrame(retention_rows)
 
     feature_tables = {
         "subject_spectra.csv": inputs.subject_spectra,
         "subject_region_counts.csv": inputs.subject_region_counts,
         "input_provenance.csv": inputs.input_provenance,
         "subject_retention.csv": retention_df,
+        "qc_retention_by_stratum.csv": retention_by_stratum,
     }
     for filename, df in feature_tables.items():
         df.to_csv(subject_features_dir / filename, index=False)
@@ -1676,8 +1722,40 @@ def _write_outputs(
         }
         for filename, df in model_tables.items():
             df.to_csv(model_dir / filename, index=False)
+        pd.DataFrame([result.method_metadata]).to_csv(model_dir / "pca_method_metadata.csv", index=False)
 
         if result.name == "PCA_whole":
+            sensitivity_dir = model_dir / "sensitivity_unscaled"
+            sensitivity_dir.mkdir(parents=True, exist_ok=True)
+            unscaled_matrix = np.hstack([inputs.matrices["1300"], inputs.matrices["2850"]])
+            unscaled = run_pca(
+                unscaled_matrix,
+                n_components=len(CANONICAL_PCS),
+                scale=False,
+                log_summary=False,
+                warn_on_high_pc1=False,
+            )
+            whole_axis = np.concatenate([inputs.axes["1300"], inputs.axes["2850"]])
+            _scores_frame(
+                "PCA_whole_unscaled_sensitivity",
+                inputs.subjects,
+                unscaled["scores"],
+                inputs.subject_spectra,
+            ).to_csv(sensitivity_dir / "scores.csv", index=False)
+            _loadings_frame(
+                "PCA_whole",
+                whole_axis,
+                ["1300", "2850"],
+                unscaled["loadings"],
+                inputs,
+                cfg,
+            ).to_csv(sensitivity_dir / "loadings.csv", index=False)
+            _explained_variance_frame("PCA_whole_unscaled_sensitivity", unscaled).to_csv(
+                sensitivity_dir / "explained_variance.csv", index=False
+            )
+            pd.DataFrame(
+                [{"method": "unscaled_concatenation_sensitivity", "canonical": False}]
+            ).to_csv(sensitivity_dir / "pca_method_metadata.csv", index=False)
             block_contrib = _build_pca_whole_block_contributions(result)
             # Always write so readers can check for block-dominance artefacts.
             block_contrib.to_csv(model_dir / "pca_whole_block_contributions.csv", index=False)
@@ -1752,7 +1830,7 @@ def run_biological_pca(
     results = fit_biological_pca_models(inputs, cfg=cfg)
     features = build_subject_biochemical_features(results)
     validate_outputs(inputs, results, features, cfg=cfg)
-    written_paths.update(_write_outputs(inputs, results, features))
+    written_paths.update(_write_outputs(inputs, results, features, cfg))
     logger.info("Biological PCA outputs written to %s", get_cross_region_summary_dir().parent)
     return written_paths
 

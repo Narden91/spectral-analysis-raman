@@ -1,4 +1,4 @@
-"""Pre-registered confirmatory panel: snapshot, integrals, and named indices."""
+"""Fixed Raman panel: provenance snapshot, integrals, and named indices."""
 
 from __future__ import annotations
 
@@ -42,6 +42,29 @@ def panel_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg.get("analysis", {}).get("preregistered_panel", {})
 
 
+def panel_provenance(panel: dict[str, Any]) -> dict[str, str]:
+    provenance_type = str(panel.get("provenance_type", "post_hoc_fixed"))
+    if provenance_type not in {"post_hoc_fixed", "externally_preregistered"}:
+        raise ValueError("panel provenance_type must be 'post_hoc_fixed' or 'externally_preregistered'")
+    fields = {
+        "provenance_type": provenance_type,
+        "registration_id": str(panel.get("registration_id") or ""),
+        "registered_at": str(panel.get("registered_at") or ""),
+        "registration_url": str(panel.get("registration_url") or ""),
+        "analysis_plan_hash": str(panel.get("analysis_plan_hash") or ""),
+    }
+    if provenance_type == "externally_preregistered":
+        required = ("registration_id", "registered_at", "analysis_plan_hash")
+        missing = [name for name in required if not fields[name]]
+        if missing:
+            raise ValueError(
+                "externally_preregistered panel is missing provenance field(s): " + ", ".join(missing)
+            )
+    if not fields["analysis_plan_hash"]:
+        fields["analysis_plan_hash"] = config_hash(panel)
+    return fields
+
+
 def _integral_spec(name: str, spec: list[Any]) -> tuple[str, str, float, float]:
     if not isinstance(spec, (list, tuple)) or len(spec) != 3:
         raise ValueError(f"Integral '{name}' must be [block, lo_cm, hi_cm]")
@@ -57,13 +80,13 @@ def _primary_hypothesis_lines(primary: dict[str, Any]) -> list[str]:
     covariates = primary.get("covariates", ["age", "sex"])
     covariate_text = ", ".join(str(item) for item in covariates)
     return [
-        "## Mandatory anchor hypothesis",
+        "## Primary exploratory anchor",
         "",
         f"H₀: {feature} is not associated with {endpoint} (partial Spearman | {covariate_text}).",
         f"H₁: {direction_text} {feature} is associated with worse {endpoint} "
         f"(partial Spearman ρ {'<' if direction == 'negative' else '>'} 0).",
         "",
-        "This is the single confirmatory test; it is not FDR-corrected across the anchor itself.",
+        "For this cohort this is a fixed post hoc hypothesis, not an independently confirmed test.",
         "",
     ]
 
@@ -81,16 +104,27 @@ def write_preregistration_snapshot(
 
     timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     resolved_hash = config_hash(panel)
+    provenance = panel_provenance(panel)
     yaml_block = yaml.safe_dump({"analysis": {"preregistered_panel": panel}}, sort_keys=False)
+    title = (
+        "Externally pre-registered panel"
+        if provenance["provenance_type"] == "externally_preregistered"
+        else "Fixed post hoc Raman panel"
+    )
 
     lines = [
-        "# Pre-registered confirmatory panel",
+        f"# {title}",
         "",
         f"- Generated (UTC): {timestamp}",
         f"- Config hash: {resolved_hash}",
+        f"- Provenance type: {provenance['provenance_type']}",
+        f"- Registration ID: {provenance['registration_id'] or 'not available'}",
+        f"- Registered at: {provenance['registered_at'] or 'not available'}",
+        f"- Registration URL: {provenance['registration_url'] or 'not available'}",
+        f"- Analysis-plan hash: {provenance['analysis_plan_hash']}",
         "",
         *_primary_hypothesis_lines(panel.get("primary_hypothesis", {})),
-        "## Registered configuration",
+        "## Frozen configuration",
         "",
         "```yaml",
         yaml_block.rstrip(),
@@ -120,18 +154,18 @@ def _resolve_lipid_carbonyl_window(
         raise ValueError("Pre-registered panel is missing lipid_carbonyl_1720 integral")
 
     _, block, lower, upper = _integral_spec(primary_name, integrals[primary_name])
-    if count_window_channels(columns, block=block, lower=lower, upper=upper) >= 2:
+    if count_window_channels(columns, block=block, lower=lower, upper=upper) >= 3:
         return primary_name, block, lower, upper
 
     if fallback_name not in integrals:
         runtime_notes.append(
-            f"{primary_name} window [{lower}, {upper}] has <2 channels and no fallback is configured."
+            f"{primary_name} window [{lower}, {upper}] has <3 channels and no fallback is configured."
         )
         return primary_name, block, lower, upper
 
     _, fb_block, fb_lower, fb_upper = _integral_spec(fallback_name, integrals[fallback_name])
     runtime_notes.append(
-        f"{primary_name} narrow window [{lower}, {upper}] had <2 channels; "
+        f"{primary_name} narrow window [{lower}, {upper}] had <3 channels; "
         f"using fallback [{fb_lower}, {fb_upper}]."
     )
     return primary_name, fb_block, fb_lower, fb_upper
@@ -210,6 +244,7 @@ def run_preregistered_panel(
     panel = panel_cfg(cfg)
     if not bool(panel.get("enabled", True)):
         return {}
+    provenance = panel_provenance(panel)
 
     runtime_notes: list[str] = []
     target_dir = Path(output_dir) if output_dir is not None else get_confirmatory_panel_dir()
@@ -244,8 +279,12 @@ def run_preregistered_panel(
     matrix_path = target_dir / "panel_feature_matrix.csv"
     write_csv_atomic(export, matrix_path, index=False)
 
-    logger.info("Pre-registered panel matrix written to %s", matrix_path)
+    provenance_path = target_dir / "panel_provenance.csv"
+    write_csv_atomic(pd.DataFrame([provenance]), provenance_path, index=False)
+
+    logger.info("Fixed panel matrix written to %s", matrix_path)
     return {
         "preregistration": prereg_path,
+        "panel_provenance": provenance_path,
         "panel_feature_matrix": matrix_path,
     }

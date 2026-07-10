@@ -111,12 +111,12 @@ def _candidate_region_features(
 ) -> pd.DataFrame:
     if integrated is None or integrated.empty:
         return pd.DataFrame(index=frame.index)
-    if "evidence_level" in integrated:
-        regions = integrated.loc[integrated["evidence_level"].isin({"High", "Medium"})].copy()
-        if regions.empty:
-            regions = integrated.copy()
-    else:
-        regions = integrated.copy()
+    if "evidence_status" not in integrated:
+        logger.warning("Integrated candidates lack evidence_status; candidate-derived subgroup features skipped")
+        return pd.DataFrame(index=frame.index)
+    regions = integrated.loc[
+        integrated["evidence_status"].eq("cluster_supported_exploratory")
+    ].copy()
 
     features: dict[str, pd.Series] = {}
     for _, region in regions.iterrows():

@@ -172,6 +172,29 @@ def test_validate_store_uses_stat_fast_path_for_unchanged_inputs(
     assert validation.is_valid
 
 
+def test_preprocessed_store_validation_enforces_resolved_preprocessing_hash(
+    configured_store_paths: dict[str, Path],
+) -> None:
+    store = build_preprocessed_store(src.config, force=True)
+    reordered = deepcopy(src.config)
+    reordered["preprocessing"] = dict(reversed(list(reordered["preprocessing"].items())))
+    assert validate_store(store.path, "preprocessed", reordered).is_valid
+
+    changed = deepcopy(src.config)
+    changed["preprocessing"]["quality_filter"]["spectral_quality"]["snr_threshold"] += 0.5
+    validation = validate_store(store.path, "preprocessed", changed)
+    assert validation.is_stale
+    assert not validation.is_valid
+    assert any("preprocessing configuration" in error for error in validation.errors)
+
+
+def test_parsed_store_ignores_preprocessing_only_changes(configured_store_paths: dict[str, Path]) -> None:
+    store = build_parsed_store(src.config, force=True)
+    changed = deepcopy(src.config)
+    changed["preprocessing"]["quality_filter"]["spectral_quality"]["snr_threshold"] += 0.5
+    assert validate_store(store.path, "parsed", changed).is_valid
+
+
 def test_write_analysis_provenance_records_analysis_mode(tmp_path: Path) -> None:
     data_source = DataSource(
         source_name="preprocessed",

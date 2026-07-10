@@ -55,7 +55,10 @@ def _integrated_candidates() -> pd.DataFrame:
             "spectral_block": ["1300", "2850"],
             "start_cm-1": [1238.0, 2838.0],
             "end_cm-1": [1252.0, 2852.0],
-            "evidence_level": ["High", "Medium"],
+            "evidence_status": [
+                "cluster_supported_exploratory",
+                "cluster_supported_exploratory",
+            ],
         }
     )
 

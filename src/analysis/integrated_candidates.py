@@ -4,8 +4,7 @@ Builds a single priority-ranked table from the cross-analysis candidate
 regions (Phase 6), covariate-adjusted models (Phase 7), PLS VIP coverage
 (Phase 8), PLS-L1DA selection (Phase 9), and biological PCA loading overlap.
 
-Evidence levels are conservative and descriptive only; no causal,
-diagnostic, predictive, or biomarker claims are made.
+All evidence is exploratory unless an independent validation source is supplied.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from src import config, get_biological_pca_canonical_dir, get_cross_region_phase_dir
@@ -24,14 +24,22 @@ _BIOLOGICAL_PCA_MODELS = ("PCA_1330", "PCA_2850", "PCA_whole")
 
 _DEFAULT_COLUMNS = [
     "candidate_region_id",
+    "source_region_id",
     "spectral_block",
     "start_cm-1",
     "end_cm-1",
     "width_cm-1",
     "selection_basis",
+    "selection_scope",
+    "family_id",
+    "inference_role",
+    "evidence_status",
+    "raw_p",
+    "within_scan_p",
+    "family_adjusted_p",
     "significance_supported",
     "source_analyses",
-    "n_supporting_sources",
+    "n_overlapping_analyses",
     "fdr_significant",
     "cluster_permutation_significant",
     "covariate_persisted",
@@ -43,7 +51,6 @@ _DEFAULT_COLUMNS = [
     "max_abs_effect",
     "mean_abs_effect",
     "integrated_abs_effect",
-    "evidence_level",
     "interpretation_note",
 ]
 
@@ -54,6 +61,21 @@ def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def _integrated_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg.get("analysis", {}).get("integrated_candidates", {})
+
+
+def _holm_adjust(values: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(values, errors="coerce")
+    result = pd.Series(np.nan, index=values.index, dtype=float)
+    valid = numeric.dropna()
+    if valid.empty:
+        return result
+    order = np.argsort(valid.to_numpy(dtype=float))
+    ordered_values = valid.to_numpy(dtype=float)[order]
+    adjusted_ordered = np.maximum.accumulate(ordered_values * (len(valid) - np.arange(len(valid))))
+    adjusted = np.empty(len(valid), dtype=float)
+    adjusted[order] = np.minimum(adjusted_ordered, 1.0)
+    result.loc[valid.index] = adjusted
+    return result
 
 
 def _load_csv_if_exists(path: str | Path | None) -> pd.DataFrame | None:
@@ -289,35 +311,31 @@ def _source_analysis_list(candidates: pd.DataFrame) -> pd.Series:
     return pd.Series(out, index=candidates.index, dtype="string")
 
 
-def _count_supporting_sources(candidates: pd.DataFrame) -> pd.Series:
-    return (
-        candidates.groupby("candidate_region_id")["source_analysis"]
-        .transform(lambda s: s.astype(str).nunique())
-        .astype(int)
-    )
+def _count_overlapping_analyses(candidates: pd.DataFrame) -> pd.Series:
+    counts: list[int] = []
+    for _, region in candidates.iterrows():
+        overlaps = candidates.loc[
+            candidates["spectral_block"].astype(str).eq(str(region["spectral_block"]))
+            & pd.to_numeric(candidates["start_cm-1"], errors="coerce").le(float(region["end_cm-1"]))
+            & pd.to_numeric(candidates["end_cm-1"], errors="coerce").ge(float(region["start_cm-1"]))
+        ]
+        contexts = overlaps["source_analysis"].astype(str) + "::" + overlaps["analysis_name"].astype(str)
+        counts.append(int(contexts.nunique()))
+    return pd.Series(counts, index=candidates.index, dtype=int)
 
 
-def _assign_evidence_level(row: pd.Series) -> str:
+def _assign_evidence_status(row: pd.Series) -> str:
     cluster = bool(row.get("cluster_permutation_significant", False))
-    covariate = bool(row.get("covariate_persisted", False))
-    pls = bool(row.get("pls_vip_coverage", False))
-    splsda = bool(row.get("splsda_selected", False))
     fdr = bool(row.get("fdr_significant", False))
-    n_sources = int(row.get("n_supporting_sources", 1))
-
-    if cluster and covariate and (pls or splsda):
-        return "High"
-    if cluster and covariate:
-        return "High"
-    if fdr and n_sources >= 2:
-        return "Medium"
-    if cluster or (pls or splsda):
-        return "Low"
-    return "Low"
+    if cluster:
+        return "cluster_supported_exploratory"
+    if fdr:
+        return "fdr_descriptive"
+    return "effect_only_fallback"
 
 
 def _interpretation_note(row: pd.Series) -> str:
-    level = str(row.get("evidence_level", ""))
+    status = str(row.get("evidence_status", "effect_only_fallback"))
     parts: list[str] = []
     if bool(row.get("cluster_permutation_significant", False)):
         parts.append("cluster-permutation significant")
@@ -335,8 +353,8 @@ def _interpretation_note(row: pd.Series) -> str:
     if not parts:
         parts.append("exploratory candidate region")
 
-    note = f"{level} evidence: " + ", ".join(parts) + "."
-    note += " Interpreted as an exploratory spectral association; not diagnostic, predictive, causal, or validated as a biomarker."
+    note = f"{status}: " + ", ".join(parts) + "."
+    note += " Same-cohort annotations do not provide independent validation. Interpretation is exploratory only."
     return note
 
 
@@ -406,19 +424,34 @@ def run_integrated_candidates(
     significant_pls_targets = _significant_pls_targets(pls_performance, alpha=vip_gate_alpha)
 
     candidates = candidates.copy()
+    if "source_region_id" not in candidates.columns:
+        candidates["source_region_id"] = candidates["candidate_region_id"]
     if "selection_basis" not in candidates.columns:
         candidates["selection_basis"] = pd.NA
     candidates["source_analyses"] = _source_analysis_list(candidates)
-    candidates["n_supporting_sources"] = _count_supporting_sources(candidates)
+    candidates["n_overlapping_analyses"] = _count_overlapping_analyses(candidates)
     candidates["fdr_significant"] = (
         candidates.get("n_fdr_significant", pd.Series(0, index=candidates.index)).fillna(0).astype(int) > 0
     )
     candidates["cluster_permutation_significant"] = (
         candidates.get("n_cluster_significant", pd.Series(0, index=candidates.index)).fillna(0).astype(int) > 0
     )
-    candidates["significance_supported"] = (
-        candidates["fdr_significant"] | candidates["cluster_permutation_significant"]
+    candidates["significance_supported"] = candidates["cluster_permutation_significant"]
+    candidates["selection_scope"] = "same_cohort_selected"
+    candidates["inference_role"] = "exploratory"
+    target_context = candidates.get(
+        "target", candidates.get("contrast_name", pd.Series("", index=candidates.index))
+    ).astype(str)
+    candidates["family_id"] = (
+        candidates["source_analysis"].astype(str)
+        + "::"
+        + candidates["spectral_block"].astype(str)
+        + "::"
+        + target_context
     )
+    candidates["raw_p"] = pd.to_numeric(candidates.get("min_cluster_p_value"), errors="coerce")
+    candidates["within_scan_p"] = pd.to_numeric(candidates.get("min_cluster_p_value"), errors="coerce")
+    candidates["family_adjusted_p"] = _holm_adjust(candidates["within_scan_p"])
     candidates["covariate_persisted"] = _annotate_covariate_persistence(
         candidates,
         covariate_models,
@@ -439,14 +472,13 @@ def run_integrated_candidates(
     )
     candidates["biochemical_class"] = _annotate_biochemical_class(candidates, cfg)
 
-    candidates["evidence_level"] = candidates.apply(_assign_evidence_level, axis=1)
+    candidates["evidence_status"] = candidates.apply(_assign_evidence_status, axis=1)
     candidates["interpretation_note"] = candidates.apply(_interpretation_note, axis=1)
 
-    # Keep one row per candidate region with the strongest supporting source.
     candidates = candidates.sort_values(
-        ["candidate_region_id", "evidence_level", "integrated_abs_effect"],
-        ascending=[True, False, False],
-    ).drop_duplicates(subset=["candidate_region_id"], keep="first")
+        ["spectral_block", "start_cm-1", "end_cm-1", "source_analysis", "analysis_name"],
+        kind="stable",
+    )
 
     ordered = [c for c in _DEFAULT_COLUMNS if c in candidates.columns]
     candidates = candidates.loc[:, ordered].reset_index(drop=True)

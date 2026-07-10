@@ -22,6 +22,7 @@ from src.analysis.biological_pca import (
     validate_biological_pca_config,
     validate_outputs,
 )
+from src.analysis.joint_dr import joint_pca_mfa
 from src.analysis.subject_features import build_subject_feature_matrices, write_subject_feature_exports
 
 
@@ -168,6 +169,27 @@ def test_whole_loadings_preserve_block_identity_and_unique_pairs() -> None:
     assert "spectral_block" in whole.loadings.columns
     assert set(whole.loadings["spectral_block"]) == {"1300", "2850"}
     assert not whole.loadings.duplicated(subset=["spectral_block", "raman_shift"]).any()
+    assert whole.method_metadata["method"] == "mfa_first_eigenvalue_scaling_v1"
+
+
+def test_mfa_scaled_blocks_have_unit_first_eigenvalue() -> None:
+    rng = np.random.default_rng(42)
+    left = rng.normal(scale=20.0, size=(30, 8))
+    right = rng.normal(scale=0.001, size=(30, 5))
+    result = joint_pca_mfa(np.hstack([left, right]), split_index=8, n_components=3)
+    for block in result["scaled_blocks"].values():
+        eigenvalue = float(np.linalg.svd(block, full_matrices=False, compute_uv=False)[0] ** 2 / (len(block) - 1))
+        assert np.isclose(eigenvalue, 1.0, rtol=1e-10, atol=1e-12)
+
+
+def test_mfa_rejects_degenerate_block() -> None:
+    rng = np.random.default_rng(42)
+    with pytest.raises(ValueError, match="degenerate"):
+        joint_pca_mfa(
+            np.hstack([rng.normal(size=(10, 4)), np.zeros((10, 3))]),
+            split_index=4,
+            n_components=2,
+        )
 
 
 def test_loading_region_extraction_normalizes_relative_contributions() -> None:

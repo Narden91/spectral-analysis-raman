@@ -105,6 +105,10 @@ def test_splsda_produces_expected_outputs(mock_load, synthetic_feature_matrix, m
     assert perf_df["method_label"].iloc[0] == "PLS-L1DA"
     assert "group_variable" in perf_df.columns
     assert set(perf_df["group_variable"]) == {"moca_severity_group", "delta_moca_group"}
+    assert set(perf_df["inference_role"]) == {"conditional_exploratory"}
+    bands_df = pd.read_csv(outputs["pls_l1da_selected_bands"])
+    assert {"estimation_scope", "validated", "selection_frequency", "sign_stability"}.issubset(bands_df.columns)
+    assert not bands_df["validated"].any()
 
     oplsda_df = pd.read_csv(outputs["oplsda_results"])
     assert len(oplsda_df) == 2
@@ -131,6 +135,8 @@ def test_splsda_gates_on_pls_p_value(mock_load, synthetic_feature_matrix, mock_s
     bands_df = pd.read_csv(outputs["pls_l1da_selected_bands"])
     assert bands_df.empty
     assert "status" in bands_df.columns
+    perf_df = pd.read_csv(outputs["pls_l1da_cv_performance"])
+    assert set(perf_df["status"]) == {"not_tested_gate"}
 
 
 @patch("src.analysis.splsda.load_disease_feature_frame")
@@ -152,8 +158,10 @@ def test_splsda_skips_insufficient_class_size(mock_load, synthetic_feature_matri
 
     assert "pls_l1da_cv_performance" in outputs
     perf_df = pd.read_csv(outputs["pls_l1da_cv_performance"])
-    assert len(perf_df) == 1
-    assert perf_df["group_variable"].iloc[0] == "moca_severity_group"
+    assert len(perf_df) == 2
+    status = perf_df.set_index("group_variable")["status"]
+    assert status["moca_severity_group"] == "ok"
+    assert status["delta_moca_group"] == "insufficient_n"
 
 
 def test_splsda_skips_when_disabled(tmp_path):

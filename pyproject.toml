@@ -22,6 +22,9 @@ dependencies = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "scientific_validation: deterministic synthetic null/signal calibration checks",
+]
 filterwarnings = [
 ]
 

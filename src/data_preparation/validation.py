@@ -10,6 +10,7 @@ import pandas as pd
 from src.data_preparation.manifest import (
     MANIFEST_VERSION,
     SCHEMA_VERSION,
+    config_hash,
     hash_file,
     load_manifest,
 )
@@ -236,6 +237,16 @@ def validate_store(path: str | Path, expected_store_type: str, config: dict) -> 
         if policy not in {"error", "rebuild"}:
             warnings.append(f"Unknown stale_manifest_policy={policy!r}; treating as error")
             policy = "error"
+        if expected_store_type == "preprocessed":
+            expected_preprocessing_hash = config_hash(config.get("preprocessing", {}))
+            stored_preprocessing_hash = manifest.get("preprocessing_config_hash")
+            if stored_preprocessing_hash != expected_preprocessing_hash:
+                is_stale = True
+                message = "Store is stale relative to resolved preprocessing configuration"
+                if policy == "error":
+                    errors.append(message)
+                else:
+                    warnings.append(message)
         source = manifest.get("source", {})
         source_type = source.get("type")
         source_path = source.get("path")

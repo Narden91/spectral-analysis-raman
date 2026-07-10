@@ -112,6 +112,8 @@ def partial_spearman(
     covar_ranks = _rank_covariates(covar_frame, valid_array)
 
     if covar_ranks.shape[1] == 0:
+        if np.std(x_rank) == 0 or np.std(y_rank) == 0:
+            return np.nan, np.nan, n
         rho, p_value = stats.spearmanr(x_rank, y_rank)
         return float(rho), float(p_value), n
 

@@ -50,8 +50,7 @@ def _build_band_table(
     for band_name, (lower, upper) in _band_windows(cfg).items():
         block = infer_block_from_upper(upper)
         series = band_integral(frame, columns, block=block, lower=lower, upper=upper)
-        if series.notna().any():
-            band_features[band_name] = series
+        band_features[band_name] = series
     return pd.DataFrame(band_features, index=frame.index)
 
 
@@ -93,6 +92,14 @@ def _spearman_associations(
             valid = y.notna() & x.notna() & np.isfinite(x)
             n_valid = int(valid.sum())
             if n_valid < min_subjects:
+                if int(x.notna().sum()) == 0:
+                    status = (
+                        "insufficient_window_coverage"
+                        if feature_source == "band_integral"
+                        else "unstable_denominator"
+                    )
+                else:
+                    status = "insufficient_n"
                 rows.append(
                     {
                         "target": target,
@@ -101,7 +108,7 @@ def _spearman_associations(
                         "rho": np.nan,
                         "p_value": np.nan,
                         "n": n_valid,
-                        "status": "insufficient sample size",
+                        "status": status,
                     }
                 )
                 continue
@@ -140,12 +147,6 @@ def _spearman_associations(
     if associations.empty:
         return associations
 
-    q_values, significant = fdr_correction(
-        associations["p_value"].to_numpy(dtype=float),
-        alpha=fdr_alpha,
-    )
-    associations["fdr_q"] = q_values
-    associations["significant_fdr"] = significant
     return associations
 
 
@@ -197,6 +198,18 @@ def run_biochemical_ratios(
         ignore_index=True,
         sort=False,
     )
+    if not associations.empty:
+        q_values, significant = fdr_correction(
+            pd.to_numeric(associations["p_value"], errors="coerce").to_numpy(dtype=float),
+            alpha=fdr_alpha,
+        )
+        associations["fdr_q"] = q_values
+        associations["significant_fdr"] = significant
+        associations["raw_p"] = associations["p_value"]
+        associations["within_scan_p"] = associations["p_value"]
+        associations["family_adjusted_p"] = associations["fdr_q"]
+        associations["family_id"] = "fixed_bands_ratios_x_moca_endpoints"
+        associations["inference_role"] = "exploratory"
 
     bands_path = target_dir / "biochemical_band_integrals.csv"
     ratios_path = target_dir / "biochemical_ratios.csv"

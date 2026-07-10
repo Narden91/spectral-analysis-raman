@@ -68,13 +68,13 @@ def _get_cv_strategy(
 
 
 def _tune_pls_components(
-    X_train_scaled: np.ndarray,
+    X_train: np.ndarray,
     y_train: np.ndarray,
     component_grid: list[int],
     random_state: int,
 ) -> int:
     """Tune n_components using an inner cross-validation."""
-    max_comps = min(max(component_grid), X_train_scaled.shape[1], X_train_scaled.shape[0] - 2)
+    max_comps = min(max(component_grid), X_train.shape[1], X_train.shape[0] - 2)
     valid_grid = [c for c in component_grid if c <= max_comps and c > 0]
     if not valid_grid:
         return 1
@@ -82,15 +82,18 @@ def _tune_pls_components(
     if len(valid_grid) == 1:
         return valid_grid[0]
 
-    inner_cv = KFold(n_splits=min(3, X_train_scaled.shape[0]), shuffle=True, random_state=random_state)
+    inner_cv = KFold(n_splits=min(3, X_train.shape[0]), shuffle=True, random_state=random_state)
     best_mse = float("inf")
     best_c = valid_grid[0]
 
     for c in valid_grid:
         mse_sum = 0.0
-        for in_tr, in_te in inner_cv.split(X_train_scaled):
-            X_in_tr, y_in_tr = X_train_scaled[in_tr], y_train[in_tr]
-            X_in_te, y_in_te = X_train_scaled[in_te], y_train[in_te]
+        for in_tr, in_te in inner_cv.split(X_train):
+            scaler = StandardScaler()
+            X_in_tr = scaler.fit_transform(X_train[in_tr])
+            X_in_te = scaler.transform(X_train[in_te])
+            y_in_tr = y_train[in_tr]
+            y_in_te = y_train[in_te]
 
             inner_model = PLSRegression(n_components=c, scale=False)
             inner_model.fit(X_in_tr, y_in_tr)
@@ -109,7 +112,8 @@ def _permutation_test(
     y: np.ndarray,
     cv_strategy: object,
     groups: np.ndarray | None,
-    best_c: int,
+    component_grid: list[int],
+    tune_inside_cv: bool,
     observed_r2: float,
     n_permutations: int,
     random_state: int,
@@ -118,23 +122,28 @@ def _permutation_test(
     """Perform permutation test on the PLS model using the fixed optimal component count."""
     n_jobs = 1 if n_jobs == 0 else n_jobs
     rng = np.random.default_rng(random_state)
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
     if n_jobs != 1:
-        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
         null_r2 = Parallel(n_jobs=n_jobs)(
-            delayed(_permuted_pls_r2)(X, y, cv_strategy, groups, best_c, int(seed))
+            delayed(_permuted_pls_r2)(
+                X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, int(seed)
+            )
             for seed in seeds
         )
     else:
-        null_r2 = []
-        for _ in range(n_permutations):
-            null_r2.append(_permuted_pls_r2_with_rng(X, y, cv_strategy, groups, best_c, rng))
+        null_r2 = [
+            _permuted_pls_r2(
+                X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, int(seed)
+            )
+            for seed in seeds
+        ]
 
     null_r2_arr = np.array(null_r2)
     finite_null = null_r2_arr[np.isfinite(null_r2_arr)]
     if len(finite_null) == 0:
         return np.nan, np.nan, np.nan
 
-    p_value = float(np.mean(finite_null >= observed_r2))
+    p_value = float((1 + np.sum(finite_null >= observed_r2)) / (len(finite_null) + 1))
     return p_value, float(np.mean(finite_null)), float(np.std(finite_null))
 
 
@@ -143,11 +152,15 @@ def _permuted_pls_r2(
     y: np.ndarray,
     cv_strategy: object,
     groups: np.ndarray | None,
-    best_c: int,
+    component_grid: list[int],
+    tune_inside_cv: bool,
+    random_state: int,
     seed: int,
 ) -> float:
     rng = np.random.default_rng(seed)
-    return _permuted_pls_r2_with_rng(X, y, cv_strategy, groups, best_c, rng)
+    return _permuted_pls_r2_with_rng(
+        X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, rng
+    )
 
 
 def _permuted_pls_r2_with_rng(
@@ -155,7 +168,9 @@ def _permuted_pls_r2_with_rng(
     y: np.ndarray,
     cv_strategy: object,
     groups: np.ndarray | None,
-    best_c: int,
+    component_grid: list[int],
+    tune_inside_cv: bool,
+    random_state: int,
     rng: np.random.Generator,
 ) -> float:
     y_perm = rng.permutation(y)
@@ -165,6 +180,11 @@ def _permuted_pls_r2_with_rng(
     for train_idx, test_idx in cv_strategy.split(X, y_perm, **cv_kwargs):
         X_train, y_train = X[train_idx], y_perm[train_idx]
         X_test = X[test_idx]
+
+        if tune_inside_cv:
+            best_c = _tune_pls_components(X_train, y_train, component_grid, random_state)
+        else:
+            best_c = min(component_grid[-1], X_train.shape[1], X_train.shape[0] - 2)
 
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
@@ -231,18 +251,20 @@ def run_pls_regression(
 
         y_pred = np.zeros_like(y, dtype=float)
         fold_selected_components = []
+        fold_vip_selected: list[np.ndarray] = []
+        fold_coefficient_signs: list[np.ndarray] = []
 
         cv_kwargs = {"groups": groups} if not isinstance(cv_strategy, (KFold, LeaveOneOut)) else {}
         for train_idx, test_idx in cv_strategy.split(X, y, **cv_kwargs):
             X_train, y_train = X[train_idx], y[train_idx]
-            X_test, y_test = X[test_idx], y[test_idx]
+            X_test = X[test_idx]
 
             scaler = StandardScaler()
             X_train_scaled = scaler.fit_transform(X_train)
             X_test_scaled = scaler.transform(X_test)
 
             if tune_inside_cv:
-                best_c = _tune_pls_components(X_train_scaled, y_train, component_grid, random_state)
+                best_c = _tune_pls_components(X_train, y_train, component_grid, random_state)
             else:
                 best_c = min(component_grid[-1], X_train_scaled.shape[1], X_train_scaled.shape[0] - 2)
 
@@ -251,12 +273,14 @@ def run_pls_regression(
             model = PLSRegression(n_components=best_c, scale=False)
             model.fit(X_train_scaled, y_train)
             y_pred[test_idx] = model.predict(X_test_scaled).ravel()
+            fold_vip_selected.append(_calculate_vip(model) >= vip_threshold)
+            fold_coefficient_signs.append(np.sign(model.coef_.ravel() / scaler.scale_))
 
         # Final model tuning and fitting
         final_scaler = StandardScaler()
         X_scaled = final_scaler.fit_transform(X)
         if tune_inside_cv:
-            final_c = _tune_pls_components(X_scaled, y, component_grid, random_state)
+            final_c = _tune_pls_components(X, y, component_grid, random_state)
         else:
             final_c = min(component_grid[-1], X_scaled.shape[1], X_scaled.shape[0] - 2)
 
@@ -269,6 +293,8 @@ def run_pls_regression(
         # y is not scaled by StandardScaler in our code, PLSRegression might scale it internally,
         # but coef_ relates X_scaled to y.
         raw_coefs = final_model.coef_.ravel() / final_scaler.scale_
+        selection_frequency = np.mean(np.vstack(fold_vip_selected), axis=0)
+        sign_stability = np.abs(np.mean(np.vstack(fold_coefficient_signs), axis=0))
 
         for i, col in enumerate(all_feature_columns):
             meta = feature_meta[feature_meta["feature_name"] == col].iloc[0]
@@ -278,14 +304,22 @@ def run_pls_regression(
                 "spectral_block": meta["spectral_block"],
                 "wavenumber": meta["wavenumber"],
                 "vip_score": float(vip_scores[i]),
-                "above_threshold": bool(vip_scores[i] >= vip_threshold)
+                "above_threshold": bool(vip_scores[i] >= vip_threshold),
+                "estimation_scope": "full_data_descriptive",
+                "validated": False,
+                "selection_frequency": float(selection_frequency[i]),
+                "sign_stability": float(sign_stability[i]),
             })
             coef_rows.append({
                 "target": target,
                 "feature_name": col,
                 "spectral_block": meta["spectral_block"],
                 "wavenumber": meta["wavenumber"],
-                "coefficient": float(raw_coefs[i])
+                "coefficient": float(raw_coefs[i]),
+                "estimation_scope": "full_data_descriptive",
+                "validated": False,
+                "selection_frequency": float(selection_frequency[i]),
+                "sign_stability": float(sign_stability[i]),
             })
 
         ss_res = np.sum((y - y_pred) ** 2)
@@ -293,7 +327,16 @@ def run_pls_regression(
         observed_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
         p_value, null_mean, null_std = _permutation_test(
-            X, y, cv_strategy, groups, final_c, observed_r2, n_permutations, random_state, n_jobs=n_jobs
+            X,
+            y,
+            cv_strategy,
+            groups,
+            component_grid,
+            tune_inside_cv,
+            observed_r2,
+            n_permutations,
+            random_state,
+            n_jobs=n_jobs,
         )
 
         perf_rows.append({
@@ -326,11 +369,17 @@ def run_pls_regression(
     )
     vip_df = pd.DataFrame(
         vip_rows,
-        columns=["target", "feature_name", "spectral_block", "wavenumber", "vip_score", "above_threshold"],
+        columns=[
+            "target", "feature_name", "spectral_block", "wavenumber", "vip_score", "above_threshold",
+            "estimation_scope", "validated", "selection_frequency", "sign_stability",
+        ],
     )
     coef_df = pd.DataFrame(
         coef_rows,
-        columns=["target", "feature_name", "spectral_block", "wavenumber", "coefficient"],
+        columns=[
+            "target", "feature_name", "spectral_block", "wavenumber", "coefficient",
+            "estimation_scope", "validated", "selection_frequency", "sign_stability",
+        ],
     )
     perm_df = pd.DataFrame(
         perm_rows,

@@ -179,10 +179,11 @@ def _plot_difference_spectrum(
         # Annotate known bands within the block
         block_centre_lo = 700.0 if block == "1300" else 2400.0
         block_centre_hi = 1900.0 if block == "1300" else 3200.0
+        annotation_y = float(np.nanmin(se)) * 0.9 if np.isfinite(se).any() else 0.0
         for band_name, centre in raman_bands.items():
             if block_centre_lo <= centre <= block_centre_hi:
                 ax1.axvline(centre, color="#999999", linewidth=0.6, linestyle=":")
-                ax1.text(centre, float(np.nanmin(se)) * 0.9, band_name,
+                ax1.text(centre, annotation_y, band_name,
                          rotation=90, fontsize=5, va="bottom", ha="center", color="#666666")
 
         ax1.set_xlabel("Raman shift (cm⁻¹)")

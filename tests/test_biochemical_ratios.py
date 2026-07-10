@@ -19,8 +19,8 @@ def _cfg() -> dict:
         },
         "whole_spectra": {
             "bands": {
-                "amide_iii_1260": [1238.0, 1252.0],
-                "ch2_sym_stretch_2850": [2838.0, 2852.0],
+                "amide_iii_1260": [1240.0, 1250.0],
+                "ch2_sym_stretch_2850": [2840.0, 2850.0],
             },
             "ratio_pairs": [["amide_iii_1260", "ch2_sym_stretch_2850"]],
         },

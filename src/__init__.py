@@ -280,7 +280,7 @@ _SPECTRAL_INTERPRETABILITY_SUBDIRS = {
 
 
 def get_confirmatory_panel_dir() -> Path:
-    """Top-level output root for Tier-1 pre-registered panel results."""
+    """Compatibility output root for fixed-panel exploratory results."""
     path = _output_dir("eda_subdir") / "05_confirmatory_panel"
     path.mkdir(parents=True, exist_ok=True)
     return path

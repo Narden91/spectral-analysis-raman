@@ -86,7 +86,7 @@ analysis:
       downweight_factor: 0.0  # float: 0 = exclude window, >0 = residual weight
   disease_stratification:
     enabled: true  # bool: run disease-internal subject-level stratification from exported whole-spectrum features
-    min_subjects_per_group: 5  # int: skip formal testing when any stratum falls below this size
+    min_subjects_per_group: 10  # int: design floor for exploratory two-group tests
     cluster_alpha: 0.05  # float: uncorrected cluster-forming threshold
     n_permutations: 1000  # int: label permutations for cluster-mass correction
     n_jobs: -1  # int: joblib workers for permutation tests; -1 uses all cores
@@ -97,7 +97,7 @@ analysis:
   clinical_correlation_matrix:
     enabled: true  # bool: run disease-only feature-clinical discovery on whole-spectrum subject features
     targets: [moca_baseline, moca_3m, delta_moca, rbans_total, age, aspects_score]
-    min_subjects: 5  # int: minimum subjects with non-missing endpoint values
+    min_subjects: 20  # int: minimum subjects with non-missing endpoint values
     fdr_alpha: 0.05  # float: BH-FDR significance threshold
     cluster_alpha: 0.05  # float: uncorrected cluster-forming threshold
     n_permutations: 1000  # int: target permutations for cluster-mass correction
@@ -108,7 +108,7 @@ analysis:
     candidate_region_fallback_quantile: 0.9  # float: top-|effect| fallback quantile when no formal hits survive
   longitudinal_moca:
     enabled: true  # bool: run disease-only longitudinal Delta MoCA feature associations
-    min_subjects: 5  # int: minimum subjects per model after endpoint/group filtering
+    min_subjects: 20  # int: minimum subjects per model after endpoint/group filtering
     fdr_alpha: 0.05  # float: BH-FDR significance threshold
     cluster_alpha: 0.05  # float: uncorrected cluster-forming threshold
     n_permutations: 1000  # int: permutations for cluster-mass correction
@@ -123,7 +123,7 @@ analysis:
   covariate_models:
     enabled: true  # bool: run covariate-adjusted models on candidate regions and configured ratios
     covariates: [age, sex]
-    min_subjects: 8  # int: minimum complete-case subjects per model
+    min_subjects: 30  # int: lower bound; design-aware parameter/event rules are stricter
     random_state: 42  # int: reproducibility seed for deterministic logistic fits
   whole_spectra:
     emit_mfa: false  # bool: write MFA to whole_spectra/exploratory_multiblock/MFA/
@@ -153,7 +153,8 @@ analysis:
     c_range: [0.01, 0.1, 1.0, 10.0]
     n_outer_splits: 5
     n_inner_splits: 3
-    min_subjects_per_group: 3
+    min_subjects_per_group: 10
+    min_subjects_continuous: 20
     n_permutations: 500
     n_jobs: -1
     random_state: 42
@@ -161,7 +162,7 @@ analysis:
   biochemical_ratios:
     enabled: true
     targets: [moca_baseline, moca_3m, delta_moca]
-    min_subjects: 5
+    min_subjects: 20
     fdr_alpha: 0.05
   integrated_candidates:
     enabled: true
@@ -221,7 +222,7 @@ analysis:
 
   spectral_shape:
     # Phase M: per-subject Gaussian peak fit (centroid / FWHM / asymmetry)
-    # on pre-registered band windows; Spearman associations with endpoints.
+    # on provenance-aware fixed-panel band windows; Spearman associations with endpoints.
     # Parameters are inherited from preregistered_panel (min_snr_for_peak_fit,
     # calibration_floor_cm, n_bootstrap, peak_shape_windows, covariates).
     enabled: true
@@ -245,7 +246,7 @@ analysis:
 
   feature_coupling:
     # Phase Q: pairwise Spearman coupling matrix + bootstrap CIs across the
-    # pre-registered indices/integrals; ratio-ratio biochemical regime map.
+    # fixed-panel indices/integrals; ratio-ratio spectral regime map.
     enabled: true
     n_bootstrap: 500  # int: bootstrap replicates for coupling CI estimation
     random_state: 42  # int: reproducibility seed
@@ -266,12 +267,17 @@ analysis:
 
   preregistered_panel:
     enabled: true
+    provenance_type: post_hoc_fixed
+    registration_id: null
+    registered_at: null
+    registration_url: null
+    analysis_plan_hash: null
     fdr_alpha: 0.05
     n_permutations: 1000
     n_bootstrap: 2000
     n_jobs: -1
     random_state: 42
-    min_subjects_per_group: 5
+    min_subjects_per_group: 10
     min_snr_for_peak_fit: 5.0
     calibration_floor_cm: 1.5
     integrals:

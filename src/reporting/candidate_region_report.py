@@ -47,20 +47,10 @@ def _requirement_met(row: pd.Series, requirement: str) -> bool:
 
 
 def _classify_candidate(row: pd.Series, *, robust_requires: list[str] | None = None) -> str:
-    fdr = bool(row.get("fdr_significant", False))
-    cluster = bool(row.get("cluster_permutation_significant", False))
-    covariate = bool(row.get("covariate_persisted", False))
-    significance_supported = bool(row.get("significance_supported", fdr or cluster))
-    evidence = str(row.get("evidence_level", "Low"))
-    robust_requires = robust_requires or ["cluster_permutation", "covariate_persisted"]
-
-    if (fdr or cluster) and not covariate:
-        return "confounded"
-    if evidence == "High" and significance_supported and all(
-        _requirement_met(row, requirement) for requirement in robust_requires
-    ):
+    evidence = str(row.get("evidence_status", "effect_only_fallback"))
+    if evidence == "independently_validated":
         return "robust"
-    if evidence == "Medium" and significance_supported:
+    if evidence == "cluster_supported_exploratory":
         return "exploratory"
     return "unstable"
 
@@ -127,7 +117,7 @@ def build_panel_report_section(
 
     tier_counts = _panel_tier_counts(ranking)
     lines = [
-        "# Pre-registered Panel Report Section",
+        "# Fixed Post Hoc Panel Report Section",
         "",
         "This section summarizes region-overlapping, tentatively assigned Raman panel features. "
         "It reports graded exploratory evidence only and avoids clinical classification claims.",
@@ -149,7 +139,7 @@ def build_panel_report_section(
         ),
         "Interpretation is limited to regions overlapping protein-associated bands; weak bands require cautious reading.",
         "",
-        "## Oxidative Imbalance",
+        "## Tentatively Assigned Raman Ratios",
         "",
         _top_feature_line(ranking, ["oxidative_index", "carotenoid_1525", "carotenoid_cc_1156", "lipid_carbonyl_1720"]),
         anchor_note,
@@ -171,7 +161,7 @@ def run_panel_report_section(
     output_dir: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
-    """Write the Phase K four-domain confirmatory-panel report section."""
+    """Write the Phase K fixed-panel exploratory report section."""
     cfg = _cfg(cfg)
     phase_cfg = cfg.get("analysis", {}).get("panel_report", {})
     if not bool(phase_cfg.get("enabled", True)):
@@ -191,9 +181,10 @@ def run_panel_report_section(
     write_text_atomic(section_path, text)
     write_text_atomic(
         readme_path,
-        "# Confirmatory Panel Outputs\n\n"
-        "- `preregistration.md`: frozen panel and anchor hypothesis.\n"
-        "- `panel_feature_matrix.csv`: subject-level pre-registered features.\n"
+        "# Fixed Post Hoc Panel Outputs\n\n"
+        "- `preregistration.md`: provenance-aware frozen panel snapshot.\n"
+        "- `panel_provenance.csv`: registration/provenance fields.\n"
+        "- `panel_feature_matrix.csv`: subject-level fixed-panel features.\n"
         "- `feature_robustness_ranking.csv`: graded Phase L evidence score.\n"
         "- `panel_report_section.md`: four-domain conservative synthesis.\n",
     )
@@ -290,21 +281,22 @@ def _section_for_class(class_name: str, candidates: pd.DataFrame) -> str:
     if sub.empty:
         return f"\n## {class_name.capitalize()} findings\n\nNo regions classified as {class_name}.\n"
 
-    display = sub[[
+    display_columns = [
         "candidate_region_id",
         "spectral_block",
         "start_cm-1",
         "end_cm-1",
-        "evidence_level",
+        "evidence_status",
         "selection_basis",
         "significance_supported",
-        "n_supporting_sources",
+        "n_overlapping_analyses",
         "covariate_persisted",
         "pls_vip_coverage",
         "splsda_selected",
         "biochemical_class",
         "interpretation_note",
-    ]].copy()
+    ]
+    display = sub[[column for column in display_columns if column in sub.columns]].copy()
     lines = [
         f"\n## {class_name.capitalize()} findings\n",
         f"{len(sub)} region(s) classified as {class_name}.\n",
@@ -324,12 +316,12 @@ def _build_report(
     has_significant_regions = bool(candidates.get("significance_supported", pd.Series(dtype=bool)).fillna(False).any())
     if has_significant_regions:
         summary_note = (
-            "Candidate regions include at least one FDR- or cluster-permutation-supported interval. "
-            "Fallback regions remain exploratory context only."
+            "Candidate regions include at least one cluster-permutation-supported interval. "
+            "Channel-FDR-only and fallback regions remain descriptive context only."
         )
     else:
         summary_note = (
-            "No statistically significant spectral regions were detected after FDR or cluster-permutation correction. "
+            "No spectral regions were supported by cluster-permutation correction. "
             "Any listed regions are fallback-selected largest-effect intervals and should be interpreted only as "
             "hypothesis-generating context."
         )
@@ -350,10 +342,10 @@ def _build_report(
         "",
         "### Classification definitions",
         "",
-        "- **Robust**: High evidence satisfying configured robust requirements, including statistical support and covariate persistence.",
-        "- **Exploratory**: Medium evidence (FDR-significant in multiple independent analyses but not fully covariate-persisted).",
-        "- **Unstable**: Low evidence, fallback-selected, or unsupported by corrected inference.",
-        "- **Confounded**: Significant before covariate adjustment but not after adjustment for age, sex, and available technical covariates.",
+        "- **Robust**: independently validated in an external cohort; unavailable for this dataset.",
+        "- **Exploratory**: supported by cluster-permutation inference in this cohort only.",
+        "- **Unstable**: channel-FDR-only, fallback-selected, or unsupported by corrected inference.",
+        "- **Confounded**: reserved for a prespecified model with measured confounders; not assigned from post-selection models.",
         "",
         "## Figures",
         "",
@@ -367,9 +359,9 @@ def _build_report(
     if panel_report_section_path is not None:
         lines.extend(
             [
-                "## Pre-registered Panel Section",
+                "## Fixed Post Hoc Panel Section",
                 "",
-                f"Four-domain confirmatory-panel synthesis: `{panel_report_section_path}`",
+                f"Four-domain exploratory fixed-panel synthesis: `{panel_report_section_path}`",
                 "",
             ]
         )
@@ -385,9 +377,10 @@ def _build_report(
         "longitudinal ΔMoCA analyses, and disease-internal stratification tests, with cluster-mass permutation correction. "
         "When no corrected intervals were detected, fallback largest-effect intervals were retained only for transparent "
         "hypothesis generation and are not treated as statistical findings. "
-        "Covariate-adjusted models included age, sex, and available technical covariates where present. "
+        "Post-selection sensitivity models included age and sex only; SEC fraction, concentration, column/batch age, "
+        "sample volume, acquisition batch, and other technical confounders were unavailable. These models do not validate selection. "
         "The minimal panel was selected by nested cross-validated ElasticNet / L1-penalized logistic regression "
-        "with permutation testing and bootstrap confidence intervals.",
+        "with permutation testing and bootstrap stability summaries.",
         "",
     ])
     return "\n".join(lines)
@@ -428,11 +421,13 @@ def run_candidate_region_report(
     integrated = _load_csv_if_exists(integrated_candidates_path)
     if integrated is None or integrated.empty:
         integrated = pd.DataFrame(columns=[
-            "candidate_region_id", "spectral_block", "start_cm-1", "end_cm-1",
-            "evidence_level", "fdr_significant", "cluster_permutation_significant",
+            "source_region_id", "candidate_region_id", "spectral_block",
+            "start_cm-1", "end_cm-1", "family_id", "inference_role",
+            "evidence_status", "selection_scope", "raw_p", "within_scan_p",
+            "family_adjusted_p", "cluster_permutation_significant",
             "selection_basis", "significance_supported", "covariate_persisted",
-            "max_abs_effect", "integrated_abs_effect",
-            "n_supporting_sources", "pls_vip_coverage", "splsda_selected",
+            "max_abs_effect", "integrated_abs_effect", "n_overlapping_analyses",
+            "pls_vip_coverage", "splsda_selected",
             "biochemical_class", "interpretation_note",
         ])
 

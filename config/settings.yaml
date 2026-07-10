@@ -96,7 +96,8 @@ preprocessing:
       snr_threshold: 5.0  # float: minimum signal-to-noise ratio
       peak_window: 5  # int: half-width in channels for peak search
       noise_channels: 20  # int: trailing channels used to estimate noise
-      min_area_percentile: 10  # int: percentile threshold for area-level retention
+      min_area_percentile: null  # deprecated: batch-relative rejection is disabled
+      min_integrated_signal: null  # requires an independently calibrated block-specific reference
       # Compute SNR/area on a virtual edge-trimmed preview so edge artifacts
       # that will later be removed cannot drive rejection.
       use_trim_aware_preview: true  # bool
@@ -111,8 +112,7 @@ preprocessing:
       intensity_ratio_threshold: 2.0  # float: intensity ratio threshold
       min_surviving_pixels: 4  # int: minimum pixels to keep an area
     baseline_clip:
-      enabled: true  # bool: enable QC gate on baseline over-correction
-      max_clipped_fraction: 0.05  # float: reject spectra where >5% of channels clipped to 0
+      enabled: false  # signed baseline residuals are preserved; metrics remain descriptive
     axis_extrapolation:
       enabled: true  # bool: enable QC gate on interpolation beyond measured range
       max_extrapolated_fraction: 0.02  # float: reject spectra where >2% of canonical channels extrapolated

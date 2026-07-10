@@ -86,31 +86,25 @@ def _write_phase_timings(timings: list[dict[str, object]]) -> Path | None:
     return path
 
 
-def _bh_fdr(p_values: np.ndarray) -> np.ndarray:
-    """Benjamini–Hochberg FDR correction. Returns q-values (same length as input)."""
+def _holm_adjust(p_values: np.ndarray) -> np.ndarray:
+    """Return Holm family-wise adjusted p-values in input order."""
     n = len(p_values)
     if n == 0:
         return np.array([], dtype=float)
     order = np.argsort(p_values)
-    ranks = np.empty(n, dtype=float)
-    ranks[order] = np.arange(1, n + 1, dtype=float)
-    q = p_values * n / ranks
-    # Enforce monotonicity: q[i] = min(q[i], q[i+1], ..., q[n-1])
-    q_sorted = q[order]
-    for i in range(n - 2, -1, -1):
-        q_sorted[i] = min(q_sorted[i], q_sorted[i + 1])
-    q[order] = np.minimum(q_sorted, 1.0)
-    return q
+    adjusted_sorted = np.maximum.accumulate(p_values[order] * (n - np.arange(n)))
+    adjusted = np.empty(n, dtype=float)
+    adjusted[order] = np.minimum(adjusted_sorted, 1.0)
+    return adjusted
 
 
 def _collect_cross_phase_multiplicity(
     outputs: dict[str, dict[str, Path]],
 ) -> pd.DataFrame | None:
-    """Collect all cluster-level p-values across discovery phases and apply BH-FDR.
+    """Collect cluster p-values across exploratory scans and apply Holm correction.
 
     The primary statistical control is within-phase cluster permutation correction.
-    This function provides a secondary, descriptive family-wide FDR view across all
-    phases, spectral blocks, and clinical endpoints — reported for transparency.
+    This adds family-wise control across phases, spectral blocks, and endpoints.
 
     Phase 9 (sPLS-DA) outputs are excluded because the gate makes them non-exchangeable
     with the unconditional Phase 1-5 tests.
@@ -155,9 +149,13 @@ def _collect_cross_phase_multiplicity(
     finite_mask = summary["cluster_p_value"].notna() & np.isfinite(summary["cluster_p_value"])
     q = np.full(len(summary), np.nan)
     if finite_mask.any():
-        q[finite_mask] = _bh_fdr(summary.loc[finite_mask, "cluster_p_value"].to_numpy(dtype=float))
-    summary["cross_phase_fdr_q"] = q
-    summary["cross_phase_significant_fdr05"] = summary["cross_phase_fdr_q"] < 0.05
+        q[finite_mask] = _holm_adjust(summary.loc[finite_mask, "cluster_p_value"].to_numpy(dtype=float))
+    summary["family_id"] = "exploratory_whole_spectrum_clusters"
+    summary["raw_p"] = summary["cluster_p_value"]
+    summary["within_scan_p"] = summary["cluster_p_value"]
+    summary["family_adjusted_p"] = q
+    summary["inference_role"] = "exploratory"
+    summary["cross_phase_significant_holm05"] = summary["family_adjusted_p"] < 0.05
     return summary.sort_values("cluster_p_value").reset_index(drop=True)
 
 
@@ -268,14 +266,14 @@ def run_disease_only_cross_region_pipeline(
 
         preregistered_outputs: dict[str, Path] = {}
         if _phase_enabled(cfg, "preregistered_panel"):
-            with _phase_timer(phase_timings, "preregistered_panel", "Pre-registered confirmatory panel", _progress, _task):
+            with _phase_timer(phase_timings, "preregistered_panel", "Fixed post hoc Raman panel", _progress, _task):
                 preregistered_outputs = run_preregistered_panel(
                     feature_matrix_path=feature_matrix_path,
                     cfg=cfg,
                 )
                 outputs["preregistered_panel"] = preregistered_outputs
 
-            with _phase_timer(phase_timings, "confirmatory_panel", "Robust confirmatory panel statistics", _progress, _task):
+            with _phase_timer(phase_timings, "confirmatory_panel", "Exploratory fixed-panel statistics", _progress, _task):
                 outputs["confirmatory_panel"] = run_confirmatory_panel_statistics(
                     feature_matrix_path=feature_matrix_path,
                     panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
@@ -338,7 +336,7 @@ def run_disease_only_cross_region_pipeline(
 
         preregistered_minimal_outputs: dict[str, Path] = {}
         if preregistered_outputs and _phase_enabled(cfg, "panel_minimal_model"):
-            with _phase_timer(phase_timings, "panel_minimal_model", "Panel-restricted minimal model", _progress, _task):
+            with _phase_timer(phase_timings, "panel_minimal_model", "Fixed-panel minimal model", _progress, _task):
                 preregistered_minimal_outputs = run_minimal_panel(
                     feature_matrix_path=feature_matrix_path,
                     panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
@@ -420,8 +418,7 @@ def run_disease_only_cross_region_pipeline(
                     cfg=cfg,
                 )
 
-    # Cross-phase multiplicity summary (secondary, descriptive BH-FDR across all
-    # discovery phases).  The primary control is within-phase cluster permutation.
+    # Cross-scan Holm correction complements within-scan max-cluster correction.
     try:
         multiplicity_df = _collect_cross_phase_multiplicity(outputs)
         if multiplicity_df is not None and not multiplicity_df.empty:
@@ -429,9 +426,9 @@ def run_disease_only_cross_region_pipeline(
             write_csv_atomic(multiplicity_df, multiplicity_path, index=False)
             outputs["cross_phase_multiplicity"] = {"cross_phase_multiplicity_summary": multiplicity_path}
             logger.info(
-                "Cross-phase multiplicity summary written: %d cluster entries, %d survive BH-FDR q<0.05",
+                "Cross-phase multiplicity summary written: %d cluster entries, %d survive Holm p<0.05",
                 len(multiplicity_df),
-                int(multiplicity_df["cross_phase_significant_fdr05"].sum()),
+                int(multiplicity_df["cross_phase_significant_holm05"].sum()),
             )
     except Exception as exc:
         logger.warning("Cross-phase multiplicity summary failed (non-fatal): %s", exc)

@@ -23,7 +23,12 @@ def _integrated_candidates() -> pd.DataFrame:
             "end_cm-1": [1252.0, 1252.0, 1510.0, 2852.0],
             "max_abs_effect": [0.8, 0.5, 0.3, 0.4],
             "integrated_abs_effect": [7.0, 4.0, 2.0, 3.0],
-            "evidence_level": ["High", "Medium", "Low", "Medium"],
+            "evidence_status": [
+                "independently_validated",
+                "cluster_supported_exploratory",
+                "effect_only_fallback",
+                "fdr_descriptive",
+            ],
             "fdr_significant": [True, True, False, True],
             "cluster_permutation_significant": [True, False, False, False],
             "covariate_persisted": [True, True, False, False],
@@ -83,7 +88,7 @@ def test_build_panel_report_section_contains_four_domains_without_blocked_terms(
     for section in [
         "Membrane Remodeling",
         "Protein Structural Heterogeneity",
-        "Oxidative Imbalance",
+            "Tentatively Assigned Raman Ratios",
         "System-Level EV Disruption",
     ]:
         assert section in text

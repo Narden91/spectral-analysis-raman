@@ -47,9 +47,14 @@ def band_integral(
     block: str,
     lower: float,
     upper: float,
+    min_channels: int = 3,
+    min_coverage: float = 0.8,
 ) -> pd.Series:
     selected_columns, wavenumbers = _select_window_columns(columns, block, lower, upper)
-    if not selected_columns:
+    requested_span = max(float(upper) - float(lower), 0.0)
+    represented_span = float(wavenumbers[-1] - wavenumbers[0]) if wavenumbers.size > 1 else 0.0
+    coverage = represented_span / requested_span if requested_span > 0 else 1.0
+    if len(selected_columns) < min_channels or coverage < min_coverage:
         return pd.Series(np.nan, index=frame.index, dtype=float)
 
     values = frame[selected_columns].to_numpy(dtype=float)
@@ -108,7 +113,10 @@ def band_median_snr(
 
 
 def ratio_from_integrals(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
-    safe_denominator = denominator.replace(0.0, np.nan)
+    finite_scale = pd.to_numeric(denominator, errors="coerce").abs()
+    reference = float(finite_scale[finite_scale > 0].median()) if (finite_scale > 0).any() else 0.0
+    tolerance = max(1e-12, reference * 1e-8)
+    safe_denominator = denominator.mask(finite_scale <= tolerance)
     return numerator / safe_denominator
 
 

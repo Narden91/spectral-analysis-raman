@@ -22,6 +22,7 @@ def _cfg() -> dict:
                 "n_bootstrap": 20,
                 "random_state": 7,
                 "min_subjects_per_group": 3,
+                "min_subjects_continuous": 5,
                 "indices": {
                     "oxidative_index": ["carotenoid_1525", "lipid_carbonyl_1720"],
                     "membrane_integrity_index": ["ch_bulk_2885", "lipid_carbonyl_1720"],
@@ -99,6 +100,19 @@ def test_permutation_pvalue_bounds() -> None:
     assert ok["perm_p_value"].between(1 / 20, 1).all()
     separated = ok.loc[ok["feature_name"] == "oxidative_index", "perm_p_value"]
     assert separated.min() < 0.2
+
+
+def test_ineligible_contrasts_keep_normalized_schema() -> None:
+    cfg = _cfg()
+    cfg["analysis"]["preregistered_panel"]["min_subjects_per_group"] = 10
+
+    contrasts = run_panel_contrasts(_frame(), cfg=cfg)
+
+    assert set(contrasts["status"]) == {"insufficient_n"}
+    assert {"raw_p", "within_scan_p", "family_adjusted_p", "family_id", "inference_role"}.issubset(
+        contrasts.columns
+    )
+    assert contrasts["raw_p"].isna().all()
 
 
 def test_run_confirmatory_panel_statistics_writes_outputs(tmp_path: Path) -> None:

@@ -36,6 +36,18 @@ def test_partial_spearman_reduces_synthetic_age_confound() -> None:
     assert abs(rho) < 0.35
 
 
+def test_partial_spearman_constant_outcome_returns_not_testable() -> None:
+    rho, p_value, n = partial_spearman(
+        np.ones(10),
+        np.arange(10, dtype=float),
+        pd.DataFrame(index=range(10)),
+    )
+
+    assert n == 10
+    assert np.isnan(rho)
+    assert np.isnan(p_value)
+
+
 def test_variance_homogeneity() -> None:
     equal_a = np.array([1, 2, 3, 4, 5], dtype=float)
     equal_b = np.array([2, 3, 4, 5, 6], dtype=float)

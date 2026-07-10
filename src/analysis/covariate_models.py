@@ -61,6 +61,8 @@ def _empty_model_table() -> pd.DataFrame:
             "accuracy",
             "available_covariates",
             "missing_covariates",
+            "selection_scope",
+            "inference_role",
             "status",
         ]
     )
@@ -137,6 +139,8 @@ def _fit_ols(
     design = design.dropna()
     y = outcome.loc[design.index]
     design_matrix = np.column_stack([np.ones(len(design)), design.to_numpy(dtype=float)])
+    if np.linalg.matrix_rank(design_matrix) < design_matrix.shape[1]:
+        raise ValueError("rank_deficient")
     beta, *_ = np.linalg.lstsq(design_matrix, y.to_numpy(dtype=float), rcond=None)
     fitted = design_matrix @ beta
     residual = y.to_numpy(dtype=float) - fitted
@@ -169,6 +173,8 @@ def _fit_logistic_wald(
     design = design.dropna()
     y = outcome.loc[design.index].to_numpy(dtype=float)
     x = np.column_stack([np.ones(len(design)), design.to_numpy(dtype=float)])
+    if np.linalg.matrix_rank(x) < x.shape[1]:
+        raise ValueError("rank_deficient")
     beta = np.zeros(x.shape[1], dtype=float)
     eps = 1e-9
 
@@ -418,8 +424,15 @@ def run_covariate_region_models(
                 continue
             design = pd.concat([outcome.rename("outcome"), predictor.rename("predictor"), covariate_frame], axis=1)
             design = design.dropna()
-            if len(design) < min_subjects:
-                status = "insufficient subjects"
+            n_parameters = 1 + len(available_covariates)
+            ols_min_subjects = max(30, 10 * n_parameters)
+            n_events_observed = int(design["outcome"].sum()) if outcome_type == "binary" else 0
+            n_nonevents_observed = int(len(design) - n_events_observed) if outcome_type == "binary" else 0
+            insufficient = len(design) < max(min_subjects, ols_min_subjects if outcome_type == "continuous" else 0)
+            if outcome_type == "binary":
+                insufficient = insufficient or min(n_events_observed, n_nonevents_observed) < 10 * n_parameters
+            if insufficient:
+                status = "insufficient_n"
                 n_subjects = int(len(design))
                 n_events = int(design["outcome"].sum()) if outcome_type == "binary" else np.nan
                 coefficient = np.nan
@@ -439,7 +452,7 @@ def run_covariate_region_models(
                         n_events = np.nan
                     else:
                         if design["outcome"].nunique() < 2:
-                            raise ValueError("binary outcome collapsed to one class")
+                            raise ValueError("insufficient_n")
                         coefficient, intercept, accuracy, coef_p_value = _fit_logistic(
                             design["outcome"],
                             design["predictor"],
@@ -449,8 +462,16 @@ def run_covariate_region_models(
                         r_squared = np.nan
                         n_events = int(design["outcome"].sum())
                     status = "ok"
-                except Exception as exc:
-                    status = str(exc)
+                except ValueError as exc:
+                    status = str(exc) if str(exc) in {"rank_deficient", "separation", "insufficient_n"} else "missing_required_data"
+                    coefficient = np.nan
+                    coef_p_value = np.nan
+                    intercept = np.nan
+                    r_squared = np.nan
+                    accuracy = np.nan
+                    n_events = int(design["outcome"].sum()) if outcome_type == "binary" else np.nan
+                except Exception:
+                    status = "missing_required_data"
                     coefficient = np.nan
                     coef_p_value = np.nan
                     intercept = np.nan
@@ -492,6 +513,8 @@ def run_covariate_region_models(
                     "accuracy": accuracy,
                     "available_covariates": ", ".join(available_covariates),
                     "missing_covariates": ", ".join(missing_covariates),
+                    "selection_scope": "same_cohort_selected",
+                    "inference_role": "post_selection_descriptive",
                     "status": status,
                 }
             )

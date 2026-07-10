@@ -194,16 +194,20 @@ def test_run_integrated_candidates_produces_expected_outputs(input_paths: dict[s
     df = pd.read_csv(outputs["integrated_candidate_regions"])
     assert len(df) == 3
     assert set(df["candidate_region_id"]) == {"1300_R1", "1300_R2", "2850_R1"}
-    assert "evidence_level" in df.columns
+    assert "evidence_status" in df.columns
+    assert "source_region_id" in df.columns
+    assert "n_overlapping_analyses" in df.columns
+    assert "n_supporting_sources" not in df.columns
     assert "selection_basis" in df.columns
     assert "significance_supported" in df.columns
     assert "interpretation_note" in df.columns
     assert "biochemical_class" in df.columns
 
-    high = df.loc[df["candidate_region_id"] == "1300_R1"]
-    assert high["evidence_level"].iloc[0] == "High"
-    assert bool(high["covariate_persisted"].iloc[0]) is True
-    assert bool(high["pls_vip_coverage"].iloc[0]) is True
+    supported = df.loc[df["candidate_region_id"] == "1300_R1"]
+    assert supported["evidence_status"].iloc[0] == "cluster_supported_exploratory"
+    assert bool(supported["covariate_persisted"].iloc[0]) is True
+    assert bool(supported["pls_vip_coverage"].iloc[0]) is True
+    assert supported["inference_role"].iloc[0] == "exploratory"
 
     fallback = df.loc[df["candidate_region_id"] == "2850_R1"]
     assert bool(fallback["significance_supported"].iloc[0]) is False

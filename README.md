@@ -14,7 +14,7 @@ A professional, high-performance Python pipeline for extracellular-vesicle (EV) 
 - `02_longitudinal_moca/`: Associations specifically targeting ΔMoCA.
 - `03_disease_stratification/`: Spectral profiles across disease severity sub-groups.
 - `04_minimal_panel/`: ElasticNet feature reduction attempts.
-- `05_confirmatory_panel/`: (Tier-1) Robust statistics and permutation testing on pre-registered features.
+- `05_confirmatory_panel/`: compatibility path for provenance-aware fixed post hoc panel analyses; current-cohort results remain exploratory.
 - `06_spectral_interpretability/`: (Tier-2) Tools for spectral shape extraction, Feature Coupling (regimes), NMF decomposition, and entropy descriptors.
 *   **Rich Visualizations**: Generates publication-ready scree plots, score pairgrids, loading summaries, group-mean waveforms, and individual QC grids.
 *   **Data Integrity & Validation**: Fully manifest-driven data storage using Parquet for tabular metadata, NPZ for dense arrays, and JSON for schema/config snapshots.
@@ -183,7 +183,7 @@ To prevent **pseudoreplication** (treating multiple pixels from the same subject
 1.  **Model Layouts**:
     *   `PCA_1330`: Fingerprint region (1300 cm⁻¹ range).
     *   `PCA_2850`: CH-stretch region (2850 cm⁻¹ range).
-    *   `PCA_whole`: Unweighted concatenation of fingerprint and CH-stretch medians.
+    *   `PCA_whole`: MFA-scaled concatenation of fingerprint and CH-stretch medians; unscaled PCA is sensitivity-only.
 2.  **Naming Convention**: Loading columns and indices are prefixed with their region (e.g. `1300__1240.0` or `2850__2840.0`) to avoid coordinate collisions.
 3.  **Components**: Exactly 3 components (PC1, PC2, PC3) are computed and exported.
 4.  **Figures Generated**:

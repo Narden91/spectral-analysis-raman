@@ -118,6 +118,7 @@ def test_build_endpoints_maps_current_header_aliases_and_writes_outputs(tmp_path
         "clinical_subject_table.csv",
         "clinical_missingness_report.csv",
         "clinical_group_counts.csv",
+        "clinical_complete_case_comparison.csv",
         "clinical_column_map.json",
     }
     assert json.loads((tmp_path / "out" / "clinical_column_map.json").read_text(encoding="utf-8"))["rbans_total"] == "rbans_total_3m"

@@ -56,6 +56,8 @@ This pipeline utilizes a **Hybrid Aggregation** strategy:
 
 The pipeline acts independently on raw pixel arrays, ensuring no pixel bleeds artifacts into its neighbors during early stages. The orchestrator sequentially applies the following steps:
 
+> **Authoritative production order:** initial dead/saturation screening; cosmic handling; edge trim; baseline correction; post-baseline SNR QC; spike repair; smoothing; normalization. Any older numbered text below that places spectral-quality filtering before baseline correction is superseded by this order. Batch-relative area-percentile rejection is disabled, and no absolute area floor is active without an independent calibration set.
+
 ### Stage 1: Quality Control & Dead/Anomalous Pixel Screening
 - **Method**: Standard deviation screening and saturation check.
 - **Rationale**: Pixels with very low variability (dead pixels, $\text{std} < 1.0$) or detector saturation ($> 65000$) are excluded early to avoid injecting unphysical signals.
@@ -64,17 +66,17 @@ The pipeline acts independently on raw pixel arrays, ensuring no pixel bleeds ar
 - **Method**: Spatial/Neighbor Median Detection (Z-score based) with Local Median fallback when spatial coordinates are unavailable.
 - **Rationale**: Cosmic rays hit the CCD detector as sharp, highly localized intensity spikes. Comparing each pixel's spectrum to its physical neighbors on the grid map identifies these anomalies robustly so they can be repaired (replaced with local medians) or flagged for exclusion.
 
-### Stage 3: Spectral Quality Filtering
-- **Method**: Deterministic Signal-to-Noise Ratio (SNR) and Area-based gating.
-- **Rationale**: Low-quality spectra (e.g. from areas with poor cell contact or focus) are discarded if their SNR falls below 5.0 (calculated on a deterministic anchor window) or if their total area falls in the bottom 10th percentile. This is calculated on a virtual edge-trimmed preview to prevent edge spectrometer artifacts from driving rejections.
+### Stage 5: Post-baseline Spectral Quality Filtering
+- **Method**: Deterministic post-baseline SNR gating before smoothing; integrated signal area is diagnostic only.
+- **Rationale**: SNR describes Raman residual signal rather than fluorescence background. Batch-relative percentile rejection is disabled; `min_integrated_signal` remains unset pending independent calibration.
 
-### Stage 4: Edge Trimming
+### Stage 3: Edge Trimming
 - **Method**: Spectral boundary trimming (10 channels or 15.0 cm⁻¹ alternative).
 - **Rationale**: Speeds and margins of the spectrometer CCD arrays are prone to border noise and artifact corruption. Trimming the ends ensures subsequent baseline fits are stable.
 
-### Stage 5: Baseline Correction
+### Stage 4: Baseline Correction
 - **Method**: Asymmetrically Reweighted Penalized Least Squares (arPLS), Asymmetric Least Squares (AsLS), or Statistics-sensitive Non-linear Iterative Peak-clipping (SNIP).
-- **Rationale**: Biological fluorescence creates a large, slow-varying baseline. arPLS estimates this background smoothly without polynomial oscillations (Runge's phenomenon). Negative intensity values resulting from slight baseline overshoots are clipped to 0.0, and the fraction of clipped channels is tracked.
+- **Rationale**: Biological fluorescence creates a large, slow-varying baseline. arPLS estimates this background smoothly without polynomial oscillations. Signed residuals are preserved; `negative_fraction` and `negative_area_fraction` are descriptive QC metrics, not rejection rules.
 
 ### Stage 6: Isolated Spike Repair
 - **Method**: Whitaker-Hayes Z-score check on discrete differences.

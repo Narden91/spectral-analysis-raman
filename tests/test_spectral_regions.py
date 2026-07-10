@@ -33,7 +33,7 @@ def test_build_candidate_regions_returns_expected_window() -> None:
     assert len(regions) == 1
     assert float(regions.loc[0, "start_cm-1"]) == 1245.0
     assert float(regions.loc[0, "end_cm-1"]) == 1250.0
-    assert regions.loc[0, "selection_basis"] == "significant_or_cluster"
+    assert regions.loc[0, "selection_basis"] == "cluster_supported"
 
 
 def test_run_candidate_region_detector_writes_unified_table(tmp_path: Path) -> None:
@@ -93,7 +93,7 @@ def test_run_candidate_region_detector_writes_unified_table(tmp_path: Path) -> N
             "contrast_name": ["low_vs_high_moca"],
             "group_variable": ["moca_severity_group"],
             "spectral_block": ["1300"],
-            "candidate_region_id": ["1300_R2"],
+            "candidate_region_id": ["1300_R1"],
             "selection_basis": ["top_abs_effect_fallback"],
             "start_cm-1": [1300.0],
             "end_cm-1": [1310.0],
@@ -122,4 +122,8 @@ def test_run_candidate_region_detector_writes_unified_table(tmp_path: Path) -> N
         "disease_stratification",
     }
     assert "effect_metric" in combined.columns
+    assert "source_region_id" in combined.columns
+    assert combined["candidate_region_id"].is_unique
+    assert not set(combined["candidate_region_id"]).intersection({"1300_R1", "2850_R1"})
+    assert (combined["source_region_id"] == "1300_R1").sum() == 2
     assert "candidate_regions_cluster_corrected" in written

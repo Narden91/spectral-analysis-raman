@@ -1,4 +1,4 @@
-"""Phase L: graded robustness ranking for pre-registered panel features."""
+"""Phase L: descriptive stability ranking for fixed post hoc panel features."""
 
 from __future__ import annotations
 

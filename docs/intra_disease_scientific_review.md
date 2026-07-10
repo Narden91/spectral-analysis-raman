@@ -51,3 +51,12 @@ Avoid claims that:
 ## Next Scientific Improvements
 
 The next study should pre-register a small spectral-region/ratio panel, use an independent validation cohort, report power or detectable-effect calculations, and consider mixed-effects modeling if repeated measurements or acquisition batches are available. The current results are valuable because they identify where the evidence is weak, not because they establish a positive molecular story.
+
+## Scientific-rigor contract
+
+- The current fixed panel is `post_hoc_fixed`, not independently pre-registered for this cohort.
+- Same-cohort covariate, VIP, sparse-weight, PCA-overlap, and biochemical annotations do not provide independent validation.
+- Whole-spectrum cluster inference is primary; channelwise FDR is descriptive and cross-scan cluster p-values receive Holm adjustment.
+- `PCA_whole` uses MFA first-eigenvalue block scaling; unscaled concatenation is sensitivity-only.
+- Baseline-corrected spectra retain signed residuals. QC SNR is computed after baseline correction and before smoothing; no batch-relative area percentile is used.
+- Missing clinical outcomes are handled by complete-case analysis with inclusion comparisons. Results may remain selection-biased.

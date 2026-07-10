@@ -153,7 +153,7 @@ def _fig2_effect_forest(
     deltas, ci_lowers, ci_uppers, feat_scores = [], [], [], []
     for feat in features:
         sub = severity[severity["feature_name"] == feat]
-        deltas.append(_first_numeric(sub["cliffs_delta"]))
+        deltas.append(_first_numeric(sub.get("cliffs_delta", pd.Series(dtype=float))))
         ci_lowers.append(_first_numeric(sub.get("bootstrap_ci_lower", pd.Series(dtype=float))))
         ci_uppers.append(_first_numeric(sub.get("bootstrap_ci_upper", pd.Series(dtype=float))))
         feat_scores.append(scores.get(str(feat), 0))

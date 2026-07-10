@@ -5,8 +5,9 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.model_selection import KFold
 
-from src.analysis.pls_regression import run_pls_regression
+from src.analysis.pls_regression import _permutation_test, run_pls_regression
 
 
 @pytest.fixture
@@ -77,12 +78,16 @@ def test_pls_regression_produces_expected_outputs(mock_load, synthetic_feature_m
     assert "target" in perf_df.columns
     assert "high_variance_flag" in perf_df.columns
     assert "selected_n_components" in perf_df.columns
-    assert perf_df["high_variance_flag"].iloc[0] == False
+    assert not perf_df["high_variance_flag"].iloc[0]
     assert perf_df["cv_strategy"].iloc[0] == "KFold"
 
     vip_df = pd.read_csv(outputs["pls_vip_bands"])
     assert len(vip_df) == 10  # 2 targets * 5 features
     assert "vip_score" in vip_df.columns
+    assert {"estimation_scope", "validated", "selection_frequency", "sign_stability"}.issubset(vip_df.columns)
+    assert not vip_df["validated"].any()
+    permutation = pd.read_csv(outputs["pls_permutation_results"])
+    assert (permutation["permutation_p_value"] >= 1 / 11).all()
 
 
 @patch("src.analysis.pls_regression.load_disease_feature_frame")
@@ -99,7 +104,7 @@ def test_pls_regression_loo_fallback(mock_load, synthetic_feature_matrix, mock_p
     )
 
     perf_df = pd.read_csv(outputs["pls_regression_performance"])
-    assert perf_df["high_variance_flag"].iloc[0] == True
+    assert perf_df["high_variance_flag"].iloc[0]
     assert perf_df["cv_strategy"].iloc[0] == "LeaveOneOut"
 
 
@@ -124,3 +129,24 @@ def test_pls_regression_skips_when_disabled(tmp_path):
     cfg = {"analysis": {"pls_regression": {"enabled": False}}}
     outputs = run_pls_regression(output_dir=tmp_path, cfg=cfg)
     assert outputs == {}
+
+
+def test_pls_permutation_serial_parallel_equivalence() -> None:
+    rng = np.random.default_rng(7)
+    X = rng.normal(size=(15, 4))
+    y = rng.normal(size=15)
+    cv = KFold(n_splits=3, shuffle=True, random_state=42)
+    kwargs = dict(
+        X=X,
+        y=y,
+        cv_strategy=cv,
+        groups=None,
+        component_grid=[1, 2],
+        tune_inside_cv=True,
+        observed_r2=0.0,
+        n_permutations=6,
+        random_state=42,
+    )
+    serial = _permutation_test(**kwargs, n_jobs=1)
+    parallel = _permutation_test(**kwargs, n_jobs=2)
+    assert serial == parallel
