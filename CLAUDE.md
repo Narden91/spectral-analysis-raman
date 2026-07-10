@@ -5,7 +5,7 @@ This repository contains a Python Raman spectroscopy analysis pipeline for extra
 ## 1. Quick Start & Entry Points
 
 - `uv run scripts/run_eda.py`: Main EDA entry point and the **only** entry point for Biological PCA.
-- `uv run scripts/run_spectral_plots.py`: Spectral comparison and QC plotting.
+- `uv run scripts/run_spectral_plots.py`: Spectral comparison, QC plotting, and CSV data export.
 
 ### Common Commands
 - Smoke test (full resampling): `uv run scripts/run_eda.py --range both --max-subjects 8`
@@ -57,7 +57,7 @@ The `disease_only` pipeline mode executes a comprehensive suite of cross-region 
 - **Phase 10 (Biochemical Ratios)**: Computes targeted band-intensity ratios via trapezoidal integration and assesses Spearman correlation with clinical endpoints.
 - **Phase 11 (Integrated Candidate Regions)**: Merges univariate hits, covariate persistence, biological PCA loading overlap, PLS VIP coverage, and biochemical interpretation into a single priority-ranked table (`High`/`Medium`/`Low`) written to `11_integrated_candidates/integrated_candidate_regions.csv`.
 - **Phase 12 (Disease Subgroups)**: Exploratory agglomerative Ward clustering evaluated via Gap statistic and bootstrap Adjusted Rand Index.
-- **Phase 13 (Minimal Candidate Panel)**: Selects 5–10 spectral peaks/ratios per endpoint using nested cross-validated ElasticNet / L1-penalized logistic regression with permutation testing and bootstrap confidence intervals. Outputs `13_minimal_panel/minimal_candidate_panel.csv`, `minimal_panel_cv_performance.csv`, and `minimal_panel_coefficients.csv`.
+- **Phase 13 (Minimal Candidate Panel)**: Selects 5–10 spectral peaks/ratios per endpoint using nested cross-validated ElasticNet / L1-penalized logistic regression with full-pipeline permutation testing and bootstrap selection-stability summaries. Candidate-derived modeling is skipped when no cluster-supported region passes its gate.
 - **Phase 14 (Publication Report)**: Generates a conservative markdown report and summary CSV that classifies findings as robust, exploratory, unstable, or confounded. Outputs `14_publication_report/candidate_region_report.md`, `candidate_region_summary.csv`, and `candidate_region_figures/`.
 
 ## 6. Biological PCA Rules
@@ -65,7 +65,7 @@ The `disease_only` pipeline mode executes a comprehensive suite of cross-region 
 Biological PCA is subject-level only and is the authoritative PCA layer per region. Area-level EDA PCA remains but is demoted to exploratory/QC use only.
 
 - **Models**: `PCA_1330`, `PCA_2850`, `PCA_whole`.
-- **Concatenation**: `PCA_whole` is an unweighted concatenation of the full median spectra.
+- **Multiblock scaling**: canonical `PCA_whole` centers each block and divides it by the square root of its first eigenvalue before joint PCA. Unscaled concatenation is sensitivity-only.
 - **Identity**: Whole-spectrum columns and loadings must preserve block identity (e.g., `1300__1240.0`).
 - **Interpretation**: Keep it conservative. Use integrated loading-region language. **Do not** make causal, diagnostic, abundance, predictive, or biomarker claims.
 - **Components**: Exactly 3 components (PC1, PC2, PC3) are reported.
@@ -83,7 +83,7 @@ Outputs are written under the active root and range-local folders (e.g., `Result
 Cross-region phases (`run_disease_only_cross_region_pipeline` in `src/analysis/disease_only_pipeline.py`) are resampling-heavy. The default path stays **CPU-compatible and deterministic**.
 
 - **Fast dev profile**: `config/eda_disease_fast.yaml` extends `eda_disease_only.yaml` with lower `n_permutations`, bootstrap counts, and CV splits. Use for iteration only—not manuscript/final science.
-- **Parallel CPU**: `n_jobs` in `config/eda.yaml` (default `-1`) controls joblib workers for cluster permutation, PLS/sPLS-DA permutation tests, confirmatory-panel resampling, and minimal panel. Set `n_jobs: 1` for serial debugging.
+- **Parallel CPU**: `n_jobs` in `config/eda.yaml` (default `-1`) controls joblib workers for cluster permutation, PLS/sPLS-DA permutation tests, fixed-panel resampling, and minimal panel. Set `n_jobs: 1` for serial debugging.
 - **Phase timing**: Each run writes `00_run_metadata/disease_only_cross_region_phase_timing.csv` under the active EDA root. Inspect before optimizing further.
 - **Feature-matrix cache**: `src/analysis/clinical_feature_associations.py` caches whole-spectrum Parquet reads in-process (path + mtime/size); callers still get copied frames.
 - **GPU**: No GPU solvers in the pipeline. `scripts/check_gpu_readiness.py` is an optional CuPy equivalence gate only. Do not introduce GPU backends without validated CPU parity.

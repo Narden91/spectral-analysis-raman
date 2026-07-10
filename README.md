@@ -164,15 +164,23 @@ uv run scripts/check_gpu_readiness.py
 ```
 
 ### 3. Spectral Plotting & QC Visualization
-Generate post-preprocessing waveforms and individual scan layouts for diagnostic audit:
+Generate post-preprocessing waveforms, individual scan layouts for diagnostic audit, and optionally export the underlying data as CSVs.
 
 ```bash
-# Generate group spectral plots
+# Generate group spectral plots and export CSV data (default behavior)
 uv run scripts/run_spectral_plots.py
 
-# Restrict plots to a smaller test cohort size
+# Restrict to a smaller test cohort size
 uv run scripts/run_spectral_plots.py --max-subjects 20 --outdir Output_plot
+
+# Generate plots only (skip CSV export)
+uv run scripts/run_spectral_plots.py --no-export-data
+
+# Export CSV data only (skip plot generation)
+uv run scripts/run_spectral_plots.py --no-plots
 ```
+
+The exported CSV data will be saved in a directory parallel to the plot output directory (e.g., `output_plot_data/` when the plot directory is `Output_plot/`).
 
 ---
 
