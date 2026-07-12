@@ -397,12 +397,12 @@ def plot_ratio_summary(
         "male_disease_vs_male_control": "Male",
     }
     ratio_labels = {
-        "amide_i_1655__over__ch2_sym_stretch_2850": "Amide I / CH2\nprotein vs lipid",
-        "amide_i_1655__over__ch3_sym_stretch_2930": "Amide I / CH3\nprotein vs CH3",
-        "phenylalanine_1004__over__ch3_sym_stretch_2930": "Phenylalanine / CH3",
-        "dna_po2_sym_1090__over__ch2_sym_stretch_2850": "DNA / CH2\nDNA vs lipid",
-        "amide_iii_1260__over__amide_i_1655": "Amide III / Amide I",
-        "ch2_sym_stretch_2850__over__ch3_sym_stretch_2930": "CH2 / CH3\nlipid balance",
+        "carotenoid_1525__over__lipid_carbonyl_1721": "Carotenoid / Lipid C=O\noxidative-stress proxy",
+        "amide_i_1657__over__ch2_sym_stretch_2853": "Amide I / CH₂\nprotein vs lipid",
+        "amide_iii_1258__over__amide_i_1657": "Amide III / Amide I\nsecondary structure",
+        "po2_cn_1112__over__amide_i_1657": "PO₂⁻ / Amide I\nnucleic acid vs protein",
+        "lipid_ester_1744__over__ch2_sym_stretch_2853": "Ester C=O / CH₂\nlipid ester",
+        "carotenoid_1156__over__carotenoid_1525": "Carotenoid ν₁ / ν₂\ninternal control",
     }
 
     working = ratio_test_df.copy()

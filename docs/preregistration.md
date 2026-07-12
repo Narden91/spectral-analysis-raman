@@ -2,7 +2,7 @@
 
 ## Primary exploratory hypothesis
 
-H0: The tentatively assigned `carotenoid_1525 / lipid_carbonyl_1720` Raman ratio is not associated with delta MoCA.
+H0: The tentatively assigned `carotenoid_1525 / lipid_carbonyl_1721` Raman ratio is not associated with delta MoCA.
 
 H1: The ratio is negatively associated with delta MoCA.
 

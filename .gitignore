@@ -25,7 +25,7 @@ Output_plot*/
 output*/
 Results_*/
 catboost_info/
-.agent/
+.agents/
 .github/
 .claude/
 .cursor/

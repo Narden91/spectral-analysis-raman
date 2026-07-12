@@ -1,4 +1,4 @@
-﻿"""Strict subject-level Biological PCA outputs for Raman spectra."""
+"""Strict subject-level Biological PCA outputs for Raman spectra."""
 
 from __future__ import annotations
 
@@ -132,7 +132,7 @@ def _band_class_map(bp_cfg: dict) -> dict[str, str]:
         raise ValueError("biological_pca.biochemical_classes must be a non-empty mapping")
     band_to_class: dict[str, str] = {}
     for class_name, band_names in class_cfg.items():
-        if str(class_name) not in {"lipid", "protein", "nucleic_acid", "mixed"}:
+        if str(class_name) not in {"lipid", "protein", "nucleic_acid", "mixed", "carotenoid"}:
             raise ValueError(f"Unsupported biochemical class '{class_name}'")
         for band_name in band_names or []:
             band_name = str(band_name)
@@ -1427,6 +1427,7 @@ def _plot_biochemical_summary(result: ModelResult, output_dir: Path, pcs: list[s
         "lipid_associated_region": "#E69F00",
         "protein_associated_region": "#0072B2",
         "nucleic_acid_associated_region": "#009E73",
+        "carotenoid_associated_region": "#D55E00",
         "mixed_context_region": "#6D597A",
         "unassigned_broad_interval": "#6B7280",
     }
