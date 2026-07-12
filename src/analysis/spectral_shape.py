@@ -357,7 +357,7 @@ def run_spectral_shape(
     }
     if not peak_windows:
         peak_windows = {
-            "lipid_carbonyl_1720": (1710.0, 1735.0),
+            "lipid_carbonyl_1721": (1710.0, 1735.0),
             "protein_1555": (1540.0, 1570.0),
             "carotenoid_1525": (1510.0, 1535.0),
         }

@@ -281,8 +281,8 @@ analysis:
     min_snr_for_peak_fit: 5.0
     calibration_floor_cm: 1.5
     integrals:
-      lipid_carbonyl_1720: ["1300", 1710, 1735]
-      lipid_carbonyl_1720_fallback: ["1300", 1700, 1750]
+      lipid_carbonyl_1721: ["1300", 1710, 1735]
+      lipid_carbonyl_1721_fallback: ["1300", 1700, 1750]
       carotenoid_cc_1156: ["1300", 1145, 1170]
       carotenoid_1525: ["1300", 1510, 1535]
       protein_1555: ["1300", 1540, 1570]
@@ -292,8 +292,8 @@ analysis:
       tyrosine_821: ["1300", 815, 828]
       ch_bulk_2885: ["2850", 2850, 2950]
     indices:
-      membrane_integrity_index: [ch_bulk_2885, lipid_carbonyl_1720]
-      oxidative_index: [carotenoid_1525, lipid_carbonyl_1720]
+      membrane_integrity_index: [ch_bulk_2885, lipid_carbonyl_1721]
+      oxidative_index: [carotenoid_1525, lipid_carbonyl_1721]
       protein_remodeling_index: [protein_1555, structural_protein_925, structural_protein_980]
       tyrosine_environment_index: [tyrosine_851, tyrosine_821]
     primary_hypothesis:
@@ -313,52 +313,7 @@ analysis:
         - {name: trajectory_extreme, group_variable: delta_moca_group_extreme, ordered_groups: [decline, recovery]}
     covariates: [age, sex]
     peak_shape_windows:
-      lipid_carbonyl_1720: [1710, 1735]
-      protein_1555: [1540, 1570]
-      carotenoid_1525: [1510, 1535]
-    nmf:
-    fdr_alpha: 0.05
-    n_permutations: 1000
-    n_bootstrap: 2000
-    n_jobs: -1
-    random_state: 42
-    min_subjects_per_group: 10
-    min_snr_for_peak_fit: 5.0
-    calibration_floor_cm: 1.5
-    integrals:
-      lipid_carbonyl_1720: ["1300", 1710, 1735]
-      lipid_carbonyl_1720_fallback: ["1300", 1700, 1750]
-      carotenoid_cc_1156: ["1300", 1145, 1170]
-      carotenoid_1525: ["1300", 1510, 1535]
-      protein_1555: ["1300", 1540, 1570]
-      structural_protein_925: ["1300", 915, 935]
-      structural_protein_980: ["1300", 970, 990]
-      tyrosine_851: ["1300", 845, 858]
-      tyrosine_821: ["1300", 815, 828]
-      ch_bulk_2885: ["2850", 2850, 2950]
-    indices:
-      membrane_integrity_index: [ch_bulk_2885, lipid_carbonyl_1720]
-      oxidative_index: [carotenoid_1525, lipid_carbonyl_1720]
-      protein_remodeling_index: [protein_1555, structural_protein_925, structural_protein_980]
-      tyrosine_environment_index: [tyrosine_851, tyrosine_821]
-    primary_hypothesis:
-      feature: oxidative_index
-      endpoint: delta_moca
-      direction: negative
-      test: partial_spearman
-      covariates: [age, sex]
-    robustness:
-      effect_size_threshold: 0.147
-      perm_p_threshold: 0.10
-      min_endpoint_agreement: 2
-    endpoints:
-      continuous: [moca_baseline, moca_3m, delta_moca]
-      contrasts:
-        - {name: severity_extreme, group_variable: moca_severity_group_extreme, ordered_groups: [severe, mild]}
-        - {name: trajectory_extreme, group_variable: delta_moca_group_extreme, ordered_groups: [decline, recovery]}
-    covariates: [age, sex]
-    peak_shape_windows:
-      lipid_carbonyl_1720: [1710, 1735]
+      lipid_carbonyl_1721: [1710, 1735]
       protein_1555: [1540, 1570]
       carotenoid_1525: [1510, 1535]
     nmf:

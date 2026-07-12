@@ -31,10 +31,10 @@ def _cfg() -> dict:
         "analysis": {"random_state": 42},
         "whole_spectra": {
             "bands": {
-                "amide_iii_1260": [1240, 1280],
+                "amide_iii_1258": [1240, 1280],
                 "ch2_bend_1300": [1290, 1320],
-                "ch2_sym_stretch_2850": [2840, 2865],
-                "ch3_sym_stretch_2930": [2920, 2945],
+                "ch2_sym_stretch_2853": [2840, 2865],
+                "ch3_asym_stretch_2937": [2920, 2945],
             }
         },
         "biological_pca": {
@@ -48,27 +48,27 @@ def _cfg() -> dict:
                 "PCA_1330": {
                     "spectral_blocks": ["1300"],
                     "window": "full",
-                    "bands": ["amide_iii_1260", "ch2_bend_1300"],
+                    "bands": ["amide_iii_1258", "ch2_bend_1300"],
                 },
                 "PCA_2850": {
                     "spectral_blocks": ["2850"],
                     "window": "full",
-                    "bands": ["ch2_sym_stretch_2850", "ch3_sym_stretch_2930"],
+                    "bands": ["ch2_sym_stretch_2853", "ch3_asym_stretch_2937"],
                 },
                 "PCA_whole": {
                     "spectral_blocks": ["1300", "2850"],
                     "window": "full",
                     "bands": [
-                        "amide_iii_1260",
+                        "amide_iii_1258",
                         "ch2_bend_1300",
-                        "ch2_sym_stretch_2850",
-                        "ch3_sym_stretch_2930",
+                        "ch2_sym_stretch_2853",
+                        "ch3_asym_stretch_2937",
                     ],
                 },
             },
             "biochemical_classes": {
-                "lipid": ["ch2_bend_1300", "ch2_sym_stretch_2850"],
-                "protein": ["amide_iii_1260", "ch3_sym_stretch_2930"],
+                "lipid": ["ch2_bend_1300", "ch2_sym_stretch_2853"],
+                "protein": ["amide_iii_1258", "ch3_asym_stretch_2937"],
                 "nucleic_acid": [],
                 "mixed": [],
             },

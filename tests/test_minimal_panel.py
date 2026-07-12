@@ -99,16 +99,16 @@ def test_run_minimal_panel_produces_expected_outputs(input_paths: dict[str, Path
             },
             "whole_spectra": {
                 "bands": {
-                    "amide_iii_1260": [1235.0, 1255.0],
-                    "ch2_sym_stretch_2850": [2840.0, 2855.0],
-                    "ch3_sym_stretch_2930": [2925.0, 2935.0],
+                    "amide_iii_1258": [1235.0, 1255.0],
+                    "ch2_sym_stretch_2853": [2840.0, 2855.0],
+                    "ch3_asym_stretch_2937": [2925.0, 2935.0],
                 },
                 "ratio_pairs": [
-                    ["amide_iii_1260", "ch2_sym_stretch_2850"],
+                    ["amide_iii_1258", "ch2_sym_stretch_2853"],
                 ],
                 "biochemical_classes": {
-                    "protein": ["amide_iii_1260"],
-                    "lipid": ["ch2_sym_stretch_2850", "ch3_sym_stretch_2930"],
+                    "protein": ["amide_iii_1258"],
+                    "lipid": ["ch2_sym_stretch_2853", "ch3_asym_stretch_2937"],
                 },
             },
         },
@@ -171,8 +171,8 @@ def test_run_minimal_panel_accepts_preregistered_panel_source(input_paths: dict[
                 },
                 "preregistered_panel": {
                     "indices": {
-                        "oxidative_index": ["carotenoid_1525", "lipid_carbonyl_1720"],
-                        "membrane_integrity_index": ["ch_bulk_2885", "lipid_carbonyl_1720"],
+                        "oxidative_index": ["carotenoid_1525", "lipid_carbonyl_1721"],
+                        "membrane_integrity_index": ["ch_bulk_2885", "lipid_carbonyl_1721"],
                         "protein_remodeling_index": ["protein_1555", "structural_protein_925", "structural_protein_980"],
                     },
                     "integrals": {},
@@ -203,7 +203,7 @@ def test_candidate_panel_skips_when_cluster_support_gate_fails(
         cfg={
             "analysis": {"minimal_panel": {"enabled": True}},
             "whole_spectra": {
-                "bands": {"amide_iii_1260": [1235.0, 1255.0]},
+                "bands": {"amide_iii_1258": [1235.0, 1255.0]},
                 "ratio_pairs": [],
             },
         },

@@ -22,7 +22,7 @@ def _make_index_frame(n: int = 12, seed: int = 0) -> pd.DataFrame:
             "membrane_integrity_index": rng.uniform(0.5, 5.0, n),
             "protein_remodeling_index": rng.uniform(0.2, 3.0, n),
             "tyrosine_environment_index": rng.uniform(0.3, 1.5, n),
-            "lipid_carbonyl_1720": rng.uniform(0.1, 1.0, n),
+            "lipid_carbonyl_1721": rng.uniform(0.1, 1.0, n),
             "carotenoid_1525": rng.uniform(0.0, 0.5, n),
         }
     )

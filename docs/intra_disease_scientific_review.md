@@ -14,7 +14,7 @@ PLS regression did not pass permutation testing for any continuous endpoint. Cro
 
 The minimal candidate panel also failed to provide reliable models. Continuous endpoint R2 values were negative, and binary balanced accuracy was weak: 0.559 for MoCA severity and 0.442 for delta MoCA group, with permutation p-values of 0.157 and 0.847. These values do not justify classification or prognostic language.
 
-Targeted biochemical ratio testing did not identify any FDR-significant associations. The smallest observed uncorrected signal was the delta MoCA association with amide_iii_1260 over amide_i_1655, but it had FDR q = 0.862 and must be treated as non-significant.
+Targeted biochemical ratio testing did not identify any FDR-significant associations. Note: previous iterations of this pipeline searched for generic protein/lipid ratios, but these have been replaced by the current pre-registered targeted EV markers, which similarly lack FDR-significant associations with outcomes in the current cohort.
 
 Disease subgrouping selected 4 clusters with mean bootstrap ARI around 0.52. This is moderate exploratory structure, not a validated disease subtype solution.
 

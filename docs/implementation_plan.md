@@ -97,7 +97,7 @@ diagnostic claims).
 **Mandatory anchor hypothesis** (frozen in `preregistration.md` before any tests):
 
 ```text
-H₀: Oxidative index (carotenoid_1525 / lipid_carbonyl_1720) is not associated with ΔMoCA
+H₀: Oxidative index (carotenoid_1525 / lipid_carbonyl_1721) is not associated with ΔMoCA
 H₁: Lower oxidative index is associated with worse ΔMoCA (Spearman ρ < 0)
 ```
 
@@ -509,8 +509,8 @@ analysis:
     min_snr_for_peak_fit: 5.0              # skip low-quality spectra (Phase M)
     calibration_floor_cm: 1.5              # shifts below this are not_interpretable
     integrals:                               # name: [block, lo_cm, hi_cm]
-      lipid_carbonyl_1720: ["1300", 1710, 1735]
-      lipid_carbonyl_1720_fallback: ["1300", 1700, 1750]   # used if narrow window <2 channels
+      lipid_carbonyl_1721: ["1300", 1710, 1735]
+      lipid_carbonyl_1721_fallback: ["1300", 1700, 1750]   # used if narrow window <2 channels
       carotenoid_cc_1156:  ["1300", 1145, 1170]
       carotenoid_1525:     ["1300", 1510, 1535]
       protein_1555:        ["1300", 1540, 1570]
@@ -520,8 +520,8 @@ analysis:
       tyrosine_821:        ["1300", 815, 828]
       ch_bulk_2885:        ["2850", 2850, 2950]
     indices:                                 # PRIMARY panel features (not secondary ratios)
-      membrane_integrity_index: [ch_bulk_2885, lipid_carbonyl_1720]
-      oxidative_index:        [carotenoid_1525, lipid_carbonyl_1720]
+      membrane_integrity_index: [ch_bulk_2885, lipid_carbonyl_1721]
+      oxidative_index:        [carotenoid_1525, lipid_carbonyl_1721]
       protein_remodeling_index: [protein_1555, structural_protein_925, structural_protein_980]
       tyrosine_environment_index: [tyrosine_851, tyrosine_821]
     primary_hypothesis:                      # MANDATORY — single confirmatory test
@@ -541,7 +541,7 @@ analysis:
         - {name: trajectory_extreme, group_variable: delta_moca_group_extreme, ordered_groups: [decline, recovery]}
     covariates: [age, sex]
     peak_shape_windows:                      # Phase M targets
-      lipid_carbonyl_1720: [1710, 1735]
+      lipid_carbonyl_1721: [1710, 1735]
       protein_1555:        [1540, 1570]
       carotenoid_1525:     [1510, 1535]
     nmf:
@@ -580,7 +580,7 @@ analysis:
 - **Changes:**
   - Create `band_features.py` with `block_columns()`, `band_integral()`, `ratio_from_integrals()`, and `build_named_index()` (handles multi-denominator sums like protein_remodeling). Port logic from `biochemical_ratios.py` / `covariate_models.py` unchanged in behavior.
   - Refactor `biochemical_ratios.py` and `covariate_models.py` to import from `band_features.py`.
-  - In `preregistered_panel.py:build_panel_matrix(...)`: compute all integrals; if `lipid_carbonyl_1720` has `<2` channels, **automatically fall back** to `lipid_carbonyl_1720_fallback` (1700–1750) and log the switch in `preregistration.md`; compute the four named indices; write `05_confirmatory_panel/panel_feature_matrix.csv` with integrals + indices (indices listed first as primary columns).
+  - In `preregistered_panel.py:build_panel_matrix(...)`: compute all integrals; if `lipid_carbonyl_1721` has `<2` channels, **automatically fall back** to `lipid_carbonyl_1721_fallback` (1700–1750) and log the switch in `preregistration.md`; compute the four named indices; write `05_confirmatory_panel/panel_feature_matrix.csv` with integrals + indices (indices listed first as primary columns).
   - Skip tyrosine/structural integrals if SNR gate fails; log, do not impute.
 - **Deliverables:** `band_features.py`; `05_confirmatory_panel/panel_feature_matrix.csv`.
 - **Tests:** `test_band_features.py`; `test_preregistered_panel.py::test_named_indices_are_primary_columns`; `::test_1720_fallback_when_narrow_window_too_small`.

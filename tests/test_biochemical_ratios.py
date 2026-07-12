@@ -19,10 +19,10 @@ def _cfg() -> dict:
         },
         "whole_spectra": {
             "bands": {
-                "amide_iii_1260": [1240.0, 1250.0],
-                "ch2_sym_stretch_2850": [2840.0, 2850.0],
+                "amide_iii_1258": [1240.0, 1250.0],
+                "ch2_sym_stretch_2853": [2840.0, 2850.0],
             },
-            "ratio_pairs": [["amide_iii_1260", "ch2_sym_stretch_2850"]],
+            "ratio_pairs": [["amide_iii_1258", "ch2_sym_stretch_2853"]],
         },
     }
 
@@ -82,7 +82,7 @@ def test_run_biochemical_ratios_writes_expected_outputs(tmp_path: Path) -> None:
         "biochemical_ratio_associations",
     }
     assert len(bands) == 12
-    assert "amide_iii_1260__over__ch2_sym_stretch_2850" in ratios.columns
+    assert "amide_iii_1258__over__ch2_sym_stretch_2853" in ratios.columns
     assert {"band_integral", "band_ratio"}.issubset(set(associations["feature_source"]))
     assert set(associations["target"]) == {"delta_moca"}
 

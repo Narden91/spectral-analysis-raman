@@ -82,13 +82,13 @@ def test_run_covariate_region_models_reports_missing_covariates_and_formulas(tmp
             },
             "whole_spectra": {
                 "bands": {
-                    "amide_iii_1260": [1235.0, 1255.0],
-                    "ch2_sym_stretch_2850": [2840.0, 2855.0],
-                    "ch3_sym_stretch_2930": [2925.0, 2935.0],
+                    "amide_iii_1258": [1235.0, 1255.0],
+                    "ch2_sym_stretch_2853": [2840.0, 2855.0],
+                    "ch3_asym_stretch_2937": [2925.0, 2935.0],
                 },
                 "ratio_pairs": [
-                    ["amide_iii_1260", "ch2_sym_stretch_2850"],
-                    ["ch2_sym_stretch_2850", "ch3_sym_stretch_2930"],
+                    ["amide_iii_1258", "ch2_sym_stretch_2853"],
+                    ["ch2_sym_stretch_2853", "ch3_asym_stretch_2937"],
                 ],
             },
         },

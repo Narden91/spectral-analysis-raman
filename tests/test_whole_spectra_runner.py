@@ -30,16 +30,16 @@ def test_disease_only_whole_spectra_skips_ratio_summary(
         "whole_spectra",
         {
             "bands": {
-                "phenylalanine_1004": [995, 1015],
-                "amide_i_1655": [1630, 1680],
-                "amide_iii_1260": [1240, 1280],
+                "beta_sheet_980": [995, 1015],
+                "amide_i_1657": [1630, 1680],
+                "amide_iii_1258": [1240, 1280],
                 "dna_po2_sym_1090": [1080, 1100],
-                "ch2_sym_stretch_2850": [2840, 2865],
-                "ch3_sym_stretch_2930": [2920, 2945],
+                "ch2_sym_stretch_2853": [2840, 2865],
+                "ch3_asym_stretch_2937": [2920, 2945],
             },
             "ratio_pairs": [
-                ["amide_i_1655", "ch2_sym_stretch_2850"],
-                ["amide_iii_1260", "amide_i_1655"],
+                ["amide_i_1657", "ch2_sym_stretch_2853"],
+                ["amide_iii_1258", "amide_i_1657"],
             ],
             "correlation": {"method": "spearman", "n_bootstrap": 0},
         },

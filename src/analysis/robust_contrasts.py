@@ -59,7 +59,7 @@ def _panel_features(frame: pd.DataFrame, panel: dict[str, Any]) -> list[str]:
     registered = list(panel.get("indices", {}).keys()) + [
         name
         for name in panel.get("integrals", {})
-        if name != "lipid_carbonyl_1720_fallback"
+        if name != "lipid_carbonyl_1721_fallback"
     ]
     return [feature for feature in registered if feature in frame.columns]
 

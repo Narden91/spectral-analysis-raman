@@ -147,11 +147,11 @@ def _resolve_lipid_carbonyl_window(
     panel: dict[str, Any],
     runtime_notes: list[str],
 ) -> tuple[str, str, float, float]:
-    primary_name = "lipid_carbonyl_1720"
-    fallback_name = "lipid_carbonyl_1720_fallback"
+    primary_name = "lipid_carbonyl_1721"
+    fallback_name = "lipid_carbonyl_1721_fallback"
     integrals = panel.get("integrals", {})
     if primary_name not in integrals:
-        raise ValueError("Pre-registered panel is missing lipid_carbonyl_1720 integral")
+        raise ValueError("Pre-registered panel is missing lipid_carbonyl_1721 integral")
 
     _, block, lower, upper = _integral_spec(primary_name, integrals[primary_name])
     if count_window_channels(columns, block=block, lower=lower, upper=upper) >= 3:
@@ -188,9 +188,9 @@ def build_panel_matrix(
     lipid_name, lipid_block, lipid_lo, lipid_hi = _resolve_lipid_carbonyl_window(columns, panel, notes)
 
     for integral_name, spec in integrals_cfg.items():
-        if integral_name == "lipid_carbonyl_1720_fallback":
+        if integral_name == "lipid_carbonyl_1721_fallback":
             continue
-        if integral_name == "lipid_carbonyl_1720":
+        if integral_name == "lipid_carbonyl_1721":
             block, lower, upper = lipid_block, lipid_lo, lipid_hi
         else:
             _, block, lower, upper = _integral_spec(integral_name, spec)
@@ -214,8 +214,8 @@ def build_panel_matrix(
     index_columns: dict[str, pd.Series] = {}
     for index_name, components in index_specs.items():
         remapped = list(components)
-        if "lipid_carbonyl_1720" in remapped and lipid_name in resolved_integrals:
-            remapped = [lipid_name if item == "lipid_carbonyl_1720" else item for item in remapped]
+        if "lipid_carbonyl_1721" in remapped and lipid_name in resolved_integrals:
+            remapped = [lipid_name if item == "lipid_carbonyl_1721" else item for item in remapped]
         index_series = build_named_index(resolved_integrals, remapped)
         if index_series.notna().any():
             index_columns[index_name] = index_series

@@ -24,12 +24,12 @@ def _cfg() -> dict:
                 "min_subjects_per_group": 3,
                 "min_subjects_continuous": 5,
                 "indices": {
-                    "oxidative_index": ["carotenoid_1525", "lipid_carbonyl_1720"],
-                    "membrane_integrity_index": ["ch_bulk_2885", "lipid_carbonyl_1720"],
+                    "oxidative_index": ["carotenoid_1525", "lipid_carbonyl_1721"],
+                    "membrane_integrity_index": ["ch_bulk_2885", "lipid_carbonyl_1721"],
                 },
                 "integrals": {
                     "carotenoid_1525": ["1300", 1510, 1535],
-                    "lipid_carbonyl_1720": ["1300", 1710, 1735],
+                    "lipid_carbonyl_1721": ["1300", 1710, 1735],
                     "ch_bulk_2885": ["2850", 2850, 2950],
                 },
                 "primary_hypothesis": {
@@ -69,7 +69,7 @@ def _frame() -> pd.DataFrame:
             "oxidative_index": [0.1, 0.2, 0.15, 0.25, 0.2, 0.18, 1.1, 1.2, 1.15, 1.25, 1.2, 1.18],
             "membrane_integrity_index": [1.0, 1.1, 0.9, 1.2, 1.1, 1.0, 1.8, 1.9, 2.0, 1.7, 1.8, 1.9],
             "carotenoid_1525": np.linspace(10, 21, 12),
-            "lipid_carbonyl_1720": np.linspace(20, 31, 12),
+            "lipid_carbonyl_1721": np.linspace(20, 31, 12),
             "ch_bulk_2885": np.linspace(30, 41, 12),
             "moca_baseline": [18, 17, 19, 18, 16, 19, 27, 28, 29, 27, 28, 29],
             "moca_3m": [17, 16, 18, 17, 15, 18, 29, 30, 31, 29, 30, 31],
@@ -119,8 +119,8 @@ def test_run_confirmatory_panel_statistics_writes_outputs(tmp_path: Path) -> Non
     frame = _frame()
     feature_matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
     panel_matrix_path = tmp_path / "panel_feature_matrix.csv"
-    frame.drop(columns=["oxidative_index", "membrane_integrity_index", "carotenoid_1525", "lipid_carbonyl_1720", "ch_bulk_2885"]).to_parquet(feature_matrix_path, index=False)
-    frame[["subject_id", "oxidative_index", "membrane_integrity_index", "carotenoid_1525", "lipid_carbonyl_1720", "ch_bulk_2885"]].to_csv(panel_matrix_path, index=False)
+    frame.drop(columns=["oxidative_index", "membrane_integrity_index", "carotenoid_1525", "lipid_carbonyl_1721", "ch_bulk_2885"]).to_parquet(feature_matrix_path, index=False)
+    frame[["subject_id", "oxidative_index", "membrane_integrity_index", "carotenoid_1525", "lipid_carbonyl_1721", "ch_bulk_2885"]].to_csv(panel_matrix_path, index=False)
 
     outputs = run_confirmatory_panel_statistics(
         feature_matrix_path=feature_matrix_path,

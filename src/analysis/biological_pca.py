@@ -1442,7 +1442,7 @@ def _plot_biochemical_summary(result: ModelResult, output_dir: Path, pcs: list[s
             vals,
             bottom=bottom,
             label=cls,
-            color=class_colors[cls],
+            color=class_colors.get(cls, "#888888"),
             alpha=0.85,
             edgecolor="#334155",
             linewidth=0.3,

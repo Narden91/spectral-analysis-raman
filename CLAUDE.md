@@ -54,7 +54,7 @@ The `disease_only` pipeline mode executes a comprehensive suite of cross-region 
 - **Phase 7 (Covariate Models)**: Fits covariate-adjusted models (age, sex) on Phase 6 candidate regions and logs persistence.
 - **Phase 8 (PLS1 Regression)**: Supervised continuous modelling of endpoints with permutation testing and VIP selection.
 - **Phase 9 (PLS-L1DA)**: Supervised binary classifier, gated strictly by Phase 8 significance.
-- **Phase 10 (Biochemical Ratios)**: Computes targeted band-intensity ratios via trapezoidal integration and assesses Spearman correlation with clinical endpoints.
+- **Phase 10 (Biochemical Ratios)**: Computes targeted band-intensity ratios via trapezoidal integration using the supervisor-curated 21-band EV panel and assesses Spearman correlation with clinical endpoints.
 - **Phase 11 (Integrated Candidate Regions)**: Merges univariate hits, covariate persistence, biological PCA loading overlap, PLS VIP coverage, and biochemical interpretation into a single priority-ranked table (`High`/`Medium`/`Low`) written to `11_integrated_candidates/integrated_candidate_regions.csv`.
 - **Phase 12 (Disease Subgroups)**: Exploratory agglomerative Ward clustering evaluated via Gap statistic and bootstrap Adjusted Rand Index.
 - **Phase 13 (Minimal Candidate Panel)**: Selects 5–10 spectral peaks/ratios per endpoint using nested cross-validated ElasticNet / L1-penalized logistic regression with full-pipeline permutation testing and bootstrap selection-stability summaries. Candidate-derived modeling is skipped when no cluster-supported region passes its gate.

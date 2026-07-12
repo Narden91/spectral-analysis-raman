@@ -22,15 +22,15 @@ def _panel_config() -> dict:
                 "provenance_type": "post_hoc_fixed",
                 "min_snr_for_peak_fit": 0.1,
                 "integrals": {
-                    "lipid_carbonyl_1720": ["1300", 1710.0, 1735.0],
-                    "lipid_carbonyl_1720_fallback": ["1300", 1700.0, 1750.0],
+                    "lipid_carbonyl_1721": ["1300", 1710.0, 1735.0],
+                    "lipid_carbonyl_1721_fallback": ["1300", 1700.0, 1750.0],
                     "carotenoid_1525": ["1300", 1510.0, 1535.0],
                     "protein_1555": ["1300", 1540.0, 1570.0],
                     "ch_bulk_2885": ["2850", 2850.0, 2950.0],
                 },
                 "indices": {
-                    "membrane_integrity_index": ["ch_bulk_2885", "lipid_carbonyl_1720"],
-                    "oxidative_index": ["carotenoid_1525", "lipid_carbonyl_1720"],
+                    "membrane_integrity_index": ["ch_bulk_2885", "lipid_carbonyl_1721"],
+                    "oxidative_index": ["carotenoid_1525", "lipid_carbonyl_1721"],
                 },
                 "primary_hypothesis": {
                     "feature": "oxidative_index",
@@ -93,7 +93,7 @@ def test_named_indices_are_primary_columns() -> None:
     panel_matrix, column_order = build_panel_matrix(frame, columns, cfg=_panel_config())
 
     assert column_order[:2] == ["membrane_integrity_index", "oxidative_index"]
-    assert "lipid_carbonyl_1720" in column_order
+    assert "lipid_carbonyl_1721" in column_order
     assert "oxidative_index" in panel_matrix.columns
 
 
@@ -113,7 +113,7 @@ def test_1720_fallback_when_narrow_window_too_small() -> None:
     _, column_order = build_panel_matrix(frame, columns, cfg=_panel_config(), runtime_notes=notes)
 
     assert any("fallback" in note for note in notes)
-    assert "lipid_carbonyl_1720" in column_order
+    assert "lipid_carbonyl_1721" in column_order
 
 
 def test_run_preregistered_panel_writes_outputs(tmp_path: Path) -> None:
