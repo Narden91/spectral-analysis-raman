@@ -159,6 +159,15 @@ def load_config(config_path: str = "config/settings.yaml") -> dict:
 config = load_config()
 
 
+def resolve_cfg(cfg: dict | None = None) -> dict:
+    """Return `cfg` if given, else the module-level default `config`.
+
+    Shared by analysis/reporting/data_preparation modules that accept an
+    optional config override on every public function.
+    """
+    return config if cfg is None else cfg
+
+
 def setup_logging(
     level: int = logging.INFO,
     *,

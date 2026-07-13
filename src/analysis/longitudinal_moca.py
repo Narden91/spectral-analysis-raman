@@ -13,7 +13,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from src import config, get_cross_region_phase_dir
+from src import get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     apply_binary_cluster_permutation,
     apply_spearman_cluster_permutation,
@@ -38,9 +39,6 @@ GROUP_COLORS = {
     "stable_or_improved": "#2A9D8F",
 }
 
-
-def _cfg(cfg: dict | None = None) -> dict:
-    return config if cfg is None else cfg
 
 
 def _longitudinal_cfg(cfg: dict) -> dict:

@@ -12,7 +12,8 @@ from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics import adjusted_rand_score
 from sklearn.preprocessing import StandardScaler
 
-from src import config, get_cross_region_phase_dir
+from src import get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     filter_disease_subjects,
@@ -22,10 +23,6 @@ from src.analysis.clinical_feature_associations import (
 from src.analysis.discriminant_spectra import run_subgroup_mean_spectra
 
 logger = logging.getLogger(__name__)
-
-
-def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    return config if cfg is None else cfg
 
 
 def _subgroup_cfg(cfg: dict[str, Any]) -> dict[str, Any]:

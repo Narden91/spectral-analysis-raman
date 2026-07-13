@@ -12,7 +12,8 @@ import pandas as pd
 from joblib import Parallel, delayed
 from scipy import stats
 
-from src import config, get_confirmatory_panel_dir
+from src import get_confirmatory_panel_dir
+from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import filter_disease_subjects, load_subject_feature_matrix
 from src.analysis.io_utils import write_csv_atomic
 from src.analysis.preregistered_panel import panel_cfg
@@ -25,10 +26,6 @@ from src.analysis.statistics import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    return config if cfg is None else cfg
 
 
 def _resampling_settings(panel: dict[str, Any]) -> tuple[int, int, int, int]:

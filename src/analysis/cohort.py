@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 
 
@@ -95,17 +93,3 @@ def build_cohort_summary(
     }
 
 
-
-def save_cohort_summary(
-    summary: dict[str, pd.DataFrame],
-    output_dir: Path,
-    prefix: str = "cohort",
-) -> dict[str, Path]:
-    """Save cohort summary tables to CSV files and return their paths."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    paths: dict[str, Path] = {}
-    for key, table in summary.items():
-        out_path = output_dir / f"{prefix}_{key}.csv"
-        table.to_csv(out_path, index=False)
-        paths[key] = out_path
-    return paths

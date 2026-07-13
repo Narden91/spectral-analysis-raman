@@ -9,7 +9,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from src import config, get_cross_region_phase_dir
+from src import get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 from src.analysis.band_features import band_mean, infer_block_from_upper, ratio_from_integrals
 from src.analysis.clinical_feature_associations import (
     feature_columns,
@@ -26,8 +27,6 @@ DEFAULT_BINARY_OUTCOMES = {
 }
 
 
-def _cfg(cfg: dict | None = None) -> dict:
-    return config if cfg is None else cfg
 
 
 def _model_cfg(cfg: dict) -> dict:

@@ -14,7 +14,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from src import config, get_cross_region_phase_dir
+from src import get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     compute_binary_group_feature_tests,
     feature_columns,
@@ -57,8 +58,6 @@ LESION_SPEC = StratificationSpec(
     ordered_groups=("left", "right", "posterior", "other"),
     kind="multigroup",
 )
-def _cfg(cfg: dict | None = None) -> dict:
-    return config if cfg is None else cfg
 
 
 def _stratification_cfg(cfg: dict) -> dict:

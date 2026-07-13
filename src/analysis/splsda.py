@@ -13,7 +13,8 @@ from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from src import config, get_cross_region_phase_dir
+from src import get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
@@ -21,10 +22,6 @@ from src.analysis.clinical_feature_associations import (
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
 
 logger = logging.getLogger(__name__)
-
-
-def _cfg(cfg: dict | None = None) -> dict:
-    return config if cfg is None else cfg
 
 
 def _splsda_cfg(cfg: dict) -> dict:

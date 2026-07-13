@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 
 from src import config as global_config
+from src import resolve_cfg as _cfg
 from src import resolve_project_path
 from src.data_preparation.manifest import config_hash, iso_utc_now
 from src.data_preparation.materialize import build_parsed_store, build_preprocessed_store
@@ -33,10 +34,6 @@ def set_active_data_source(data_source: DataSource) -> None:
 
 def get_active_data_source() -> DataSource | None:
     return _ACTIVE_DATA_SOURCE
-
-
-def _cfg(cfg: dict | None = None) -> dict:
-    return global_config if cfg is None else cfg
 
 
 def _store_dir(source_name: str, cfg: dict) -> Path:

@@ -25,7 +25,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src import config, get_confirmatory_panel_dir, get_spectral_interpretability_dir
+from src import get_confirmatory_panel_dir, get_spectral_interpretability_dir
+from src import resolve_cfg as _cfg
 from src.analysis.feature_coupling import REGIME_PALETTE, coupling_df_to_matrix
 from src.analysis.io_utils import load_csv_or_empty
 
@@ -40,9 +41,6 @@ _INDEX_COLS = [
 _COLORS = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00"]
 _SMALL_EFFECT_THRESHOLD = 0.147
 
-
-def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    return config if cfg is None else cfg
 
 
 def _interp_root() -> Path:

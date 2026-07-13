@@ -19,7 +19,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src import config, get_confirmatory_panel_dir, get_cross_region_phase_dir
+from src import get_confirmatory_panel_dir, get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 from src.analysis._reporting import dataframe_to_markdown
 from src.analysis.io_utils import load_csv_or_empty, write_csv_atomic, write_text_atomic
 
@@ -28,22 +29,12 @@ logger = logging.getLogger(__name__)
 _CLASS_ORDER = ("robust", "exploratory", "unstable", "confounded")
 
 
-def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    return config if cfg is None else cfg
-
-
 def _report_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg.get("analysis", {}).get("publication_report", {})
 
 
 def _analysis_mode(cfg: dict[str, Any]) -> str:
     return str(cfg.get("analysis", {}).get("mode", "disease_vs_control"))
-
-
-def _requirement_met(row: pd.Series, requirement: str) -> bool:
-    if requirement == "cluster_permutation":
-        return bool(row.get("cluster_permutation_significant", False))
-    return bool(row.get(requirement, False))
 
 
 def _classify_candidate(row: pd.Series, *, robust_requires: list[str] | None = None) -> str:

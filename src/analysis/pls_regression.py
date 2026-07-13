@@ -13,17 +13,14 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import GroupKFold, KFold, LeaveOneGroupOut, LeaveOneOut
 from sklearn.preprocessing import StandardScaler
 
-from src import config, get_cross_region_phase_dir
+from src import get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _cfg(cfg: dict | None = None) -> dict:
-    return config if cfg is None else cfg
 
 
 def _pls_cfg(cfg: dict) -> dict:

@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src import config, get_confirmatory_panel_dir
+from src import get_confirmatory_panel_dir
+from src import resolve_cfg as _cfg
 from src.analysis.band_features import (
     band_integral,
     band_median_snr,
@@ -32,10 +33,6 @@ _SNR_GATED_INTEGRALS = frozenset(
         "tyrosine_821",
     }
 )
-
-
-def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    return config if cfg is None else cfg
 
 
 def panel_cfg(cfg: dict[str, Any]) -> dict[str, Any]:

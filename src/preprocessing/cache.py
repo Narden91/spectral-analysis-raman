@@ -18,13 +18,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
-import pandas as pd
 
 from src import config as _cfg
 from src import resolve_project_path
@@ -173,58 +170,6 @@ def build_area_cache(
         manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
 
     return CachedArea(wavenumbers=result.wavenumbers, spectra=spectra_out, manifest=manifest)
-
-
-def build_cache_for_index(
-    df_index: pd.DataFrame,
-    *,
-    region: Optional[str] = None,
-    force: bool = False,
-    io_workers: Optional[int] = None,
-) -> pd.DataFrame:
-    """Build the on-disk cache for every (subject, slide, area, range) row.
-
-    Returns a manifest DataFrame, one row per area actually processed.
-    """
-    region_keys = ["fingerprint", "ch_stretch"] if region in (None, "all") else [region]
-    range_to_region = {"1300": "fingerprint", "2850": "ch_stretch"}
-
-    jobs: list[dict] = []
-    for _, row in df_index.iterrows():
-        range_str = str(row["spectral_range_cm-1"]).split(".")[0]
-        region_key = range_to_region.get(range_str)
-        if region_key is None or region_key not in region_keys:
-            continue
-        jobs.append(
-            {
-                "filepath": row["filepath"],
-                "subject_id": str(row["subject_id"]),
-                "slide_number": str(row["slide_number"]),
-                "area_id": str(row["area_id"]),
-                "region": region_key,
-            }
-        )
-
-    workers = int(io_workers if io_workers is not None else _cfg.get("analysis", {}).get("io_workers", 8))
-    manifests: list[dict] = []
-
-    def _run_job(job: dict) -> dict:
-        cached = build_area_cache(
-            job["filepath"],
-            subject_id=job["subject_id"],
-            slide_number=job["slide_number"],
-            area_id=job["area_id"],
-            region=job["region"],
-            force=force,
-        )
-        return cached.manifest
-
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        for manifest in pool.map(_run_job, jobs):
-            manifests.append(manifest)
-
-    logger.info("Built/loaded preprocessing cache for %d areas", len(manifests))
-    return pd.DataFrame(manifests)
 
 
 def load_subject_pixels(

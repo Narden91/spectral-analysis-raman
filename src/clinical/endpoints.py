@@ -7,8 +7,8 @@ from typing import Any
 
 import pandas as pd
 
-from src import config as global_config
 from src import get_run_metadata_dir, resolve_project_path
+from src import resolve_cfg as _cfg
 from src.metadata.clinical import resolve_clinical_csv_path
 
 _ENDPOINT_ALIASES: dict[str, tuple[str, ...]] = {
@@ -60,10 +60,6 @@ class ClinicalEndpointResult:
     clinical_group_counts: pd.DataFrame
     clinical_complete_case_comparison: pd.DataFrame
     clinical_column_map: dict[str, str]
-
-
-def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    return global_config if cfg is None else cfg
 
 
 def _endpoint_cfg(cfg: dict[str, Any]) -> dict[str, Any]:

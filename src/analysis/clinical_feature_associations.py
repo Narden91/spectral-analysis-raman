@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from src import config, get_cross_region_phase_dir
+from src import get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 from src.analysis.spectral_regions import build_candidate_regions
 from src.analysis.statistics import fdr_correction
 from src.statistics.cluster_permutation import (
@@ -23,8 +24,6 @@ logger = logging.getLogger(__name__)
 FEATURE_PREFIXES = ("1300__", "2850__")
 
 
-def _cfg(cfg: dict | None = None) -> dict:
-    return config if cfg is None else cfg
 
 
 def _feature_matrix_path(feature_matrix_path: str | Path | None = None) -> Path:

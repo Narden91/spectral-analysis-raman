@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from src import config as global_config
+from src import resolve_cfg as _cfg
 from src import resolve_project_path
 from src.data_preparation.cohorts import build_materialized_cohorts, write_cohort_tables
 from src.data_preparation.manifest import (
@@ -37,10 +38,6 @@ class MaterializedStore:
     store_type: str
     path: Path
     manifest: dict[str, Any]
-
-
-def _cfg(cfg: dict | None = None) -> dict:
-    return global_config if cfg is None else cfg
 
 
 def _data_cfg(cfg: dict) -> dict:

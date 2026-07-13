@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from src import config, get_cross_region_phase_dir
+from src import get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 from src.analysis.band_features import band_integral, infer_block_from_upper, ratio_from_integrals
 from src.analysis.clinical_feature_associations import (
     feature_columns,
@@ -24,8 +25,6 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TARGETS = ("moca_baseline", "moca_3m", "delta_moca")
 
 
-def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    return config if cfg is None else cfg
 
 
 def _ratio_cfg(cfg: dict[str, Any]) -> dict[str, Any]:

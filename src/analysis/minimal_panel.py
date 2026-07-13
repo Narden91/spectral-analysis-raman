@@ -17,12 +17,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
-from sklearn.linear_model import ElasticNet, ElasticNetCV
+from sklearn.linear_model import ElasticNet
 from sklearn.metrics import balanced_accuracy_score, mean_absolute_error, mean_squared_error, r2_score, roc_auc_score
 from sklearn.model_selection import KFold, LeaveOneOut, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from src import config, get_confirmatory_panel_dir, get_cross_region_phase_dir
+from src import get_confirmatory_panel_dir, get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
@@ -39,10 +40,6 @@ _DEFAULT_BINARY_TARGETS = (
     {"group_variable": "moca_severity_group", "ordered_groups": ("low_moca", "high_moca")},
     {"group_variable": "delta_moca_group", "ordered_groups": ("decline", "stable_or_improved")},
 )
-
-
-def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    return config if cfg is None else cfg
 
 
 def _panel_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -179,27 +176,7 @@ def _cv_strategy(n_samples: int, n_splits: int, random_state: int, stratified: b
     return KFold(n_splits=min(n_splits, n_samples), shuffle=True, random_state=random_state)
 
 
-def _elasticnet_cv_model(cv, random_state: int) -> ElasticNetCV:
-    return ElasticNetCV(
-        l1_ratio=[0.1, 0.5, 0.7, 0.9, 0.95, 0.99, 1.0],
-        cv=cv,
-        random_state=random_state,
-        max_iter=_ELASTICNET_MAX_ITER,
-        tol=_ELASTICNET_TOL,
-    )
-
-
-def _elasticnet_model(random_state: int) -> ElasticNet:
-    return ElasticNet(
-        alpha=0.1,
-        l1_ratio=0.5,
-        random_state=random_state,
-        max_iter=_ELASTICNET_MAX_ITER,
-        tol=_ELASTICNET_TOL,
-    )
-
-
-def _fit_elasticnet(model: ElasticNet | ElasticNetCV, X: np.ndarray, y: np.ndarray, context: str) -> None:
+def _fit_elasticnet(model: ElasticNet, X: np.ndarray, y: np.ndarray, context: str) -> None:
     fit_with_convergence_capture(model, X, y, context=context)
 
 
@@ -521,119 +498,6 @@ def _optional_gpu_status() -> str:
         return f"cupy_available:{count}_cuda_device(s)" if count else "cupy_available:no_cuda_device"
     except Exception:
         return "not_available"
-
-
-def _nested_cv_elasticnet(
-    X: np.ndarray,
-    y: np.ndarray,
-    *,
-    n_outer_splits: int,
-    n_inner_splits: int,
-    random_state: int,
-) -> tuple[np.ndarray, dict[str, Any], dict[str, float]]:
-    n_samples = X.shape[0]
-    outer_cv = _cv_strategy(n_samples, n_outer_splits, random_state)
-    y_pred = np.zeros_like(y, dtype=float)
-    selected_alphas: list[float] = []
-    selected_l1_ratios: list[float] = []
-
-    for train_idx, test_idx in outer_cv.split(X, y) if isinstance(outer_cv, StratifiedKFold) else outer_cv.split(X):
-        X_train, y_train = X[train_idx], y[train_idx]
-        X_test = X[test_idx]
-
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-
-        inner_cv = KFold(n_splits=min(n_inner_splits, len(X_train)), shuffle=True, random_state=random_state)
-        model = _elasticnet_cv_model(inner_cv, random_state)
-        _fit_elasticnet(model, X_train_scaled, y_train, "nested ElasticNetCV")
-        y_pred[test_idx] = model.predict(X_test_scaled)
-        selected_alphas.append(float(model.alpha_))
-        selected_l1_ratios.append(float(model.l1_ratio_))
-
-    perf = {
-        "r2": float(r2_score(y, y_pred)),
-        "rmse": float(np.sqrt(mean_squared_error(y, y_pred))),
-        "mae": float(mean_absolute_error(y, y_pred)),
-    }
-    cv_info = {
-        "selected_alphas": selected_alphas,
-        "selected_l1_ratios": selected_l1_ratios,
-        "cv_strategy": type(outer_cv).__name__,
-    }
-    return y_pred, cv_info, perf
-
-
-def _nested_cv_logistic_l1(
-    X: np.ndarray,
-    y: np.ndarray,
-    *,
-    n_outer_splits: int,
-    n_inner_splits: int,
-    random_state: int,
-    c_values: list[float] | None = None,
-) -> tuple[np.ndarray, np.ndarray, dict[str, Any], dict[str, float]]:
-    if c_values is None:
-        c_values = [0.01, 0.1, 1.0, 10.0, 100.0]
-    class_counts = np.bincount(y)
-    n_splits = min(n_outer_splits, max(2, class_counts.min()))
-    outer_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-
-    y_pred = np.zeros_like(y, dtype=int)
-    y_prob = np.zeros_like(y, dtype=float)
-    selected_cs: list[float] = []
-
-    for train_idx, test_idx in outer_cv.split(X, y):
-        X_train, y_train = X[train_idx], y[train_idx]
-        X_test = X[test_idx]
-
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-
-        inner_splits = min(n_inner_splits, np.bincount(y_train).min())
-        inner_cv = StratifiedKFold(n_splits=max(2, inner_splits), shuffle=True, random_state=random_state)
-        best_c = c_values[0]
-        best_score = -1.0
-        for c in c_values:
-            scores = []
-            for in_train, in_test in inner_cv.split(X_train_scaled, y_train):
-                clf = l1_logistic_model(c=c, random_state=random_state)
-                fit_with_convergence_capture(
-                    clf,
-                    X_train_scaled[in_train],
-                    y_train[in_train],
-                    context="minimal panel inner CV",
-                )
-                scores.append(balanced_accuracy_score(y_train[in_test], clf.predict(X_train_scaled[in_test])))
-            mean_score = float(np.mean(scores))
-            if mean_score > best_score:
-                best_score = mean_score
-                best_c = c
-
-        final_clf = l1_logistic_model(c=best_c, random_state=random_state)
-        fit_with_convergence_capture(final_clf, X_train_scaled, y_train, context="minimal panel outer CV")
-        y_pred[test_idx] = final_clf.predict(X_test_scaled)
-        if len(final_clf.classes_) == 2:
-            y_prob[test_idx] = final_clf.predict_proba(X_test_scaled)[:, 1]
-        else:
-            y_prob[test_idx] = y_pred[test_idx]
-        selected_cs.append(best_c)
-
-    perf = {
-        "balanced_accuracy": float(balanced_accuracy_score(y, y_pred)),
-    }
-    try:
-        perf["roc_auc"] = float(roc_auc_score(y, y_prob))
-    except ValueError:
-        perf["roc_auc"] = np.nan
-
-    cv_info = {
-        "selected_C": selected_cs,
-        "cv_strategy": type(outer_cv).__name__,
-    }
-    return y_pred, y_prob, cv_info, perf
 
 
 def _permutation_test_continuous(

@@ -310,6 +310,7 @@ def _build_curated_subject_table(
 ) -> pd.DataFrame:
     curated = subject_inventory.copy()
     clinical = clinical_df.copy()
+    clinical_cols: list[str] = []
 
     if not clinical.empty:
         clinical["subject_id"] = clinical["subject_id"].astype(str).str.strip()
@@ -343,6 +344,7 @@ def _build_curated_subject_table(
         curated["clinical_condition"],
         curated["condition"],
     )
+    curated = _quarantine_group_mismatched_clinical_rows(curated, clinical_cols)
     curated["gender_binary"] = curated["gender"].map(_gender_to_binary).astype("Int64")
 
     for alias, candidates in _CLINICAL_ALIAS_SPECS.items():
@@ -456,6 +458,38 @@ def _prune_duplicate_clinical_matches(curated: pd.DataFrame, clinical_cols: list
         out.loc[clear_idx, clinical_cols] = pd.NA
         out.loc[clear_idx, "clinical_present"] = False
 
+    return out
+
+
+def _quarantine_group_mismatched_clinical_rows(curated: pd.DataFrame, clinical_cols: list[str]) -> pd.DataFrame:
+    """Drop clinical fields for subjects whose folder-derived condition disagrees with the
+    clinical-CSV-derived condition. A raw-data folder path (Control/Disease) is ground truth
+    for group membership; a mismatch means the clinical row was joined by a colliding
+    subject_id_raw and belongs to a different person, so it must not contribute any clinical
+    value (diagnosis, age, MoCA, etc.) to this subject.
+    """
+    if "group_matches_data" not in curated.columns:
+        return curated
+
+    mismatch_mask = (curated["group_matches_data"] == False).fillna(False).astype(bool)  # noqa: E712 (nullable boolean; explicit False only, NA/True left alone)
+    if not mismatch_mask.any():
+        return curated
+
+    out = curated.copy()
+    derived_cols = [c for c in ("diagnosis_raw", "diagnosis_normalized", "diagnosis_family", "clinical_condition") if c in out.columns]
+    quarantine_cols = [c for c in {*clinical_cols, *derived_cols} if c in out.columns]
+    out.loc[mismatch_mask, quarantine_cols] = pd.NA
+    out.loc[mismatch_mask, "clinical_present"] = False
+    out.loc[mismatch_mask, "group_matches_data"] = pd.NA
+    if "gender_matches_data" in out.columns:
+        out.loc[mismatch_mask, "gender_matches_data"] = pd.NA
+
+    logger.warning(
+        "Quarantined clinical data for %d subject(s) whose folder-derived condition "
+        "disagrees with the clinical CSV (colliding subject_id_raw, different person): %s",
+        int(mismatch_mask.sum()),
+        sorted(out.loc[mismatch_mask, "subject_id"].astype(str).tolist()),
+    )
     return out
 
 

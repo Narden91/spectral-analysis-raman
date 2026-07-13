@@ -9,7 +9,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src import config, get_cross_region_phase_dir
+from src import get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 
 logger = logging.getLogger(__name__)
 
@@ -158,10 +159,6 @@ def build_candidate_regions(
         list(group_columns) + ["selection_basis", "integrated_abs_effect"],
         ascending=[True] * len(group_columns) + [True, False],
     ).reset_index(drop=True)
-
-
-def _cfg(cfg: dict | None = None) -> dict:
-    return config if cfg is None else cfg
 
 
 def _candidate_cfg(cfg: dict) -> dict:

@@ -9,15 +9,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src import config, get_confirmatory_panel_dir, get_cross_region_phase_dir
+from src import get_confirmatory_panel_dir, get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import filter_disease_subjects, load_subject_feature_matrix
 from src.analysis.io_utils import load_csv_or_empty, write_csv_atomic
 
 logger = logging.getLogger(__name__)
 
 
-def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    return config if cfg is None else cfg
 
 
 def _panel_cluster_cfg(cfg: dict[str, Any]) -> dict[str, Any]:

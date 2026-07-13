@@ -1162,47 +1162,6 @@ def _apply_baseline_stage(
     return result, metrics_df
 
 
-def _apply_baseline_clip_qc(
-    result: np.ndarray,
-    metrics_df: pd.DataFrame,
-    flags_df: pd.DataFrame,
-    retained_mask: np.ndarray,
-    *,
-    clip_cfg: dict,
-) -> tuple[np.ndarray, pd.DataFrame, pd.DataFrame, np.ndarray]:
-    """Reject spectra where baseline over-correction clipped >max_clipped_fraction channels."""
-    if not bool(clip_cfg.get("enabled", True)):
-        return result, metrics_df, flags_df, retained_mask
-
-    max_frac = float(clip_cfg.get("max_clipped_fraction", 0.05))
-    if "clipped_fraction" not in metrics_df.columns or result.size == 0:
-        return result, metrics_df, flags_df, retained_mask
-
-    clipped_frac = metrics_df["clipped_fraction"].to_numpy(dtype=float)
-    bad = np.where(clipped_frac > max_frac)[0]
-    if len(bad) == 0:
-        return result, metrics_df, flags_df, retained_mask
-
-    kept_indices = np.where(retained_mask)[0]
-    original_bad = kept_indices[bad]
-    flags_df.loc[original_bad, "qc_flag"] = True
-    existing = flags_df.loc[original_bad, "qc_reason"].fillna("")
-    flags_df.loc[original_bad, "qc_reason"] = existing.where(
-        existing == "",
-        existing + "; baseline_clip_excess",
-    ).where(existing != "", "baseline_clip_excess")
-    retained_mask = retained_mask.copy()
-    retained_mask[original_bad] = False
-
-    keep = np.ones(len(result), dtype=bool)
-    keep[bad] = False
-    logger.debug(
-        "Baseline clip QC: rejected %d/%d spectra (clipped fraction > %.2f)",
-        len(bad), len(result), max_frac,
-    )
-    return result[keep], metrics_df.loc[keep].reset_index(drop=True), flags_df, retained_mask
-
-
 def _apply_spike_repair_stage(
     result: np.ndarray,
     metrics_df: pd.DataFrame,

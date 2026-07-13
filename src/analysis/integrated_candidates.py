@@ -16,7 +16,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src import config, get_biological_pca_canonical_dir, get_cross_region_phase_dir
+from src import get_biological_pca_canonical_dir, get_cross_region_phase_dir
+from src import resolve_cfg as _cfg
+from src.analysis.clinical_feature_associations import load_subject_feature_matrix
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +55,6 @@ _DEFAULT_COLUMNS = [
     "integrated_abs_effect",
     "interpretation_note",
 ]
-
-
-def _cfg(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    return config if cfg is None else cfg
 
 
 def _integrated_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -413,10 +411,8 @@ def run_integrated_candidates(
 
     feature_columns: list[str] = []
     if feature_matrix_path is not None and Path(feature_matrix_path).exists():
-        frame = pd.read_parquet(feature_matrix_path)
+        frame = load_subject_feature_matrix(feature_matrix_path=feature_matrix_path)
         feature_columns = [c for c in frame.columns if c.startswith(("1300__", "2850__"))]
-    else:
-        feature_columns = []
 
     vip_threshold = float(integrated_cfg.get("vip_threshold", 1.0))
     covariate_alpha = float(integrated_cfg.get("covariate_alpha", 0.05))
