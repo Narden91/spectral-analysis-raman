@@ -1,6 +1,6 @@
 # Raman Spectroscopy Analysis Pipeline
 
-A professional, high-performance Python pipeline for extracellular-vesicle (EV) Raman spectroscopy analysis. This repository implements data ingestion, robust multi-stage preprocessing, statistical group comparisons, clinical correlations, and a strict subject-level **Biological PCA** interpretation layer.
+A professional, high-performance Python pipeline for extracellular-vesicle (EV) Raman spectroscopy analysis. This repository implements data ingestion, robust multi-stage preprocessing, statistical group comparisons, clinical correlations, a strict subject-level **Biological PCA** interpretation layer, and an exploratory **control-vs-disease ML classification** layer. Every output — including the ML layer — is exploratory scientific analysis: no diagnostic, biomarker, causal, or clinical-utility claim is made anywhere in this repository.
 
 ---
 
@@ -9,6 +9,7 @@ A professional, high-performance Python pipeline for extracellular-vesicle (EV) 
 *   **Robust Preprocessing**: Custom multi-stage pipeline including cosmic-ray removal, arPLS/AsLS/SNIP baseline correction, Savitzky-Golay smoothing, edge-trimming, and region-specific normalization.
 *   **Hierarchical Data Model**: Natively handles nested structures: $\text{Subject} \rightarrow \text{Sample (Slide)} \rightarrow \text{Spot (Area)} \rightarrow \text{Pixels}$.
 *   **Subject-Level Biological PCA**: Aggregates spectral data at the subject level to avoid pseudoreplication, projecting fingerprint (1300 cm⁻¹), CH-stretch (2850 cm⁻¹), and concatenated whole-spectrum spaces.
+*   **Exploratory Control-vs-Disease ML Classification**: A separate, read-only downstream layer over the Biological PCA subject feature matrix. Nested cross-validation, label-permutation significance (unrestricted and sex-stratified), bootstrap confidence intervals, and measured (not assumed) confounder handling. Exploratory only — no diagnostic, biomarker, causal, or clinical-utility claim.
 *   **Clinical Correlation**: Outputs are generated in `outputs/eda/intra_disease/`:
 - `01_clinical_correlation_matrix/`: Broad spectral feature correlations with clinical endpoints.
 - `02_longitudinal_moca/`: Associations specifically targeting ΔMoCA.
@@ -23,13 +24,14 @@ A professional, high-performance Python pipeline for extracellular-vesicle (EV) 
 
 ## 📋 Pipeline Tracks
 
-The analysis pipeline is organized into three primary operational tracks:
+The analysis pipeline is organized into four operational tracks:
 
 | Track | Entry Point / Script | Primary Outputs |
 | :--- | :--- | :--- |
 | **1. Data Store Management** | `uv run scripts/manage_data_store.py` | `data/parsed/` and `data/preprocessed/` stores |
-| **2. Exploratory Data Analysis** | `uv run scripts/run_eda.py` | `Results_control_vs_disease/` or `Results_intra_disease/` |
+| **2. Exploratory Data Analysis** | `uv run scripts/run_eda.py` | `Results_control_vs_disease/` (incl. Biological PCA and ML classification) or `Results_intra_disease/` |
 | **3. Spectral Plotting & QC** | `uv run scripts/run_spectral_plots.py` | `Output_plot/qc/` and `Output_plot/spectral_plots/` |
+| **4. GPU Readiness Probe** (optional) | `uv run scripts/check_gpu_readiness.py` | CuPy/CUDA equivalence check — does not change the pipeline |
 
 ---
 
@@ -101,18 +103,44 @@ uv run scripts/manage_data_store.py build --source parsed
 # Apply the preprocessing pipeline and cache the preprocessed cache
 uv run scripts/manage_data_store.py build --source preprocessed
 
+# Force a rebuild even if a fresh store already exists
+uv run scripts/manage_data_store.py build --source preprocessed --force
+
 # Validate cache integrity and check config matches
 uv run scripts/manage_data_store.py validate --source preprocessed
 
 # Display information on the cached data stores
 uv run scripts/manage_data_store.py info --source preprocessed
+
+# Remove a materialized store (parsed or preprocessed)
+uv run scripts/manage_data_store.py clean --source preprocessed
+
+# Preview actions without mutating any store (works with any subcommand)
+uv run scripts/manage_data_store.py --dry-run build --source preprocessed
+
+# Point at a non-default config file
+uv run scripts/manage_data_store.py --config config/eda_disease_control.yaml info --source preprocessed
 ```
 
+`build`, `validate`, `info`, and `clean` all require `--source {parsed,preprocessed}`. `--dry-run` and `--config` are top-level flags placed before the subcommand.
+
 ### 2. Running the Exploratory Data Analysis (EDA)
-The EDA script executes statistical checks and principal component analyses. EDA mode selection is explicit and authoritative through either `analysis.mode` in config or `--analysis-mode` on the CLI.
+The EDA script executes statistical checks, principal component analyses, and (in Case vs. Control mode) the ML classification layer. EDA mode selection is explicit and authoritative through either `analysis.mode` in config or `--analysis-mode` on the CLI. `scripts/run_eda.py` is the **only** entry point for Biological PCA and the control-vs-disease ML layer.
+
+#### CLI Flags
+| Flag | Description |
+| :--- | :--- |
+| `--range {1300,2850,both}` | Spectral range to analyze. Omit to use `run.ranges` from config. `both` also runs the fused whole-spectrum analysis, Biological PCA, and (in Case vs. Control mode) the ML layer. |
+| `--config PATH` | Config YAML to use (overrides `config/eda.yaml`). Supports `_extends:` inheritance; relative paths resolve from the project root. |
+| `--analysis-mode {disease_vs_control,disease_only}` | Explicit EDA analysis family. Overrides `analysis.mode` from config. |
+| `--max-subjects N` | Limit subjects per group — quick smoke testing only. Below ~10/class the ML layer's minimum-subjects guard will fail it by design. |
+| `--skip-preprocess` | Use raw (unpreprocessed) spectra instead of the preprocessed store. |
+| `--skip-biological-pca` | Skip the subject-level Biological PCA layer (and, transitively, the ML layer, which consumes its output). |
+| `--source {raw_text,parsed,preprocessed}` | Override `data.source`. Defaults to `preprocessed`; `raw_text` crawls `data/raw` directly (avoid in normal analysis, per data-source rules). |
+| `--verbose` | Show detailed INFO logs in the terminal. Full detail is always written to `run.log` regardless of this flag. |
 
 #### Mode A: Case vs. Control (Default case)
-Compares healthy controls against disease subjects.
+Compares healthy controls against disease subjects. Runs Biological PCA, then the control-vs-disease ML classification layer, when `--range both` is used.
 ```bash
 # Analyze fingerprint region
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range 1300
@@ -120,10 +148,10 @@ uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range 1300
 # Analyze CH-stretch region
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range 2850
 
-# Fused analysis (combines fingerprint & CH-stretch + Subject Biological PCA)
+# Fused analysis (combines fingerprint & CH-stretch + Subject Biological PCA + ML classification)
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both
 ```
-*   **Output Directory**: `Results_control_vs_disease/`
+*   **Output Directory**: `Results_control_vs_disease/` (ML classification outputs land in `Results_control_vs_disease/07_ml_classification/`)
 
 #### Mode B: Disease-Only Cohort (Clinical Correlations)
 Restricts analysis to disease subjects to correlate spectral bands with clinical parameters (requires `data/clinical_data.csv`).
@@ -138,18 +166,26 @@ uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range both
 Notes:
 *   `--analysis-mode` overrides `analysis.mode` from config.
 *   `config/eda_disease_control.yaml` and `config/eda_disease_only.yaml` are thin wrappers over `config/eda.yaml`.
-*   `config/eda_disease_fast.yaml` is a **development-only** overlay on `eda_disease_only.yaml` that lowers permutation/bootstrap counts and CV cost so cross-region phases finish quickly. Do **not** use it for final scientific outputs.
+*   `config/eda_disease_fast.yaml` is a **development-only** overlay on `eda_disease_only.yaml` that lowers permutation/bootstrap counts and CV cost so disease-only cross-region phases finish quickly. Do **not** use it for final scientific outputs.
+*   `config/eda_disease_control_fast.yaml` is the equivalent **development-only** overlay for the Case vs. Control ML layer — it lowers nested-CV repeats, permutation counts, and bootstrap counts. The ML layer needs the full cohort; `--max-subjects` below ~10/class fails its minimum-subjects guard. Do **not** use it for manuscript numbers.
 *   Output root selection is derived from the resolved EDA mode, not from `data.subject_group` or wrapper-specific output paths.
 
-#### Fast iteration (disease-only cross-region phases)
+#### Fast iteration
 
-For day-to-day development after Biological PCA, prefer the fast profile:
+For day-to-day development after Biological PCA, prefer the fast profiles:
 
 ```bash
+# Disease-only cross-region phases (reduced permutations/CV)
 uv run scripts/run_eda.py --config config/eda_disease_fast.yaml --range both --max-subjects 8
+
+# Case vs. Control ML layer (reduced permutations/CV/bootstrap; full cohort required)
+uv run scripts/run_eda.py --config config/eda_disease_control_fast.yaml --range both
+
+# Smoke test across both ranges with a tiny subject cap (full resampling settings)
+uv run scripts/run_eda.py --range both --max-subjects 8
 ```
 
-Production disease-only runs should use `config/eda_disease_only.yaml` (full resampling counts from `config/eda.yaml`).
+Production runs should use `config/eda_disease_only.yaml` or `config/eda_disease_control.yaml` (full resampling counts from `config/eda.yaml`) — these produce the manuscript numbers, the fast overlays do not.
 
 After each EDA run, inspect per-phase wall time at:
 
@@ -161,10 +197,24 @@ Resampling-heavy steps parallelize across CPU cores via `n_jobs` in config (defa
 
 ```bash
 uv run scripts/check_gpu_readiness.py
+
+# Custom seed, numerical tolerance, and result output path
+uv run scripts/check_gpu_readiness.py --seed 42 --tolerance 1e-6 --output gpu_check.json
 ```
+
+This script does not change the analysis pipeline — it only verifies CuPy/CUDA availability and CPU-vs-GPU numerical equivalence for future GPU-backed code paths.
 
 ### 3. Spectral Plotting & QC Visualization
 Generate post-preprocessing waveforms, individual scan layouts for diagnostic audit, and optionally export the underlying data as CSVs.
+
+| Flag | Description |
+| :--- | :--- |
+| `--config PATH` | Config YAML to use (overrides `config/plots.yaml`). |
+| `--max-subjects N` | Limit subjects per cohort. |
+| `--outdir DIR` | Override the base output directory. |
+| `--source {raw_text,parsed,preprocessed}` | Override `data.source`. |
+| `--plots` / `--no-plots` | Generate plot images (default: on). |
+| `--export-data` / `--no-export-data` | Export CSV data files (default: on). |
 
 ```bash
 # Generate group spectral plots and export CSV data (default behavior)
@@ -178,6 +228,9 @@ uv run scripts/run_spectral_plots.py --no-export-data
 
 # Export CSV data only (skip plot generation)
 uv run scripts/run_spectral_plots.py --no-plots
+
+# Use a non-default config and data source
+uv run scripts/run_spectral_plots.py --config config/plots.yaml --source preprocessed
 ```
 
 The exported CSV data will be saved in a directory parallel to the plot output directory (e.g., `output_plot_data/` when the plot directory is `Output_plot/`).
@@ -202,8 +255,57 @@ To prevent **pseudoreplication** (treating multiple pixels from the same subject
 
 ---
 
+## 🤖 Control-vs-Disease ML Classification (Case vs. Control Mode Only)
+
+`disease_vs_control` mode runs an exploratory, subject-level supervised classification layer after Biological PCA (`src/analysis/control_vs_disease_ml.py`, figures/report in `src/analysis/control_vs_disease_ml_report.py`). It is a **separate, read-only downstream consumer** of the Biological PCA subject feature matrix — no ML claim attaches to Biological PCA outputs, and this layer never mutates Biological PCA state.
+
+*   **Models**: PLS-DA, L1-logistic (`class_weight='balanced'`), Random Forest (`class_weight='balanced_subsample'`) — each on two feature representations (`whole` fused spectrum, `band_panel` 21-band biochemical panel).
+*   **Positive class**: Disease (`is_control == False` → 1), documented in every output artifact.
+*   **Rigor**: Nested cross-validation (`RepeatedStratifiedKFold`, in-fold scaling/tuning/thresholding — never on the outer test fold), full-pipeline label-permutation significance (unrestricted **and** sex-stratified nulls — the sex-stratified p-value is the primary inferential result), out-of-bag bootstrap 95% confidence intervals, BH-FDR correction across the model family.
+*   **Confounding is measured, not assumed**: this cohort's sex distribution is significantly associated with class (controls are predominantly female, disease more balanced). `confounder_analysis.csv` reports a female-only sensitivity refit and a sex-only baseline classifier per model; a spectral finding must survive the sex-stratified permutation null and beat the sex-only baseline. Age is **not modeled anywhere in this layer** — no age data exists for controls in this cohort and no proxy exists in the repository; this is a permanent limitation.
+*   **Claims discipline**: exploratory only. No diagnostic, biomarker, causal, or clinical-utility claim. Single-cohort, single-site, no external validation. `ml_report.md` states this explicitly at the top of every run.
+*   **Output**: `Results_control_vs_disease/07_ml_classification/`, including per-model metric tables, ROC/PR/confusion-matrix and permutation-null figures, `confounder_analysis.csv`, and `ml_report.md`.
+*   **Config**: `analysis.control_vs_disease_ml` in `config/eda.yaml`; fast dev overlay `config/eda_disease_control_fast.yaml` (iteration only, not manuscript numbers — see [Fast iteration](#fast-iteration)).
+
+```bash
+# Production run (full resampling — manuscript numbers)
+uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both
+
+# Fast dev iteration (reduced permutations/CV/bootstrap; full cohort still required)
+uv run scripts/run_eda.py --config config/eda_disease_control_fast.yaml --range both
+```
+
+---
+
+## ✅ Testing
+
+The full suite covers preprocessing, statistics, Biological PCA, the disease-only cross-region pipeline, and the control-vs-disease ML layer.
+
+```bash
+# Run the full test suite
+uv run pytest -v
+
+# Run a specific test file
+uv run pytest tests/test_biological_pca.py -v
+
+# Run Biological PCA tests only
+uv run pytest tests/test_biological_pca.py
+
+# Run control-vs-disease ML tests only (core pipeline + report generation)
+uv run pytest tests/test_control_vs_disease_ml.py tests/test_control_vs_disease_ml_report.py
+
+# Run with a keyword filter (matches test/file names)
+uv run pytest -k "clinical or metadata"
+
+# Stop at the first failure, show local variables on error
+uv run pytest -x -l
+```
+
+---
+
 ## 🔬 Scientific Caveats & Guidance
 
-*   **No Diagnostic Claims**: The pipeline is strictly intended for unsupervised exploratory data analysis (EDA). The outputs must not be interpreted as diagnostic, predictive, or biomarker classification evidence.
+*   **No Diagnostic Claims**: The pipeline is strictly intended for exploratory data analysis (EDA), including the supervised ML classification layer. No output — unsupervised or supervised — may be interpreted as diagnostic, predictive, causal, or biomarker classification evidence.
 *   **Variance Confounders**: Keep in mind that variance in EV spectral signals may be influenced by technical factors (SEC fraction, sample concentration, column age, and sample volume) in addition to genuine biology.
-*   **Stratification Guardrails**: Severe imbalances in sex distribution between cohorts can produce misleading pooled effects. Stratify findings where possible.
+*   **Stratification Guardrails**: Severe imbalances in sex distribution between cohorts can produce misleading pooled effects. Stratify findings where possible; the ML layer's sex-stratified permutation null and female-only sensitivity refit exist specifically to guard against this.
+*   **Single-Cohort Scope**: All results — Biological PCA and ML alike — are single-cohort, single-site, with no external validation. Findings do not generalize beyond this dataset without independent replication.
