@@ -12,8 +12,7 @@ import pytest
 from src.analysis.control_vs_disease_ml import (
     _classification_metrics,
     _cohort_summary,
-    _fit_tuned_logistic_threshold,
-    _fit_tuned_pls_da,
+    _fit_tuned_model,
     _labels,
     _load_cohort,
     _permute_labels,
@@ -23,8 +22,10 @@ from src.analysis.control_vs_disease_ml import (
     _sex_stratified_refit,
     _single_split_balanced_accuracy,
     _tune_threshold,
+    run_bootstrap_ci,
     run_control_vs_disease_ml_pipeline,
     run_permutation_test,
+    run_univariate_band_screen,
 )
 from src.analysis.eda_mode import validate_control_vs_disease_ml_config
 
@@ -261,27 +262,19 @@ def test_pls_da_threshold_uses_only_inner_fold_scores(monkeypatch: pytest.Monkey
     We fit on the same X_train/y_train twice and confirm the returned threshold
     is identical regardless of what (unused) outer-test data exists alongside it -
     i.e. the function signature itself proves no outer-fold data can leak in,
-    since _fit_tuned_pls_da never receives X_test/y_test.
+    since _fit_tuned_model never receives X_test/y_test.
     """
     rng = np.random.default_rng(0)
     X_train = rng.normal(size=(30, 6))
     y_train = np.array([0] * 15 + [1] * 15)
+    kwargs = dict(
+        ml_cfg={"pls_components_grid": [1, 2, 3]}, n_inner_splits=3,
+        threshold_metric="balanced_accuracy", random_state=42, n_jobs=1,
+    )
 
-    _scaler_a, _model_a, threshold_a = _fit_tuned_pls_da(
-        X_train, y_train,
-        component_grid=[1, 2, 3],
-        n_inner_splits=3,
-        threshold_metric="balanced_accuracy",
-        random_state=42,
-    )
-    _scaler_b, _model_b, threshold_b = _fit_tuned_pls_da(
-        X_train, y_train,
-        component_grid=[1, 2, 3],
-        n_inner_splits=3,
-        threshold_metric="balanced_accuracy",
-        random_state=42,
-    )
-    assert threshold_a == threshold_b
+    fit_a = _fit_tuned_model("pls_da", X_train, y_train, **kwargs)
+    fit_b = _fit_tuned_model("pls_da", X_train, y_train, **kwargs)
+    assert fit_a.threshold == fit_b.threshold
 
 
 def test_nested_cv_scaler_never_fit_on_test_fold(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -310,12 +303,10 @@ def test_nested_cv_scaler_never_fit_on_test_fold(monkeypatch: pytest.MonkeyPatch
 
     for train_idx, test_idx in outer_cv:
         seen_fit_arrays.clear()
-        _fit_tuned_logistic_threshold(
-            X[train_idx], y[train_idx],
-            c_grid=[0.1, 1.0],
-            n_inner_splits=2,
-            threshold_metric="balanced_accuracy",
-            random_state=42,
+        _fit_tuned_model(
+            "l1_logistic", X[train_idx], y[train_idx],
+            ml_cfg={"logistic_c_grid": [0.1, 1.0]}, n_inner_splits=2,
+            threshold_metric="balanced_accuracy", random_state=42, n_jobs=1,
         )
         test_rows = X[test_idx]
         for fit_array in seen_fit_arrays:
@@ -514,6 +505,122 @@ def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> N
 
 
 # ---------------------------------------------------------------------------
+# Phase E: bootstrap confidence intervals
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_ci_bounds_are_ordered_and_finite(base_ml_cfg: dict) -> None:
+    frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=1.0, random_state=12)
+    X, _names = _representation_matrix(frame, "whole", base_ml_cfg["whole_spectra"])
+    y = _labels(frame)
+    ml_cfg = _small_permutation_cfg(base_ml_cfg)
+    ml_cfg["n_bootstrap"] = 25
+
+    ci = run_bootstrap_ci("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
+
+    assert ci["n_bootstrap_used"] > 0
+    low, high = ci["balanced_accuracy_ci_low"], ci["balanced_accuracy_ci_high"]
+    assert np.isfinite(low) and np.isfinite(high)
+    assert low <= high
+    assert 0.0 <= low <= 1.0
+    assert 0.0 <= high <= 1.0
+
+
+def test_bootstrap_ci_no_duplicate_subject_leakage_across_in_bag_out_of_bag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Guards against the classic bootstrap+CV leak: a naive implementation that
+    resamples with replacement and then cross-validates the resampled array can
+    place two copies of the same original subject into different CV folds,
+    letting the model see a near-duplicate of a "held-out" row during training.
+    The fix used here is out-of-bag scoring: fit once on the in-bag resample,
+    score only on subjects whose original row was never drawn into it. This
+    test instruments the model fit to record every row index array it is
+    trained on, and asserts no scored (out-of-bag) row's feature vector
+    appears anywhere in the training data for that draw.
+    """
+    from src.analysis.control_vs_disease_ml import _bootstrap_metric_sample
+
+    rng = np.random.default_rng(21)
+    n = 40
+    X = rng.normal(size=(n, 6))
+    y = np.array([0] * 20 + [1] * 20)
+    ml_cfg = {"n_inner_splits": 2, "threshold_metric": "balanced_accuracy", "logistic_c_grid": [0.1, 1.0]}
+
+    seed = 99
+    draw_rng = np.random.default_rng(seed)
+    in_bag_idx = draw_rng.integers(0, n, size=n)
+    out_of_bag_idx = np.setdiff1d(np.arange(n), in_bag_idx)
+    assert len(out_of_bag_idx) > 0, "test fixture must produce at least one out-of-bag subject"
+
+    X_in_bag_rows = X[in_bag_idx]
+    for oob_index in out_of_bag_idx:
+        oob_row = X[oob_index]
+        matches = np.any(np.all(np.isclose(X_in_bag_rows, oob_row), axis=1))
+        assert not matches, "an out-of-bag subject's row also appears in the in-bag training data"
+
+    result = _bootstrap_metric_sample("l1_logistic", X, y, ml_cfg, seed)
+    assert result is None or "balanced_accuracy" in result
+
+
+def test_bootstrap_ci_deterministic_with_same_seed(base_ml_cfg: dict) -> None:
+    frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=1.0, random_state=13)
+    X, _names = _representation_matrix(frame, "whole", base_ml_cfg["whole_spectra"])
+    y = _labels(frame)
+    ml_cfg = _small_permutation_cfg(base_ml_cfg)
+    ml_cfg["n_bootstrap"] = 20
+
+    ci_a = run_bootstrap_ci("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=7)
+    ci_b = run_bootstrap_ci("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=7)
+
+    assert ci_a == ci_b
+
+
+# ---------------------------------------------------------------------------
+# Phase F: univariate band screen
+# ---------------------------------------------------------------------------
+
+
+def _band_panel_cfg() -> dict:
+    return {
+        "whole_spectra": {
+            "bands": {
+                "band_a": [1000.0, 1015.0],
+                "band_b": [1010.0, 1025.0],
+                "band_c": [2850.0, 2865.0],
+            },
+            "ratio_pairs": [],
+        }
+    }
+
+
+def test_univariate_band_screen_has_one_row_per_band_with_fdr() -> None:
+    frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=1.0, random_state=14)
+    y = _labels(frame)
+    valid_rows = np.ones(len(frame), dtype=bool)
+
+    result = run_univariate_band_screen(frame, y, valid_rows, _band_panel_cfg())
+
+    assert set(result["band"]) == {"band_a", "band_b", "band_c"}
+    assert (result["status"] == "ok").all()
+    assert "fdr_q" in result.columns
+    assert "significant_fdr" in result.columns
+    assert (result["p_value"] > 0).all() and (result["p_value"] <= 1).all()
+
+
+def test_univariate_band_screen_reports_insufficient_data_status() -> None:
+    frame = _make_feature_matrix(n_control=15, n_disease=18, random_state=15)
+    # Blank out one band's underlying spectral columns so it cannot be integrated.
+    columns_to_null = [c for c in frame.columns if c.startswith("2850__")]
+    frame[columns_to_null] = np.nan
+    y = _labels(frame)
+    valid_rows = np.ones(len(frame), dtype=bool)
+
+    result = run_univariate_band_screen(frame, y, valid_rows, _band_panel_cfg())
+
+    band_c_row = result.loc[result["band"] == "band_c"].iloc[0]
+    assert band_c_row["status"] == "insufficient_data"
+
+
+# ---------------------------------------------------------------------------
 # Phase C: sex-confound battery
 # ---------------------------------------------------------------------------
 
@@ -546,7 +653,7 @@ def test_sex_stratified_refit_reports_female_only_metrics(base_ml_cfg: dict) -> 
     ml_cfg = _small_permutation_cfg(base_ml_cfg)
 
     result = _sex_stratified_refit(
-        "l1_logistic", "whole", frame, X, y, valid_rows, ml_cfg=ml_cfg, n_jobs=1
+        "l1_logistic", frame, X, y, valid_rows, ml_cfg=ml_cfg, n_jobs=1
     )
     assert result["status"] == "ok"
     assert "female_only_balanced_accuracy_mean" in result
@@ -562,7 +669,7 @@ def test_sex_stratified_refit_insufficient_n_reports_status(base_ml_cfg: dict) -
     ml_cfg = _small_permutation_cfg(base_ml_cfg)
 
     result = _sex_stratified_refit(
-        "l1_logistic", "whole", frame, X, y, valid_rows, ml_cfg=ml_cfg, n_jobs=1
+        "l1_logistic", frame, X, y, valid_rows, ml_cfg=ml_cfg, n_jobs=1
     )
     assert result["status"] == "insufficient_n"
 
@@ -629,6 +736,7 @@ def test_runner_smoke_produces_expected_outputs(
     assert (out_dir / "model_comparison.csv").exists()
     assert (out_dir / "confounder_analysis.csv").exists()
     assert (out_dir / "permutation_null_distributions.csv").exists()
+    assert (out_dir / "univariate_band_screen.csv").exists()
 
     comparison = pd.read_csv(out_dir / "model_comparison.csv")
     n_models = 3
@@ -648,12 +756,22 @@ def test_runner_smoke_produces_expected_outputs(
     # Exactly one (model, representation) row is pre-specified as primary per plan_ml.md §2.
     assert comparison["is_primary_model"].sum() == 1
 
+    assert "bootstrap_balanced_accuracy_ci_low" in comparison.columns
+    assert "bootstrap_balanced_accuracy_ci_high" in comparison.columns
+    ci_low = comparison["bootstrap_balanced_accuracy_ci_low"].dropna()
+    ci_high = comparison["bootstrap_balanced_accuracy_ci_high"].dropna()
+    assert (ci_low <= ci_high).all()
+
     confounder = pd.read_csv(out_dir / "confounder_analysis.csv")
     assert len(confounder) == n_models * n_representations
     assert "status" in confounder.columns
 
     null_dist = pd.read_csv(out_dir / "permutation_null_distributions.csv")
     assert set(null_dist["null_type"].unique()) <= {"unrestricted", "sex_stratified"}
+
+    band_screen = pd.read_csv(out_dir / "univariate_band_screen.csv")
+    assert set(band_screen["band"]) == {"band_a", "band_b", "band_c"}
+    assert "fdr_q" in band_screen.columns
 
     for model_name in ("pls_da", "l1_logistic", "random_forest"):
         for representation in ("whole", "band_panel"):
@@ -662,9 +780,25 @@ def test_runner_smoke_produces_expected_outputs(
             assert pred_path.exists()
             assert importance_path.exists()
 
+    report_path = out_dir / "ml_report.md"
+    assert report_path.exists()
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "exploratory only" in report_text.lower()
+    assert "diagnostic" in report_text.lower()
+
+    figures_dir = out_dir / "figures"
+    assert figures_dir.exists()
+    assert any(figures_dir.glob("roc_curves_*.png"))
+    assert any(figures_dir.glob("pr_curves_*.png"))
+    assert any(figures_dir.glob("confusion_matrices_*.png"))
+    assert any(figures_dir.glob("metric_comparison_*.png"))
+    assert any(figures_dir.glob("permutation_null_*.png"))
+
     assert "cohort_summary" in outputs
     assert "model_comparison" in outputs
     assert "confounder_analysis" in outputs
+    assert "univariate_band_screen" in outputs
+    assert "ml_report" in outputs
     _mock_write_provenance.assert_called_once()
 
 

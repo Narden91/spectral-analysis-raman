@@ -1,17 +1,19 @@
 # Repository Guidance: Raman Spectral Analysis
 
-This repository contains a Python Raman spectroscopy analysis pipeline for extracellular-vesicle data. The maintained workflow covers preprocessing/QC, exploratory data analysis, visualization, and a strict subject-level Biological PCA layer. Treat all outputs as exploratory scientific analysis, not diagnosis, prediction, or supervised classification.
+This repository contains a Python Raman spectroscopy analysis pipeline for extracellular-vesicle data. The maintained workflow covers preprocessing/QC, exploratory data analysis, visualization, a strict subject-level Biological PCA layer, and an exploratory control-vs-disease ML classification layer (§7). Treat all outputs — including the ML layer — as exploratory scientific analysis: no diagnostic, biomarker, causal, or clinical-utility claim is made anywhere in this repository.
 
 ## 1. Quick Start & Entry Points
 
-- `uv run scripts/run_eda.py`: Main EDA entry point and the **only** entry point for Biological PCA.
+- `uv run scripts/run_eda.py`: Main EDA entry point and the **only** entry point for Biological PCA and the control-vs-disease ML layer (§7).
 - `uv run scripts/run_spectral_plots.py`: Spectral comparison, QC plotting, and CSV data export.
 
 ### Common Commands
 - Smoke test (full resampling): `uv run scripts/run_eda.py --range both --max-subjects 8`
 - Fast disease-only iteration (reduced permutations/CV; not for final outputs): `uv run scripts/run_eda.py --config config/eda_disease_fast.yaml --range both --max-subjects 8`
+- Fast disease-vs-control ML iteration (reduced permutations/CV/bootstrap; not for final outputs — the ML layer needs the full cohort, `--max-subjects` below ~10/class will fail its minimum-subjects guard): `uv run scripts/run_eda.py --config config/eda_disease_control_fast.yaml --range both`
 - Run all tests: `uv run pytest -v`
 - Run biological PCA tests: `uv run pytest tests/test_biological_pca.py`
+- Run control-vs-disease ML tests: `uv run pytest tests/test_control_vs_disease_ml.py tests/test_control_vs_disease_ml_report.py`
 - Optional GPU readiness probe (does not change pipeline): `uv run scripts/check_gpu_readiness.py`
 
 ## 2. Core Architecture
@@ -23,11 +25,11 @@ The codebase follows a modular structure:
 - `src/preprocessing/`: Raman preprocessing and QC.
 - `src/clinical/`: clinical endpoint definitions and mappings.
 - `src/fusion/`: cross-range and area-level fusion helpers.
-- `src/analysis/`: EDA, PCA, whole-spectra analysis, and Biological PCA.
+- `src/analysis/`: EDA, PCA, whole-spectra analysis, Biological PCA, and the control-vs-disease ML classification layer (§7).
 - `src/visualization/`: plotting and report figures.
 - `src/reporting/`: candidate region provenance and manuscript reports.
 
-Configuration is YAML-based. Track configs use `_extends`; `config/eda.yaml` owns EDA and Biological PCA settings.
+Configuration is YAML-based. Track configs use `_extends`; `config/eda.yaml` owns EDA, Biological PCA, and control-vs-disease ML settings.
 
 ## 3. Data Source Rules
 
@@ -72,13 +74,25 @@ Biological PCA is subject-level only and is the authoritative PCA layer per regi
 
 Outputs are written under the active root and range-local folders (e.g., `Results_intra_disease/01_fingerprint_1300/06_biological_pca/`). *Do not generate a root-level `biological_pca/` directory.*
 
-## 7. Visualization Conventions
+## 7. Control-vs-Disease ML Classification (Disease-vs-Control Mode Only)
+
+`disease_vs_control` mode runs an exploratory, subject-level supervised classification layer (`src/analysis/control_vs_disease_ml.py`, figures/report in `src/analysis/control_vs_disease_ml_report.py`), firing after Biological PCA in `scripts/run_eda.py`. Outputs to `Results_control_vs_disease/07_ml_classification/`. This is a **separate, read-only downstream consumer** of the Biological PCA subject feature matrix — per §6, no ML claim may attach to Biological PCA outputs, and this layer never mutates Biological PCA state.
+
+- **Models**: PLS-DA, L1-logistic (`class_weight='balanced'`), Random Forest (`class_weight='balanced_subsample'`) — each on two feature representations (`whole` fused spectrum, `band_panel` 21-band biochemical panel).
+- **Positive class**: Disease (`is_control == False` → 1), documented in every output artifact.
+- **Rigor**: Nested CV (`RepeatedStratifiedKFold`, in-fold scaling/tuning/thresholding — never on the outer test fold), full-pipeline label-permutation significance (unrestricted **and** sex-stratified nulls — the sex-stratified p-value is the primary inferential result), out-of-bag bootstrap 95% CIs, BH-FDR across the model family.
+- **Confounding is measured, not assumed**: this cohort's sex distribution is significantly associated with class (χ²≈13.9, p≈0.0002 — controls are ~80% female, disease ~46% female). `confounder_analysis.csv` reports a female-only sensitivity refit and a sex-only baseline classifier per model; a spectral finding must survive the sex-stratified permutation null and beat the sex-only baseline. Age is **not modeled anywhere in this layer** — no age data exists for controls in this cohort and no proxy exists in the repository; this is a permanent limitation, not a gap left open for a future fix.
+- **Claims discipline**: exploratory only. No diagnostic, biomarker, causal, or clinical-utility claim. Single-cohort, single-site, no external validation. `ml_report.md` states this explicitly at the top of every run.
+- **Config**: `analysis.control_vs_disease_ml` in `config/eda.yaml`; fast dev overlay `config/eda_disease_control_fast.yaml` (iteration only, not manuscript numbers).
+- Full scientific-rigor rationale, verified data facts, and phase-by-phase implementation status: `plan_ml.md`.
+
+## 8. Visualization Conventions
 
 - `_TARGET_LABELS` maps raw clinical column names to readable labels. Always use `_target_label()` for axes and legends.
 - In `plot_correlation_spectrum` and `plot_intra_disease_correlation_overview`, the legend is placed below the x-axis to prevent collision.
 - `plot_intra_disease_top_regions` scales dynamically based on bar count and adds value labels to bar ends.
 
-## 8. Cross-Region Performance (Disease-Only)
+## 9. Cross-Region Performance (Disease-Only)
 
 Cross-region phases (`run_disease_only_cross_region_pipeline` in `src/analysis/disease_only_pipeline.py`) are resampling-heavy. The default path stays **CPU-compatible and deterministic**.
 
@@ -88,7 +102,7 @@ Cross-region phases (`run_disease_only_cross_region_pipeline` in `src/analysis/d
 - **Feature-matrix cache**: `src/analysis/clinical_feature_associations.py` caches whole-spectrum Parquet reads in-process (path + mtime/size); callers still get copied frames.
 - **GPU**: No GPU solvers in the pipeline. `scripts/check_gpu_readiness.py` is an optional CuPy equivalence gate only. Do not introduce GPU backends without validated CPU parity.
 
-## 9. General Agent Rules
+## 10. General Agent Rules
 
 - **Use Existing Tools**: Prefer repo-local helpers, statistics functions (e.g., `src.statistics.cluster_permutation`), and established config patterns over new entry points or redundant logic.
 - **Version Control**: Keep generated artifacts out of version control.
