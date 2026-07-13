@@ -7,7 +7,6 @@ from typing import Any
 
 import yaml
 
-from src import config as global_config
 from src import resolve_cfg as _cfg
 from src import resolve_project_path
 from src.data_preparation.manifest import config_hash, iso_utc_now

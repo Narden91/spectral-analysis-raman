@@ -11,7 +11,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src import config as global_config
 from src import resolve_cfg as _cfg
 from src import resolve_project_path
 from src.data_preparation.cohorts import build_materialized_cohorts, write_cohort_tables
