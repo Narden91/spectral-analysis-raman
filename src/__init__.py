@@ -294,6 +294,13 @@ def get_spectral_interpretability_dir(phase: str) -> Path:
     return path
 
 
+def get_ml_classification_dir() -> Path:
+    """Return the control-vs-disease ML classification output root (disease_vs_control mode)."""
+    path = _output_dir("eda_subdir") / "07_ml_classification"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def get_biological_pca_canonical_dir(model_name: str) -> Path:
     """Return the canonical range-local directory for a Biological PCA model."""
     relative = BIOLOGICAL_PCA_CANONICAL_DIRS.get(str(model_name))

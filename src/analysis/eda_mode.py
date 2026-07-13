@@ -142,6 +142,70 @@ def validate_eda_mode_config(
         )
 
 
+_SUPPORTED_THRESHOLD_METRICS = ("balanced_accuracy",)
+_SUPPORTED_REPRESENTATIONS = ("whole", "band_panel")
+_SUPPORTED_ML_MODELS = ("pls_da", "l1_logistic", "random_forest")
+
+
+def validate_control_vs_disease_ml_config(cfg: dict[str, Any]) -> None:
+    """Validate analysis.control_vs_disease_ml. No declarative schema in this repo."""
+    ml_cfg = cfg.get("analysis", {}).get("control_vs_disease_ml", {})
+    if not bool(ml_cfg.get("enabled", True)):
+        return
+
+    representations = ml_cfg.get("representations", [])
+    if not representations:
+        raise ValueError("analysis.control_vs_disease_ml.representations must be non-empty")
+    unknown_representations = set(representations) - set(_SUPPORTED_REPRESENTATIONS)
+    if unknown_representations:
+        raise ValueError(
+            f"analysis.control_vs_disease_ml.representations has unknown value(s): {sorted(unknown_representations)}. "
+            f"Valid options: {list(_SUPPORTED_REPRESENTATIONS)}"
+        )
+
+    primary_model = ml_cfg.get("primary_model")
+    if primary_model not in _SUPPORTED_ML_MODELS:
+        raise ValueError(
+            f"analysis.control_vs_disease_ml.primary_model must be one of {list(_SUPPORTED_ML_MODELS)}, got {primary_model!r}"
+        )
+    primary_representation = ml_cfg.get("primary_representation")
+    if primary_representation not in representations:
+        raise ValueError(
+            "analysis.control_vs_disease_ml.primary_representation "
+            f"({primary_representation!r}) must be one of the configured representations: {representations}"
+        )
+
+    threshold_metric = ml_cfg.get("threshold_metric")
+    if threshold_metric not in _SUPPORTED_THRESHOLD_METRICS:
+        raise ValueError(
+            f"analysis.control_vs_disease_ml.threshold_metric must be one of {list(_SUPPORTED_THRESHOLD_METRICS)}, "
+            f"got {threshold_metric!r}"
+        )
+
+    positive_int_fields = (
+        "n_outer_splits",
+        "n_outer_repeats",
+        "n_inner_splits",
+        "n_permutations",
+        "n_bootstrap",
+    )
+    for field in positive_int_fields:
+        value = ml_cfg.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"analysis.control_vs_disease_ml.{field} must be a positive integer, got {value!r}")
+
+    grid_fields = (
+        "pls_components_grid",
+        "logistic_c_grid",
+        "rf_n_estimators_grid",
+        "rf_max_depth_grid",
+    )
+    for field in grid_fields:
+        value = ml_cfg.get(field)
+        if not value:
+            raise ValueError(f"analysis.control_vs_disease_ml.{field} must be a non-empty list")
+
+
 def filter_index_for_eda_mode(df_index: pd.DataFrame, mode: str) -> pd.DataFrame:
     if mode == "disease_only":
         return df_index.loc[~df_index["is_control"]].copy()

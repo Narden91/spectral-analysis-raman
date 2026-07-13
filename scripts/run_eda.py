@@ -34,12 +34,14 @@ from src import (
 )
 from src.analysis._single_range import _VALID_RANGES
 from src.analysis.biological_pca import run_biological_pca
+from src.analysis.control_vs_disease_ml import run_control_vs_disease_ml_pipeline
 from src.analysis.disease_only_pipeline import run_disease_only_cross_region_pipeline
 from src.analysis.eda_mode import (
     EDA_ANALYSIS_MODES,
     apply_eda_analysis_mode,
     eda_output_root,
     resolve_eda_analysis_mode,
+    validate_control_vs_disease_ml_config,
     validate_eda_mode_config,
 )
 from src.analysis.run_eda import run_eda
@@ -220,6 +222,8 @@ def _main() -> None:
     apply_eda_analysis_mode(config, analysis_mode)
     _apply_analysis_mode_runtime_defaults(analysis_mode)
     validate_eda_mode_config(config, analysis_mode)
+    if analysis_mode == "disease_vs_control":
+        validate_control_vs_disease_ml_config(config)
     _set_analysis_output_root(analysis_mode)
     metadata_dir = get_run_metadata_dir()
     _attach_run_log_file(metadata_dir / "run.log")
@@ -280,6 +284,14 @@ def _main() -> None:
                     cfg=config,
                 )
                 print_status("Finished disease-only cross-region phases")
+            elif analysis_mode == "disease_vs_control":
+                feature_matrix_path = biological_outputs.get("subject_feature_matrix_whole")
+                print_status("Starting control-vs-disease ML classification")
+                run_control_vs_disease_ml_pipeline(
+                    feature_matrix_path=feature_matrix_path,
+                    cfg=config,
+                )
+                print_status("Finished control-vs-disease ML classification")
         warnings = _write_warning_summaries(_output_dir("eda_subdir")) if biological_ran else []
         _log_final_summary(ranges, biological_ran, warnings)
         print_status(f"EDA complete. Outputs: {_output_dir('eda_subdir')}")
