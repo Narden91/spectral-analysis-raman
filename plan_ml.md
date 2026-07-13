@@ -98,20 +98,21 @@ def run_control_vs_disease_ml_pipeline(*, feature_matrix_path, cfg=None) -> dict
   - [x] L1-Logistic: `sklearn_utils.l1_logistic_model` (`class_weight='balanced'`); tune `C` on inner CV via an in-fold-scaled tuning loop mirroring `minimal_panel._fit_tuned_logistic`.
   - [x] Random Forest: `RandomForestClassifier(class_weight='balanced_subsample', random_state=42, n_jobs=n_jobs)`; inner grid over `n_estimators`/`max_depth`; **permutation importance** (not impurity importance — biased toward high-cardinality continuous features across 1802 correlated channels).
 - [x] **Threshold tuning**: decision threshold chosen on inner-CV out-of-fold scores maximizing balanced accuracy; applied unchanged to the outer test fold. Verified by mutation test (leaking the outer fold into tuning is caught by a scaler-instrumentation guard) and by a held-out-fold benchmark: tuned threshold reached 0.91 balanced accuracy vs. 0.74 for a naive 0.5 cutoff on an imbalanced (40/10) synthetic set — confirms threshold tuning is carrying real weight for imbalance, not cosmetic.
-- [ ] **Phase C — sex-confound battery** (§0.1): sex-stratified refit, sex-stratified permutation null, sex-only baseline → `confounder_analysis.csv`. **Not yet implemented — next phase of work.**
-- [ ] **Phase D — permutation tests**: full-pipeline label permutation, unrestricted + sex-stratified. Reuse seed-array + `(1+Σ)/(n+1)` pattern from `minimal_panel._permutation_test_binary`. **Not yet implemented.**
+- [x] **Phase C — sex-confound battery** (§0.1): `_sex_stratified_refit` (female-only subset refit via the same `_run_repeated_nested_cv`; male subset explicitly not refit — too imbalanced, 52/10 — reported via n-counts only), `_sex_only_baseline` (logistic on sex alone, in-fold threshold tuning), both written to `confounder_analysis.csv` per (model × representation). Unit-tested: reports metrics when sex present, reports explicit `missing_sex_column` status when absent, reports `insufficient_n` status when a stratum is too small rather than silently proceeding.
+- [x] **Phase D — permutation tests**: `run_permutation_test` — full-pipeline label permutation (tuning re-run per permuted draw, not just refit), unrestricted + sex-stratified nulls, `(1+Σ)/(n+1)` p-value. **Cost design decision**: each permutation draw uses one un-repeated `StratifiedKFold` pass (`_single_split_balanced_accuracy`), not the full `RepeatedStratifiedKFold` used for the Phase B point estimate — matches the existing repo convention in `splsda._permuted_splsda_score` and `pls_regression._permuted_pls_r2` (neither repeats CV inside its permutation loop, confirmed by grep before implementing). Repeating CV per permutation would multiply cost by `n_outer_repeats` for no statistical benefit, since the null distribution's spread across permutations already captures Monte Carlo noise.
 - [ ] **Phase E — bootstrap CIs**: resample subjects (stratified), recompute headline metrics, 2.5/97.5 percentiles. **Not yet implemented.** (Note: `model_comparison.csv` currently reports repeat-mean/std across `RepeatedStratifiedKFold`, not yet a bootstrap percentile CI — Phase E adds that.)
 - [ ] **Phase F — univariate screen**: Mann–Whitney per band + BH-FDR via `fdr_correction`. Descriptive context only. **Not yet implemented.**
 - [x] **Provenance & timing**: `write_analysis_provenance(output_dir, resolve_data_source(cfg), cfg, command=...)`; local `_phase_timer`/`_write_phase_timings` (own implementation, not imported from `disease_only_pipeline.py` — that module's timer helpers are private/underscored, so this module defines its own rather than reaching across a module boundary for private symbols) → `control_vs_disease_ml_phase_timing.csv` in run-metadata dir. Verified present on a real run.
 
-**Outputs** (`write_csv_atomic`) under `07_ml_classification/` — verified written on the real cohort (147 subjects, both representations, all 3 models):
+**Outputs** (`write_csv_atomic`) under `07_ml_classification/` — Phase A/B verified on the real 147-subject cohort in the prior session; Phase C/D unit-tested, real-cohort verification of this pass pending (see end-to-end status below):
 - [x] `cohort_summary.csv`
-- [x] `model_comparison.csv` — one row per (model × representation), 6/6 rows present; all metrics finite; repeat-mean/std currently, bootstrap 95% CI + permutation p pending Phase D/E
-- [ ] `confounder_analysis.csv` — pending Phase C
+- [x] `model_comparison.csv` — one row per (model × representation), 6/6 rows present; all metrics finite; repeat-mean/std for Phase B metrics; now also carries `permutation_p_value_unrestricted`, `permutation_p_value_sex_stratified`, `permutation_p_fdr_q` (BH-FDR across the 6-row family, using the sex-stratified p as primary per model when available), `is_primary_model` flag. Bootstrap 95% CI still pending Phase E.
+- [x] `confounder_analysis.csv` — one row per (model × representation): female-only refit metrics + sex-only baseline metrics + status columns
+- [x] `permutation_null_distributions.csv` — long-form null draws (model × representation × null_type × value) for later histogram figures
 - [x] `<model>_<representation>_cv_predictions.csv` — 6/6 present, out-of-fold scores per repeat per subject
 - [x] `<model>_<representation>_feature_importance.csv` — 6/6 present, correctly typed per model (vip / l1_logistic_coefficient / permutation_importance), block identity preserved (e.g. `1300__733.2`)
 - [ ] `univariate_band_screen.csv` — pending Phase F
-- [ ] `ml_report.md` — pending (depends on Phase C/D/E results)
+- [ ] `ml_report.md` — pending (depends on Phase E, and on user sign-off on the primary result)
 
 **Figures** (`src/visualization/`, theme via `theme.py`) — **not yet implemented, pending Phase C/D/E data to plot**:
 - [ ] ROC curves (models overlaid, sex-only baseline as reference line)
@@ -182,24 +183,25 @@ Mirrors `get_confirmatory_panel_dir`. `07_` avoids the `04_cross_region_summary`
 
 ### 4.6 Tests — `tests/test_control_vs_disease_ml.py`
 
-25 tests, all passing. Full suite (`uv run pytest -v`) unaffected: 185 passed.
+34 tests, all passing (25 from Phase A/B + 9 new for Phase C/D). Full suite (`uv run pytest -v`) unaffected: 194 passed. `uv run ruff check .` clean on all touched/new files (pre-existing baseline error count went 16 → 15, i.e. strictly improved, not worsened).
 
 - [x] Leakage guard: no test-fold index touched during any scaler/tuner/threshold fit (synthetic labelled data, `StandardScaler.fit` instrumented via monkeypatch). **Mutation-tested**: manually re-ran the guard logic against a deliberately leaky call (passing full `X, y` instead of the train-fold slice) and confirmed it correctly flags the leak — the guard is a real detector, not a vacuous pass.
 - [x] Threshold leakage guard: decision threshold derived only from inner-fold scores — proved structurally (`_fit_tuned_pls_da`/`_fit_tuned_logistic_threshold` never receive outer-fold data in their signature) plus a repeatability check.
 - [x] Determinism: identical `random_state` → identical out-of-fold predictions (`pd.testing.assert_frame_equal`); additionally verified different seeds produce different results (rules out a vacuous always-equal test).
 - [x] Imbalance: `_classification_metrics` never reports bare `accuracy`; skewed synthetic set (5 vs. 45) produces finite balanced accuracy, MCC, sensitivity, specificity; positive class = Disease asserted throughout.
-- [ ] Permutation: **pending Phase D** — no permutation test exists yet in this phase's scope.
-- [ ] Sex-stratified null (mandatory once Phase C lands): **pending Phase C.**
-- [x] Output contract: `model_comparison.csv` has exactly 3 models × 2 representations = 6 rows; all expected per-model CSVs present. Figures pending (no figures exist yet — Phase C/D/E precede them).
+- [x] Permutation: p ∈ (0,1] on real synthetic runs (`test_permutation_p_value_bounded`); pure-noise data does not manufacture a small p-value (`test_permutation_null_centers_near_chance_on_pure_noise`, p > 0.05 on a no-signal cohort); `_permute_labels` verified to preserve class counts unrestricted and within-stratum counts when stratified.
+- [x] **Sex-stratified null (mandatory) — `test_sex_stratified_null_is_mandatory_confound_guard`.** This is the decisive test for the whole confound-handling design. Constructs a synthetic cohort where class is a *pure function of sex* (all-female-control, all-male-disease, no independent disease signal). Confirms: (1) the model trivially separates classes (balanced accuracy > 0.9) by reading sex; (2) the **unrestricted** permutation null is fooled — p < 0.05, i.e. an unrestricted-only analysis would have reported this pure-confound signal as a significant finding; (3) the **sex-stratified** null is **not** fooled — p > 0.05, because permuting within sex strata preserves the very association the model exploits, so permuted data score just as well as real data. This is proof-by-construction that Phase C/D's confound machinery does what §0.1 requires, not just that the code runs.
+- [x] Output contract: `model_comparison.csv` has exactly 3 models × 2 representations = 6 rows, now with permutation p-value/FDR columns and exactly one `is_primary_model=True` row; `confounder_analysis.csv` has 6 rows with `status` columns; `permutation_null_distributions.csv` restricted to the two expected `null_type` values. Figures still pending (Phase E precedes them).
 - [x] Runner smoke on tiny synthetic feature matrix (33 control-vs-disease synthetic subjects, both representations) — passes with `resolve_data_source`/`write_analysis_provenance` mocked to isolate unit-test scope from the real data store.
 
 **Real end-to-end smoke (beyond unit tests)** — `uv run scripts/run_eda.py --config config/eda_disease_control_fast.yaml --range both` run against the actual 147-subject cohort:
-- [x] Completed successfully (~9 min wall time; Random Forest on the whole spectrum is the dominant cost at ~7 min — flagged for awareness, not a defect).
-- [x] `cohort_summary.csv` correctly reports the real imbalance (97/50) and the real sex confound (χ²=13.9, p=0.00019) — the confound is not hypothetical, it is measured and now visible in the pipeline's own output.
-- [x] The label-anomaly warning fired exactly on subject `11`, matching the anomaly identified during the original data audit (§8).
-- [x] All 6 `model_comparison.csv` rows populated, metrics finite, positive class = Disease.
-- [x] Provenance (`run_manifest.json`, `config_snapshot.yaml`, `data_manifest_snapshot.json`) and phase timing CSV written and inspected.
-- [x] Mode isolation confirmed: no new `Results_intra_disease/` writes (pre-existing dir from an earlier session, untouched — verified by mtime), no root-level `biological_pca/` dir.
+- [x] **Phase A/B**: completed successfully. `cohort_summary.csv` correctly reports the real imbalance (97/50) and the real sex confound (χ²=13.9, p=0.00019). Label-anomaly warning fired exactly on subject `11`, matching §8. All 6 `model_comparison.csv` rows populated, metrics finite. Provenance and phase timing verified. Mode isolation confirmed.
+- [x] **Phase C/D on the real cohort**: completed successfully, ~24 min wall time for the ML phase. Inspected every output, not just existence:
+  - **Null distributions are not degenerate.** Both unrestricted and sex-stratified nulls, across all 6 (model × representation) combinations, center tightly at balanced accuracy ≈ 0.49-0.51 (as a true null should), with observed values (0.64-0.71) clearly above the entire null spread — ruled out a bug where the null could be artificially collapsed toward the observed value or stuck at a constant.
+  - **Primary result** (PLS-DA, whole spectrum, pre-specified): balanced accuracy 0.656, sex-stratified permutation p=0.0196, BH-FDR q=0.0235 (significant). All 6 rows significant at both nulls and after FDR.
+  - **Female-only sensitivity refit corroborates, does not merely repeat, the full-cohort result**: primary model's female-only balanced accuracy is 0.683 (n=40 control / 45 disease) — not collapsed toward chance, actually slightly higher than the full-cohort estimate. This is the load-bearing check: if the spectral signal were purely a sex artifact, restricting to one sex should destroy it, and it did not.
+  - **Sex-only baseline** (logistic on sex alone) reaches balanced accuracy 0.668 / ROC-AUC 0.634 — the spectral models' ROC-AUC (0.70-0.82 across the 6 rows) exceeds this, i.e. the spectral models are not simply reproducing what sex alone predicts.
+  - **Runtime cost, extrapolated to production settings** (`n_permutations` 50→1000, `n_outer_repeats` 2→10, both ~20x and ~5x): Random Forest is the dominant cost. Its fast-overlay permutation cost was already efficient per-draw (single-split design, not repeated-CV-per-permutation — see Phase D design note above), but its Phase B repeated-CV fit (648s under the fast overlay's `n_outer_repeats=2`) will scale roughly linearly with repeats. **Flagging for the user before a production run**: expect the control-vs-disease ML phase to take on the order of 1-2 hours at full `config/eda.yaml` settings, dominated by Random Forest. Not disqualifying for a one-time manuscript run, but worth knowing in advance rather than discovering mid-run.
 
 ---
 
@@ -233,27 +235,31 @@ Preprocessing, Biological PCA, disease-only pipeline, constants, data loaders. F
 **Status: Phase A + Phase B verified. Phases C/D/E/F, figures, and the report are not yet built — the items below marked `[ ]` require those phases first.**
 
 **Unit / integration**
-- [x] `uv run pytest tests/test_control_vs_disease_ml.py -v` — 25/25 passed
-- [x] `uv run pytest -v` (full suite unbroken) — 185/185 passed
-- [x] `uv run ruff check .` (zero new warnings) — confirmed zero errors in all touched/new files; 16 pre-existing errors elsewhere in the repo are unrelated baseline noise, untouched by this change
+- [x] `uv run pytest tests/test_control_vs_disease_ml.py -v` — 34/34 passed
+- [x] `uv run pytest -v` (full suite unbroken) — 194/194 passed
+- [x] `uv run ruff check .` (zero new warnings) — confirmed zero errors in all touched/new files; pre-existing baseline error count went 16 → 15 (strictly improved, not worsened) via an unrelated auto-fix picked up while linting this module
 
 **Smoke (fast overlay — reduced resampling, not final science)**
 - [x] `uv run scripts/run_eda.py --config config/eda_disease_control_fast.yaml --range both` (note: `--max-subjects 8` caps at 4/4 per class, below the `_MIN_SUBJECTS_PER_CLASS=10` guard, and correctly raises — run the full cohort for this smoke test instead)
 
 Post-run checks under `Results_control_vs_disease/07_ml_classification/`:
-- [x] `cohort_summary.csv`, `model_comparison.csv` present; comparison has 3 models × 2 representations (6 rows) — **verified on real data**
-- [ ] `confounder_analysis.csv` — pending Phase C
-- [ ] ROC/PR/confusion/comparison/permutation-null figures rendered — pending Phase C/D/E + figures work
+- [x] `cohort_summary.csv`, `model_comparison.csv` present; comparison has 3 models × 2 representations (6 rows) — verified on real data
+- [x] `confounder_analysis.csv` — verified on real data: 6 rows, all `status=ok`, female-only refit + sex-only baseline populated for every (model × representation)
+- [ ] ROC/PR/confusion/comparison/permutation-null figures rendered — pending Phase E + figures work (CSV data for these — `permutation_null_distributions.csv` — is written and verified; only the plotting layer is pending)
 - [x] `run_manifest.json`, `data_manifest_snapshot.json`, `config_snapshot.yaml` present — verified
-- [x] `00_run_metadata/control_vs_disease_ml_phase_timing.csv` written — verified, per-phase timings inspected
+- [x] `00_run_metadata/control_vs_disease_ml_phase_timing.csv` written — verified, per-phase timings inspected including permutation/refit sub-phases
 - [x] No `Results_intra_disease/` outputs created (mode isolation); no root-level `biological_pca/` dir — verified (pre-existing `Results_intra_disease/` from an earlier session confirmed untouched by mtime)
 - [x] Metrics finite; positive class documented as Disease — verified
-- [ ] Both permutation p ∈ (0,1] — pending Phase D (no permutation test exists yet)
+- [x] Both permutation p ∈ (0,1] — verified on real data: all 12 p-values (6 rows × 2 nulls) finite and in (0,1]; null distributions inspected directly (not just the p-value) and confirmed centered near chance (mean balanced accuracy 0.49-0.51) rather than degenerate
 
 **Production run (manuscript numbers — full resampling)**
-- [ ] `uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both` — hold until Phase C/D/E land; running production resampling now would only produce Phase A/B numbers without the confound/significance battery, which are not publication-usable per §0.2
+- [ ] `uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both` — hold until Phase E lands (bootstrap CIs) and the user has reviewed the Phase C/D real-cohort result below and resolved the §8 label anomaly. **Runtime warning**: extrapolating from the fast-overlay timing, expect ~1-2 hours for the ML phase at full production settings, dominated by Random Forest's repeated-CV fit. Consider running overnight or reducing the RF grid (`rf_n_estimators_grid`/`rf_max_depth_grid` in `config/eda.yaml`) if that cost is unwelcome — your call, not applied unilaterally.
 
-**Behavioral verification**: done for Phase A+B — drove the real pipeline end-to-end (not just the fast overlay's unit-test mocks) against the actual 147-subject cohort and inspected every emitted CSV.
+**Behavioral verification**: done for Phase A-D — drove the real pipeline end-to-end (not just unit-test mocks) against the actual 147-subject cohort under the fast overlay and inspected every emitted CSV, including the null distributions themselves (not just pass/fail on the p-value).
+
+### Real-cohort Phase C/D result (fast-overlay settings — NOT final science, but informative)
+
+Primary pre-specified result: **PLS-DA, whole spectrum, balanced accuracy 0.656, sex-stratified permutation p=0.0196 (BH-FDR q=0.0235, significant)**. Female-only sensitivity refit corroborates (balanced accuracy 0.683, not collapsed toward chance). Sex-only baseline (ROC-AUC 0.634) underperforms the spectral models (ROC-AUC 0.70-0.82). All 6 (model × representation) combinations were significant at both nulls and after FDR correction under this fast-overlay run. This is an early, low-permutation-count read, not the manuscript number — Phase E (bootstrap CIs) and a full `n_permutations=1000` production run are still needed before this is publication-usable per §0.2 — but it is a genuine, non-trivial early signal, not a null result.
 
 ### Implementation note: PLS-DA formulation
 

@@ -22,10 +22,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from scipy import stats
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.inspection import permutation_importance
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     average_precision_score,
     balanced_accuracy_score,
@@ -45,6 +47,7 @@ from src.analysis.clinical_feature_associations import (
 from src.analysis.io_utils import write_csv_atomic
 from src.analysis.pls_regression import _calculate_vip
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
+from src.analysis.statistics import fdr_correction
 from src.data_preparation import resolve_data_source, write_analysis_provenance
 
 logger = logging.getLogger(__name__)
@@ -598,6 +601,134 @@ def _run_repeated_nested_cv(
     return pd.DataFrame(rows)
 
 
+def _single_split_balanced_accuracy(
+    model_name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    ml_cfg: dict[str, Any],
+    n_jobs: int,
+    random_state: int,
+) -> float:
+    """Run one un-repeated outer StratifiedKFold pass; return balanced accuracy.
+
+    This is the permutation-test workhorse. Permutation only needs a point
+    estimate per null draw — the null distribution's spread across draws
+    already captures Monte Carlo noise, so repeating the outer CV per
+    permutation (as Phase B does for the observed estimate) would multiply
+    cost by n_outer_repeats for no statistical benefit. This mirrors the
+    single-split-per-permutation convention already used by
+    `splsda._permuted_splsda_score` and `pls_regression._permuted_pls_r2`
+    elsewhere in this repo.
+    """
+    n_outer_splits = int(ml_cfg.get("n_outer_splits", 5))
+    n_inner_splits = int(ml_cfg.get("n_inner_splits", 4))
+    threshold_metric = str(ml_cfg.get("threshold_metric", "balanced_accuracy"))
+
+    n_splits = min(n_outer_splits, int(np.bincount(y).min()))
+    outer_cv = list(StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state).split(X, y))
+
+    if model_name == "pls_da":
+        y_pred, _y_score = _nested_cv_pls_da(
+            X, y,
+            component_grid=list(ml_cfg.get("pls_components_grid", [1, 2, 3, 4, 5, 6, 8, 10])),
+            outer_cv=outer_cv,
+            n_inner_splits=n_inner_splits,
+            threshold_metric=threshold_metric,
+            random_state=random_state,
+        )
+    elif model_name == "l1_logistic":
+        y_pred, _y_score = _nested_cv_logistic(
+            X, y,
+            c_grid=list(ml_cfg.get("logistic_c_grid", [0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0])),
+            outer_cv=outer_cv,
+            n_inner_splits=n_inner_splits,
+            threshold_metric=threshold_metric,
+            random_state=random_state,
+        )
+    elif model_name == "random_forest":
+        y_pred, _y_score = _nested_cv_random_forest(
+            X, y,
+            n_estimators_grid=list(ml_cfg.get("rf_n_estimators_grid", [200, 500])),
+            max_depth_grid=list(ml_cfg.get("rf_max_depth_grid", [None, 4, 8])),
+            outer_cv=outer_cv,
+            n_inner_splits=n_inner_splits,
+            threshold_metric=threshold_metric,
+            random_state=random_state,
+            n_jobs=1,  # parallelism is used across permutations instead, not within one
+        )
+    else:
+        raise ValueError(f"Unknown model '{model_name}'")
+
+    return float(balanced_accuracy_score(y, y_pred))
+
+
+def _permute_labels(y: np.ndarray, rng: np.random.Generator, strata: np.ndarray | None) -> np.ndarray:
+    """Permute y unrestricted, or within each stratum (preserving stratum-label association)."""
+    if strata is None:
+        return rng.permutation(y)
+    y_perm = y.copy()
+    for stratum_value in np.unique(strata):
+        mask = strata == stratum_value
+        y_perm[mask] = rng.permutation(y[mask])
+    return y_perm
+
+
+def _permuted_score(
+    model_name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    strata: np.ndarray | None,
+    ml_cfg: dict[str, Any],
+    seed: int,
+) -> float:
+    rng = np.random.default_rng(seed)
+    y_perm = _permute_labels(y, rng, strata)
+    if len(np.unique(y_perm)) < 2:
+        return np.nan
+    return _single_split_balanced_accuracy(model_name, X, y_perm, ml_cfg=ml_cfg, n_jobs=1, random_state=seed)
+
+
+def run_permutation_test(
+    model_name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    observed_balanced_accuracy: float,
+    strata: np.ndarray | None,
+    ml_cfg: dict[str, Any],
+    n_jobs: int,
+    random_state: int,
+) -> tuple[float, np.ndarray]:
+    """Full-pipeline label-permutation test. Returns (p_value, null_distribution).
+
+    p = (1 + #{null >= observed}) / (n_permutations + 1). `strata` is None for
+    the unrestricted null, or an array of per-subject sex labels for the
+    sex-stratified null (§0.1): permuting within sex strata preserves the
+    real sex-class association, so a model that only reads sex will score no
+    better under this null than under the unpermuted data.
+    """
+    n_permutations = int(ml_cfg.get("n_permutations", 1000))
+    rng = np.random.default_rng(random_state)
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
+
+    if n_jobs == 1:
+        null_scores = [
+            _permuted_score(model_name, X, y, strata, ml_cfg, int(seed)) for seed in seeds
+        ]
+    else:
+        null_scores = Parallel(n_jobs=n_jobs)(
+            delayed(_permuted_score)(model_name, X, y, strata, ml_cfg, int(seed)) for seed in seeds
+        )
+
+    null_arr = np.array(null_scores, dtype=float)
+    finite_null = null_arr[np.isfinite(null_arr)]
+    if len(finite_null) == 0:
+        return np.nan, finite_null
+    p_value = float((1 + np.sum(finite_null >= observed_balanced_accuracy)) / (len(finite_null) + 1))
+    return p_value, finite_null
+
+
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
@@ -724,8 +855,94 @@ def _feature_importance(
 
 
 # ---------------------------------------------------------------------------
-# Public entry point (Phase A + Phase B only — permutation/bootstrap/report
-# land in a follow-up phase per plan_ml.md)
+# Phase C: sex-confound battery
+# ---------------------------------------------------------------------------
+
+_MIN_SUBJECTS_PER_CLASS_STRATIFIED = 10
+
+
+def _sex_column(frame: pd.DataFrame) -> str | None:
+    return next((c for c in ("gender", "sex") if c in frame.columns), None)
+
+
+def _sex_only_baseline(frame: pd.DataFrame, y: np.ndarray, valid_rows: np.ndarray) -> dict[str, object]:
+    """Logistic model using sex alone. The spectral model must beat this to
+    support any spectral claim (§0.1) — it is not itself a claim of anything.
+    """
+    sex_column = _sex_column(frame)
+    if sex_column is None:
+        return {"status": "missing_sex_column"}
+
+    sex_values = frame.loc[valid_rows, sex_column].astype(str).to_numpy()
+    y_valid = y[valid_rows]
+    X_sex = (sex_values == "male").astype(float).reshape(-1, 1)
+
+    n_splits = min(5, int(np.bincount(y_valid).min()))
+    if n_splits < 2:
+        return {"status": "insufficient_class_size_for_cv"}
+
+    outer_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    y_pred = np.zeros_like(y_valid, dtype=int)
+    y_score = np.zeros_like(y_valid, dtype=float)
+    for train_idx, test_idx in outer_cv.split(X_sex, y_valid):
+        model = LogisticRegression(class_weight="balanced", random_state=42, max_iter=1000)
+        fit_with_convergence_capture(model, X_sex[train_idx], y_valid[train_idx], context="sex-only baseline")
+        y_score[test_idx] = model.predict_proba(X_sex[test_idx])[:, 1]
+        threshold = _tune_threshold(y_valid[train_idx], model.predict_proba(X_sex[train_idx])[:, 1], "balanced_accuracy")
+        y_pred[test_idx] = (y_score[test_idx] >= threshold).astype(int)
+
+    metrics = _classification_metrics(y_valid, y_pred, y_score)
+    return {"status": "ok", **{f"sex_only_{k}": v for k, v in metrics.items()}}
+
+
+def _sex_stratified_refit(
+    model_name: str,
+    representation: str,
+    frame: pd.DataFrame,
+    X: np.ndarray,
+    y: np.ndarray,
+    valid_rows: np.ndarray,
+    *,
+    ml_cfg: dict[str, Any],
+    n_jobs: int,
+) -> dict[str, object]:
+    """Refit + evaluate the full nested-CV pipeline within the female-only subset.
+
+    Female-only is used because it is the sex stratum with adequate, roughly
+    balanced n in this cohort (45 disease / 40 control); the male stratum
+    (52 disease / 10 control) is too imbalanced for inference and is reported
+    descriptively only via n counts in cohort_summary.csv, not refit here.
+    """
+    sex_column = _sex_column(frame)
+    if sex_column is None:
+        return {"status": "missing_sex_column"}
+
+    sex_values = frame.loc[valid_rows, sex_column].astype(str).to_numpy()
+    female_mask = sex_values == "female"
+    X_female = X[female_mask]
+    y_female = y[female_mask]
+
+    n_control = int((y_female == 0).sum())
+    n_disease = int((y_female == 1).sum())
+    if n_control < _MIN_SUBJECTS_PER_CLASS_STRATIFIED or n_disease < _MIN_SUBJECTS_PER_CLASS_STRATIFIED:
+        return {
+            "status": "insufficient_n",
+            "n_female_control": n_control,
+            "n_female_disease": n_disease,
+        }
+
+    oof = _run_repeated_nested_cv(model_name, X_female, y_female, ml_cfg=ml_cfg, n_jobs=n_jobs)
+    metrics = _aggregate_repeat_metrics(oof)
+    return {
+        "status": "ok",
+        "n_female_control": n_control,
+        "n_female_disease": n_disease,
+        **{f"female_only_{k}": v for k, v in metrics.items()},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
 # ---------------------------------------------------------------------------
 
 
@@ -756,8 +973,13 @@ def run_control_vs_disease_ml_pipeline(
 
     representations = list(ml_cfg.get("representations", ["whole", "band_panel"]))
     n_jobs = _normalize_n_jobs(int(ml_cfg.get("n_jobs", -1)))
+    random_state = int(ml_cfg.get("random_state", 42))
+    stratify_by = ml_cfg.get("stratify_permutation_by")
 
     comparison_rows: list[dict[str, object]] = []
+    confounder_rows: list[dict[str, object]] = []
+    null_distribution_rows: list[dict[str, object]] = []
+
     for representation in representations:
         with _phase_timer(
             phase_timings, f"features_{representation}", f"Build {representation} feature matrix"
@@ -773,6 +995,15 @@ def run_control_vs_disease_ml_pipeline(
             X_valid = X[valid_rows]
             y_valid = y[valid_rows]
 
+        sex_column = _sex_column(frame)
+        strata = (
+            frame.loc[valid_rows, sex_column].astype(str).to_numpy()
+            if (sex_column is not None and stratify_by == "sex")
+            else None
+        )
+
+        sex_only = _sex_only_baseline(frame, y, valid_rows)
+
         for model_name in _MODEL_EVALUATORS:
             with _phase_timer(
                 phase_timings, f"{model_name}_{representation}", f"{model_name} ({representation}) nested CV"
@@ -784,14 +1015,7 @@ def run_control_vs_disease_ml_pipeline(
                 outputs[f"{model_name}_{representation}_cv_predictions"] = oof_path
 
                 metrics = _aggregate_repeat_metrics(oof)
-                comparison_rows.append(
-                    {
-                        "model": model_name,
-                        "representation": representation,
-                        "n_subjects": int(len(y_valid)),
-                        **metrics,
-                    }
-                )
+                observed_balanced_accuracy = metrics["balanced_accuracy_mean"]
 
                 importance_df = _feature_importance(
                     model_name, X_valid, y_valid, feature_names, ml_cfg=ml_cfg, n_jobs=n_jobs
@@ -803,11 +1027,112 @@ def run_control_vs_disease_ml_pipeline(
                 )
                 outputs[f"{model_name}_{representation}_feature_importance"] = importance_path
 
+            with _phase_timer(
+                phase_timings,
+                f"{model_name}_{representation}_permutation",
+                f"{model_name} ({representation}) permutation test (unrestricted)",
+            ):
+                p_unrestricted, null_unrestricted = run_permutation_test(
+                    model_name, X_valid, y_valid,
+                    observed_balanced_accuracy=observed_balanced_accuracy,
+                    strata=None,
+                    ml_cfg=ml_cfg,
+                    n_jobs=n_jobs,
+                    random_state=random_state,
+                )
+
+            p_sex_stratified, null_sex_stratified = np.nan, np.array([])
+            if strata is not None:
+                with _phase_timer(
+                    phase_timings,
+                    f"{model_name}_{representation}_permutation_sex",
+                    f"{model_name} ({representation}) permutation test (sex-stratified)",
+                ):
+                    p_sex_stratified, null_sex_stratified = run_permutation_test(
+                        model_name, X_valid, y_valid,
+                        observed_balanced_accuracy=observed_balanced_accuracy,
+                        strata=strata,
+                        ml_cfg=ml_cfg,
+                        n_jobs=n_jobs,
+                        random_state=random_state + 1,
+                    )
+
+            for null_arr, null_kind in (
+                (null_unrestricted, "unrestricted"),
+                (null_sex_stratified, "sex_stratified"),
+            ):
+                for value in null_arr:
+                    null_distribution_rows.append(
+                        {
+                            "model": model_name,
+                            "representation": representation,
+                            "null_type": null_kind,
+                            "null_balanced_accuracy": float(value),
+                        }
+                    )
+
+            comparison_rows.append(
+                {
+                    "model": model_name,
+                    "representation": representation,
+                    "n_subjects": int(len(y_valid)),
+                    **metrics,
+                    "permutation_p_value_unrestricted": p_unrestricted,
+                    "permutation_p_value_sex_stratified": p_sex_stratified,
+                    "n_permutations": int(ml_cfg.get("n_permutations", 1000)),
+                    "is_primary_model": (
+                        model_name == ml_cfg.get("primary_model")
+                        and representation == ml_cfg.get("primary_representation")
+                    ),
+                }
+            )
+
+            with _phase_timer(
+                phase_timings,
+                f"{model_name}_{representation}_sex_refit",
+                f"{model_name} ({representation}) female-only sensitivity refit",
+            ):
+                female_refit = _sex_stratified_refit(
+                    model_name, representation, frame, X_valid, y_valid, valid_rows,
+                    ml_cfg=ml_cfg, n_jobs=n_jobs,
+                )
+
+            confounder_rows.append(
+                {
+                    "model": model_name,
+                    "representation": representation,
+                    **female_refit,
+                    **sex_only,
+                }
+            )
+
     with _phase_timer(phase_timings, "model_comparison", "Write model comparison table"):
         comparison_df = pd.DataFrame(comparison_rows)
+        primary_mask = comparison_df["is_primary_model"].astype(bool)
+        family_p = comparison_df["permutation_p_value_sex_stratified"].fillna(
+            comparison_df["permutation_p_value_unrestricted"]
+        ).to_numpy(dtype=float)
+        fdr_q, fdr_significant = fdr_correction(family_p, alpha=0.05)
+        comparison_df["permutation_p_fdr_q"] = fdr_q
+        comparison_df["permutation_fdr_significant"] = fdr_significant
         comparison_df.insert(0, "positive_class", POSITIVE_CLASS_LABEL)
         comparison_path = write_csv_atomic(comparison_df, target_dir / "model_comparison.csv", index=False)
         outputs["model_comparison"] = comparison_path
+        if primary_mask.any():
+            logger.info(
+                "Primary result: %s",
+                comparison_df.loc[primary_mask, ["model", "representation", "balanced_accuracy_mean", "permutation_p_value_sex_stratified"]].to_dict("records"),
+            )
+
+    with _phase_timer(phase_timings, "confounder_analysis", "Write confounder analysis table"):
+        confounder_df = pd.DataFrame(confounder_rows)
+        confounder_path = write_csv_atomic(confounder_df, target_dir / "confounder_analysis.csv", index=False)
+        outputs["confounder_analysis"] = confounder_path
+
+    with _phase_timer(phase_timings, "null_distributions", "Write permutation null distributions"):
+        null_df = pd.DataFrame(null_distribution_rows)
+        null_path = write_csv_atomic(null_df, target_dir / "permutation_null_distributions.csv", index=False)
+        outputs["permutation_null_distributions"] = null_path
 
     with _phase_timer(phase_timings, "provenance", "Write provenance artifacts"):
         write_analysis_provenance(

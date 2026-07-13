@@ -1,4 +1,4 @@
-"""Tests for the control-vs-disease ML classification layer (Phase A + Phase B)."""
+"""Tests for the control-vs-disease ML classification layer (Phase A-D)."""
 
 from __future__ import annotations
 
@@ -16,13 +16,17 @@ from src.analysis.control_vs_disease_ml import (
     _fit_tuned_pls_da,
     _labels,
     _load_cohort,
+    _permute_labels,
     _representation_matrix,
     _run_repeated_nested_cv,
+    _sex_only_baseline,
+    _sex_stratified_refit,
+    _single_split_balanced_accuracy,
     _tune_threshold,
     run_control_vs_disease_ml_pipeline,
+    run_permutation_test,
 )
 from src.analysis.eda_mode import validate_control_vs_disease_ml_config
-
 
 N_FEATURES = 12
 
@@ -367,6 +371,203 @@ def test_repeated_nested_cv_is_deterministic(base_ml_cfg: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase D: permutation tests
+# ---------------------------------------------------------------------------
+
+
+def _small_permutation_cfg(base_ml_cfg: dict) -> dict:
+    ml_cfg = dict(base_ml_cfg["analysis"]["control_vs_disease_ml"])
+    ml_cfg["n_permutations"] = 30
+    ml_cfg["n_outer_splits"] = 3
+    ml_cfg["n_inner_splits"] = 2
+    ml_cfg["logistic_c_grid"] = [0.1, 1.0]
+    return ml_cfg
+
+
+def test_permute_labels_unrestricted_preserves_class_counts() -> None:
+    rng = np.random.default_rng(0)
+    y = np.array([0] * 20 + [1] * 10)
+    y_perm = _permute_labels(y, rng, strata=None)
+    assert sorted(y_perm.tolist()) == sorted(y.tolist())
+
+
+def test_permute_labels_stratified_preserves_within_stratum_counts() -> None:
+    rng = np.random.default_rng(0)
+    y = np.array([0, 0, 0, 1, 1, 1, 0, 0, 1, 1])
+    strata = np.array(["f", "f", "f", "f", "f", "m", "m", "m", "m", "m"])
+    y_perm = _permute_labels(y, rng, strata)
+    for stratum in ("f", "m"):
+        mask = strata == stratum
+        assert sorted(y_perm[mask].tolist()) == sorted(y[mask].tolist())
+
+
+def test_permutation_p_value_bounded(base_ml_cfg: dict) -> None:
+    frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=1.0, random_state=3)
+    X, _names = _representation_matrix(frame, "whole", base_ml_cfg["whole_spectra"])
+    y = _labels(frame)
+    ml_cfg = _small_permutation_cfg(base_ml_cfg)
+
+    observed = _single_split_balanced_accuracy("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
+    p_value, null_dist = run_permutation_test(
+        "l1_logistic", X, y,
+        observed_balanced_accuracy=observed,
+        strata=None,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=42,
+    )
+    assert 0.0 < p_value <= 1.0
+    assert len(null_dist) == ml_cfg["n_permutations"]
+
+
+def test_permutation_null_centers_near_chance_on_pure_noise(base_ml_cfg: dict) -> None:
+    """With no real signal, the permutation null and the observed statistic should
+    both hover near balanced-accuracy 0.5 - i.e. permuting labels on noise data
+    should not manufacture a small p-value.
+    """
+    frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=0.0, random_state=4)
+    X, _names = _representation_matrix(frame, "whole", base_ml_cfg["whole_spectra"])
+    y = _labels(frame)
+    ml_cfg = _small_permutation_cfg(base_ml_cfg)
+    ml_cfg["n_permutations"] = 40
+
+    observed = _single_split_balanced_accuracy("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
+    p_value, null_dist = run_permutation_test(
+        "l1_logistic", X, y,
+        observed_balanced_accuracy=observed,
+        strata=None,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=42,
+    )
+    # Not a strict guarantee (this is a stochastic test on noise data), but a
+    # complete false positive (p < 0.05 on pure noise) should be rare given
+    # the null and observed are drawn from the same no-signal process.
+    assert p_value > 0.05
+
+
+def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> None:
+    """The decisive test: build a cohort where class is a PURE function of sex
+    (no independent disease signal at all) and confirm:
+      - the UNRESTRICTED permutation null is fooled (small p-value, because the
+        model IS discriminating classes, just via sex, and unrestricted
+        permutation destroys the sex-class link the model relies on) — proving
+        an unrestricted null alone would falsely look like a real spectral finding.
+      - the SEX-STRATIFIED null is NOT fooled (large p-value), because permuting
+        within sex strata preserves the sex-class association the model is
+        actually exploiting, so permuted data score just as well as real data.
+
+    This is the test that proves the confound-handling machinery in Phase C/D
+    actually does its job, per plan_ml.md §2 invariant 5 and §0.1.
+    """
+    rng = np.random.default_rng(99)
+    n_female, n_male = 30, 30
+    sex = np.array(["female"] * n_female + ["male"] * n_male)
+    # Class is entirely determined by sex: all females control, all males disease.
+    is_control = np.array([True] * n_female + [False] * n_male)
+
+    feature_names_1300 = [f"1300__{1000 + j * 10}.0" for j in range(N_FEATURES // 2)]
+    feature_names_2850 = [f"2850__{2850 + j * 10}.0" for j in range(N_FEATURES - N_FEATURES // 2)]
+    all_names = feature_names_1300 + feature_names_2850
+
+    n_total = n_female + n_male
+    X = rng.normal(0, 1, size=(n_total, N_FEATURES))
+    # Signal is driven by SEX only, not by an independent disease effect.
+    X += (sex == "male").astype(float)[:, None] * 2.0
+
+    frame = pd.DataFrame({"is_control": is_control, "gender": sex})
+    for j, name in enumerate(all_names):
+        frame[name] = X[:, j]
+
+    y = _labels(frame)
+    Xw, _names = _representation_matrix(frame, "whole", {})
+
+    ml_cfg = _small_permutation_cfg(base_ml_cfg)
+    ml_cfg["n_permutations"] = 60
+
+    observed = _single_split_balanced_accuracy("l1_logistic", Xw, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
+    assert observed > 0.9, "sanity check: sex-driven signal should be trivially separable"
+
+    p_unrestricted, _null_u = run_permutation_test(
+        "l1_logistic", Xw, y,
+        observed_balanced_accuracy=observed,
+        strata=None,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=1,
+    )
+    p_sex_stratified, _null_s = run_permutation_test(
+        "l1_logistic", Xw, y,
+        observed_balanced_accuracy=observed,
+        strata=sex,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=2,
+    )
+
+    assert p_unrestricted < 0.05, (
+        f"unrestricted null should be fooled by pure sex-confounded signal (p={p_unrestricted})"
+    )
+    assert p_sex_stratified > 0.05, (
+        f"sex-stratified null should NOT be fooled by pure sex-confounded signal (p={p_sex_stratified})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase C: sex-confound battery
+# ---------------------------------------------------------------------------
+
+
+def test_sex_only_baseline_reports_metrics_when_sex_present() -> None:
+    frame = _make_feature_matrix(n_control=15, n_disease=18, sex_confound_strength=1.0, random_state=6)
+    y = _labels(frame)
+    valid_rows = np.ones(len(frame), dtype=bool)
+    result = _sex_only_baseline(frame, y, valid_rows)
+    assert result["status"] == "ok"
+    assert "sex_only_balanced_accuracy" in result
+
+
+def test_sex_only_baseline_missing_sex_column_reports_status() -> None:
+    frame = _make_feature_matrix(n_control=15, n_disease=18)
+    frame = frame.drop(columns=["gender"])
+    y = _labels(frame)
+    valid_rows = np.ones(len(frame), dtype=bool)
+    result = _sex_only_baseline(frame, y, valid_rows)
+    assert result["status"] == "missing_sex_column"
+
+
+def test_sex_stratified_refit_reports_female_only_metrics(base_ml_cfg: dict) -> None:
+    frame = _make_feature_matrix(n_control=25, n_disease=25, signal_strength=1.0, random_state=8)
+    # Force an adequately sized, balanced female stratum.
+    frame["gender"] = ["female"] * 40 + ["male"] * 10
+    y = _labels(frame)
+    valid_rows = np.ones(len(frame), dtype=bool)
+    X, _names = _representation_matrix(frame, "whole", {})
+    ml_cfg = _small_permutation_cfg(base_ml_cfg)
+
+    result = _sex_stratified_refit(
+        "l1_logistic", "whole", frame, X, y, valid_rows, ml_cfg=ml_cfg, n_jobs=1
+    )
+    assert result["status"] == "ok"
+    assert "female_only_balanced_accuracy_mean" in result
+
+
+def test_sex_stratified_refit_insufficient_n_reports_status(base_ml_cfg: dict) -> None:
+    frame = _make_feature_matrix(n_control=15, n_disease=18, random_state=9)
+    # Almost no females -> insufficient n for a female-only refit.
+    frame["gender"] = ["female"] * 3 + ["male"] * (len(frame) - 3)
+    y = _labels(frame)
+    valid_rows = np.ones(len(frame), dtype=bool)
+    X, _names = _representation_matrix(frame, "whole", {})
+    ml_cfg = _small_permutation_cfg(base_ml_cfg)
+
+    result = _sex_stratified_refit(
+        "l1_logistic", "whole", frame, X, y, valid_rows, ml_cfg=ml_cfg, n_jobs=1
+    )
+    assert result["status"] == "insufficient_n"
+
+
+# ---------------------------------------------------------------------------
 # Config validation
 # ---------------------------------------------------------------------------
 
@@ -426,6 +627,8 @@ def test_runner_smoke_produces_expected_outputs(
 
     assert (out_dir / "cohort_summary.csv").exists()
     assert (out_dir / "model_comparison.csv").exists()
+    assert (out_dir / "confounder_analysis.csv").exists()
+    assert (out_dir / "permutation_null_distributions.csv").exists()
 
     comparison = pd.read_csv(out_dir / "model_comparison.csv")
     n_models = 3
@@ -437,6 +640,21 @@ def test_runner_smoke_produces_expected_outputs(
     assert "balanced_accuracy_mean" in comparison.columns
     assert "roc_auc_mean" in comparison.columns
 
+    assert "permutation_p_value_unrestricted" in comparison.columns
+    assert "permutation_p_value_sex_stratified" in comparison.columns
+    assert "permutation_p_fdr_q" in comparison.columns
+    p_unrestricted = comparison["permutation_p_value_unrestricted"].dropna()
+    assert (p_unrestricted > 0).all() and (p_unrestricted <= 1).all()
+    # Exactly one (model, representation) row is pre-specified as primary per plan_ml.md §2.
+    assert comparison["is_primary_model"].sum() == 1
+
+    confounder = pd.read_csv(out_dir / "confounder_analysis.csv")
+    assert len(confounder) == n_models * n_representations
+    assert "status" in confounder.columns
+
+    null_dist = pd.read_csv(out_dir / "permutation_null_distributions.csv")
+    assert set(null_dist["null_type"].unique()) <= {"unrestricted", "sex_stratified"}
+
     for model_name in ("pls_da", "l1_logistic", "random_forest"):
         for representation in ("whole", "band_panel"):
             pred_path = out_dir / f"{model_name}_{representation}_cv_predictions.csv"
@@ -446,6 +664,7 @@ def test_runner_smoke_produces_expected_outputs(
 
     assert "cohort_summary" in outputs
     assert "model_comparison" in outputs
+    assert "confounder_analysis" in outputs
     _mock_write_provenance.assert_called_once()
 
 
