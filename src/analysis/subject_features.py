@@ -20,6 +20,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SPECTRAL_PREFIXES = ("1300__", "2850__")
+# Baseline-corrected, un-normalized companion features (positive-valued basis for
+# physical band-integral intensities; see src/analysis/biochemical_ratios.py).
+# Kept out of the SNV/area SPECTRAL_PREFIXES matrices and exported separately so the
+# "whole" matrix's {1300, 2850} block-identity invariant stays exact.
+SPECTRAL_BC_PREFIXES = ("1300_bc__", "2850_bc__")
 RUNTIME_ENDPOINT_COLUMNS = (
     "moca_baseline",
     "moca_3m",
@@ -210,10 +215,15 @@ def build_subject_feature_matrices(
     spectral_columns = [
         column for column in subject_spectra.columns if column.startswith(SPECTRAL_PREFIXES)
     ]
+    bc_columns = [
+        column for column in subject_spectra.columns if column.startswith(SPECTRAL_BC_PREFIXES)
+    ]
     non_spectral = [
         column
         for column in base.columns
-        if column not in spectral_columns and not column.endswith("_provenance")
+        if column not in spectral_columns
+        and column not in bc_columns
+        and not column.endswith("_provenance")
     ]
 
     block_features = {
@@ -229,6 +239,11 @@ def build_subject_feature_matrices(
         filename = f"subject_feature_matrix_{block}.parquet"
         _validate_subject_feature_matrix(frame, filename, features)
         matrices[block] = frame
+
+    if bc_columns:
+        bc_frame = base[["subject_id"] + bc_columns].copy()
+        _validate_subject_feature_matrix(bc_frame, "subject_feature_matrix_whole_bc.parquet", bc_columns)
+        matrices["whole_bc"] = bc_frame
 
     return matrices, provenance
 
@@ -249,15 +264,20 @@ def write_subject_feature_exports(
         "2850": target_dir / "subject_feature_matrix_2850.parquet",
         "whole": target_dir / "subject_feature_matrix_whole.parquet",
     }
+    if "whole_bc" in matrices:
+        paths["whole_bc"] = target_dir / "subject_feature_matrix_whole_bc.parquet"
     for block, path in paths.items():
         matrices[block].to_parquet(path, index=False)
 
     provenance_path = target_dir / "subject_feature_provenance.csv"
     provenance.to_csv(provenance_path, index=False)
 
-    return {
+    outputs = {
         "subject_feature_matrix_1300": paths["1300"],
         "subject_feature_matrix_2850": paths["2850"],
         "subject_feature_matrix_whole": paths["whole"],
         "subject_feature_provenance": provenance_path,
     }
+    if "whole_bc" in paths:
+        outputs["subject_feature_matrix_whole_bc"] = paths["whole_bc"]
+    return outputs

@@ -513,6 +513,15 @@ def _build_subject_inputs_from_materialized_store(max_subjects: int | None = Non
             )
             for shift, value in zip(axes[block], median):
                 feature_values[f"{block}__{float(shift):.1f}"] = float(value)
+            # Baseline-corrected, un-normalized companion (positive-valued basis for
+            # physical band-integral intensities, e.g. src/analysis/biochemical_ratios.py).
+            # Descriptive-export only: never feeds matrices/matrix_arrays, so it cannot
+            # influence the PCA fit.
+            if "area_summary_bc" in payloads[block]:
+                block_matrix_bc = np.asarray(payloads[block]["area_summary_bc"][mask], dtype=float)
+                median_bc = np.nanmedian(block_matrix_bc, axis=0)
+                for shift, value in zip(axes[block], median_bc):
+                    feature_values[f"{block}_bc__{float(shift):.1f}"] = float(value)
 
         subject_rows.append(
             {

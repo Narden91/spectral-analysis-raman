@@ -62,12 +62,29 @@ def _feature_matrix() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _bc_feature_matrix(feature_matrix: pd.DataFrame) -> pd.DataFrame:
+    # Baseline-corrected companion: same subject_ids, positive-valued un-normalized
+    # basis. Values need not match the SNV/area columns in the fixture above — only
+    # the subject_id + "<block>_bc__<shift>" schema matters for this test.
+    bc = feature_matrix[["subject_id"]].copy()
+    for column in feature_matrix.columns:
+        if column.startswith("1300__"):
+            bc[column.replace("1300__", "1300_bc__")] = feature_matrix[column].abs()
+        elif column.startswith("2850__"):
+            bc[column.replace("2850__", "2850_bc__")] = feature_matrix[column].abs()
+    return bc
+
+
 def test_run_biochemical_ratios_writes_expected_outputs(tmp_path: Path) -> None:
+    feature_matrix = _feature_matrix()
     matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
-    _feature_matrix().to_parquet(matrix_path, index=False)
+    feature_matrix.to_parquet(matrix_path, index=False)
+    bc_matrix_path = tmp_path / "subject_feature_matrix_whole_bc.parquet"
+    _bc_feature_matrix(feature_matrix).to_parquet(bc_matrix_path, index=False)
 
     outputs = run_biochemical_ratios(
         feature_matrix_path=matrix_path,
+        bc_feature_matrix_path=bc_matrix_path,
         output_dir=tmp_path / "10_biochemical_ratios",
         cfg=_cfg(),
     )
@@ -93,3 +110,32 @@ def test_run_biochemical_ratios_disabled_returns_empty(tmp_path: Path) -> None:
         cfg={"analysis": {"biochemical_ratios": {"enabled": False}}},
     )
     assert outputs == {}
+
+
+def test_band_integrals_use_positive_bc_basis_not_signed_snv(tmp_path: Path) -> None:
+    """Band integrals must come from the baseline-corrected (_bc) basis, not the
+    signed SNV feature matrix — trapezoid-integrating a mean-centered signal is not
+    a physical band intensity (see CLAUDE.md preprocessing normalization notes).
+    """
+    feature_matrix = _feature_matrix()
+    # Force signed/mean-centered values (as real SNV output would have) so this
+    # test actually exercises the sign-safety property, not incidentally-positive data.
+    feature_matrix["1300__1240.0"] -= feature_matrix["1300__1240.0"].mean()
+    assert (feature_matrix["1300__1240.0"] < 0).any()
+
+    matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
+    feature_matrix.to_parquet(matrix_path, index=False)
+    bc_matrix_path = tmp_path / "subject_feature_matrix_whole_bc.parquet"
+    _bc_feature_matrix(feature_matrix).to_parquet(bc_matrix_path, index=False)
+
+    outputs = run_biochemical_ratios(
+        feature_matrix_path=matrix_path,
+        bc_feature_matrix_path=bc_matrix_path,
+        output_dir=tmp_path / "10_biochemical_ratios",
+        cfg=_cfg(),
+    )
+    bands = pd.read_csv(outputs["biochemical_band_integrals"])
+    # _bc_feature_matrix() builds the companion basis as abs() of the SNV columns,
+    # so every band integral must be non-negative if it was computed on that basis.
+    assert (bands["amide_iii_1258"] >= 0).all()
+    assert (bands["ch2_sym_stretch_2853"] >= 0).all()

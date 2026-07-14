@@ -31,6 +31,15 @@ The codebase follows a modular structure:
 
 Configuration is YAML-based. Track configs use `_extends`; `config/eda.yaml` owns EDA, Biological PCA, and control-vs-disease ML settings.
 
+## 2b. Preprocessing & Normalization (`src/preprocessing/pipeline.py`)
+
+Single implementation, orchestrated by `run_preprocessing`. Order: QC metrics → dead-pixel screen → cosmic-ray suppression → edge trim → **arPLS baseline correction** (`corrected = row - baseline`) → SNR/area quality gate → isolated-spike repair → optional Savitzky-Golay smoothing → optional interpolation → **normalization (last)**.
+
+- **Negative values after preprocessing are expected, not a bug.** Two intentional sources: (1) arPLS baseline subtraction with `quality_filter.baseline_clip.enabled: false` (`config/settings.yaml`) — signed residuals are deliberately preserved, standard Raman practice; (2) SNV normalization on the fingerprint region mean-centers the spectrum, making roughly half the channels negative by construction. `PCA_whole` additionally mean-centers each block before joint PCA (`src/analysis/joint_dr.py`).
+- **Normalization differs by region, intentionally**: fingerprint (1300) = **SNV** (signed, standardized), CH-stretch (2850) = **area** (unsigned scale). Config: `preprocessing.ranges.{fingerprint,ch_stretch}.normalization.method` in `config/settings.yaml`. `PCA_whole` reconciles the scale mismatch via MFA-style block centering + division by `sqrt(first eigenvalue)` per block (`src/analysis/joint_dr.py`) before joint PCA — see §6.
+- **Physical band intensities (Phase 8 biochemical ratios) must not be trapezoid-integrated over signed SNV data.** A "band area" of a mean-centered signal is not a physical intensity. The materialized preprocessed store therefore also carries a **baseline-corrected, un-normalized companion** (`area_summary_bc` in `data/preprocessed/area_summaries_{1300,2850}.npz`, produced by a second `run_preprocessing(..., normalize=False)` call with identical QC/baseline kwargs — deterministic, so it retains the same pixel population as the normalized pass). This surfaces as `{1300,2850}_bc__<shift>` subject-level feature columns in a separate `subject_feature_matrix_whole_bc.parquet` (kept out of the primary `subject_feature_matrix_whole.parquet` so the `{1300, 2850}` block-identity invariant on that file stays exact — see §5 Phase 6/9). `src/analysis/biochemical_ratios.py` reads this basis via `load_subject_bc_feature_matrix()` / `bc_feature_columns()` (`src/analysis/clinical_feature_associations.py`); it raises rather than silently falling back to SNV if the `_bc` matrix or columns are missing. **SNV/area features are unchanged and remain authoritative for Biological PCA and the ML `whole`/`band_panel` representations** — only Phase 8's band-integral basis was routed to `_bc`; `minimal_panel.py`'s band *means* (not integrals, a nested-CV selection feature) intentionally stay on SNV/area.
+- Data-store schema is versioned (`src/data_preparation/manifest.py::SCHEMA_VERSION`); it was bumped when `area_summary_bc` was added. A schema mismatch fails loudly (`src/data_preparation/validation.py`) rather than silently rebuilding — rebuild explicitly with `uv run scripts/manage_data_store.py build --source preprocessed --force`.
+
 ## 3. Data Source Rules
 
 The repository supports three explicit source levels: `raw_text`, `parsed`, and `preprocessed` (default).
@@ -47,20 +56,26 @@ Outputs are routed through the resolved EDA analysis mode (`--analysis-mode` or 
 - **Disease vs Control**: `Results_control_vs_disease/`
 - **Disease Only**: `Results_intra_disease/`
 
-## 5. Disease-Only Pipeline (14 Phases)
+## 5. Disease-Only Pipeline
 
-The `disease_only` pipeline mode executes a comprehensive suite of cross-region summarizations and modelling, outputting to `Results_intra_disease/04_cross_region_summary/`.
+The `disease_only` pipeline mode executes a comprehensive suite of cross-region summarizations and modelling. Descriptive/association phases output to `Results_intra_disease/04_cross_region_summary/` as one flat, ascending-numbered sequence (`CROSS_REGION_PHASE_DIRS` in `src/__init__.py`). Predictive/classifier phases output to a separate top-level `Results_intra_disease/classification/` folder (`CLASSIFICATION_PHASE_DIRS`, resolved via `get_classification_phase_dir(phase_key)`) — kept apart so a reader never mistakes an exploratory classifier's output for a descriptive finding. All phase code resolves its output directory through these resolver functions — never construct these paths by string concatenation.
 
-- **Phases 1-5**: Base clinical correlation matrices, longitudinal delta MoCA testing, and disease-internal subject stratification.
-- **Phase 6 (Candidate Regions)**: Unifies hits from phases 1-5 into a consolidated, cluster-corrected table (`candidate_regions_cluster_corrected.csv`).
-- **Phase 7 (Covariate Models)**: Fits covariate-adjusted models (age, sex) on Phase 6 candidate regions and logs persistence.
-- **Phase 8 (PLS1 Regression)**: Supervised continuous modelling of endpoints with permutation testing and VIP selection.
-- **Phase 9 (PLS-L1DA)**: Supervised binary classifier, gated strictly by Phase 8 significance.
-- **Phase 10 (Biochemical Ratios)**: Computes targeted band-intensity ratios via trapezoidal integration using the supervisor-curated 21-band EV panel and assesses Spearman correlation with clinical endpoints.
-- **Phase 11 (Integrated Candidate Regions)**: Merges univariate hits, covariate persistence, biological PCA loading overlap, PLS VIP coverage, and biochemical interpretation into a single priority-ranked table (`High`/`Medium`/`Low`) written to `11_integrated_candidates/integrated_candidate_regions.csv`.
-- **Phase 12 (Disease Subgroups)**: Exploratory agglomerative Ward clustering evaluated via Gap statistic and bootstrap Adjusted Rand Index.
-- **Phase 13 (Minimal Candidate Panel)**: Selects 5–10 spectral peaks/ratios per endpoint using nested cross-validated ElasticNet / L1-penalized logistic regression with full-pipeline permutation testing and bootstrap selection-stability summaries. Candidate-derived modeling is skipped when no cluster-supported region passes its gate.
-- **Phase 14 (Publication Report)**: Generates a conservative markdown report and summary CSV that classifies findings as robust, exploratory, unstable, or confounded. Outputs `14_publication_report/candidate_region_report.md`, `candidate_region_summary.csv`, and `candidate_region_figures/`.
+**`04_cross_region_summary/` (descriptive/association, flat 01-10):**
+- **Phase 1 (Subject Features)** / **Phase 2 (Biological PCA Summary)**: subject-level feature exports and Biological PCA summary — shared inputs to every downstream phase. Phase 1 also writes `subject_feature_matrix_whole_bc.parquet`, the baseline-corrected/un-normalized companion consumed only by Phase 8 (§2b).
+- **Phases 3-5**: Base clinical correlation matrices, longitudinal delta MoCA testing, and disease-internal subject stratification. Each also emits a `*_candidate_regions.csv` byproduct consumed only by Phase 6 — not a standalone result.
+- **Phase 6 (Candidate Regions)**: Unifies hits from phases 1-5 into a consolidated, cluster-corrected table (`candidate_regions_cluster_corrected.csv`). This is the single canonical candidate-region table.
+- **Phase 7 (Covariate Models)**: Fits covariate-adjusted models (age, sex) on Phase 6 candidate regions and logs persistence — a confound-check, not a predictive model, so it stays in this sequence rather than `classification/`.
+- **Phase 8 (Biochemical Ratios)**: Computes targeted band-intensity ratios via trapezoidal integration using the supervisor-curated 21-band EV panel and assesses Spearman correlation with clinical endpoints. Integrates over the baseline-corrected, un-normalized `_bc` basis (§2b), not the SNV/area feature matrix, so integrated "intensities" stay physical.
+- **Phase 9 (Integrated Candidate Regions)**: Merges univariate hits, covariate persistence, biological PCA loading overlap, PLS VIP coverage, and biochemical interpretation into a single priority-ranked table (`High`/`Medium`/`Low`) written to `09_integrated_candidates/integrated_candidate_regions.csv`.
+- **Phase 10 (Publication Report)**: Generates a conservative markdown report and summary CSV that classifies findings as robust, exploratory, unstable, or confounded. Outputs `10_publication_report/candidate_region_report.md`, `candidate_region_summary.csv`, and `candidate_region_figures/`.
+
+**`classification/` (predictive/classifier phases, unnumbered — each a self-contained analysis, not a sequence):**
+- **PLS1 Regression** (`pls_regression/`): Supervised continuous modelling of endpoints with permutation testing and VIP selection.
+- **PLS-L1DA** (`splsda_exploratory_classifier/`): Supervised binary classifier, gated strictly by PLS1 Regression significance.
+- **Minimal Candidate Panel** (`minimal_panel/`): Selects 5–10 spectral peaks/ratios per endpoint using nested cross-validated ElasticNet / L1-penalized logistic regression with full-pipeline permutation testing and bootstrap selection-stability summaries. Candidate-derived modeling is skipped when no cluster-supported region passes its gate.
+- **Disease Subgroups** (`disease_subgroups/`): Exploratory agglomerative Ward clustering evaluated via Gap statistic and bootstrap Adjusted Rand Index.
+
+Phases that cannot run at the current sample size (below `min_subjects`) report their status in `00_run_metadata/phase_status.csv` instead of writing header-only CSVs — see §10.
 
 ## 6. Biological PCA Rules
 
@@ -107,3 +122,4 @@ Cross-region phases (`run_disease_only_cross_region_pipeline` in `src/analysis/d
 - **Use Existing Tools**: Prefer repo-local helpers, statistics functions (e.g., `src.statistics.cluster_permutation`), and established config patterns over new entry points or redundant logic.
 - **Version Control**: Keep generated artifacts out of version control.
 - **Non-Destructive Work**: Do not delete unrelated files from result directories; overwrite only deterministic output files.
+- **Skip-manifest, not stub files**: When a disease-only cross-region phase's entire input is empty (e.g. zero candidate regions survived an upstream phase, or no target reaches its configured `min_subjects`), the phase must not write header-only CSVs. It returns a status via `src/analysis/phase_status.py::PhaseStatus` instead; the orchestrator aggregates these into `00_run_metadata/phase_status.csv`. This does **not** apply to legitimate per-row status columns inside a populated table (e.g. a per-feature `insufficient_n` row in `biochemical_ratio_associations.csv`) — those must keep writing normally.

@@ -21,6 +21,9 @@ from src.statistics.cluster_permutation import (
 logger = logging.getLogger(__name__)
 
 FEATURE_PREFIXES = ("1300__", "2850__")
+# Baseline-corrected, un-normalized companion columns (positive-valued basis for
+# physical band-integral intensities). See src/analysis/subject_features.py.
+BC_FEATURE_PREFIXES = ("1300_bc__", "2850_bc__")
 
 
 def _feature_matrix_path(feature_matrix_path: str | Path | None = None) -> Path:
@@ -28,6 +31,14 @@ def _feature_matrix_path(feature_matrix_path: str | Path | None = None) -> Path:
         Path(feature_matrix_path)
         if feature_matrix_path is not None
         else get_cross_region_phase_dir("subject_features") / "subject_feature_matrix_whole.parquet"
+    )
+
+
+def _bc_feature_matrix_path(feature_matrix_path: str | Path | None = None) -> Path:
+    return (
+        Path(feature_matrix_path)
+        if feature_matrix_path is not None
+        else get_cross_region_phase_dir("subject_features") / "subject_feature_matrix_whole_bc.parquet"
     )
 
 
@@ -66,6 +77,23 @@ def filter_disease_subjects(frame: pd.DataFrame) -> pd.DataFrame:
 
 def feature_columns(frame: pd.DataFrame) -> list[str]:
     return [column for column in frame.columns if column.startswith(FEATURE_PREFIXES)]
+
+
+def load_subject_bc_feature_matrix(
+    *,
+    feature_matrix_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """Load the baseline-corrected, un-normalized companion feature matrix.
+
+    Positive-valued basis for physical band-integral intensities (see
+    src/analysis/biochemical_ratios.py). Raises if the file is missing rather than
+    silently falling back to the SNV/area matrix (repo rule: no silent fallbacks).
+    """
+    return load_subject_feature_matrix(feature_matrix_path=_bc_feature_matrix_path(feature_matrix_path))
+
+
+def bc_feature_columns(frame: pd.DataFrame) -> list[str]:
+    return [column for column in frame.columns if column.startswith(BC_FEATURE_PREFIXES)]
 
 
 def feature_metadata(columns: list[str]) -> pd.DataFrame:

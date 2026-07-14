@@ -209,9 +209,7 @@ def _preprocess_measurement_vectors(file_index: pd.DataFrame) -> tuple[dict[str,
         range_code = str(int(float(row["spectral_range_cm-1"])))
         wavenumbers, _, _, spectra, _ = read_txt_spectrum(row["filepath"])
         flat = flatten_spectra_rows(spectra)
-        result = run_preprocessing(
-            flat,
-            np.asarray(wavenumbers, dtype=float),
+        preprocess_kwargs = dict(
             region=_range_key(range_code),
             screen_dead=True,
             suppress_cosmic=None,
@@ -219,9 +217,13 @@ def _preprocess_measurement_vectors(file_index: pd.DataFrame) -> tuple[dict[str,
             smooth=None,
             interpolate=False,
             filter_quality=None,
+        )
+        result = run_preprocessing(
+            flat,
+            np.asarray(wavenumbers, dtype=float),
             normalize=True,
             norm_for="eda",
-            record_stages=False,
+            **preprocess_kwargs,
         )
         valid = np.asarray(result.spectra, dtype=float)
         valid_area = valid.size > 0
@@ -239,6 +241,18 @@ def _preprocess_measurement_vectors(file_index: pd.DataFrame) -> tuple[dict[str,
         )
         if not valid_area:
             continue
+        # Un-normalized companion: same QC/baseline decisions (deterministic, identical
+        # kwargs), just skips the final normalize step. Gives a positive-valued,
+        # baseline-corrected basis for physical band-integral intensities (see
+        # src/analysis/biochemical_ratios.py), independent of the SNV/area scaling
+        # used for PCA and ML variance features.
+        result_bc = run_preprocessing(
+            flat,
+            np.asarray(wavenumbers, dtype=float),
+            normalize=False,
+            **preprocess_kwargs,
+        )
+        baseline_corrected = np.asarray(result_bc.spectra, dtype=float)
         grouped[range_code]["axes"].append(np.asarray(result.wavenumbers, dtype=float))
         grouped[range_code]["rows"].append(
             {
@@ -248,6 +262,7 @@ def _preprocess_measurement_vectors(file_index: pd.DataFrame) -> tuple[dict[str,
                 "area_id": str(row["area_id"]),
                 "axis": np.asarray(result.wavenumbers, dtype=float),
                 "vector": np.nanmedian(valid, axis=0),
+                "vector_bc": np.nanmedian(baseline_corrected, axis=0),
             }
         )
     output: dict[str, dict[str, np.ndarray]] = {}
@@ -257,6 +272,7 @@ def _preprocess_measurement_vectors(file_index: pd.DataFrame) -> tuple[dict[str,
         if target_axis.size == 0:
             output[range_code] = {
                 "spectra": np.empty((0, 0)),
+                "spectra_bc": np.empty((0, 0)),
                 "wavenumbers": np.array([], dtype=float),
                 "measurement_ids": np.array([], dtype=str),
                 "subject_ids": np.array([], dtype=str),
@@ -267,8 +283,12 @@ def _preprocess_measurement_vectors(file_index: pd.DataFrame) -> tuple[dict[str,
         vectors = np.vstack(
             [_resample_vector(row["axis"], target_axis, row["vector"]) for row in rows]
         )
+        vectors_bc = np.vstack(
+            [_resample_vector(row["axis"], target_axis, row["vector_bc"]) for row in rows]
+        )
         output[range_code] = {
             "spectra": vectors,
+            "spectra_bc": vectors_bc,
             "wavenumbers": target_axis,
             "measurement_ids": np.asarray([row["measurement_id"] for row in rows], dtype=str),
             "subject_ids": np.asarray([row["subject_id"] for row in rows], dtype=str),
@@ -312,13 +332,16 @@ def _build_area_metadata(file_index: pd.DataFrame, area_flags: pd.DataFrame | No
 
 def _area_npz_payload(spectra_payload: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     feature_names = np.asarray([f"{shift:.1f}" for shift in spectra_payload["wavenumbers"]], dtype=str)
-    return {
+    payload = {
         "area_summary": spectra_payload["spectra"],
         "area_ids": spectra_payload["area_ids"],
         "measurement_ids": spectra_payload["measurement_ids"],
         "subject_ids": spectra_payload["subject_ids"],
         "feature_names": feature_names,
     }
+    if "spectra_bc" in spectra_payload:
+        payload["area_summary_bc"] = spectra_payload["spectra_bc"]
+    return payload
 
 
 def _whole_area_store_from_ranges(

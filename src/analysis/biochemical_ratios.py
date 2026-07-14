@@ -15,8 +15,9 @@ from src import get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.band_features import band_integral, infer_block_from_upper, ratio_from_integrals
 from src.analysis.clinical_feature_associations import (
-    feature_columns,
+    bc_feature_columns,
     load_disease_feature_frame,
+    load_subject_bc_feature_matrix,
 )
 from src.analysis.statistics import fdr_correction
 
@@ -45,9 +46,13 @@ def _build_band_table(
     columns: list[str],
     cfg: dict[str, Any],
 ) -> pd.DataFrame:
+    """Band-integral table computed on the baseline-corrected, un-normalized (``_bc``)
+    basis: physical band intensities must not be trapezoid-integrated over SNV
+    mean-centered data (see CLAUDE.md preprocessing normalization notes).
+    """
     band_features: dict[str, pd.Series] = {}
     for band_name, (lower, upper) in _band_windows(cfg).items():
-        block = infer_block_from_upper(upper)
+        block = f"{infer_block_from_upper(upper)}_bc"
         series = band_integral(frame, columns, block=block, lower=lower, upper=upper)
         band_features[band_name] = series
     return pd.DataFrame(band_features, index=frame.index)
@@ -152,6 +157,7 @@ def _spearman_associations(
 def run_biochemical_ratios(
     *,
     feature_matrix_path: str | Path | None = None,
+    bc_feature_matrix_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
@@ -162,7 +168,15 @@ def run_biochemical_ratios(
         return {}
 
     disease_only, _feature_meta = load_disease_feature_frame(feature_matrix_path=feature_matrix_path)
-    all_feature_columns = feature_columns(disease_only)
+    bc_frame = load_subject_bc_feature_matrix(feature_matrix_path=bc_feature_matrix_path)
+    bc_columns = bc_feature_columns(bc_frame)
+    if not bc_columns:
+        raise ValueError(
+            "subject_feature_matrix_whole_bc.parquet has no baseline-corrected feature "
+            "columns; re-run Phase 1 (subject feature export) to materialize them"
+        )
+    disease_only = disease_only.merge(bc_frame[["subject_id", *bc_columns]], on="subject_id", how="left")
+    all_feature_columns = bc_columns
     targets = tuple(str(target) for target in ratio_cfg.get("targets", _DEFAULT_TARGETS))
     min_subjects = int(ratio_cfg.get("min_subjects", 5))
     fdr_alpha = float(ratio_cfg.get("fdr_alpha", 0.05))
