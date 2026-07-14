@@ -66,6 +66,11 @@ def _fig1_cohort_rainclouds(panel_matrix_path: Path, output_path: Path) -> bool:
 
     group_cols = [c for c in panel.columns if c.endswith("_group_extreme") or c.endswith("_group")]
     group_col = group_cols[0] if group_cols else None
+    if group_col is None:
+        logger.info(
+            "Phase U fig1: no contrast-group column in panel matrix; "
+            "falling back to ungrouped distributions."
+        )
     palette = {"severe": "#D55E00", "mild": "#0072B2", "decline": "#CC79A7", "recovery": "#009E73"}
 
     fig, axes = plt.subplots(1, len(index_cols), figsize=(3.5 * len(index_cols), 4), squeeze=False)
@@ -94,7 +99,12 @@ def _fig1_cohort_rainclouds(panel_matrix_path: Path, output_path: Path) -> bool:
             fig.legend(handles[:4], labels_leg[:4], loc="lower center",
                        ncol=min(4, len(labels_leg)), fontsize=7, bbox_to_anchor=(0.5, -0.02))
 
-    fig.suptitle("Named EV biochemical indices by contrast group", fontsize=9)
+    suptitle = (
+        "Named EV biochemical indices by contrast group"
+        if group_col
+        else "Named EV biochemical indices (no contrast group available)"
+    )
+    fig.suptitle(suptitle, fontsize=9)
     fig.tight_layout(rect=[0, 0.05, 1, 1])
     _save_and_close(fig, output_path)
     return True
@@ -219,6 +229,7 @@ def _fig3_difference_spectrum(difference_spectrum_path: Path, output_path: Path)
     contrast = diff["contrast_name"].iloc[0] if "contrast_name" in diff.columns else "unknown"
 
     fig, axes = plt.subplots(2, len(blocks), figsize=(5.5 * len(blocks), 5), squeeze=False)
+    plotted_any = False
     for col_idx, block in enumerate(blocks):
         sub = diff[diff["block"] == block]
         if "contrast_name" in sub.columns:
@@ -226,6 +237,11 @@ def _fig3_difference_spectrum(difference_spectrum_path: Path, output_path: Path)
         if sub.empty:
             continue
         _plot_block_panel((axes[0][col_idx], axes[1][col_idx]), sub, block, contrast)
+        plotted_any = True
+
+    if not plotted_any:
+        plt.close(fig)
+        return False
 
     fig.suptitle(f"Difference spectrum: {contrast}", fontsize=9)
     fig.tight_layout()

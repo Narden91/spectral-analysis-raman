@@ -16,9 +16,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src import get_biological_pca_canonical_dir, get_cross_region_phase_dir
+from src import get_biological_pca_canonical_dir, get_classification_phase_dir, get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import load_subject_feature_matrix
+from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, PhaseStatus
 
 logger = logging.getLogger(__name__)
 
@@ -356,10 +357,6 @@ def _interpretation_note(row: pd.Series) -> str:
     return note
 
 
-def _empty_table() -> pd.DataFrame:
-    return pd.DataFrame(columns=_DEFAULT_COLUMNS)
-
-
 def run_integrated_candidates(
     *,
     candidate_regions_path: str | Path | None = None,
@@ -390,19 +387,24 @@ def run_integrated_candidates(
     if covariate_models_path is None:
         covariate_models_path = get_cross_region_phase_dir("covariate_models") / "covariate_adjusted_region_models.csv"
     if pls_vip_path is None:
-        pls_vip_path = get_cross_region_phase_dir("pls_regression") / "pls_vip_bands.csv"
+        pls_vip_path = get_classification_phase_dir("pls_regression") / "pls_vip_bands.csv"
         if pls_performance_path is None:
-            pls_performance_path = get_cross_region_phase_dir("pls_regression") / "pls_regression_performance.csv"
+            pls_performance_path = get_classification_phase_dir("pls_regression") / "pls_regression_performance.csv"
     if splsda_bands_path is None:
-        splsda_bands_path = get_cross_region_phase_dir("splsda") / "pls_l1da_selected_bands.csv"
+        splsda_bands_path = get_classification_phase_dir("splsda") / "pls_l1da_selected_bands.csv"
 
     candidates = _load_csv_if_exists(candidate_regions_path)
     if candidates is None or candidates.empty:
-        logger.warning("No candidate regions available; writing empty integrated table")
-        empty = _empty_table()
-        out_path = target_dir / "integrated_candidate_regions.csv"
-        empty.to_csv(out_path, index=False)
-        return {"integrated_candidate_regions": out_path}
+        logger.warning("No candidate regions available; skipping integrated candidate table write")
+        return {
+            "_status": PhaseStatus(
+                phase_key="integrated_candidates",
+                status=STATUS_MISSING_REQUIRED_DATA,
+                reason="no candidate regions available (Phase 6 produced zero rows)",
+                n_subjects=None,
+                n_artifacts=0,
+            ).as_row()
+        }
 
     covariate_models = _load_csv_if_exists(covariate_models_path)
     pls_vip = _load_csv_if_exists(pls_vip_path)

@@ -219,3 +219,19 @@ def test_run_integrated_candidates_disabled_returns_empty(tmp_path: Path) -> Non
         cfg={"analysis": {"integrated_candidates": {"enabled": False}}},
     )
     assert outputs == {}
+
+
+def test_run_integrated_candidates_skips_write_when_no_candidate_regions(tmp_path: Path) -> None:
+    # No candidate_regions_path is supplied and none exists at the resolved
+    # default location, so run_integrated_candidates must skip the CSV write
+    # (previously this wrote a header-only integrated_candidate_regions.csv).
+    outputs = run_integrated_candidates(
+        candidate_regions_path=tmp_path / "does_not_exist.csv",
+        output_dir=tmp_path / "out",
+        cfg={"analysis": {"integrated_candidates": {"enabled": True}}},
+    )
+
+    assert set(outputs) == {"_status"}
+    assert outputs["_status"]["phase_key"] == "integrated_candidates"
+    assert outputs["_status"]["status"] == "missing_required_data"
+    assert not (tmp_path / "out" / "integrated_candidate_regions.csv").exists()

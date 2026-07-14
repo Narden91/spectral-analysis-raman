@@ -209,10 +209,13 @@ def test_candidate_panel_skips_when_cluster_support_gate_fails(
         },
     )
 
-    performance = pd.read_csv(outputs["minimal_panel_cv_performance"])
-    selected = pd.read_csv(outputs["minimal_candidate_panel"])
-    assert performance.loc[0, "status"] == "not_tested_gate"
-    assert selected.empty
+    # The whole-phase input pool is empty (no cluster-supported region), so no
+    # CSVs are written at all; the phase reports a status dict instead.
+    assert set(outputs) == {"_status"}
+    assert outputs["_status"]["status"] == "not_tested_gate"
+    assert outputs["_status"]["phase_key"] == "minimal_panel"
+    assert not (tmp_path / "gated" / "minimal_candidate_panel.csv").exists()
+    assert not (tmp_path / "gated" / "minimal_panel_cv_performance.csv").exists()
 
 
 def test_run_minimal_panel_disabled_returns_empty(tmp_path: Path) -> None:

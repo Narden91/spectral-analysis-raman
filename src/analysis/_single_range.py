@@ -819,8 +819,8 @@ def _run_single_range_eda(
 
     robust_cfg = config.get("analysis", {}).get("advanced", {}).get("robustness", {})
     if spectral_range != "both" and robust_cfg.get("enabled", False):
-        _log_phase("PHASE 6b: Region-influence robustness")
-        robust_dir = get_eda_phase_dir(spectral_range, "07b_region_robustness")
+        _log_phase("PHASE 7: Region-influence robustness")
+        robust_dir = get_eda_phase_dir(spectral_range, "07_region_robustness")
         try:
             suspect_windows = robust_cfg.get("suspect_windows", [])
             downweight_factor = float(robust_cfg.get("downweight_factor", 0.0))

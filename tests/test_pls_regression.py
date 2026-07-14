@@ -131,6 +131,26 @@ def test_pls_regression_skips_when_disabled(tmp_path):
     assert outputs == {}
 
 
+@patch("src.analysis.pls_regression.load_disease_feature_frame")
+def test_pls_regression_no_target_reaches_min_subjects_skips_all_writes(
+    mock_load, synthetic_feature_matrix, mock_pls_cfg, tmp_path
+):
+    df, meta_df = synthetic_feature_matrix
+    mock_load.return_value = (df, meta_df)
+
+    cfg = dict(mock_pls_cfg)
+    cfg["analysis"]["pls_regression"] = dict(cfg["analysis"]["pls_regression"])
+    cfg["analysis"]["pls_regression"]["min_subjects"] = 1000  # unreachable
+
+    out_dir = tmp_path / "pls_out_empty"
+    outputs = run_pls_regression(output_dir=out_dir, cfg=cfg)
+
+    assert set(outputs) == {"_status"}
+    assert outputs["_status"]["phase_key"] == "pls_regression"
+    assert outputs["_status"]["status"] == "insufficient_n"
+    assert not any(out_dir.glob("*.csv"))
+
+
 def test_pls_permutation_serial_parallel_equivalence() -> None:
     rng = np.random.default_rng(7)
     X = rng.normal(size=(15, 4))

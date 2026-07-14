@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src import get_confirmatory_panel_dir, get_cross_region_phase_dir
+from src import get_classification_phase_dir, get_confirmatory_panel_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import filter_disease_subjects, load_subject_feature_matrix
 from src.analysis.io_utils import load_csv_or_empty, write_csv_atomic
@@ -99,7 +99,7 @@ def run_panel_cluster_summary(
     assignments_path = (
         Path(subgroup_assignments_path)
         if subgroup_assignments_path is not None
-        else get_cross_region_phase_dir("disease_subgroups") / "disease_subgroup_assignments.csv"
+        else get_classification_phase_dir("disease_subgroups") / "disease_subgroup_assignments.csv"
     )
     output_path = target_dir / "panel_cluster_summary.csv"
 

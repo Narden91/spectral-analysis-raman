@@ -12,7 +12,7 @@ from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics import adjusted_rand_score
 from sklearn.preprocessing import StandardScaler
 
-from src import get_cross_region_phase_dir
+from src import get_classification_phase_dir, get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     feature_columns,
@@ -21,6 +21,7 @@ from src.analysis.clinical_feature_associations import (
     load_subject_feature_matrix,
 )
 from src.analysis.discriminant_spectra import run_subgroup_mean_spectra
+from src.analysis.phase_status import STATUS_INSUFFICIENT_N, PhaseStatus
 
 logger = logging.getLogger(__name__)
 
@@ -222,23 +223,15 @@ def _bootstrap_ari(
     )
 
 
-def _empty_outputs(target_dir: Path) -> dict[str, Path]:
-    assignments_path = target_dir / "disease_subgroup_assignments.csv"
-    gap_path = target_dir / "disease_subgroup_gap_statistic.csv"
-    stability_path = target_dir / "disease_subgroup_stability.csv"
-    feature_path = target_dir / "disease_subgroup_feature_matrix.csv"
-    mean_spectra_path = target_dir / "subgroup_mean_spectra.csv"
-    pd.DataFrame(columns=["subject_id", "subgroup_label", "n_clusters"]).to_csv(assignments_path, index=False)
-    pd.DataFrame(columns=["n_clusters", "observed_log_dispersion", "reference_log_dispersion_mean", "reference_log_dispersion_sd", "gap", "n_bootstrap"]).to_csv(gap_path, index=False)
-    pd.DataFrame(columns=["selected_n_clusters", "mean_bootstrap_ari", "sd_bootstrap_ari", "n_bootstrap_requested", "n_bootstrap_used"]).to_csv(stability_path, index=False)
-    pd.DataFrame(columns=["subject_id"]).to_csv(feature_path, index=False)
-    pd.DataFrame(columns=["block", "subgroup_label", "n_subjects", "wavenumber", "mean_intensity", "std_intensity", "nearest_band"]).to_csv(mean_spectra_path, index=False)
+def _empty_outputs(reason: str, *, n_subjects: int | None = None) -> dict[str, object]:
     return {
-        "disease_subgroup_assignments": assignments_path,
-        "disease_subgroup_gap_statistic": gap_path,
-        "disease_subgroup_stability": stability_path,
-        "disease_subgroup_feature_matrix": feature_path,
-        "subgroup_mean_spectra": mean_spectra_path,
+        "_status": PhaseStatus(
+            phase_key="disease_subgroups",
+            status=STATUS_INSUFFICIENT_N,
+            reason=reason,
+            n_subjects=n_subjects,
+            n_artifacts=0,
+        ).as_row()
     }
 
 
@@ -258,7 +251,7 @@ def run_disease_subgroups(
     target_dir = (
         Path(output_dir)
         if output_dir is not None
-        else get_cross_region_phase_dir("disease_subgroups")
+        else get_classification_phase_dir("disease_subgroups")
     )
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -275,8 +268,11 @@ def run_disease_subgroups(
 
     min_subjects = int(subgroup_cfg.get("min_subjects", 10))
     if len(disease_only) < min_subjects or X.shape[1] == 0:
-        logger.info("Disease subgroup analysis has insufficient subjects or features; writing empty outputs")
-        return _empty_outputs(target_dir)
+        logger.info("Disease subgroup analysis has insufficient subjects or features; skipping CSV writes")
+        return _empty_outputs(
+            "insufficient subjects or no usable clustering features",
+            n_subjects=int(len(disease_only)),
+        )
 
     min_clusters = int(subgroup_cfg.get("min_clusters", 2))
     max_clusters = int(subgroup_cfg.get("max_clusters", 4))
@@ -288,8 +284,11 @@ def run_disease_subgroups(
         if 1 < k < len(disease_only)
     ]
     if not k_values:
-        logger.info("Disease subgroup analysis has no valid cluster counts; writing empty outputs")
-        return _empty_outputs(target_dir)
+        logger.info("Disease subgroup analysis has no valid cluster counts; skipping CSV writes")
+        return _empty_outputs(
+            "no valid cluster count in [min_clusters, max_clusters] for this cohort size",
+            n_subjects=int(len(disease_only)),
+        )
 
     gap = _gap_statistic(
         X,

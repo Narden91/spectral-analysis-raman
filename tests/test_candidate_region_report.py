@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from src.reporting.candidate_region_report import (
     build_panel_report_section,
@@ -126,9 +125,14 @@ def test_run_candidate_region_report_disabled_returns_empty(tmp_path: Path) -> N
     assert outputs == {}
 
 
-def test_run_candidate_region_report_fails_without_integrated_table(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError):
-        run_candidate_region_report(
-            output_dir=tmp_path,
-            cfg={"analysis": {"publication_report": {"enabled": True}}},
-        )
+def test_run_candidate_region_report_handles_missing_integrated_table(tmp_path: Path) -> None:
+    """Phase 11 skips its write (no _status stub file) when it has zero candidates;
+    Phase 14 must treat that absence the same as an empty table, not raise."""
+    outputs = run_candidate_region_report(
+        output_dir=tmp_path,
+        cfg={"analysis": {"publication_report": {"enabled": True}}},
+    )
+    assert outputs["candidate_region_report"].exists()
+    assert outputs["candidate_region_summary"].exists()
+    summary = pd.read_csv(outputs["candidate_region_summary"])
+    assert summary["n_regions"].sum() == 0

@@ -22,13 +22,14 @@ from sklearn.metrics import balanced_accuracy_score, mean_absolute_error, mean_s
 from sklearn.model_selection import KFold, LeaveOneOut, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from src import get_confirmatory_panel_dir, get_cross_region_phase_dir
+from src import get_classification_phase_dir, get_confirmatory_panel_dir, get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
 )
 from src.analysis.io_utils import write_csv_atomic
+from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, STATUS_NOT_TESTED_GATE, PhaseStatus
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
 
 logger = logging.getLogger(__name__)
@@ -715,7 +716,7 @@ def run_minimal_panel(
     feature_source = str(panel_cfg.get("feature_source", "candidate_regions"))
     is_preregistered_source = feature_source == "preregistered_panel"
     target_dir = Path(output_dir) if output_dir is not None else (
-        get_confirmatory_panel_dir() if is_preregistered_source else get_cross_region_phase_dir("minimal_panel")
+        get_confirmatory_panel_dir() if is_preregistered_source else get_classification_phase_dir("minimal_panel")
     )
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -746,27 +747,21 @@ def run_minimal_panel(
     coefficients_filename = f"{output_stem}_coefficients.csv" if is_preregistered_source else "minimal_panel_coefficients.csv"
 
     if pool.empty:
-        status = "missing_required_data" if is_preregistered_source else "not_tested_gate"
-        logger.warning("No eligible panel features available; writing status=%s outputs", status)
-        write_csv_atomic(pd.DataFrame(columns=[
-            "endpoint", "endpoint_type", "feature_name", "feature_source", "feature_description",
-            "selection_frequency", "mean_absolute_coefficient", "panel_selected", "status",
-        ]), target_dir / selected_filename, index=False)
-        write_csv_atomic(pd.DataFrame([{
-            "endpoint": pd.NA, "endpoint_type": pd.NA, "metric": pd.NA, "value": np.nan,
-            "n_subjects": 0, "permutation_p_value": np.nan, "n_permutations": 0,
-            "cv_strategy": pd.NA, "compute_backend": "sklearn_cpu", "gpu_status": "not_checked",
-            "inference_role": "exploratory", "status": status,
-        }]), target_dir / performance_filename, index=False)
-        write_csv_atomic(pd.DataFrame(columns=[
-            "endpoint", "feature_name", "mean_coefficient", "stability_interval_low",
-            "stability_interval_high", "bootstrap_selection_frequency", "n_bootstrap_used",
-            "estimation_scope", "validated", "status",
-        ]), target_dir / coefficients_filename, index=False)
+        status = STATUS_MISSING_REQUIRED_DATA if is_preregistered_source else STATUS_NOT_TESTED_GATE
+        reason = (
+            "preregistered panel matrix has no usable features"
+            if is_preregistered_source
+            else "no cluster-supported candidate region available; candidate-derived panel not tested"
+        )
+        logger.warning("No eligible panel features available; skipping CSV writes (status=%s)", status)
         return {
-            ("panel_minimal_model_features" if is_preregistered_source else "minimal_candidate_panel"): target_dir / selected_filename,
-            ("panel_minimal_model_performance" if is_preregistered_source else "minimal_panel_cv_performance"): target_dir / performance_filename,
-            ("panel_minimal_model_coefficients" if is_preregistered_source else "minimal_panel_coefficients"): target_dir / coefficients_filename,
+            "_status": PhaseStatus(
+                phase_key="panel_minimal_model" if is_preregistered_source else "minimal_panel",
+                status=status,
+                reason=reason,
+                n_subjects=None,
+                n_artifacts=0,
+            ).as_row()
         }
 
     max_features = int(panel_cfg.get("max_features", 10))

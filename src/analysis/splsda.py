@@ -13,12 +13,13 @@ from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from src import get_cross_region_phase_dir
+from src import get_classification_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
 )
+from src.analysis.phase_status import STATUS_NOT_TESTED_GATE, PhaseStatus
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
 
 logger = logging.getLogger(__name__)
@@ -260,7 +261,7 @@ def run_splsda_classifier(
     if not bool(splsda_cfg.get("enabled", True)):
         return {}
 
-    target_dir = Path(output_dir) if output_dir is not None else get_cross_region_phase_dir("splsda")
+    target_dir = Path(output_dir) if output_dir is not None else get_classification_phase_dir("splsda")
     target_dir.mkdir(parents=True, exist_ok=True)
 
     gate_p = float(splsda_cfg.get("gate_on_pls_p_value", 0.05))
@@ -269,10 +270,19 @@ def run_splsda_classifier(
             pls_perm = pd.read_csv(pls_outputs["pls_permutation_results"])
             if pls_perm["permutation_p_value"].min() >= gate_p:
                 logger.info("Skipping PLS-L1DA: No PLS model passed permutation gate (p < %s)", gate_p)
-                perf_path = target_dir / "pls_l1da_cv_performance.csv"
-                bands_path = target_dir / "pls_l1da_selected_bands.csv"
-                perm_path = target_dir / "pls_l1da_permutation_results.csv"
                 gated_targets = splsda_cfg.get("targets", [])
+                if not gated_targets:
+                    return {
+                        "_status": PhaseStatus(
+                            phase_key="splsda",
+                            status=STATUS_NOT_TESTED_GATE,
+                            reason="no PLS model passed permutation gate and no targets configured",
+                            n_subjects=None,
+                            n_artifacts=0,
+                        ).as_row()
+                    }
+                perf_path = target_dir / "pls_l1da_cv_performance.csv"
+                perm_path = target_dir / "pls_l1da_permutation_results.csv"
                 pd.DataFrame(
                     [
                         {
@@ -297,21 +307,9 @@ def run_splsda_classifier(
                         "status",
                     ]
                 ).to_csv(perf_path, index=False)
-                pd.DataFrame(
-                    columns=[
-                        "group_variable",
-                        "feature_name",
-                        "spectral_block",
-                        "wavenumber",
-                        "loading_weight",
-                        "selected",
-                        "estimation_scope",
-                        "validated",
-                        "selection_frequency",
-                        "sign_stability",
-                        "status",
-                    ]
-                ).to_csv(bands_path, index=False)
+                # No per-feature rows exist here (the gate fires before any band is
+                # ever scored), unlike perf_path/perm_path which carry one legitimate
+                # status row per gated target. Skip the header-only write.
                 pd.DataFrame(
                     [
                         {
@@ -334,7 +332,6 @@ def run_splsda_classifier(
                 ).to_csv(perm_path, index=False)
                 return {
                     "pls_l1da_cv_performance": perf_path,
-                    "pls_l1da_selected_bands": bands_path,
                     "pls_l1da_permutation_results": perm_path,
                 }
         except Exception as e:
@@ -551,22 +548,27 @@ def run_splsda_classifier(
     res: dict[str, Path] = {}
     if perf_rows:
         perf_df = pd.DataFrame(perf_rows)
-        bands_df = pd.DataFrame(bands_rows)
-        perm_df = pd.DataFrame(perm_rows)
-
         perf_path = target_dir / "pls_l1da_cv_performance.csv"
-        bands_path = target_dir / "pls_l1da_selected_bands.csv"
-        perm_path = target_dir / "pls_l1da_permutation_results.csv"
-
         perf_df.to_csv(perf_path, index=False)
-        bands_df.to_csv(bands_path, index=False)
-        perm_df.to_csv(perm_path, index=False)
+        res["pls_l1da_cv_performance"] = perf_path
 
-        res.update({
-            "pls_l1da_cv_performance": perf_path,
-            "pls_l1da_selected_bands": bands_path,
-            "pls_l1da_permutation_results": perm_path,
-        })
+        # bands_rows/perm_rows are only populated when at least one target
+        # actually reached model fitting (i.e. cleared insufficient_n/
+        # missing_data); a fully gated run has zero rows in both and should
+        # not produce header-only files. perf_rows always has one row per
+        # target (including gated ones, carrying their status), so it is
+        # written unconditionally above.
+        if bands_rows:
+            bands_df = pd.DataFrame(bands_rows)
+            bands_path = target_dir / "pls_l1da_selected_bands.csv"
+            bands_df.to_csv(bands_path, index=False)
+            res["pls_l1da_selected_bands"] = bands_path
+
+        if perm_rows:
+            perm_df = pd.DataFrame(perm_rows)
+            perm_path = target_dir / "pls_l1da_permutation_results.csv"
+            perm_df.to_csv(perm_path, index=False)
+            res["pls_l1da_permutation_results"] = perm_path
 
         if emit_oplsda and oplsda_rows:
             oplsda_df = pd.DataFrame(oplsda_rows)

@@ -102,3 +102,25 @@ def test_run_disease_subgroups_disabled_returns_empty(tmp_path: Path) -> None:
         cfg={"analysis": {"disease_subgroups": {"enabled": False}}},
     )
     assert outputs == {}
+
+
+def test_run_disease_subgroups_skips_writes_when_insufficient_subjects(tmp_path: Path) -> None:
+    matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
+    integrated_path = tmp_path / "integrated_candidate_regions.csv"
+    # Fewer subjects than min_subjects=8 in _cfg().
+    _feature_matrix().iloc[:4].to_parquet(matrix_path, index=False)
+    _integrated_candidates().to_csv(integrated_path, index=False)
+
+    out_dir = tmp_path / "12_disease_subgroups"
+    outputs = run_disease_subgroups(
+        feature_matrix_path=matrix_path,
+        integrated_candidates_path=integrated_path,
+        output_dir=out_dir,
+        cfg=_cfg(),
+    )
+
+    assert set(outputs) == {"_status"}
+    assert outputs["_status"]["phase_key"] == "disease_subgroups"
+    assert outputs["_status"]["status"] == "insufficient_n"
+    assert not out_dir.exists() or not any(out_dir.glob("*.csv"))
+    assert not out_dir.exists() or not any(out_dir.glob("figures/*.png"))

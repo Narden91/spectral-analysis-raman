@@ -86,6 +86,50 @@ def _write_phase_timings(timings: list[dict[str, object]]) -> Path | None:
     return path
 
 
+def _write_phase_status_manifest(outputs: dict[str, dict[str, object]]) -> Path | None:
+    """Aggregate each phase's outcome into a single skip-manifest CSV.
+
+    Phases that skip their CSV writes because the whole-phase input was empty
+    (see ``src.analysis.phase_status``) report a ``"_status"`` row directly.
+    Phases that ran normally are synthesized as ``ok``; phases absent from
+    ``outputs`` (disabled via config, or never reached) are synthesized as
+    ``disabled_or_skipped``.
+    """
+    if not outputs:
+        return None
+
+    rows: list[dict[str, object]] = []
+    for phase_key, phase_outputs in outputs.items():
+        if phase_outputs and "_status" in phase_outputs:
+            row = dict(phase_outputs["_status"])
+            row.setdefault("phase_key", phase_key)
+            rows.append(row)
+        elif not phase_outputs:
+            rows.append(
+                {
+                    "phase_key": phase_key,
+                    "status": "disabled_or_skipped",
+                    "reason": "",
+                    "n_subjects": None,
+                    "n_artifacts": 0,
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "phase_key": phase_key,
+                    "status": "ok",
+                    "reason": "",
+                    "n_subjects": None,
+                    "n_artifacts": len(phase_outputs),
+                }
+            )
+
+    path = get_run_metadata_dir() / "phase_status.csv"
+    write_csv_atomic(pd.DataFrame(rows), path, index=False)
+    return path
+
+
 def _holm_adjust(p_values: np.ndarray) -> np.ndarray:
     """Return Holm family-wise adjusted p-values in input order."""
     n = len(p_values)
@@ -433,5 +477,6 @@ def run_disease_only_cross_region_pipeline(
     except Exception as exc:
         logger.warning("Cross-phase multiplicity summary failed (non-fatal): %s", exc)
 
+    _write_phase_status_manifest(outputs)
     _write_phase_timings(phase_timings)
     return outputs

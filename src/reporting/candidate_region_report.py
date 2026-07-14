@@ -91,6 +91,34 @@ def _top_feature_line(ranking: pd.DataFrame, feature_names: list[str]) -> str:
     )
 
 
+def _build_panel_readme(ranking: pd.DataFrame, anchor: pd.DataFrame | None) -> str:
+    if anchor is not None and not anchor.empty:
+        row = anchor.iloc[0]
+        anchor_line = (
+            f"- **Primary anchor result**: `{row.get('feature_name', 'oxidative_index')}` vs "
+            f"`{row.get('endpoint', 'delta_moca')}` (n={row.get('n', pd.NA)}, "
+            f"rho={row.get('rho', pd.NA)}, permutation p={row.get('perm_p_value', pd.NA)}).\n"
+        )
+    else:
+        anchor_line = "- **Primary anchor result**: not available for this run (see `phase_status.csv`).\n"
+
+    n_ranked = 0 if ranking.empty else len(ranking)
+
+    return (
+        "# Fixed Post Hoc Panel Outputs\n\n"
+        "Exploratory only — no diagnostic, biomarker, causal, or clinical-utility claim.\n\n"
+        f"{anchor_line}"
+        f"- **Ranked panel features**: {n_ranked}.\n\n"
+        "## File index\n\n"
+        "- `preregistration.md`: provenance-aware frozen panel snapshot.\n"
+        "- `panel_provenance.csv`: registration/provenance fields.\n"
+        "- `panel_feature_matrix.csv`: subject-level fixed-panel features.\n"
+        "- `feature_robustness_ranking.csv`: graded Phase L evidence score.\n"
+        "- `panel_report_section.md`: four-domain conservative synthesis.\n"
+        "- `primary_anchor_result.csv`: prespecified primary hypothesis test.\n"
+    )
+
+
 def build_panel_report_section(
     *,
     ranking: pd.DataFrame,
@@ -170,22 +198,17 @@ def run_panel_report_section(
     section_path = target_dir / "panel_report_section.md"
     readme_path = target_dir / "README.md"
     write_text_atomic(section_path, text)
-    write_text_atomic(
-        readme_path,
-        "# Fixed Post Hoc Panel Outputs\n\n"
-        "- `preregistration.md`: provenance-aware frozen panel snapshot.\n"
-        "- `panel_provenance.csv`: registration/provenance fields.\n"
-        "- `panel_feature_matrix.csv`: subject-level fixed-panel features.\n"
-        "- `feature_robustness_ranking.csv`: graded Phase L evidence score.\n"
-        "- `panel_report_section.md`: four-domain conservative synthesis.\n",
-    )
+    write_text_atomic(readme_path, _build_panel_readme(ranking if ranking is not None else pd.DataFrame(), anchor))
     return {"panel_report_section": section_path, "panel_report_readme": readme_path}
 
 
 def _plot_overview(
     candidates: pd.DataFrame,
     figures_dir: Path,
-) -> Path:
+) -> Path | None:
+    if candidates.empty or "spectral_block" not in candidates.columns:
+        return None
+
     fig, axes = plt.subplots(2, 1, figsize=(16, 8), sharex=False)
     colors = {
         "robust": "#2A9D8F",
@@ -402,12 +425,6 @@ def run_candidate_region_report(
 
     if integrated_candidates_path is None:
         integrated_candidates_path = get_cross_region_phase_dir("integrated_candidates") / "integrated_candidate_regions.csv"
-
-    if not Path(integrated_candidates_path).exists():
-        raise FileNotFoundError(
-            "Integrated candidate table not found. "
-            "Run Phase 11 (integrated_candidates) before generating the publication report."
-        )
 
     integrated = _load_csv_if_exists(integrated_candidates_path)
     if integrated is None or integrated.empty:

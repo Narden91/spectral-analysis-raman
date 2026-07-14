@@ -387,7 +387,6 @@ def run_spectral_shape(
         "panel_peak_shape_features": panel_summary_path,
     }
 
-    assoc_path = target_dir / "peak_shape_associations.csv"
     associations = (
         compute_shape_endpoint_associations(
             features, clinical, endpoints=endpoints, covariates=covariates,
@@ -396,8 +395,10 @@ def run_spectral_shape(
         if not features.empty and endpoints
         else pd.DataFrame()
     )
-    write_csv_atomic(associations, assoc_path, index=False)
-    outputs["peak_shape_associations"] = assoc_path
+    if not associations.empty:
+        assoc_path = target_dir / "peak_shape_associations.csv"
+        write_csv_atomic(associations, assoc_path, index=False)
+        outputs["peak_shape_associations"] = assoc_path
 
     if not summary.empty:
         fig_path = _plot_shape_summary(summary, target_dir)

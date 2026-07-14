@@ -22,6 +22,10 @@ WHOLE_SPECTRA_PHASE_DIRS = {
 }
 
 CROSS_REGION_PHASE_DIRS = {
+    # Flat execution-order sequence. Predictive/classifier phases (PLS
+    # regression, sPLS-DA, minimal panel, disease subgroups) live under
+    # CLASSIFICATION_PHASE_DIRS / get_classification_phase_dir() instead —
+    # this tree holds descriptive, association, and confound-check phases.
     "subject_features": "01_subject_features",
     "biological_pca_summary": "02_biological_pca_summary",
     "clinical_correlations": "03_clinical_correlations",
@@ -29,13 +33,16 @@ CROSS_REGION_PHASE_DIRS = {
     "disease_stratification": "05_disease_stratification",
     "candidate_regions": "06_candidate_regions",
     "covariate_models": "07_covariate_models",
-    "pls_regression": "08_pls_regression",
-    "splsda": "09_splsda_exploratory_classifier",
-    "biochemical_ratios": "10_biochemical_ratios",
-    "integrated_candidates": "11_integrated_candidates",
-    "disease_subgroups": "12_disease_subgroups",
-    "minimal_panel": "13_minimal_panel",
-    "publication_report": "14_publication_report",
+    "biochemical_ratios": "08_biochemical_ratios",
+    "integrated_candidates": "09_integrated_candidates",
+    "publication_report": "10_publication_report",
+}
+
+CLASSIFICATION_PHASE_DIRS = {
+    "pls_regression": "pls_regression",
+    "splsda": "splsda_exploratory_classifier",
+    "minimal_panel": "minimal_panel",
+    "disease_subgroups": "disease_subgroups",
 }
 
 # Ordered sequence of single-range EDA phases.  Numbers are derived from
@@ -276,15 +283,30 @@ def get_cross_region_phase_dir(phase: str) -> Path:
     return path
 
 
+def get_classification_dir() -> Path:
+    """Return the top-level classification/predictive-modeling root for disease-only mode."""
+    path = _output_dir("eda_subdir") / "classification"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_classification_phase_dir(phase: str) -> Path:
+    """Return a phase directory under the classification root (PLS regression, sPLS-DA, minimal panel, disease subgroups)."""
+    suffix = CLASSIFICATION_PHASE_DIRS.get(phase, phase)
+    path = get_classification_dir() / suffix
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 _SPECTRAL_INTERPRETABILITY_SUBDIRS = {
-    "peak_shape": "peak_shape",
-    "nmf": "nmf_decomposition",
-    "entropy": "spectral_entropy",
-    "discriminant": "discriminant_signatures",
-    "coupling": "feature_coupling",
-    "index_clustering": "index_clustering",
-    "consistency": "endpoint_consistency",
-    "figures": "figures",
+    "peak_shape": "01_peak_shape",
+    "nmf": "02_nmf_decomposition",
+    "entropy": "03_spectral_entropy",
+    "discriminant": "04_discriminant_signatures",
+    "coupling": "05_feature_coupling",
+    "consistency": "06_endpoint_consistency",
+    "index_clustering": "07_index_clustering",  # opt-in, disabled by default
+    "figures": "08_figures",
 }
 
 

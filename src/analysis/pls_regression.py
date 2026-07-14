@@ -13,12 +13,13 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import GroupKFold, KFold, LeaveOneGroupOut, LeaveOneOut
 from sklearn.preprocessing import StandardScaler
 
-from src import get_cross_region_phase_dir
+from src import get_classification_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
 )
+from src.analysis.phase_status import STATUS_INSUFFICIENT_N, PhaseStatus
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +211,7 @@ def run_pls_regression(
     disease_only, feature_meta = load_disease_feature_frame(feature_matrix_path=feature_matrix_path)
     all_feature_columns = feature_columns(disease_only)
 
-    target_dir = Path(output_dir) if output_dir is not None else get_cross_region_phase_dir("pls_regression")
+    target_dir = Path(output_dir) if output_dir is not None else get_classification_phase_dir("pls_regression")
     target_dir.mkdir(parents=True, exist_ok=True)
 
     targets = pls_cfg.get("targets", ["moca_baseline", "moca_3m", "delta_moca"])
@@ -382,6 +383,18 @@ def run_pls_regression(
         perm_rows,
         columns=["target", "observed_r2", "null_distribution_mean", "null_distribution_std", "permutation_p_value", "n_permutations"],
     )
+
+    if perf_df.empty and vip_df.empty and coef_df.empty and perm_df.empty:
+        logger.info("No PLS regression target reached min_subjects=%d; skipping CSV writes", min_subjects)
+        return {
+            "_status": PhaseStatus(
+                phase_key="pls_regression",
+                status=STATUS_INSUFFICIENT_N,
+                reason=f"no target reached min_subjects={min_subjects}",
+                n_subjects=int(disease_only["subject_id"].nunique()) if "subject_id" in disease_only.columns else None,
+                n_artifacts=0,
+            ).as_row()
+        }
 
     perf_path = target_dir / "pls_regression_performance.csv"
     vip_path = target_dir / "pls_vip_bands.csv"

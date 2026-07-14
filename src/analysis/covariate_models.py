@@ -16,6 +16,7 @@ from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
 )
+from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, PhaseStatus
 from src.analysis.sklearn_utils import covariate_logistic_model, fit_with_convergence_capture
 from src.analysis.spectral_regions import candidate_region_feature_names
 
@@ -346,15 +347,15 @@ def run_covariate_region_models(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     if candidates.empty:
-        models = _empty_model_table()
-        availability = _empty_availability_table()
-        models_path = target_dir / "covariate_adjusted_region_models.csv"
-        availability_path = target_dir / "covariate_availability_report.csv"
-        models.to_csv(models_path, index=False)
-        availability.to_csv(availability_path, index=False)
+        logger.info("No candidate regions available; skipping covariate model CSV writes")
         return {
-            "covariate_adjusted_region_models": models_path,
-            "covariate_availability_report": availability_path,
+            "_status": PhaseStatus(
+                phase_key="covariate_models",
+                status=STATUS_MISSING_REQUIRED_DATA,
+                reason="no candidate regions available (Phase 6 produced zero rows)",
+                n_subjects=None,
+                n_artifacts=0,
+            ).as_row()
         }
 
     requested_covariates = [str(item) for item in model_cfg.get("covariates", ["age", "sex"])]

@@ -513,7 +513,17 @@ def plot_global_comparison(
     peak_cfg = plot_cfg.get("peak_detection", {})
     annotated_segments: list[tuple[np.ndarray, np.ndarray, np.ndarray, str]] = []
 
-    for entry in series:
+    # SNV-rescale every region's series for display so regions with different
+    # normalization (area norm vs SNV) share a comparable y-axis. Mirrors the
+    # same fix in plot_cohort_mean_spectra_grid. Peak annotation uses the
+    # rescaled signal for prominence detection; actual wavenumber positions
+    # and stored data are unaffected.
+    display_series: list[dict[str, object]] = [
+        {**entry, "segments": {region: _snv_rescale(np.asarray(y, dtype=float)) for region, y in entry["segments"].items()}}
+        for entry in series
+    ]
+
+    for entry in display_series:
         label = entry.get("label")
         color = str(entry["color"])
         linewidth = float(entry.get("linewidth", 2.0))
@@ -546,7 +556,7 @@ def plot_global_comparison(
     _set_spectrum_limits(
         ax,
         display_axes.values(),
-        [np.asarray(entry["segments"][region], dtype=float) for entry in series for region in entry["segments"]],
+        [np.asarray(entry["segments"][region], dtype=float) for entry in display_series for region in entry["segments"]],
         top_pad=0.22,
     )
     for x_values, y_values, actual_wavenumbers, color in annotated_segments:
