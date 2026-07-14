@@ -8,13 +8,13 @@ a single ``00_run_metadata/phase_status.csv``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 STATUS_OK = "ok"
 STATUS_INSUFFICIENT_N = "insufficient_n"
 STATUS_NOT_TESTED_GATE = "not_tested_gate"
 STATUS_MISSING_REQUIRED_DATA = "missing_required_data"
-STATUS_DISABLED = "disabled"
+STATUS_DISABLED_OR_SKIPPED = "disabled_or_skipped"
 
 _VALID_STATUSES = frozenset(
     {
@@ -22,7 +22,7 @@ _VALID_STATUSES = frozenset(
         STATUS_INSUFFICIENT_N,
         STATUS_NOT_TESTED_GATE,
         STATUS_MISSING_REQUIRED_DATA,
-        STATUS_DISABLED,
+        STATUS_DISABLED_OR_SKIPPED,
     }
 )
 
@@ -36,7 +36,6 @@ class PhaseStatus:
     reason: str = ""
     n_subjects: int | None = None
     n_artifacts: int = 0
-    detail: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.status not in _VALID_STATUSES:

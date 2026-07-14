@@ -29,6 +29,7 @@ from src.analysis.journal_figures import run_journal_figures
 from src.analysis.longitudinal_moca import run_longitudinal_moca
 from src.analysis.minimal_panel import run_minimal_panel
 from src.analysis.nmf_decomposition import run_nmf_decomposition
+from src.analysis.phase_status import STATUS_DISABLED_OR_SKIPPED, STATUS_OK, PhaseStatus
 from src.analysis.pls_regression import run_pls_regression
 from src.analysis.preregistered_panel import run_preregistered_panel
 from src.analysis.robust_contrasts import run_confirmatory_panel_statistics
@@ -105,24 +106,10 @@ def _write_phase_status_manifest(outputs: dict[str, dict[str, object]]) -> Path 
             row.setdefault("phase_key", phase_key)
             rows.append(row)
         elif not phase_outputs:
-            rows.append(
-                {
-                    "phase_key": phase_key,
-                    "status": "disabled_or_skipped",
-                    "reason": "",
-                    "n_subjects": None,
-                    "n_artifacts": 0,
-                }
-            )
+            rows.append(PhaseStatus(phase_key=phase_key, status=STATUS_DISABLED_OR_SKIPPED).as_row())
         else:
             rows.append(
-                {
-                    "phase_key": phase_key,
-                    "status": "ok",
-                    "reason": "",
-                    "n_subjects": None,
-                    "n_artifacts": len(phase_outputs),
-                }
+                PhaseStatus(phase_key=phase_key, status=STATUS_OK, n_artifacts=len(phase_outputs)).as_row()
             )
 
     path = get_run_metadata_dir() / "phase_status.csv"

@@ -42,7 +42,7 @@ legacy_results/
 
 # !doc/ml_results_report/build_report.py
 presentation/
-# CLAUDE.md
+CLAUDE.md
 
 # Latex auxiliary files
 *.aux

@@ -55,7 +55,10 @@ preprocessing:
     method: "spatial"  # str: algorithm name (e.g. "spatial")
     n_neighbors: 8  # int: neighboring pixels used for comparison
     z_threshold: 8.0  # float: z-score threshold for spike detection
-    window: 2  # int: half-width of the local window
+    window: 10  # int: half-width of the local window (kernel=2*window+1).
+    # A narrower kernel lets wide cosmic-ray artifacts contaminate their own
+    # local median, so the peak channel escapes suppression. kernel=21 fully
+    # cleans multi-channel spikes while staying under real Raman peak widths.
   # Global fallback defaults used when no range-specific value is set.
   baseline:
     method: "arpls"  # str: baseline algorithm ("arpls", "snip", ...)
