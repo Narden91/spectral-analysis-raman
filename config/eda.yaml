@@ -351,30 +351,6 @@ analysis:
 # Whole-spectra band definitions (EV-specific curation)
 # ---------------------------------------------------------------------------
 whole_spectra:
-  bands:
-    # Fingerprint block (1300)
-    cytosine_786: [773, 796]
-    o_p_o_821: [812, 832]
-    tyrosine_851: [836, 874]
-    c_o_c_sugar_925: [900, 938]
-    beta_sheet_980: [965, 995]
-    c_o_c_n_1060: [1044, 1078]
-    lipid_cc_1089: [1082, 1098]
-    po2_cn_1112: [1105, 1120]
-    carotenoid_1156: [1145, 1165]
-    amide_iii_1258: [1240, 1280]
-    ch2_twist_1301: [1290, 1325]
-    ch2_ch3_scissor_1440: [1430, 1445]
-    ch2_ch3_bend_1465: [1450, 1475]
-    carotenoid_1525: [1510, 1535]
-    tryptophan_1555: [1550, 1560]
-    amide_i_1657: [1640, 1675]
-    lipid_carbonyl_1721: [1710, 1730]
-    lipid_ester_1744: [1735, 1755]
-    # CH-stretch block (2850)
-    ch2_sym_stretch_2853: [2845, 2860]
-    ch2_asym_stretch_2890: [2870, 2910]
-    ch3_asym_stretch_2937: [2925, 2945]
   ratio_pairs:
     - [carotenoid_1525, lipid_carbonyl_1721]
     - [amide_i_1657, ch2_sym_stretch_2853]

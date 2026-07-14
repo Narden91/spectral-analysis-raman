@@ -9,6 +9,7 @@ import pytest
 import src
 from src.preprocessing.pipeline import (
     compute_qc_metrics,
+    normalize_spectra,
     run_preprocessing,
     sample_baseline_qc_artifacts,
     smooth_spectra,
@@ -138,3 +139,17 @@ def test_spectral_quality_has_no_batch_relative_area_rejection() -> None:
     )
     assert mask.all()
     assert np.isnan(stats["area_threshold"])
+
+
+def test_pre_normalization_basis_uses_the_same_preprocessing_pass(
+    preprocessing_config_guard: None,
+) -> None:
+    wavenumbers = np.linspace(1200.0, 1280.0, 81)
+    spectra = np.vstack((20.0 + np.exp(-((wavenumbers - 1240.0) ** 2) / 20.0), 22.0 + np.exp(-((wavenumbers - 1240.0) ** 2) / 20.0)))
+    result = run_preprocessing(
+        spectra, wavenumbers, region="fingerprint", screen_dead=False,
+        suppress_cosmic=False, correct_bl=False, smooth=False, filter_quality=False,
+        trim=0, normalize=True, norm_for="eda", return_pre_normalization=True,
+    )
+    pre = result.stage_arrays["pre_normalization"]
+    assert np.allclose(result.spectra, normalize_spectra(pre, mode="eda", region="fingerprint"))

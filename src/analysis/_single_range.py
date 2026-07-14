@@ -59,7 +59,6 @@ from src.analysis.statistics import (
     test_normality,
 )
 from src.data_preparation.loaders import load_clinical_subjects, load_file_index
-from src.data_preparation.store import get_active_data_source
 from src.metadata.clinical import merge_index_with_clinical
 from src.preprocessing.pipeline import apply_region_weights, preprocess_spectra
 from src.visualization.advanced_plots import plot_all_bands_raincloud
@@ -485,30 +484,7 @@ def _run_single_range_eda(
 
     if spectral_range != "both":
         _log_phase("PHASE 0.5: Preprocessing Consistency Checks (PCS)")
-        active_source = get_active_data_source()
-        if active_source is not None and active_source.source_name != "raw_text":
-            logger.info(
-                "Skipping PCS validation for source=%s because it requires raw pixel reloads",
-                active_source.source_name,
-            )
-        else:
-            try:
-                from src.analysis.pcs import run_pcs_validation
-                from src.analysis.spectral_loader import load_subject_spectra
-                from src.preprocessing.pipeline import preprocess_spectra
-
-                sample_sid = list(group_ids.values())[0][0] if group_ids and list(group_ids.values())[0] else None
-                if sample_sid:
-                    w_raw, r_pix = load_subject_spectra(df_index, sample_sid, spectral_range)
-                    if r_pix.size > 0:
-                        p_pix, w_proc = preprocess_spectra(r_pix, w_raw, region=spectral_range)
-                        pcs_metrics = run_pcs_validation(r_pix, p_pix, w_raw, w_proc)
-                        if not pcs_metrics.get("passed", False):
-                            logger.error("PCS validation FAILED! Preprocessing distorts chemical signal. Metrics: %s", pcs_metrics)
-                        else:
-                            logger.info("PCS validation PASSED successfully.")
-            except Exception as exc:
-                logger.warning("PCS validation could not be completed: %s", exc)
+        logger.info("PCS is a build-time synthetic/reference validation, not an analysis-time raw reload.")
 
     result_both = None
     if spectral_range == "both":

@@ -37,8 +37,6 @@ def get_active_data_source() -> DataSource | None:
 
 def _store_dir(source_name: str, cfg: dict) -> Path:
     data_cfg = cfg.get("data", {})
-    if source_name == "raw_text":
-        return resolve_project_path(data_cfg.get("raw_text_dir", "data/raw"))
     if source_name == "parsed":
         return resolve_project_path(data_cfg.get("parsed_dir", "data/parsed"))
     if source_name == "preprocessed":
@@ -48,11 +46,6 @@ def _store_dir(source_name: str, cfg: dict) -> Path:
 
 def _validated_source(source_name: str, cfg: dict, *, was_built: bool) -> DataSource:
     source_path = _store_dir(source_name, cfg)
-    if source_name == "raw_text":
-        if not source_path.exists():
-            raise FileNotFoundError(f"Raw text source not found: {source_path}")
-        return DataSource(source_name, source_path, None, None, was_built)
-
     validation = validate_store(source_path, source_name, cfg)
     if not validation.is_valid:
         raise RuntimeError("; ".join(validation.errors))
@@ -76,9 +69,7 @@ def resolve_data_source(
     auto_build = bool(config.get("data", {}).get("auto_build", True))
 
     if source_name == "raw_text":
-        data_source = _validated_source("raw_text", config, was_built=False)
-        set_active_data_source(data_source)
-        return data_source
+        raise ValueError("raw_text is ingestion-only; build the parsed store before analysis")
 
     source_path = _store_dir(source_name, config)
     if force:
@@ -134,8 +125,8 @@ def data_source_summary(data_source: DataSource) -> dict[str, object]:
         "Files": counts.get("files", "n/a"),
         "Measurements": counts.get("measurements", "n/a"),
         "Areas": counts.get("areas", "n/a"),
-        "Spectra 1300": counts.get("spectra_1300", "n/a"),
-        "Spectra 2850": counts.get("spectra_2850", "n/a"),
+        "Pixels 1300": counts.get("retained_pixels_1300", counts.get("pixels_1300", "n/a")),
+        "Pixels 2850": counts.get("retained_pixels_2850", counts.get("pixels_2850", "n/a")),
         "Source state": "built" if data_source.was_built else "loaded",
     }
 

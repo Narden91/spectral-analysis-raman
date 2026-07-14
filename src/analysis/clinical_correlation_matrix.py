@@ -15,12 +15,12 @@ import pandas as pd
 from src import get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
-    apply_spearman_cluster_permutation,
-    build_candidate_regions,
     compute_spearman_feature_tests,
     endpoint_missingness_report,
     load_disease_feature_frame,
 )
+from src.analysis.spectral_regions import build_candidate_regions
+from src.statistics.cluster_permutation import apply_spearman_cluster_permutation
 
 logger = logging.getLogger(__name__)
 

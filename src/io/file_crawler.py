@@ -2,7 +2,6 @@ import logging
 from pathlib import Path
 from typing import Literal
 
-import numpy as np
 import pandas as pd
 
 from src import config, resolve_project_path
@@ -96,18 +95,16 @@ def _deduplicate_measurements(
 
     out = df.copy().reset_index(drop=True)
     key_cols = group_cols + ["measurement_number"]
+    if "acquisition_mode" in out.columns:
+        key_cols.append("acquisition_mode")
     if not out.duplicated(subset=key_cols, keep=False).any():
         return out
 
-    renumbered: list[pd.DataFrame] = []
-    for _, group in out.groupby(group_cols, sort=False):
-        g = group.sort_values(
-            sort_cols or ["measurement_number"], kind="mergesort"
-        ).reset_index(drop=True)
-        if g.duplicated(subset=["measurement_number"], keep=False).any():
-            g["measurement_number"] = np.arange(1, len(g) + 1)
-        renumbered.append(g)
-    return pd.concat(renumbered, ignore_index=True)
+    duplicates = out.loc[out.duplicated(subset=key_cols, keep=False), key_cols + ["filepath"]]
+    raise ValueError(
+        "Duplicate measurement identities in raw data; correct the provenance: "
+        f"{duplicates.to_dict(orient='records')[:5]}"
+    )
 
 
 

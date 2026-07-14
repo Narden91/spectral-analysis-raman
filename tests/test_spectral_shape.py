@@ -1,6 +1,7 @@
 """Tests for Phase M: spectral-shape analysis (peak fit + FWHM + asymmetry)."""
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from src.analysis.spectral_shape import (
@@ -39,8 +40,7 @@ def _synthetic_feature_matrix(
     centre: float = 1720.0,
     fwhm: float = 20.0,
     noise: float = 0.02,
-) -> "pd.DataFrame":
-    import pandas as pd
+) -> pd.DataFrame:
 
     wn = np.linspace(lo, hi, 30)
     rng = np.random.default_rng(42)

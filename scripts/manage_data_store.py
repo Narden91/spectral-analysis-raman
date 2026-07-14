@@ -34,6 +34,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Manage parsed/preprocessed Raman data stores.")
     parser.add_argument("--config", type=str, default=None, help="Optional config override.")
     parser.add_argument("--dry-run", action="store_true", help="Print actions without mutating stores.")
+    parser.add_argument("--strict", action="store_true", help="Rehash every artifact and input during validation.")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("build", "validate", "info", "clean"):
@@ -55,8 +56,8 @@ def _build(source: str, force: bool, dry_run: bool) -> None:
     print_kv_table("Store Summary", data_source_summary(resolved))
 
 
-def _validate(source: str) -> None:
-    result = validate_store(_store_dir(source, config), source, config)
+def _validate(source: str, strict: bool) -> None:
+    result = validate_store(_store_dir(source, config), source, config, strict=strict)
     if not result.is_valid:
         for error in result.errors:
             logger.error("%s", error)
@@ -96,7 +97,7 @@ def main() -> None:
         _build(args.source, args.force, args.dry_run)
         return
     if args.command == "validate":
-        _validate(args.source)
+        _validate(args.source, args.strict)
         return
     if args.command == "info":
         _info(args.source)

@@ -42,7 +42,7 @@ _REORG_STEM_RE = re.compile(
     r"^(?P<subject_id>[^_]+)"
     r"_(?P<slide>[^_]+)"
     r"_(?P<range>\d+(?:\.\d+)?)"
-    r"_range(?:_(?:SS|FP))?"
+    r"_range(?:_(?P<acquisition_mode>SS|FP))?"
     r"_meas(?P<meas>\d+)$",
     re.IGNORECASE,
 )
@@ -90,6 +90,8 @@ def parse_filename(filepath: str | Path) -> dict[str, Any]:
         metadata["slide_number"] = match.group("slide")
         metadata["spectral_range"] = float(match.group("range"))
         metadata["measurement_number"] = int(match.group("meas"))
+        mode = match.group("acquisition_mode")
+        metadata["acquisition_mode"] = mode.upper() if mode else None
     except (ValueError, AttributeError) as exc:
         logger.warning("Failed to parse reorganized filename '%s': %s", path.name, exc)
 

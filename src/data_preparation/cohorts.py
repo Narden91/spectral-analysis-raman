@@ -27,8 +27,6 @@ def build_materialized_cohorts(df_merged: pd.DataFrame) -> dict[str, dict[str, p
 def write_cohort_tables(
     cohort_root: str | Path,
     cohorts: dict[str, dict[str, pd.DataFrame]],
-    *,
-    write_csv_mirrors: bool,
 ) -> list[Path]:
     output_root = Path(cohort_root)
     written: list[Path] = []
@@ -49,8 +47,4 @@ def write_cohort_tables(
             parquet_path = cohort_dir / f"{table_name}.parquet"
             frame.to_parquet(parquet_path, index=False)
             written.append(parquet_path)
-            if write_csv_mirrors:
-                csv_path = cohort_dir / f"{table_name}.csv"
-                frame.to_csv(csv_path, index=False)
-                written.append(csv_path)
     return written

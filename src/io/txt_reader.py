@@ -72,6 +72,12 @@ def read_txt_spectrum(
             f"Data length {len(df)} is not a multiple of {num_wavenumbers} wavenumbers."
         )
 
+    if df.duplicated(subset=[x_col, y_col, wave_col], keep=False).any():
+        raise ValueError(f"Duplicate (X, Y, wavenumber) rows in '{Path(filepath).name}'")
+    per_pixel = df.groupby([x_col, y_col], dropna=False)[wave_col].agg(["count", "nunique"])
+    if not ((per_pixel["count"] == num_wavenumbers) & (per_pixel["nunique"] == num_wavenumbers)).all():
+        raise ValueError(f"Incomplete wavenumber coverage for one or more pixels in '{Path(filepath).name}'")
+
     # Sort by (point index, wavenumber) so the reshape always maps columns
     # to sorted wavenumbers regardless of file-internal ordering.
     df = df.sort_values(by=[x_col, y_col, wave_col]).reset_index(drop=True)

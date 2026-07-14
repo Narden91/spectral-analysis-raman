@@ -150,7 +150,6 @@ def _plot_difference_spectrum(
         fig, axes = plt.subplots(2, 1, figsize=(7, 5.5), sharex=True)
 
         wn = data["wavenumber"].to_numpy(dtype=float)
-        diff = data["difference"].to_numpy(dtype=float)
         se = data["signed_effect"].to_numpy(dtype=float)
 
         # Top panel: mean spectra + shaded difference
@@ -349,7 +348,7 @@ def _plot_subgroup_mean_spectra(
     for i, (label, X) in enumerate(sorted(groups.items())):
         color = _SUBGROUP_PALETTE[i % len(_SUBGROUP_PALETTE)]
         mean = np.nanmean(X, axis=0)
-        ax.plot(wavenumbers, mean, color=color, linewidth=1.5, label=f"{label} (n={X.shape[0]})")
+        ax.plot(wavenumbers, mean, color=color, linewidth=1.5, label=label)
         if X.shape[0] > 2:
             sem = np.nanstd(X, axis=0, ddof=1) / np.sqrt(X.shape[0])
             ax.fill_between(wavenumbers, mean - 1.96 * sem, mean + 1.96 * sem, color=color, alpha=ci_alpha)

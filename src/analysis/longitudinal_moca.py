@@ -16,13 +16,12 @@ from scipy import stats
 from src import get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
-    apply_binary_cluster_permutation,
-    apply_spearman_cluster_permutation,
-    build_candidate_regions,
     compute_binary_group_feature_tests,
     compute_spearman_feature_tests,
     load_disease_feature_frame,
 )
+from src.analysis.spectral_regions import build_candidate_regions
+from src.statistics.cluster_permutation import apply_binary_cluster_permutation, apply_spearman_cluster_permutation
 
 logger = logging.getLogger(__name__)
 

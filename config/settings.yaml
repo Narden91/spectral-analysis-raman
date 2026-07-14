@@ -20,13 +20,12 @@ experiment:
 # Data
 # ---------------------------------------------------------------------------
 data:
-  source: "preprocessed"        # str: one of {"raw_text", "parsed", "preprocessed"}
-  auto_build: true              # bool: build missing derived stores at load time
+  source: "preprocessed"        # str: one of {"parsed", "preprocessed"}
+  auto_build: false             # bool: analysis never builds or mutates data stores
   raw_text_dir: "data/raw"      # str: original canonical spectra tree
   clinical_data_path: "data/clinical_data.csv"  # str: source clinical CSV
   parsed_dir: "data/parsed"     # str: validated materialized store before preprocessing
   preprocessed_dir: "data/preprocessed"  # str: materialized store after preprocessing
-  write_csv_mirrors: true       # bool: emit CSV mirrors beside parquet tables for inspection
   require_valid_manifest: true  # bool: reject missing or invalid manifests for derived stores
   stale_manifest_policy: "error"  # str: "error" or "rebuild"
   root_dir: "data/raw"              # str: legacy alias for reorganized canonical dataset
@@ -38,6 +37,35 @@ data:
   clinical_audit_csv: "data_cleaned/clinical/clinical_mismatch_audit.csv"  # str: mismatch audit log
   missing_clinical_subjects_csv: "data_cleaned/clinical/subjects_missing_clinical.csv"  # str: subjects without clinical data
   file_extension: ".txt"        # str: spectrum file suffix
+
+# ---------------------------------------------------------------------------
+# Curated Raman-band definitions shared by analysis and plotting tracks.
+# ---------------------------------------------------------------------------
+whole_spectra:
+  bands:
+    # Fingerprint block (1300)
+    cytosine_786: [773, 796]
+    o_p_o_821: [812, 832]
+    tyrosine_851: [836, 874]
+    c_o_c_sugar_925: [900, 938]
+    beta_sheet_980: [965, 995]
+    c_o_c_n_1060: [1044, 1078]
+    lipid_cc_1089: [1082, 1098]
+    po2_cn_1112: [1105, 1120]
+    carotenoid_1156: [1145, 1165]
+    amide_iii_1258: [1240, 1280]
+    ch2_twist_1301: [1290, 1325]
+    ch2_ch3_scissor_1440: [1430, 1445]
+    ch2_ch3_bend_1465: [1450, 1475]
+    carotenoid_1525: [1510, 1535]
+    tryptophan_1555: [1550, 1560]
+    amide_i_1657: [1640, 1675]
+    lipid_carbonyl_1721: [1710, 1730]
+    lipid_ester_1744: [1735, 1755]
+    # CH-stretch block (2850)
+    ch2_sym_stretch_2853: [2845, 2860]
+    ch2_asym_stretch_2890: [2870, 2910]
+    ch3_asym_stretch_2937: [2925, 2945]
 
 # ---------------------------------------------------------------------------
 # Preprocessing

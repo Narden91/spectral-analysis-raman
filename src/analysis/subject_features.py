@@ -126,7 +126,7 @@ def _subject_source_provenance(inputs: "SubjectInputs", cfg: dict) -> pd.DataFra
     area_wide = area_wide.reset_index()
 
     source = get_active_data_source()
-    source_name = source.source_name if source is not None else "raw_text"
+    source_name = source.source_name if source is not None else "preprocessed"
     base["analysis_mode"] = resolve_eda_analysis_mode(cfg)
     base["feature_aggregation"] = str(cfg.get("biological_pca", {}).get("aggregation", "median"))
     base["data_source"] = source_name

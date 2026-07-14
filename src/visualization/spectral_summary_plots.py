@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Iterable
 
 import matplotlib.pyplot as plt
@@ -44,6 +45,30 @@ REGION_TITLES = {
     "2850": "CH-stretch (2850 cm$^{-1}$)",
 }
 
+BAND_DISPLAY_LABELS = {
+    "cytosine_786": "Cytosine",
+    "o_p_o_821": "O-P-O",
+    "tyrosine_851": "Tyrosine",
+    "c_o_c_sugar_925": "C-O-C (sugar)",
+    "beta_sheet_980": r"$\beta$-sheet",
+    "c_o_c_n_1060": "C-O-C-N",
+    "lipid_cc_1089": "Lipid C-C",
+    "po2_cn_1112": r"PO$_2^-$/C-N",
+    "carotenoid_1156": "Carotenoid",
+    "amide_iii_1258": "Amide III",
+    "ch2_twist_1301": r"CH$_2$ twist",
+    "ch2_ch3_scissor_1440": r"CH$_2$/CH$_3$ scissor",
+    "ch2_ch3_bend_1465": r"CH$_2$/CH$_3$ bend",
+    "carotenoid_1525": "Carotenoid",
+    "tryptophan_1555": "Tryptophan",
+    "amide_i_1657": "Amide I",
+    "lipid_carbonyl_1721": "Lipid C=O",
+    "lipid_ester_1744": "Lipid ester",
+    "ch2_sym_stretch_2853": r"CH$_2$ sym. stretch",
+    "ch2_asym_stretch_2890": r"CH$_2$ asym. stretch",
+    "ch3_asym_stretch_2937": r"CH$_3$ asym. stretch",
+}
+
 
 def _region_key(region: str) -> str:
     key = str(region).strip().lower()
@@ -66,8 +91,20 @@ def _condition_name(condition: str) -> str:
     return str(condition).strip().capitalize()
 
 
+def _plot_bands(plot_cfg: dict) -> Mapping[str, Iterable[float]]:
+    bands = plot_cfg.get("bands", {})
+    return bands if isinstance(bands, Mapping) else {}
+
+
 def _mean_signal(matrix: np.ndarray) -> np.ndarray:
     return np.nanmean(np.asarray(matrix, dtype=float), axis=0)
+
+
+def _upper_envelope(signals: Iterable[np.ndarray]) -> np.ndarray:
+    arrays = [np.asarray(signal, dtype=float) for signal in signals]
+    if not arrays:
+        return np.array([], dtype=float)
+    return np.nanmax(np.vstack(arrays), axis=0)
 
 
 def _snv_rescale(y: np.ndarray) -> np.ndarray:
@@ -113,7 +150,7 @@ def _peak_indices(signal: np.ndarray, peak_cfg: dict) -> np.ndarray:
 
     prominences = props.get("prominences", np.zeros(peaks.size, dtype=float))
     ranked = np.argsort(prominences)[::-1][:max_peaks]
-    return np.sort(peaks[ranked])
+    return np.sort(peaks[ranked][y[peaks[ranked]] > 0])
 
 
 def _build_layout(
@@ -240,41 +277,87 @@ def _decorate_regions(
         )
 
 
+def _nearest_band_name(
+    wavenumber: float,
+    bands: Mapping[str, Iterable[float]],
+    *,
+    tolerance: float = 12.0,
+) -> str | None:
+    nearest_name: str | None = None
+    nearest_distance = tolerance
+    for name, bounds in bands.items():
+        values = tuple(bounds)
+        if len(values) != 2:
+            continue
+        center = (float(values[0]) + float(values[1])) / 2.0
+        distance = abs(wavenumber - center)
+        if distance <= nearest_distance:
+            nearest_name = name
+            nearest_distance = distance
+    return nearest_name
+
+
+def _nearest_band_label(
+    wavenumber: float,
+    bands: Mapping[str, Iterable[float]],
+    *,
+    tolerance: float = 12.0,
+) -> str | None:
+    """Return the curated Raman-band label nearest to a detected peak."""
+    band_name = _nearest_band_name(wavenumber, bands, tolerance=tolerance)
+    if band_name is None:
+        return None
+    return BAND_DISPLAY_LABELS.get(band_name, band_name.replace("_", " "))
+
+
 def _annotate_peaks(
     ax: plt.Axes,
     x: np.ndarray,
     y: np.ndarray,
     actual_wavenumbers: np.ndarray,
-    color: str,
     peak_cfg: dict,
+    *,
+    bands: Mapping[str, Iterable[float]] | None = None,
 ) -> None:
+    """Annotate positive, curated Raman-band peaks with vertical leader lines."""
     peak_idx = _peak_indices(y, peak_cfg)
-    if peak_idx.size == 0:
+    if peak_idx.size == 0 or not bands:
         return
 
-    y_min = float(np.nanmin(y))
-    y_max = float(np.nanmax(y))
-    y_span = y_max - y_min
-    if not np.isfinite(y_span) or y_span == 0:
-        y_span = max(abs(y_max), 1.0)
+    y_bottom, y_top = map(float, ax.get_ylim())
+    y_span = y_top - y_bottom
+    if not np.isfinite(y_span) or y_span <= 0:
+        return
+
+    annotated_bands = getattr(ax, "_raman_annotated_bands", set())
+    label_levels = (0.74, 0.60, 0.88, 0.48)
     y_top = float(ax.get_ylim()[1])
     cap = y_top - 0.03 * y_span
 
-    for order, idx in enumerate(peak_idx):
-        offset = (0.02 + 0.012 * (order % 3)) * y_span
-        ax.axvline(float(x[idx]), color=color, linewidth=0.7, linestyle=":", alpha=0.2)
-        ax.text(
-            float(x[idx]),
-            float(min(y[idx] + offset, cap)),
-            f"{int(round(actual_wavenumbers[idx]))}",
-            rotation=90,
+    for order, idx in enumerate(sorted(peak_idx, key=lambda item: x[item])):
+        band_name = _nearest_band_name(float(actual_wavenumbers[idx]), bands)
+        if band_name is None or band_name in annotated_bands:
+            continue
+        label = _nearest_band_label(float(actual_wavenumbers[idx]), bands)
+        if label is None:
+            continue
+        peak_x = float(x[idx])
+        peak_y = float(y[idx])
+        label_y = max(peak_y + 0.06 * y_span, y_bottom + label_levels[order % len(label_levels)] * y_span)
+        ax.annotate(
+            label,
+            xy=(peak_x, peak_y),
+            xytext=(peak_x, min(label_y, cap)),
             ha="center",
             va="bottom",
-            fontsize=8,
-            color=color,
-            alpha=0.9,
-            clip_on=True,
+            fontsize=7.5,
+            color="#111827",
+            annotation_clip=True,
+            arrowprops={"arrowstyle": "-", "color": "#111827", "linewidth": 0.65, "shrinkA": 0, "shrinkB": 2},
+            zorder=4,
         )
+        annotated_bands.add(band_name)
+    setattr(ax, "_raman_annotated_bands", annotated_bands)
 
 
 def _finalize_axis(
@@ -331,7 +414,7 @@ def plot_condition_region(
         mean_control,
         color=CONDITION_COLORS["control"],
         linewidth=2.0,
-        label=f"Control (n={control.shape[0]})",
+        label="Control",
     )
     ax.fill_between(wavenumbers, mean_control, alpha=0.08, color=CONDITION_COLORS["control"])
     ax.plot(
@@ -339,13 +422,20 @@ def plot_condition_region(
         mean_disease,
         color=CONDITION_COLORS["disease"],
         linewidth=2.0,
-        label=f"Disease (n={disease.shape[0]})",
+        label="Disease",
     )
     ax.fill_between(wavenumbers, mean_disease, alpha=0.08, color=CONDITION_COLORS["disease"])
     _set_spectrum_limits(ax, [wavenumbers], [mean_control, mean_disease], top_pad=0.18)
     peak_cfg = plot_cfg.get("peak_detection", {})
-    _annotate_peaks(ax, wavenumbers, mean_control, wavenumbers, CONDITION_COLORS["control"], peak_cfg)
-    _annotate_peaks(ax, wavenumbers, mean_disease, wavenumbers, CONDITION_COLORS["disease"], peak_cfg)
+    bands = _plot_bands(plot_cfg)
+    _annotate_peaks(
+        ax,
+        wavenumbers,
+        _upper_envelope((mean_control, mean_disease)),
+        wavenumbers,
+        peak_cfg,
+        bands=bands,
+    )
     _finalize_axis(
         ax,
         title=f"Preprocessed spectra: Disease vs Control - {_region_title(region)}",
@@ -374,7 +464,7 @@ def plot_gender_condition_region(
         mean_control,
         color=control_color,
         linewidth=2.0,
-        label=f"Control (n={control.shape[0]})",
+        label="Control",
     )
     ax.fill_between(wavenumbers, mean_control, alpha=0.08, color=control_color)
     ax.plot(
@@ -382,13 +472,20 @@ def plot_gender_condition_region(
         mean_disease,
         color=disease_color,
         linewidth=2.0,
-        label=f"Disease (n={disease.shape[0]})",
+        label="Disease",
     )
     ax.fill_between(wavenumbers, mean_disease, alpha=0.08, color=disease_color)
     _set_spectrum_limits(ax, [wavenumbers], [mean_control, mean_disease], top_pad=0.18)
     peak_cfg = plot_cfg.get("peak_detection", {})
-    _annotate_peaks(ax, wavenumbers, mean_control, wavenumbers, control_color, peak_cfg)
-    _annotate_peaks(ax, wavenumbers, mean_disease, wavenumbers, disease_color, peak_cfg)
+    bands = _plot_bands(plot_cfg)
+    _annotate_peaks(
+        ax,
+        wavenumbers,
+        _upper_envelope((mean_control, mean_disease)),
+        wavenumbers,
+        peak_cfg,
+        bands=bands,
+    )
     _finalize_axis(
         ax,
         title=f"Preprocessed spectra: {gender.capitalize()} Control vs Disease - {_region_title(region)}",
@@ -418,7 +515,7 @@ def plot_individual_region(
         mean_spectrum,
         color=color,
         linewidth=mean_linewidth,
-        label=f"{_condition_name(condition)} mean (n={spectra.shape[0]})",
+        label=f"{_condition_name(condition)} mean",
     )
     ax.fill_between(wavenumbers, mean_spectrum, alpha=0.08, color=color)
     _set_spectrum_limits(
@@ -427,7 +524,9 @@ def plot_individual_region(
         [np.asarray(spectra, dtype=float), mean_spectrum],
         top_pad=0.18,
     )
-    _annotate_peaks(ax, wavenumbers, mean_spectrum, wavenumbers, color, plot_cfg.get("peak_detection", {}))
+    _annotate_peaks(
+        ax, wavenumbers, mean_spectrum, wavenumbers, plot_cfg.get("peak_detection", {}), bands=_plot_bands(plot_cfg)
+    )
     _finalize_axis(
         ax,
         title=f"Preprocessed spectra: {_condition_name(condition)} individual spectra - {_region_title(region)} (n={spectra.shape[0]})",
@@ -478,11 +577,13 @@ def plot_individual_by_gender_region(
             mean_spectrum,
             color=color,
             linewidth=mean_linewidth,
-            label=f"{label} mean (n={spectra.shape[0]})",
+            label=f"{label} mean",
         )
         ax.fill_between(wavenumbers, mean_spectrum, alpha=0.08, color=color)
         _set_spectrum_limits(ax, [wavenumbers], [spectra, mean_spectrum], top_pad=0.18)
-        _annotate_peaks(ax, wavenumbers, mean_spectrum, wavenumbers, color, plot_cfg.get("peak_detection", {}))
+        _annotate_peaks(
+            ax, wavenumbers, mean_spectrum, wavenumbers, plot_cfg.get("peak_detection", {}), bands=_plot_bands(plot_cfg)
+        )
         _finalize_axis(ax, title=label)
         handles, labels_ax = ax.get_legend_handles_labels()
         ax.legend(handles, labels_ax, loc="upper right", fontsize=8, frameon=False)
@@ -511,7 +612,7 @@ def plot_global_comparison(
         gap_cm=float(plot_cfg.get("gap_cm", 50.0)),
     )
     peak_cfg = plot_cfg.get("peak_detection", {})
-    annotated_segments: list[tuple[np.ndarray, np.ndarray, np.ndarray, str]] = []
+    annotation_signals: dict[str, list[np.ndarray]] = {}
 
     # SNV-rescale every region's series for display so regions with different
     # normalization (area norm vs SNV) share a comparable y-axis. Mirrors the
@@ -544,14 +645,7 @@ def plot_global_comparison(
             )
             if annotate:
                 ax.fill_between(display_axes[region], y, alpha=0.08, color=color)
-                annotated_segments.append(
-                    (
-                        np.asarray(display_axes[region], dtype=float),
-                        np.asarray(y, dtype=float),
-                        np.asarray(region_axes[region], dtype=float),
-                        color,
-                    )
-                )
+                annotation_signals.setdefault(region, []).append(np.asarray(y, dtype=float))
 
     _set_spectrum_limits(
         ax,
@@ -559,8 +653,15 @@ def plot_global_comparison(
         [np.asarray(entry["segments"][region], dtype=float) for entry in display_series for region in entry["segments"]],
         top_pad=0.22,
     )
-    for x_values, y_values, actual_wavenumbers, color in annotated_segments:
-        _annotate_peaks(ax, x_values, y_values, actual_wavenumbers, color, peak_cfg)
+    for region, signals in annotation_signals.items():
+        _annotate_peaks(
+            ax,
+            np.asarray(display_axes[region], dtype=float),
+            _upper_envelope(signals),
+            np.asarray(region_axes[region], dtype=float),
+            peak_cfg,
+            bands=_plot_bands(plot_cfg),
+        )
     _style_wavenumber_axis(ax, region_axes, display_axes, plot_cfg.get("axis", {}))
     _decorate_regions(ax, gap_spans, label_positions)
     _finalize_axis(ax, title=title, title_pad=24.0)
@@ -574,7 +675,6 @@ def plot_global_comparison(
 def plot_cohort_mean_spectra_grid(
     region_axes: dict[str, np.ndarray],
     cohort_segments: dict[tuple[str, str], dict[str, np.ndarray]],
-    subject_counts: dict[tuple[str, str], int],
     plot_cfg: dict,
 ) -> tuple[plt.Figure, np.ndarray]:
     fig, axes = plt.subplots(2, 2, figsize=(18, 10), sharey=False)
@@ -596,7 +696,7 @@ def plot_cohort_mean_spectra_grid(
             region: _snv_rescale(np.asarray(y, dtype=float))
             for region, y in segments.items()
         }
-        annotated_segments: list[tuple[np.ndarray, np.ndarray, np.ndarray, str]] = []
+        annotated_segments: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
         for region in region_axes:
             y_disp = display_segments.get(region)
             if y_disp is None:
@@ -618,7 +718,6 @@ def plot_cohort_mean_spectra_grid(
                     np.asarray(display_axes[region], dtype=float),
                     y_disp,
                     np.asarray(region_axes[region], dtype=float),
-                    color,
                 )
             )
         _set_spectrum_limits(
@@ -627,13 +726,20 @@ def plot_cohort_mean_spectra_grid(
             list(display_segments.values()),
             top_pad=0.22,
         )
-        for x_values, y_values, actual_wavenumbers, color in annotated_segments:
-            _annotate_peaks(ax, x_values, y_values, actual_wavenumbers, color, plot_cfg.get("peak_detection", {}))
+        for x_values, y_values, actual_wavenumbers in annotated_segments:
+            _annotate_peaks(
+                ax,
+                x_values,
+                y_values,
+                actual_wavenumbers,
+                plot_cfg.get("peak_detection", {}),
+                bands=_plot_bands(plot_cfg),
+            )
         _style_wavenumber_axis(ax, region_axes, display_axes, plot_cfg.get("axis", {}))
         _decorate_regions(ax, gap_spans, label_positions)
         _finalize_axis(
             ax,
-            title=f"{_cohort_name(condition, gender)} (n={subject_counts.get(cohort, 0)})",
+            title=_cohort_name(condition, gender),
             title_pad=18.0,
         )
 
@@ -655,7 +761,9 @@ def plot_region_mean_spectrum(
     ax.plot(wavenumbers, mean_spectrum, color=color, linewidth=2.0)
     ax.fill_between(wavenumbers, mean_spectrum, alpha=0.08, color=color)
     _set_spectrum_limits(ax, [wavenumbers], [mean_spectrum], top_pad=0.18)
-    _annotate_peaks(ax, wavenumbers, mean_spectrum, wavenumbers, color, plot_cfg.get("peak_detection", {}))
+    _annotate_peaks(
+        ax, wavenumbers, mean_spectrum, wavenumbers, plot_cfg.get("peak_detection", {}), bands=_plot_bands(plot_cfg)
+    )
     _finalize_axis(ax, title=f"Mean spectrum - {_region_title(region)}")
     fig.tight_layout()
     return fig, ax
@@ -732,7 +840,6 @@ def plot_whole_spectra_per_cohort(
     region_axes: dict[str, np.ndarray],
     segments: dict[str, np.ndarray],
     cohort: tuple[str, str],
-    subject_count: int,
     plot_cfg: dict,
 ) -> tuple[plt.Figure, plt.Axes]:
     condition, gender = cohort
@@ -741,13 +848,13 @@ def plot_whole_spectra_per_cohort(
         region_axes,
         [
             {
-                "label": f"{_cohort_name(condition, gender)} (n={subject_count})",
+                "label": _cohort_name(condition, gender),
                 "color": color,
                 "linewidth": 2.3,
                 "segments": segments,
             }
         ],
-        title=f"{_cohort_name(condition, gender)} whole spectra (n={subject_count})",
+        title=f"{_cohort_name(condition, gender)} whole spectra",
         plot_cfg=plot_cfg,
     )
 

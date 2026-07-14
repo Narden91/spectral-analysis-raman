@@ -157,7 +157,7 @@ def _parse_args() -> argparse.Namespace:
         "--source",
         type=str,
         default=None,
-        help="Override data.source with one of: raw_text, parsed, preprocessed.",
+        help="Override data.source with one of: parsed, preprocessed.",
     )
     parser.add_argument(
         "--verbose",

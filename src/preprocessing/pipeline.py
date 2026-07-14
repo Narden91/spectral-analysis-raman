@@ -1235,6 +1235,7 @@ def run_preprocessing(
     trim_cm: Optional[float] = None,
     norm_for: Optional[str] = None,
     record_stages: Optional[bool] = None,
+    return_pre_normalization: bool = False,
 ) -> PreprocessResult:
     arr = flatten_spectra_rows(spectra)
     wn = np.asarray(wavenumbers, dtype=float)
@@ -1343,6 +1344,9 @@ def run_preprocessing(
         result, wn = interpolate_spectra(result, wn)
 
     metrics_df, flags_df = _flag_outliers(metrics_df, flags_df)
+
+    if return_pre_normalization:
+        stage_arrays["pre_normalization"] = result.copy()
 
     if normalize and result.size > 0:
         result = normalize_spectra(result, mode=norm_for, region=region_key)

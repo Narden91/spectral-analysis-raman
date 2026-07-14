@@ -11,6 +11,7 @@ import pytest
 import src
 from src.analysis.spectral_loader import build_group_matrix
 from src.data_preparation import validation as validation_module
+from src.data_preparation.loaders import load_area_summaries, load_file_index, load_spectra, load_whole_area_store
 from src.data_preparation.materialize import build_parsed_store, build_preprocessed_store
 from src.data_preparation.store import (
     DataSource,
@@ -51,7 +52,6 @@ def configured_store_paths(tmp_path: Path) -> dict[str, Path]:
             "clinical_csv": str(clinical_path),
             "parsed_dir": str(parsed_dir),
             "preprocessed_dir": str(preprocessed_dir),
-            "write_csv_mirrors": True,
             "require_valid_manifest": True,
             "stale_manifest_policy": "error",
         }
@@ -108,8 +108,9 @@ def configured_store_paths(tmp_path: Path) -> dict[str, Path]:
 
 def test_build_parsed_store_and_validate(configured_store_paths: dict[str, Path]) -> None:
     store = build_parsed_store(src.config, force=True)
-    assert (store.path / "file_index.parquet").exists()
-    assert (store.path / "spectra_1300.npz").exists()
+    assert (store.path / "measurements.parquet").exists()
+    assert (store.path / "raw_spectra_1300.npy").exists()
+    assert (store.path / "pixels.parquet").exists()
     assert (store.path / "cohort" / "control_vs_disease" / "subject_summary.parquet").exists()
 
     validation = validate_store(store.path, "parsed", src.config)
@@ -118,9 +119,19 @@ def test_build_parsed_store_and_validate(configured_store_paths: dict[str, Path]
     manifest = json.loads((store.path / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["counts"]["areas"] == 2
 
-    with np.load(store.path / "whole_area_store.npz", allow_pickle=False) as data:
-        assert np.asarray(data["values"]).shape[0] == 2
-        assert set(np.asarray(data["subject_ids"]).astype(str).tolist()) == {"1", "2"}
+    assert not (store.path / "spectra_1300.npz").exists()
+    assert not (store.path / "area_summaries_1300.npz").exists()
+
+
+def test_parsed_store_aligns_only_to_the_common_axis_overlap(configured_store_paths: dict[str, Path]) -> None:
+    shifted = configured_store_paths["raw_dir"] / "Disease" / "Male" / "2" / "sample_1" / "2_1_1300_range_meas1.txt"
+    _write_measurement_file(shifted, [1240.2 + idx for idx in range(10)], 20.0)
+    store = build_parsed_store(src.config, force=True)
+    axis = np.load(store.path / "wavenumbers_1300.npy")
+    values = np.load(store.path / "raw_spectra_1300.npy")
+    assert axis[0] >= 1240.2
+    assert axis[-1] <= 1249.0
+    assert values.shape[1] == axis.size
 
 
 def test_resolve_preprocessed_source_and_group_matrix(configured_store_paths: dict[str, Path]) -> None:
@@ -129,7 +140,7 @@ def test_resolve_preprocessed_source_and_group_matrix(configured_store_paths: di
     assert resolved.source_name == "preprocessed"
     assert get_active_data_source() is not None
 
-    file_index = pd.read_parquet(configured_store_paths["preprocessed_dir"] / "file_index.parquet")
+    file_index = load_file_index(resolved)
     wave, matrix, subject_ids = build_group_matrix(
         file_index,
         gender="male",
@@ -139,6 +150,22 @@ def test_resolve_preprocessed_source_and_group_matrix(configured_store_paths: di
     assert wave.size > 0
     assert matrix.shape[0] == 1
     assert subject_ids == ["2"]
+    whole = load_whole_area_store(resolved)
+    assert whole["values"].shape[0] == 2
+
+
+def test_store_readers_share_canonical_arrays(configured_store_paths: dict[str, Path]) -> None:
+    build_preprocessed_store(src.config, force=True)
+    source = resolve_data_source(src.config, source_override="preprocessed")
+
+    spectra = load_spectra(source, "1300")
+    summaries = load_area_summaries(source, "1300")
+
+    assert isinstance(spectra["spectra"], np.memmap)
+    assert spectra["spectra"].shape[0] == spectra["measurement_ids"].size
+    assert summaries["area_summary"].shape == summaries["area_summary_bc"].shape
+    assert summaries["area_summary"].shape[0] == summaries["measurement_ids"].size
+    assert summaries["feature_names"].shape[0] == spectra["wavenumbers"].size
 
 
 def test_stale_manifest_fails_after_raw_input_change(configured_store_paths: dict[str, Path]) -> None:
@@ -152,10 +179,10 @@ def test_stale_manifest_fails_after_raw_input_change(configured_store_paths: dic
 
 def test_validation_fails_when_required_file_missing(configured_store_paths: dict[str, Path]) -> None:
     store = build_parsed_store(src.config, force=True)
-    (store.path / "area_metadata.parquet").unlink()
+    (store.path / "areas.parquet").unlink()
     validation = validate_store(store.path, "parsed", src.config)
     assert not validation.is_valid
-    assert any("area_metadata.parquet" in error for error in validation.errors)
+    assert any("areas.parquet" in error for error in validation.errors)
 
 
 def test_validate_store_uses_stat_fast_path_for_unchanged_inputs(

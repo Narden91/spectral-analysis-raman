@@ -15,7 +15,7 @@ import pandas as pd
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from src import config, get_output_root, whole_spectra_split_index
+from src import config, get_output_root, load_config, whole_spectra_split_index
 from src.analysis.spectral_loader import build_group_matrix, build_whole_spectra_group_matrices
 from src.constants import CANONICAL_REGION_CHANNELS
 from src.data_preparation.loaders import load_clinical_subjects, load_file_index
@@ -65,7 +65,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default=None, help="Path to config YAML (overrides config/plots.yaml)")
     parser.add_argument("--max-subjects", type=int, default=None, help="Limit subjects per cohort")
     parser.add_argument("--outdir", type=str, default=None, help="Override base output directory")
-    parser.add_argument("--source", type=str, default=None, help="Override data.source with one of: raw_text, parsed, preprocessed")
+    parser.add_argument("--source", type=str, default=None, help="Override data.source with one of: parsed, preprocessed")
     parser.add_argument("--plots", action=argparse.BooleanOptionalAction, default=True, help="Generate plot images (default: True)")
     parser.add_argument("--export-data", action=argparse.BooleanOptionalAction, default=True, help="Export CSV data files (default: True)")
     return parser.parse_args()
@@ -98,6 +98,7 @@ def _plot_cfg() -> dict:
         "individual": {**defaults["modes"]["individual"], **cfg.get("modes", {}).get("individual", {})},
     }
     cfg["qc"] = {**defaults["qc"], **cfg.get("qc", {})}
+    cfg["bands"] = config.get("whole_spectra", {}).get("bands", {})
     return cfg
 
 
@@ -368,22 +369,18 @@ def _write_qc_plots(
         if np.asarray(payload["wavenumbers"]).size > 0
     }
     cohort_segments: dict[tuple[str, str], dict[str, np.ndarray]] = {}
-    subject_counts: dict[tuple[str, str], int] = {}
     for cohort in GROUP_FILTERS:
         segments: dict[str, np.ndarray] = {}
-        counts = []
         for region, payload in single_range_data.items():
             matrix = payload["groups"].get(cohort)
             if matrix is None or np.asarray(matrix).size == 0:
                 continue
             segments[region] = np.nanmean(np.asarray(matrix, dtype=float), axis=0)
-            counts.append(len(payload["ids"].get(cohort, [])))
         if segments:
             cohort_segments[cohort] = segments
-            subject_counts[cohort] = max(counts) if counts else 0
 
     if cohort_segments and len(region_axes) >= 1:
-        fig, _ = plot_cohort_mean_spectra_grid(region_axes, cohort_segments, subject_counts, plot_cfg)
+        fig, _ = plot_cohort_mean_spectra_grid(region_axes, cohort_segments, plot_cfg)
         _save_fig(fig, qc_root / "cohort_mean_spectra.png")
 
     for region, payload in single_range_data.items():
@@ -424,7 +421,6 @@ def _write_qc_plots(
             region_axes_whole,
             mean_segments,
             cohort,
-            subject_count=len(whole_range_data.get("ids", {}).get(cohort, [])),
             plot_cfg=plot_cfg,
         )
         condition, gender = cohort
@@ -449,19 +445,15 @@ def _write_qc_data(
         if np.asarray(payload["wavenumbers"]).size > 0
     }
     cohort_segments: dict[tuple[str, str], dict[str, np.ndarray]] = {}
-    subject_counts: dict[tuple[str, str], int] = {}
     for cohort in GROUP_FILTERS:
         segments: dict[str, np.ndarray] = {}
-        counts = []
         for region, payload in single_range_data.items():
             matrix = payload["groups"].get(cohort)
             if matrix is None or np.asarray(matrix).size == 0:
                 continue
             segments[region] = np.nanmean(np.asarray(matrix, dtype=float), axis=0)
-            counts.append(len(payload["ids"].get(cohort, [])))
         if segments:
             cohort_segments[cohort] = segments
-            subject_counts[cohort] = max(counts) if counts else 0
 
     if cohort_segments and len(region_axes) >= 1:
         frames = []
@@ -768,12 +760,12 @@ def _write_spectral_plots(
             whole_axes,
             [
                 {
-                    "label": f"Control (n={whole_pooled['control'].shape[0]})",
+                    "label": "Control",
                     "color": "#0072B2",
                     "segments": {region: np.nanmean(values, axis=0) for region, values in control_segments.items()},
                 },
                 {
-                    "label": f"Disease (n={whole_pooled['disease'].shape[0]})",
+                    "label": "Disease",
                     "color": "#D55E00",
                     "segments": {region: np.nanmean(values, axis=0) for region, values in disease_segments.items()},
                 },
@@ -795,12 +787,12 @@ def _write_spectral_plots(
                 whole_axes,
                 [
                     {
-                        "label": f"Control (n={control.shape[0]})",
+                        "label": "Control",
                         "color": "#0072B2" if gender == "female" else "#009E73",
                         "segments": {region: np.nanmean(values, axis=0) for region, values in control_split.items()},
                     },
                     {
-                        "label": f"Disease (n={disease.shape[0]})",
+                        "label": "Disease",
                         "color": "#D55E00" if gender == "female" else "#CC79A7",
                         "segments": {region: np.nanmean(values, axis=0) for region, values in disease_split.items()},
                     },
@@ -833,7 +825,7 @@ def _write_spectral_plots(
                 )
             series.append(
                 {
-                    "label": f"{condition.capitalize()} mean (n={matrix.shape[0]})",
+                    "label": f"{condition.capitalize()} mean",
                     "color": color,
                     "linewidth": mean_linewidth,
                     "segments": {region: np.nanmean(values, axis=0) for region, values in split_matrix.items()},
@@ -843,7 +835,7 @@ def _write_spectral_plots(
             fig, _ = plot_global_comparison(
                 whole_axes,
                 [*series[:-1], series[-1]],
-                title=f"Preprocessed spectra: {condition.capitalize()} individual spectra - Global (n={matrix.shape[0]})",
+                title=f"Preprocessed spectra: {condition.capitalize()} individual spectra - Global",
                 plot_cfg=plot_cfg,
             )
             _save_fig(fig, plot_root / "individual" / f"{condition.capitalize()}_global.png")
@@ -915,6 +907,9 @@ def run_spectral_plots(
 
 def _main() -> None:
     args = _parse_args()
+    if args.config:
+        config.clear()
+        config.update(load_config(args.config))
     run_spectral_plots(
         outdir=args.outdir,
         max_subjects=args.max_subjects,

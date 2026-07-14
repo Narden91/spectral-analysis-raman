@@ -136,7 +136,6 @@ def _binary_cluster_maxima(
         )
 
     maxima = np.zeros(n_permutations, dtype=float)
-    n_left = int((labels == 0).sum())
     for perm_index in range(n_permutations):
         order = rng.permutation(len(labels))
         maxima[perm_index] = _binary_cluster_mass_for_order(values, order, int((labels == 0).sum()), cluster_alpha)

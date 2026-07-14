@@ -1,12 +1,20 @@
+"""Build the two canonical Raman stores.
+
+``parsed`` owns immutable pixel-level raw spectra. ``preprocessed`` owns the
+two necessary derived bases and QC provenance.  Analysis code never crawls raw
+files or reruns preprocessing.
+"""
+
 from __future__ import annotations
 
+import hashlib
 import logging
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -23,13 +31,14 @@ from src.data_preparation.manifest import (
     iso_utc_now,
     write_manifest,
 )
-from src.fusion.area_pipeline import process_subject_areas
+from src.data_preparation.validation import validate_store
 from src.io.file_crawler import build_file_index, disambiguate_subject_ids
 from src.io.txt_reader import read_txt_spectrum
 from src.metadata.clinical import load_clinical_data, merge_index_with_clinical
 from src.preprocessing.pipeline import flatten_spectra_rows, run_preprocessing
 
 logger = logging.getLogger(__name__)
+RANGES = ("1300", "2850")
 
 
 @dataclass(frozen=True)
@@ -39,16 +48,27 @@ class MaterializedStore:
     manifest: dict[str, Any]
 
 
+@dataclass
+class _ProcessedMeasurement:
+    row: pd.Series
+    range_code: str
+    result_spectra: np.ndarray
+    pre_normalization: np.ndarray
+    retained_mask: np.ndarray
+    qc: pd.DataFrame
+    axis: np.ndarray
+
+
 def _data_cfg(cfg: dict) -> dict:
     return cfg.get("data", {})
 
 
 def _store_dir(store_type: str, cfg: dict) -> Path:
-    if store_type == "parsed":
-        return resolve_project_path(_data_cfg(cfg).get("parsed_dir", "data/parsed"))
-    if store_type == "preprocessed":
-        return resolve_project_path(_data_cfg(cfg).get("preprocessed_dir", "data/preprocessed"))
-    raise ValueError(f"Unsupported store_type: {store_type}")
+    key = {"parsed": "parsed_dir", "preprocessed": "preprocessed_dir"}.get(store_type)
+    if key is None:
+        raise ValueError(f"Unsupported store_type: {store_type}")
+    default = f"data/{store_type}"
+    return resolve_project_path(_data_cfg(cfg).get(key, default))
 
 
 def _raw_text_dir(cfg: dict) -> Path:
@@ -60,55 +80,42 @@ def _clinical_data_path(cfg: dict) -> Path:
 
 
 def _code_version() -> str:
+    """Commit plus working-tree hash; a bare commit is insufficient when dirty."""
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            check=True,
-            text=True,
-        )
+        head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, check=True, text=True).stdout.strip()
+        diff = subprocess.run(["git", "diff", "--no-ext-diff", "HEAD"], capture_output=True, check=True).stdout
+        return f"{head}+dirty:{hashlib.sha256(diff).hexdigest()[:16]}" if diff else head
     except Exception:
         return "unknown"
-    return result.stdout.strip() or "unknown"
-
-
-def _measurement_id(row: pd.Series) -> str:
-    range_value = str(int(float(row["spectral_range_cm-1"])))
-    return "__".join(
-        [
-            str(row["subject_id"]),
-            str(row["slide_number"]),
-            range_value,
-            f"meas{int(row['measurement_number'])}",
-        ]
-    )
-
-
-def _file_id(row: pd.Series) -> str:
-    relative = str(Path(row["filepath"]).as_posix()).lower()
-    return hash_file_id(relative)
 
 
 def hash_file_id(value: str) -> str:
-    import hashlib
-
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
+def _measurement_ids(frame: pd.DataFrame) -> pd.Series:
+    ranges = pd.to_numeric(frame["spectral_range_cm-1"], errors="raise").astype(int).astype(str)
+    modes = frame["acquisition_mode"].fillna("none").astype(str).str.lower()
+    measurement_numbers = pd.to_numeric(frame["measurement_number"], errors="raise").astype(int).astype(str)
+    return frame["subject_id"].astype(str).str.cat(
+        [frame["slide_number"].astype(str), ranges, modes, "meas" + measurement_numbers], sep="__"
+    )
+
+
 def _prepare_file_index(cfg: dict) -> pd.DataFrame:
-    legacy_root = cfg.setdefault("data", {}).get("root_dir")
-    if not legacy_root:
-        cfg["data"]["root_dir"] = str(_raw_text_dir(cfg))
-    frame = disambiguate_subject_ids(build_file_index(measurement="all")).copy()
+    frame = disambiguate_subject_ids(build_file_index(data_dir=_raw_text_dir(cfg), measurement="all")).copy()
     if frame.empty:
-        return frame
+        raise FileNotFoundError(f"No canonical Raman measurement files found in {_raw_text_dir(cfg)}")
     frame["filepath"] = frame["filepath"].map(lambda value: str(Path(value)))
+    frame["acquisition_mode"] = frame.get("acquisition_mode", pd.Series(pd.NA, index=frame.index)).astype("string")
     frame = frame.sort_values(
-        ["subject_id", "slide_number", "spectral_range_cm-1", "measurement_number", "filepath"],
+        ["subject_id", "slide_number", "spectral_range_cm-1", "acquisition_mode", "measurement_number", "filepath"],
         kind="mergesort",
     ).reset_index(drop=True)
-    frame["file_id"] = frame.apply(_file_id, axis=1)
-    frame["measurement_id"] = frame.apply(_measurement_id, axis=1)
+    frame["file_id"] = frame["filepath"].map(lambda value: hash_file_id(Path(value).as_posix().lower()))
+    frame["measurement_id"] = _measurement_ids(frame)
+    if frame["measurement_id"].duplicated().any():
+        raise ValueError("Duplicate measurement_id values after raw ingestion")
     frame["spectral_range"] = frame["spectral_range_cm-1"].map(lambda value: str(int(float(value))))
     frame["subject_id"] = frame["subject_id"].astype(str)
     frame["area_id"] = frame["area_id"].astype(str)
@@ -119,515 +126,330 @@ def _prepare_file_index(cfg: dict) -> pd.DataFrame:
 
 
 def _range_key(range_code: str) -> str:
-    return "fingerprint" if str(range_code) == "1300" else "ch_stretch"
+    return "fingerprint" if range_code == "1300" else "ch_stretch"
 
 
-def _area_entity_count(area_metadata: pd.DataFrame) -> int:
-    if area_metadata.empty:
-        return 0
-    if {"subject_id", "area_id"}.issubset(area_metadata.columns):
-        return int(
-            area_metadata[["subject_id", "area_id"]]
-            .astype(str)
-            .drop_duplicates()
-            .shape[0]
+def _flatten_with_coordinates(spectra: np.ndarray, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    values = flatten_spectra_rows(spectra)
+    if spectra.ndim == 3:
+        coords = np.column_stack((np.repeat(x, len(y)), np.tile(y, len(x))))
+    else:
+        coords = np.column_stack((np.asarray(x, dtype=float), np.asarray(y, dtype=float)))
+    if len(coords) != len(values):
+        raise ValueError("Pixel coordinate count does not match flattened spectra")
+    return values, coords
+
+
+def _assert_same_axis(reference: np.ndarray | None, candidate: np.ndarray, range_code: str) -> np.ndarray:
+    axis = np.asarray(candidate, dtype=float)
+    if axis.ndim != 1 or axis.size < 2 or not np.all(np.diff(axis) > 0):
+        raise ValueError(f"{range_code} has an invalid wavenumber axis")
+    if reference is not None and (reference.shape != axis.shape or not np.allclose(reference, axis, rtol=0, atol=1e-8)):
+        raise ValueError(f"{range_code} raw axes differ; calibrate/regrid explicitly before materialisation")
+    return axis
+
+
+def _common_overlap_axis(axes: list[np.ndarray], range_code: str, spacing: float) -> np.ndarray:
+    if not axes:
+        raise ValueError(f"Raw dataset does not contain required {range_code} range")
+    lower = max(float(axis[0]) for axis in axes)
+    upper = min(float(axis[-1]) for axis in axes)
+    if upper <= lower:
+        raise ValueError(f"{range_code} measurements have no common calibrated-axis overlap")
+    step = float(spacing)
+    if not np.isfinite(step) or step <= 0:
+        raise ValueError("preprocessing.interpolation.target_spacing must be positive")
+    start = np.ceil(lower / step) * step
+    stop = np.floor(upper / step) * step
+    axis = np.round(np.arange(start, stop + step * 0.5, step), 6)
+    if axis.size < 2:
+        raise ValueError(f"{range_code} common calibrated-axis overlap is too small")
+    return axis
+
+
+def _write_npy(path: Path, values: np.ndarray) -> None:
+    np.save(path, np.asarray(values, dtype=float))
+
+
+def _write_parsed_payload(store_dir: Path, measurements: pd.DataFrame, spacing: float) -> tuple[pd.DataFrame, dict[str, int]]:
+    spectra_parts: dict[str, list[np.ndarray]] = {code: [] for code in RANGES}
+    pixel_parts: list[pd.DataFrame] = []
+    source_axes: dict[str, list[np.ndarray]] = {code: [] for code in RANGES}
+    starts: dict[str, int] = {code: 0 for code in RANGES}
+    indexed = measurements.copy()
+    indexed["raw_start"] = 0
+    indexed["raw_stop"] = 0
+    indexed["source_axis_min"] = np.nan
+    indexed["source_axis_max"] = np.nan
+    indexed["source_axis_channels"] = 0
+
+    for idx, row in indexed.iterrows():
+        code = str(row["spectral_range"])
+        axis, x, y, spectra, _ = read_txt_spectrum(row["filepath"])
+        axis = _assert_same_axis(None, axis, code)
+        values, coords = _flatten_with_coordinates(spectra, x, y)
+        start = starts[code]
+        stop = start + len(values)
+        indexed.loc[idx, ["raw_start", "raw_stop"]] = (start, stop)
+        indexed.loc[idx, ["source_axis_min", "source_axis_max", "source_axis_channels"]] = (axis[0], axis[-1], len(axis))
+        starts[code] = stop
+        spectra_parts[code].append(values)
+        source_axes[code].append(axis)
+        pixel_parts.append(
+            pd.DataFrame(
+                {
+                    "measurement_id": str(row["measurement_id"]),
+                    "subject_id": str(row["subject_id"]),
+                    "area_id": str(row["area_id"]),
+                    "spectral_range": code,
+                    "pixel_index": np.arange(len(values), dtype=int),
+                    "x": coords[:, 0],
+                    "y": coords[:, 1],
+                    "raw_row": np.arange(start, stop, dtype=int),
+                }
+            )
         )
-    if "area_id" in area_metadata.columns:
-        return int(area_metadata["area_id"].astype(str).nunique())
-    return len(area_metadata)
+
+    for code in RANGES:
+        canonical_axis = _common_overlap_axis(source_axes[code], code, spacing)
+        aligned = [
+            values if values.shape[1] == canonical_axis.size and np.allclose(axis, canonical_axis, rtol=0, atol=1e-8)
+            else np.vstack([np.interp(canonical_axis, axis, row) for row in values])
+            for values, axis in zip(spectra_parts[code], source_axes[code])
+        ]
+        _write_npy(store_dir / f"raw_spectra_{code}.npy", np.vstack(aligned))
+        _write_npy(store_dir / f"wavenumbers_{code}.npy", canonical_axis)
+    pixels = pd.concat(pixel_parts, ignore_index=True)
+    pixels.to_parquet(store_dir / "pixels.parquet", index=False)
+    return indexed, {code: int(starts[code]) for code in RANGES}
 
 
-def _common_axis(vectors: list[np.ndarray]) -> np.ndarray:
-    if not vectors:
-        return np.array([], dtype=float)
-    reference = np.asarray(vectors[0], dtype=float)
-    return reference
+def _append_reason(values: pd.Series, reason: str, mask: np.ndarray) -> pd.Series:
+    out = values.fillna("").astype(str).copy()
+    out.loc[mask & (out == "ok")] = reason
+    out.loc[mask & (out != "ok")] = out.loc[mask & (out != "ok")] + "; " + reason
+    return out
 
 
-def _resample_vector(source_axis: np.ndarray, target_axis: np.ndarray, values: np.ndarray) -> np.ndarray:
-    if source_axis.shape == target_axis.shape and np.allclose(source_axis, target_axis):
-        return np.asarray(values, dtype=float)
-    return np.interp(target_axis, source_axis, np.asarray(values, dtype=float))
+def _process_measurements(parsed_dir: Path, measurements: pd.DataFrame, cfg: dict) -> tuple[dict[str, np.ndarray], pd.DataFrame, pd.DataFrame]:
+    raw = {code: np.load(parsed_dir / f"raw_spectra_{code}.npy", mmap_mode="r") for code in RANGES}
+    axes = {code: np.load(parsed_dir / f"wavenumbers_{code}.npy", mmap_mode="r") for code in RANGES}
+    pixels = pd.read_parquet(parsed_dir / "pixels.parquet")
+    pixel_groups = {key: group.sort_values("pixel_index") for key, group in pixels.groupby("measurement_id", sort=False)}
+    processed: list[_ProcessedMeasurement] = []
 
-
-def _read_raw_measurement_vectors(file_index: pd.DataFrame) -> dict[str, dict[str, np.ndarray]]:
-    grouped: dict[str, dict[str, list[Any]]] = {
-        "1300": {"axes": [], "rows": []},
-        "2850": {"axes": [], "rows": []},
-    }
-    for _, row in file_index.iterrows():
-        range_code = str(int(float(row["spectral_range_cm-1"])))
-        wavenumbers, _, _, spectra, _ = read_txt_spectrum(row["filepath"])
-        flat = flatten_spectra_rows(spectra)
-        grouped[range_code]["axes"].append(np.asarray(wavenumbers, dtype=float))
-        grouped[range_code]["rows"].append(
-            {
-                "measurement_id": row["measurement_id"],
-                "subject_id": str(row["subject_id"]),
-                "file_id": row["file_id"],
-                "area_id": str(row["area_id"]),
-                "axis": np.asarray(wavenumbers, dtype=float),
-                "vector": np.nanmedian(flat, axis=0),
-            }
-        )
-    output: dict[str, dict[str, np.ndarray]] = {}
-    for range_code, payload in grouped.items():
-        axes = payload["axes"]
-        target_axis = _common_axis(axes)
-        rows = payload["rows"]
-        if target_axis.size == 0:
-            output[range_code] = {
-                "spectra": np.empty((0, 0)),
-                "wavenumbers": np.array([], dtype=float),
-                "measurement_ids": np.array([], dtype=str),
-                "subject_ids": np.array([], dtype=str),
-                "file_ids": np.array([], dtype=str),
-                "area_ids": np.array([], dtype=str),
-            }
-            continue
-        vectors = np.vstack(
-            [_resample_vector(row["axis"], target_axis, row["vector"]) for row in rows]
-        )
-        output[range_code] = {
-            "spectra": vectors,
-            "wavenumbers": target_axis,
-            "measurement_ids": np.asarray([row["measurement_id"] for row in rows], dtype=str),
-            "subject_ids": np.asarray([row["subject_id"] for row in rows], dtype=str),
-            "file_ids": np.asarray([row["file_id"] for row in rows], dtype=str),
-            "area_ids": np.asarray([row["area_id"] for row in rows], dtype=str),
-        }
-    return output
-
-
-def _preprocess_measurement_vectors(file_index: pd.DataFrame) -> tuple[dict[str, dict[str, np.ndarray]], pd.DataFrame]:
-    grouped: dict[str, dict[str, list[Any]]] = {
-        "1300": {"axes": [], "rows": []},
-        "2850": {"axes": [], "rows": []},
-    }
-    area_rows: list[dict[str, Any]] = []
-    for _, row in file_index.iterrows():
-        range_code = str(int(float(row["spectral_range_cm-1"])))
-        wavenumbers, _, _, spectra, _ = read_txt_spectrum(row["filepath"])
-        flat = flatten_spectra_rows(spectra)
-        preprocess_kwargs = dict(
-            region=_range_key(range_code),
+    for _, row in measurements.iterrows():
+        code = str(row["spectral_range"])
+        start, stop = int(row["raw_start"]), int(row["raw_stop"])
+        coordinates = pixel_groups[str(row["measurement_id"])][["x", "y"]].to_numpy(dtype=float)
+        result = run_preprocessing(
+            raw[code][start:stop],
+            axes[code],
+            region=_range_key(code),
+            pixel_coords=coordinates,
             screen_dead=True,
             suppress_cosmic=None,
             correct_bl=True,
             smooth=None,
             interpolate=False,
             filter_quality=None,
-        )
-        result = run_preprocessing(
-            flat,
-            np.asarray(wavenumbers, dtype=float),
             normalize=True,
             norm_for="eda",
-            **preprocess_kwargs,
+            return_pre_normalization=True,
         )
-        valid = np.asarray(result.spectra, dtype=float)
-        valid_area = valid.size > 0
-        retained_pixels = int(valid.shape[0]) if valid_area else 0
+        pre = np.asarray(result.stage_arrays.get("pre_normalization"), dtype=float)
+        if pre.shape != result.spectra.shape:
+            raise RuntimeError("Pre-normalization output is missing or misaligned")
+        processed.append(
+            _ProcessedMeasurement(
+                row=row,
+                range_code=code,
+                result_spectra=np.asarray(result.spectra, dtype=float),
+                pre_normalization=pre,
+                retained_mask=np.asarray(result.retained_mask, dtype=bool),
+                qc=result.qc_flags.merge(result.qc_metrics, on="row_index", how="left", suffixes=("", "_metric")),
+                axis=np.asarray(result.wavenumbers, dtype=float),
+            )
+        )
+
+    min_area = int(cfg.get("preprocessing", {}).get("retention", {}).get("min_pixels_per_area", 1))
+    min_subject = int(cfg.get("preprocessing", {}).get("retention", {}).get("min_pixels_per_subject", 1))
+    subject_counts: dict[tuple[str, str], int] = {}
+    for item in processed:
+        if int(item.retained_mask.sum()) >= min_area:
+            key = (str(item.row["subject_id"]), item.range_code)
+            subject_counts[key] = subject_counts.get(key, 0) + int(item.retained_mask.sum())
+
+    arrays: dict[str, list[np.ndarray]] = {f"normalized_{code}": [] for code in RANGES}
+    arrays.update({f"pre_normalization_{code}": [] for code in RANGES})
+    qc_parts: list[pd.DataFrame] = []
+    area_rows: list[dict[str, Any]] = []
+    expected_axis: dict[str, np.ndarray | None] = {code: None for code in RANGES}
+    offsets = {code: 0 for code in RANGES}
+
+    for item in processed:
+        row = item.row
+        code = item.range_code
+        expected_axis[code] = _assert_same_axis(expected_axis[code], item.axis, code)
+        n_retained = int(item.retained_mask.sum())
+        area_ok = n_retained >= min_area
+        subject_ok = subject_counts.get((str(row["subject_id"]), code), 0) >= min_subject
+        final_mask = item.retained_mask & area_ok & subject_ok
+        qc = item.qc.sort_values("row_index").reset_index(drop=True)
+        if len(qc) != len(final_mask):
+            raise RuntimeError("QC rows are not aligned to input pixels")
+        qc["qc_reason"] = _append_reason(qc["qc_reason"], "area_min_pixels", item.retained_mask & (not area_ok))
+        qc["qc_reason"] = _append_reason(qc["qc_reason"], "subject_min_pixels", item.retained_mask & area_ok & (not subject_ok))
+        qc["retained"] = final_mask
+        qc["measurement_id"] = str(row["measurement_id"])
+        qc["subject_id"] = str(row["subject_id"])
+        qc["area_id"] = str(row["area_id"])
+        qc["spectral_range"] = code
+        qc["pixel_index"] = np.arange(len(qc), dtype=int)
+        qc["normalized_row"] = -1
+        qc["pre_normalization_row"] = -1
+        kept = np.flatnonzero(final_mask)
+        if len(kept):
+            output_start = offsets[code]
+            output_stop = output_start + len(kept)
+            qc.loc[kept, "normalized_row"] = np.arange(output_start, output_stop, dtype=int)
+            qc.loc[kept, "pre_normalization_row"] = np.arange(output_start, output_stop, dtype=int)
+            arrays[f"normalized_{code}"].append(item.result_spectra)
+            arrays[f"pre_normalization_{code}"].append(item.pre_normalization)
+            offsets[code] = output_stop
+        qc_parts.append(qc)
         area_rows.append(
             {
-                "measurement_id": row["measurement_id"],
-                "file_id": row["file_id"],
-                "subject_id": str(row["subject_id"]),
-                "area_id": str(row["area_id"]),
-                "spectral_range": range_code,
-                "valid_area": bool(valid_area),
-                "n_retained_pixels": retained_pixels,
+                "measurement_id": str(row["measurement_id"]), "file_id": str(row["file_id"]),
+                "subject_id": str(row["subject_id"]), "area_id": str(row["area_id"]),
+                "spectral_range": code, "slide_number": str(row["slide_number"]),
+                "measurement_number": int(row["measurement_number"]), "acquisition_mode": row.get("acquisition_mode"),
+                "n_input_pixels": len(item.retained_mask), "n_qc_retained_pixels": n_retained,
+                "n_retained_pixels": int(final_mask.sum()), "valid_area": bool(final_mask.any()),
+                "retention_reason": "ok" if final_mask.any() else ("area_min_pixels" if not area_ok else "subject_min_pixels"),
             }
         )
-        if not valid_area:
-            continue
-        # Un-normalized companion: same QC/baseline decisions (deterministic, identical
-        # kwargs), just skips the final normalize step. Gives a positive-valued,
-        # baseline-corrected basis for physical band-integral intensities (see
-        # src/analysis/biochemical_ratios.py), independent of the SNV/area scaling
-        # used for PCA and ML variance features.
-        result_bc = run_preprocessing(
-            flat,
-            np.asarray(wavenumbers, dtype=float),
-            normalize=False,
-            **preprocess_kwargs,
-        )
-        baseline_corrected = np.asarray(result_bc.spectra, dtype=float)
-        grouped[range_code]["axes"].append(np.asarray(result.wavenumbers, dtype=float))
-        grouped[range_code]["rows"].append(
-            {
-                "measurement_id": row["measurement_id"],
-                "subject_id": str(row["subject_id"]),
-                "file_id": row["file_id"],
-                "area_id": str(row["area_id"]),
-                "axis": np.asarray(result.wavenumbers, dtype=float),
-                "vector": np.nanmedian(valid, axis=0),
-                "vector_bc": np.nanmedian(baseline_corrected, axis=0),
-            }
-        )
-    output: dict[str, dict[str, np.ndarray]] = {}
-    for range_code, payload in grouped.items():
-        target_axis = _common_axis(payload["axes"])
-        rows = payload["rows"]
-        if target_axis.size == 0:
-            output[range_code] = {
-                "spectra": np.empty((0, 0)),
-                "spectra_bc": np.empty((0, 0)),
-                "wavenumbers": np.array([], dtype=float),
-                "measurement_ids": np.array([], dtype=str),
-                "subject_ids": np.array([], dtype=str),
-                "file_ids": np.array([], dtype=str),
-                "area_ids": np.array([], dtype=str),
-            }
-            continue
-        vectors = np.vstack(
-            [_resample_vector(row["axis"], target_axis, row["vector"]) for row in rows]
-        )
-        vectors_bc = np.vstack(
-            [_resample_vector(row["axis"], target_axis, row["vector_bc"]) for row in rows]
-        )
-        output[range_code] = {
-            "spectra": vectors,
-            "spectra_bc": vectors_bc,
-            "wavenumbers": target_axis,
-            "measurement_ids": np.asarray([row["measurement_id"] for row in rows], dtype=str),
-            "subject_ids": np.asarray([row["subject_id"] for row in rows], dtype=str),
-            "file_ids": np.asarray([row["file_id"] for row in rows], dtype=str),
-            "area_ids": np.asarray([row["area_id"] for row in rows], dtype=str),
-        }
-    return output, pd.DataFrame(area_rows)
+
+    result_arrays: dict[str, np.ndarray] = {}
+    for code in RANGES:
+        width = int(expected_axis[code].size) if expected_axis[code] is not None else 0
+        for basis in ("normalized", "pre_normalization"):
+            chunks = arrays[f"{basis}_{code}"]
+            result_arrays[f"{basis}_{code}"] = np.vstack(chunks) if chunks else np.empty((0, width), dtype=float)
+        result_arrays[f"wavenumbers_{code}"] = np.asarray(expected_axis[code], dtype=float)
+    return result_arrays, pd.concat(qc_parts, ignore_index=True), pd.DataFrame(area_rows)
 
 
-def _build_area_metadata(file_index: pd.DataFrame, area_flags: pd.DataFrame | None = None) -> pd.DataFrame:
-    columns = [
-        "area_id",
-        "subject_id",
-        "file_id",
-        "measurement_id",
-        "spectral_range_cm-1",
-        "slide_number",
-        "measurement_number",
-        "gender",
-        "is_control",
-    ]
-    metadata = file_index[[column for column in columns if column in file_index.columns]].copy()
-    metadata = metadata.rename(columns={"spectral_range_cm-1": "spectral_range"})
-    metadata["subject_id"] = metadata["subject_id"].astype(str)
-    metadata["file_id"] = metadata["file_id"].astype(str)
-    metadata["measurement_id"] = metadata["measurement_id"].astype(str)
-    metadata["area_id"] = metadata["area_id"].astype(str)
-    metadata["spectral_range"] = metadata["spectral_range"].map(lambda value: str(int(float(value))))
-    if area_flags is not None and not area_flags.empty:
-        area_flags = area_flags.copy()
-        for column in ("subject_id", "file_id", "measurement_id", "area_id"):
-            area_flags[column] = area_flags[column].astype(str)
-        area_flags["spectral_range"] = area_flags["spectral_range"].astype(str)
-        metadata = metadata.merge(
-            area_flags,
-            on=["measurement_id", "file_id", "subject_id", "area_id", "spectral_range"],
-            how="left",
-        )
-    return metadata.reset_index(drop=True)
+def _area_entity_count(areas: pd.DataFrame) -> int:
+    return int(areas[["subject_id", "area_id"]].drop_duplicates().shape[0]) if not areas.empty else 0
 
 
-def _area_npz_payload(spectra_payload: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    feature_names = np.asarray([f"{shift:.1f}" for shift in spectra_payload["wavenumbers"]], dtype=str)
-    payload = {
-        "area_summary": spectra_payload["spectra"],
-        "area_ids": spectra_payload["area_ids"],
-        "measurement_ids": spectra_payload["measurement_ids"],
-        "subject_ids": spectra_payload["subject_ids"],
-        "feature_names": feature_names,
-    }
-    if "spectra_bc" in spectra_payload:
-        payload["area_summary_bc"] = spectra_payload["spectra_bc"]
-    return payload
-
-
-def _whole_area_store_from_ranges(
-    payload_1300: dict[str, np.ndarray],
-    payload_2850: dict[str, np.ndarray],
-) -> dict[str, np.ndarray]:
-    rows_1300 = {
-        (str(payload_1300["subject_ids"][index]), area_id): index
-        for index, area_id in enumerate(payload_1300["area_ids"].astype(str))
-    }
-    rows_2850 = {
-        (str(payload_2850["subject_ids"][index]), area_id): index
-        for index, area_id in enumerate(payload_2850["area_ids"].astype(str))
-    }
-    paired_keys = sorted(set(rows_1300) & set(rows_2850))
-    if not paired_keys:
-        return {
-            "values": np.empty((0, 0), dtype=float),
-            "area_ids": np.array([], dtype=str),
-            "measurement_ids": np.array([], dtype=str),
-            "subject_ids": np.array([], dtype=str),
-            "feature_names": np.array([], dtype=str),
-        }
-    values = []
-    area_ids = []
-    measurement_ids = []
-    subject_ids = []
-    for subject_id, area_id in paired_keys:
-        left_idx = rows_1300[(subject_id, area_id)]
-        right_idx = rows_2850[(subject_id, area_id)]
-        values.append(
-            np.concatenate(
-                [
-                    payload_1300["spectra"][left_idx],
-                    payload_2850["spectra"][right_idx],
-                ]
-            )
-        )
-        area_ids.append(area_id)
-        measurement_ids.append(
-            f"{payload_1300['measurement_ids'][left_idx]}|{payload_2850['measurement_ids'][right_idx]}"
-        )
-        subject_ids.append(subject_id)
-    feature_names = np.asarray(
-        [f"1300__{shift:.1f}" for shift in payload_1300["wavenumbers"]]
-        + [f"2850__{shift:.1f}" for shift in payload_2850["wavenumbers"]],
-        dtype=str,
-    )
-    return {
-        "values": np.vstack(values),
-        "area_ids": np.asarray(area_ids, dtype=str),
-        "measurement_ids": np.asarray(measurement_ids, dtype=str),
-        "subject_ids": np.asarray(subject_ids, dtype=str),
-        "feature_names": feature_names,
-    }
-
-
-def _whole_area_store_preprocessed(file_index: pd.DataFrame) -> dict[str, np.ndarray]:
-    rows: list[dict[str, Any]] = []
-    feature_names: np.ndarray | None = None
-    for subject_id, subject_df in file_index.groupby("subject_id", sort=False):
-        area_results = process_subject_areas(subject_df, persist_artifacts=False)
-        for result in area_results:
-            values = np.asarray(result["area_mean"], dtype=float)
-            if feature_names is None:
-                feature_names = np.asarray(
-                    [f"1300__{float(shift):.1f}" for shift in np.asarray(result["wn_1300"], dtype=float)]
-                    + [f"2850__{float(shift):.1f}" for shift in np.asarray(result["wn_2850"], dtype=float)],
-                    dtype=str,
-                )
-            rows.append(
-                {
-                    "area_id": str(result["area_id"]),
-                    "measurement_id": f"{result['subject_id']}__{result['area_id']}",
-                    "subject_id": str(subject_id),
-                    "values": values,
-                }
-            )
-    if not rows:
-        return {
-            "values": np.empty((0, 0), dtype=float),
-            "area_ids": np.array([], dtype=str),
-            "measurement_ids": np.array([], dtype=str),
-            "subject_ids": np.array([], dtype=str),
-            "feature_names": np.array([], dtype=str),
-        }
-    return {
-        "values": np.vstack([row["values"] for row in rows]),
-        "area_ids": np.asarray([row["area_id"] for row in rows], dtype=str),
-        "measurement_ids": np.asarray([row["measurement_id"] for row in rows], dtype=str),
-        "subject_ids": np.asarray([row["subject_id"] for row in rows], dtype=str),
-        "feature_names": feature_names if feature_names is not None else np.array([], dtype=str),
-    }
-
-
-def _write_npz(path: Path, payload: dict[str, np.ndarray]) -> None:
-    np.savez_compressed(path, **payload)
-
-
-def _write_tables(
-    store_dir: Path,
-    file_index: pd.DataFrame,
-    clinical_subjects: pd.DataFrame,
-    area_metadata: pd.DataFrame,
-    *,
-    write_csv_mirrors: bool,
-) -> list[Path]:
-    written: list[Path] = []
-    tables = {
-        "file_index.parquet": file_index,
-        "clinical_subjects.parquet": clinical_subjects,
-        "area_metadata.parquet": area_metadata,
-    }
-    for filename, frame in tables.items():
-        path = store_dir / filename
-        frame.to_parquet(path, index=False)
-        written.append(path)
-        if write_csv_mirrors:
-            csv_path = path.with_suffix(".csv")
-            frame.to_csv(csv_path, index=False)
-            written.append(csv_path)
-    return written
-
-
-def _input_signatures(cfg: dict, file_index: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    inputs: dict[str, str | Path] = {
-        str(_clinical_data_path(cfg)): _clinical_data_path(cfg),
-    }
-    for filepath in sorted(file_index["filepath"].astype(str).unique().tolist()):
-        inputs[filepath] = Path(filepath)
-    return {
-        name: file_signature(path).to_dict()
-        for name, path in inputs.items()
-    }
+def _write_cohorts(store_dir: Path, measurements: pd.DataFrame, subjects: pd.DataFrame) -> None:
+    merged = merge_index_with_clinical(measurements, subjects)
+    write_cohort_tables(store_dir / "cohort", build_materialized_cohorts(merged))
 
 
 def _generated_signatures(root: Path) -> dict[str, dict[str, Any]]:
-    files = {
-        str(path.relative_to(root)): path
+    return {
+        str(path.relative_to(root)): file_signature(path).to_dict()
         for path in sorted(root.rglob("*"))
         if path.is_file() and path.name != "manifest.json"
     }
-    return {
-        name: file_signature(path).to_dict()
-        for name, path in files.items()
-    }
+
+
+def _input_signatures(cfg: dict, measurements: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    signatures = {str(_clinical_data_path(cfg)): file_signature(_clinical_data_path(cfg)).to_dict()}
+    for row in measurements[["filepath", "raw_file_signature"]].itertuples(index=False):
+        path = Path(str(row.filepath))
+        stat = path.stat()
+        signatures[str(path)] = {
+            "sha256": str(row.raw_file_signature),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+    return signatures
 
 
 def _build_manifest(
-    *,
-    store_type: str,
-    store_dir: Path,
-    source: dict[str, Any],
-    cfg: dict,
-    file_index: pd.DataFrame,
-    area_metadata: pd.DataFrame,
-    spectra_payloads: dict[str, dict[str, np.ndarray]],
+    store_type: str, store_dir: Path, source: dict[str, Any], cfg: dict, measurements: pd.DataFrame,
+    subjects: pd.DataFrame, areas: pd.DataFrame, counts: dict[str, int],
 ) -> dict[str, Any]:
     return {
-        "manifest_version": MANIFEST_VERSION,
-        "schema_version": SCHEMA_VERSION,
-        "store_type": store_type,
-        "created_at": iso_utc_now(),
-        "source": source,
-        "table_format": "parquet",
-        "array_format": "npz",
-        "input_signatures": _input_signatures(cfg, file_index),
-        "generated_file_signatures": _generated_signatures(store_dir),
+        "manifest_version": MANIFEST_VERSION, "schema_version": SCHEMA_VERSION, "store_type": store_type,
+        "created_at": iso_utc_now(), "source": source, "table_format": "parquet", "array_format": "npy",
+        "input_signatures": _input_signatures(cfg, measurements) if store_type == "parsed" else {}, "generated_file_signatures": _generated_signatures(store_dir),
         "preprocessing_config_hash": config_hash(cfg.get("preprocessing", {})),
-        "materialization_config_hash": config_hash(cfg.get("data", {})),
-        "code_version": _code_version(),
-        "counts": {
-            "subjects": int(file_index["subject_id"].astype(str).nunique()),
-            "files": int(file_index["file_id"].astype(str).nunique()),
-            "measurements": int(file_index["measurement_id"].astype(str).nunique()),
-            "areas": _area_entity_count(area_metadata),
-            "spectra_1300": int(spectra_payloads["1300"]["spectra"].shape[0]),
-            "spectra_2850": int(spectra_payloads["2850"]["spectra"].shape[0]),
-        },
+        "materialization_config_hash": config_hash(cfg.get("data", {})), "code_version": _code_version(),
+        "counts": {"subjects": int(subjects["subject_id"].nunique()), "files": int(measurements["file_id"].nunique()),
+                   "measurements": int(measurements["measurement_id"].nunique()), "areas": _area_entity_count(areas), **counts},
     }
 
 
-def _atomic_replace(store_dir: Path, writer: callable) -> MaterializedStore:
+def _atomic_replace(store_dir: Path, writer: Callable[[Path], MaterializedStore]) -> MaterializedStore:
     store_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(tempfile.mkdtemp(prefix=f".{store_dir.name}_", dir=store_dir.parent))
+    staging = Path(tempfile.mkdtemp(prefix=f".{store_dir.name}_", dir=store_dir.parent))
     try:
-        materialized = writer(staging_dir)
-        backup_dir = None
+        output = writer(staging)
+        backup = store_dir.with_name(f".{store_dir.name}_backup")
+        if backup.exists():
+            shutil.rmtree(backup)
         if store_dir.exists():
-            backup_dir = Path(tempfile.mkdtemp(prefix=f".{store_dir.name}_backup_", dir=store_dir.parent))
-            shutil.rmtree(backup_dir, ignore_errors=True)
-            store_dir.replace(backup_dir)
-        staging_dir.replace(store_dir)
-        if backup_dir is not None:
-            shutil.rmtree(backup_dir, ignore_errors=True)
-        return materialized
+            store_dir.replace(backup)
+        staging.replace(store_dir)
+        if backup.exists():
+            shutil.rmtree(backup)
+        return output
     except Exception:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)
         raise
 
 
 def build_parsed_store(cfg: dict | None = None, *, force: bool = False) -> MaterializedStore:
     config = _cfg(cfg)
     store_dir = _store_dir("parsed", config)
+    if store_dir.exists() and not force and validate_store(store_dir, "parsed", config).is_valid:
+        from src.data_preparation.manifest import load_manifest
+        return MaterializedStore("parsed", store_dir, load_manifest(store_dir / "manifest.json"))
 
-    def _write(staging_dir: Path) -> MaterializedStore:
-        file_index = _prepare_file_index(config)
-        clinical = load_clinical_data(data_index=file_index, write_curated=False)
-        merged = merge_index_with_clinical(file_index, clinical)
-        spectra_payloads = _read_raw_measurement_vectors(file_index)
-        area_metadata = _build_area_metadata(file_index)
-        write_csv_mirrors = bool(_data_cfg(config).get("write_csv_mirrors", True))
-        _write_tables(staging_dir, file_index, clinical, area_metadata, write_csv_mirrors=write_csv_mirrors)
-        _write_npz(staging_dir / "spectra_1300.npz", {key: value for key, value in spectra_payloads["1300"].items() if key != "area_ids"})
-        _write_npz(staging_dir / "spectra_2850.npz", {key: value for key, value in spectra_payloads["2850"].items() if key != "area_ids"})
-        _write_npz(staging_dir / "area_summaries_1300.npz", _area_npz_payload(spectra_payloads["1300"]))
-        _write_npz(staging_dir / "area_summaries_2850.npz", _area_npz_payload(spectra_payloads["2850"]))
-        _write_npz(
-            staging_dir / "whole_area_store.npz",
-            _whole_area_store_from_ranges(spectra_payloads["1300"], spectra_payloads["2850"]),
-        )
-        cohorts = build_materialized_cohorts(merged)
-        write_cohort_tables(staging_dir / "cohort", cohorts, write_csv_mirrors=write_csv_mirrors)
-        manifest = _build_manifest(
-            store_type="parsed",
-            store_dir=staging_dir,
-            source={
-                "type": "raw_text",
-                "path": str(_raw_text_dir(config)),
-                "manifest_hash": None,
-            },
-            cfg=config,
-            file_index=file_index,
-            area_metadata=area_metadata,
-            spectra_payloads=spectra_payloads,
-        )
-        manifest = write_manifest(staging_dir / "manifest.json", manifest)
-        return MaterializedStore("parsed", store_dir, manifest)
+    def write(staging: Path) -> MaterializedStore:
+        measurements = _prepare_file_index(config)
+        subjects = load_clinical_data(data_index=measurements, write_curated=False)
+        spacing = float(config.get("preprocessing", {}).get("interpolation", {}).get("target_spacing", 1.0))
+        measurements, pixel_counts = _write_parsed_payload(staging, measurements, spacing)
+        measurements.to_parquet(staging / "measurements.parquet", index=False)
+        subjects.to_parquet(staging / "subjects.parquet", index=False)
+        areas = measurements[["measurement_id", "file_id", "subject_id", "area_id", "spectral_range", "slide_number", "measurement_number", "acquisition_mode"]].copy()
+        areas.to_parquet(staging / "areas.parquet", index=False)
+        _write_cohorts(staging, measurements, subjects)
+        manifest = _build_manifest("parsed", staging, {"type": "raw_text", "path": str(_raw_text_dir(config)), "manifest_hash": None}, config, measurements, subjects, areas, {f"pixels_{code}": pixel_counts[code] for code in RANGES})
+        return MaterializedStore("parsed", store_dir, write_manifest(staging / "manifest.json", manifest))
 
-    if force or store_dir.exists():
-        return _atomic_replace(store_dir, _write)
-    return _atomic_replace(store_dir, _write)
+    return _atomic_replace(store_dir, write)
 
 
 def build_preprocessed_store(cfg: dict | None = None, *, force: bool = False) -> MaterializedStore:
     config = _cfg(cfg)
-    parsed_store = build_parsed_store(config, force=False)
-    parsed_manifest_hash = parsed_store.manifest.get("manifest_hash")
     parsed_dir = _store_dir("parsed", config)
+    parsed = build_parsed_store(config, force=False)
     store_dir = _store_dir("preprocessed", config)
+    if store_dir.exists() and not force and validate_store(store_dir, "preprocessed", config).is_valid:
+        from src.data_preparation.manifest import load_manifest
+        return MaterializedStore("preprocessed", store_dir, load_manifest(store_dir / "manifest.json"))
 
-    def _write(staging_dir: Path) -> MaterializedStore:
-        file_index = pd.read_parquet(parsed_dir / "file_index.parquet")
-        clinical = pd.read_parquet(parsed_dir / "clinical_subjects.parquet")
-        spectra_payloads, area_flags = _preprocess_measurement_vectors(file_index)
-        area_metadata = _build_area_metadata(file_index, area_flags)
-        retained_ids = set(spectra_payloads["1300"]["measurement_ids"].astype(str)) | set(
-            spectra_payloads["2850"]["measurement_ids"].astype(str)
-        )
-        retained_index = file_index[file_index["measurement_id"].astype(str).isin(retained_ids)].copy()
-        retained_merged = merge_index_with_clinical(retained_index, clinical)
-        write_csv_mirrors = bool(_data_cfg(config).get("write_csv_mirrors", True))
-        _write_tables(staging_dir, retained_index, clinical, area_metadata, write_csv_mirrors=write_csv_mirrors)
-        _write_npz(staging_dir / "spectra_1300.npz", {key: value for key, value in spectra_payloads["1300"].items() if key != "area_ids"})
-        _write_npz(staging_dir / "spectra_2850.npz", {key: value for key, value in spectra_payloads["2850"].items() if key != "area_ids"})
-        _write_npz(staging_dir / "area_summaries_1300.npz", _area_npz_payload(spectra_payloads["1300"]))
-        _write_npz(staging_dir / "area_summaries_2850.npz", _area_npz_payload(spectra_payloads["2850"]))
-        _write_npz(staging_dir / "whole_area_store.npz", _whole_area_store_preprocessed(retained_index))
-        cohorts = build_materialized_cohorts(retained_merged)
-        write_cohort_tables(staging_dir / "cohort", cohorts, write_csv_mirrors=write_csv_mirrors)
-        manifest = _build_manifest(
-            store_type="preprocessed",
-            store_dir=staging_dir,
-            source={
-                "type": "parsed",
-                "path": str(parsed_dir),
-                "manifest_hash": parsed_manifest_hash,
-            },
-            cfg=config,
-            file_index=retained_index,
-            area_metadata=area_metadata,
-            spectra_payloads=spectra_payloads,
-        )
-        manifest = write_manifest(staging_dir / "manifest.json", manifest)
-        return MaterializedStore("preprocessed", store_dir, manifest)
+    def write(staging: Path) -> MaterializedStore:
+        measurements = pd.read_parquet(parsed_dir / "measurements.parquet")
+        subjects = pd.read_parquet(parsed_dir / "subjects.parquet")
+        arrays, qc, areas = _process_measurements(parsed_dir, measurements, config)
+        for key, values in arrays.items():
+            _write_npy(staging / f"{key}.npy", values)
+        measurements.to_parquet(staging / "measurements.parquet", index=False)
+        subjects.to_parquet(staging / "subjects.parquet", index=False)
+        areas.to_parquet(staging / "areas.parquet", index=False)
+        qc.to_parquet(staging / "qc.parquet", index=False)
+        _write_cohorts(staging, measurements, subjects)
+        counts = {f"pixels_{code}": int((qc["spectral_range"] == code).sum()) for code in RANGES}
+        counts.update({f"retained_pixels_{code}": int((qc[(qc["spectral_range"] == code) & qc["retained"]]).shape[0]) for code in RANGES})
+        manifest = _build_manifest("preprocessed", staging, {"type": "parsed", "path": str(parsed_dir), "manifest_hash": parsed.manifest.get("manifest_hash")}, config, measurements, subjects, areas, counts)
+        return MaterializedStore("preprocessed", store_dir, write_manifest(staging / "manifest.json", manifest))
 
-    if force or store_dir.exists():
-        return _atomic_replace(store_dir, _write)
-    return _atomic_replace(store_dir, _write)
+    return _atomic_replace(store_dir, write)

@@ -11,12 +11,7 @@ import pandas as pd
 from scipy import stats
 
 from src import get_cross_region_phase_dir
-from src.analysis.spectral_regions import build_candidate_regions
 from src.analysis.statistics import fdr_correction
-from src.statistics.cluster_permutation import (
-    apply_binary_cluster_permutation,
-    apply_spearman_cluster_permutation,
-)
 
 logger = logging.getLogger(__name__)
 
