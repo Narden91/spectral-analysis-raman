@@ -35,10 +35,7 @@ validation or add compatibility fallbacks. If materialization changes, rebuild
 both stores deliberately and strict-validate them:
 
 ```bash
-uv run scripts/manage_data_store.py build --source parsed --force
-uv run scripts/manage_data_store.py build --source preprocessed --force
-uv run scripts/manage_data_store.py validate --source parsed --strict
-uv run scripts/manage_data_store.py validate --source preprocessed --strict
+uv run scripts/manage_data_store.py prepare
 ```
 
 ## Preprocessing contract
@@ -114,6 +111,6 @@ uv run python -m compileall -q src scripts
 
 1. Run focused tests for every changed subsystem.
 2. Run `git diff --check`.
-3. State whether stores require rebuilding.
+3. State whether `uv run scripts/manage_data_store.py prepare --force` is required.
 4. Do not claim a campaign is ready if strict store validation or required
    scientific safeguards are incomplete.

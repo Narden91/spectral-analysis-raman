@@ -161,6 +161,19 @@ def test_parsed_store_preserves_measurement_specific_native_axes(configured_stor
     assert values.shape[1] == axes.shape[1]
 
 
+def test_prepare_store_callbacks_report_raw_and_preprocessing_progress(
+    configured_store_paths: dict[str, Path],
+) -> None:
+    events: list[tuple[str, int, int]] = []
+
+    build_preprocessed_store(src.config, force=True, progress_callback=lambda stage, completed, total: events.append((stage, completed, total)))
+
+    assert {stage for stage, _, _ in events} == {"Raw ingestion", "Preprocessing"}
+    for stage in ("Raw ingestion", "Preprocessing"):
+        stage_events = [event for event in events if event[0] == stage]
+        assert stage_events[-1][1] == stage_events[-1][2] == 4
+
+
 def test_resolve_preprocessed_source_and_group_matrix(configured_store_paths: dict[str, Path]) -> None:
     build_preprocessed_store(src.config, force=True)
     resolved = resolve_data_source(src.config, source_override="preprocessed")

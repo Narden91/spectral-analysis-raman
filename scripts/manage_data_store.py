@@ -21,11 +21,13 @@ from src.data_preparation import (
     build_parsed_store,
     build_preprocessed_store,
     data_source_summary,
+    prepare_data_stores,
     resolve_data_source,
 )
 from src.data_preparation.store import _store_dir, _validated_source
 from src.data_preparation.validation import validate_store
 from src.terminal_output import print_kv_table
+from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             # Accept the natural ``validate --source ... --strict`` form as
             # well as the historical top-level placement before the command.
             sub.add_argument("--strict", action="store_true", default=argparse.SUPPRESS)
+    prepare = subparsers.add_parser("prepare", help="Build and strict-validate analysis-ready data from raw files.")
+    prepare.add_argument("--force", action="store_true", help="Rebuild both stores even when they are current.")
+    prepare.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -77,6 +82,45 @@ def _validate(source: str, strict: bool) -> None:
     )
 
 
+def _prepare(force: bool, dry_run: bool) -> None:
+    """Build raw-derived stores with visible, measurement-level progress."""
+    if dry_run:
+        logger.info("Dry-run: prepare complete parsed and preprocessed stores force=%s", force)
+        return
+
+    task_ids: dict[str, object] = {}
+    with Progress(
+        TextColumn("{task.description}"),
+        BarColumn(),
+        "{task.completed}/{task.total}",
+        TimeElapsedColumn(),
+        transient=False,
+    ) as progress:
+        def update(stage: str, completed: int, total: int) -> None:
+            task_id = task_ids.get(stage)
+            if task_id is None:
+                task_id = progress.add_task(stage, total=total)
+                task_ids[stage] = task_id
+            progress.update(task_id, total=total, completed=completed)
+
+        prepare_data_stores(config, force=force, progress_callback=update)
+        validation_task = progress.add_task("Strict validation", total=2)
+        for completed, source in enumerate(("parsed", "preprocessed"), start=1):
+            result = validate_store(_store_dir(source, config), source, config, strict=True)
+            if not result.is_valid:
+                raise RuntimeError(f"{source} store validation failed: {'; '.join(result.errors)}")
+            progress.update(validation_task, completed=completed)
+
+    print_kv_table(
+        "Analysis-ready data",
+        {
+            "Source": "raw text",
+            "Stores": "parsed + preprocessed",
+            "Strict validation": "passed",
+        },
+    )
+
+
 def _info(source: str) -> None:
     resolved = resolve_data_source(config, source_override=source)
     print_kv_table("Store Summary", data_source_summary(resolved))
@@ -99,6 +143,9 @@ def main() -> None:
     args = _parse_args()
     if args.command == "build":
         _build(args.source, args.force, args.dry_run)
+        return
+    if args.command == "prepare":
+        _prepare(args.force, args.dry_run)
         return
     if args.command == "validate":
         _validate(args.source, args.strict)

@@ -31,3 +31,21 @@ def test_strict_validation_flag_remains_accepted_before_subcommand() -> None:
     assert args.command == "validate"
     assert args.source == "preprocessed"
     assert args.strict is True
+
+
+def test_prepare_command_requires_no_source_selection() -> None:
+    cli = _load_cli_module()
+
+    args = cli._parse_args(["prepare", "--force"])
+
+    assert args.command == "prepare"
+    assert args.force is True
+
+
+def test_prepare_dry_run_flag_is_accepted_after_subcommand() -> None:
+    cli = _load_cli_module()
+
+    args = cli._parse_args(["prepare", "--dry-run"])
+
+    assert args.command == "prepare"
+    assert args.dry_run is True

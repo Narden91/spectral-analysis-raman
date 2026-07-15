@@ -39,6 +39,7 @@ from src.preprocessing.pipeline import flatten_spectra_rows, run_preprocessing
 
 logger = logging.getLogger(__name__)
 RANGES = ("1300", "2850")
+ProgressCallback = Callable[[str, int, int], None]
 
 
 @dataclass(frozen=True)
@@ -179,7 +180,11 @@ def _write_npy(path: Path, values: np.ndarray) -> None:
     np.save(path, np.asarray(values, dtype=float))
 
 
-def _write_parsed_payload(store_dir: Path, measurements: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+def _write_parsed_payload(
+    store_dir: Path,
+    measurements: pd.DataFrame,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[pd.DataFrame, dict[str, int]]:
     spectra_parts: dict[str, list[np.ndarray]] = {code: [] for code in RANGES}
     pixel_parts: list[pd.DataFrame] = []
     source_axes: dict[str, list[np.ndarray]] = {code: [] for code in RANGES}
@@ -192,7 +197,7 @@ def _write_parsed_payload(store_dir: Path, measurements: pd.DataFrame) -> tuple[
     indexed["source_axis_channels"] = 0
     indexed["native_axis_row"] = -1
 
-    for idx, row in indexed.iterrows():
+    for position, (idx, row) in enumerate(indexed.iterrows(), start=1):
         code = str(row["spectral_range"])
         axis, x, y, spectra, _ = read_txt_spectrum(row["filepath"])
         axis = _assert_same_axis(None, axis, code)
@@ -219,6 +224,8 @@ def _write_parsed_payload(store_dir: Path, measurements: pd.DataFrame) -> tuple[
                 }
             )
         )
+        if progress_callback is not None:
+            progress_callback("Raw ingestion", position, len(indexed))
 
     for code in RANGES:
         axes = source_axes[code]
@@ -241,14 +248,19 @@ def _append_reason(values: pd.Series, reason: str, mask: np.ndarray) -> pd.Serie
     return out
 
 
-def _process_measurements(parsed_dir: Path, measurements: pd.DataFrame, cfg: dict) -> tuple[dict[str, np.ndarray], pd.DataFrame, pd.DataFrame]:
+def _process_measurements(
+    parsed_dir: Path,
+    measurements: pd.DataFrame,
+    cfg: dict,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[dict[str, np.ndarray], pd.DataFrame, pd.DataFrame]:
     raw = {code: np.load(parsed_dir / f"raw_spectra_{code}.npy", mmap_mode="r") for code in RANGES}
     native_axes = {code: np.load(parsed_dir / f"native_wavenumbers_{code}.npy", mmap_mode="r") for code in RANGES}
     pixels = pd.read_parquet(parsed_dir / "pixels.parquet")
     pixel_groups = {key: group.sort_values("pixel_index") for key, group in pixels.groupby("measurement_id", sort=False)}
     processed: list[_ProcessedMeasurement] = []
 
-    for _, row in measurements.iterrows():
+    for position, (_, row) in enumerate(measurements.iterrows(), start=1):
         code = str(row["spectral_range"])
         start, stop = int(row["raw_start"]), int(row["raw_stop"])
         native_axis = np.asarray(native_axes[code][int(row["native_axis_row"])], dtype=float)
@@ -283,6 +295,8 @@ def _process_measurements(parsed_dir: Path, measurements: pd.DataFrame, cfg: dic
                 axis=np.asarray(result.wavenumbers, dtype=float),
             )
         )
+        if progress_callback is not None:
+            progress_callback("Preprocessing", position, len(measurements))
 
     min_area = int(cfg.get("preprocessing", {}).get("retention", {}).get("min_pixels_per_area", 1))
     min_subject = int(cfg.get("preprocessing", {}).get("retention", {}).get("min_pixels_per_subject", 1))
@@ -430,17 +444,24 @@ def _atomic_replace(store_dir: Path, writer: Callable[[Path], MaterializedStore]
         shutil.rmtree(backup_parent, ignore_errors=True)
 
 
-def build_parsed_store(cfg: dict | None = None, *, force: bool = False) -> MaterializedStore:
+def build_parsed_store(
+    cfg: dict | None = None,
+    *,
+    force: bool = False,
+    progress_callback: ProgressCallback | None = None,
+) -> MaterializedStore:
     config = _cfg(cfg)
     store_dir = _store_dir("parsed", config)
     if store_dir.exists() and not force and validate_store(store_dir, "parsed", config).is_valid:
         from src.data_preparation.manifest import load_manifest
+        if progress_callback is not None:
+            progress_callback("Raw ingestion", 1, 1)
         return MaterializedStore("parsed", store_dir, load_manifest(store_dir / "manifest.json"))
 
     def write(staging: Path) -> MaterializedStore:
         measurements = _prepare_file_index(config)
         subjects = load_clinical_data(data_index=measurements, write_curated=False)
-        measurements, pixel_counts = _write_parsed_payload(staging, measurements)
+        measurements, pixel_counts = _write_parsed_payload(staging, measurements, progress_callback)
         measurements.to_parquet(staging / "measurements.parquet", index=False)
         subjects.to_parquet(staging / "subjects.parquet", index=False)
         areas = measurements[["measurement_id", "file_id", "subject_id", "sample_id", "spot_id", "area_id", "spectral_range", "slide_number", "measurement_number", "acquisition_mode"]].copy()
@@ -452,19 +473,26 @@ def build_parsed_store(cfg: dict | None = None, *, force: bool = False) -> Mater
     return _atomic_replace(store_dir, write)
 
 
-def build_preprocessed_store(cfg: dict | None = None, *, force: bool = False) -> MaterializedStore:
+def build_preprocessed_store(
+    cfg: dict | None = None,
+    *,
+    force: bool = False,
+    progress_callback: ProgressCallback | None = None,
+) -> MaterializedStore:
     config = _cfg(cfg)
     parsed_dir = _store_dir("parsed", config)
-    parsed = build_parsed_store(config, force=False)
+    parsed = build_parsed_store(config, force=False, progress_callback=progress_callback)
     store_dir = _store_dir("preprocessed", config)
     if store_dir.exists() and not force and validate_store(store_dir, "preprocessed", config).is_valid:
         from src.data_preparation.manifest import load_manifest
+        if progress_callback is not None:
+            progress_callback("Preprocessing", 1, 1)
         return MaterializedStore("preprocessed", store_dir, load_manifest(store_dir / "manifest.json"))
 
     def write(staging: Path) -> MaterializedStore:
         measurements = pd.read_parquet(parsed_dir / "measurements.parquet")
         subjects = pd.read_parquet(parsed_dir / "subjects.parquet")
-        arrays, qc, areas = _process_measurements(parsed_dir, measurements, config)
+        arrays, qc, areas = _process_measurements(parsed_dir, measurements, config, progress_callback)
         for key, values in arrays.items():
             _write_npy(staging / f"{key}.npy", values)
         measurements.to_parquet(staging / "measurements.parquet", index=False)
@@ -478,3 +506,16 @@ def build_preprocessed_store(cfg: dict | None = None, *, force: bool = False) ->
         return MaterializedStore("preprocessed", store_dir, write_manifest(staging / "manifest.json", manifest))
 
     return _atomic_replace(store_dir, write)
+
+
+def prepare_data_stores(
+    cfg: dict | None = None,
+    *,
+    force: bool = False,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[MaterializedStore, MaterializedStore]:
+    """Build the complete, analysis-ready store pair from raw data."""
+    config = _cfg(cfg)
+    parsed = build_parsed_store(config, force=force, progress_callback=progress_callback)
+    preprocessed = build_preprocessed_store(config, force=force, progress_callback=progress_callback)
+    return parsed, preprocessed

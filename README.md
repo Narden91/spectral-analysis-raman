@@ -54,34 +54,23 @@ are recorded in the parsed-store manifest.
 
 ## End-to-end production workflow
 
-Run these commands from the repository root. They are the supported path from
-raw text files to results.
+Run this command from the repository root. It is the supported path from raw
+text files to final analysis-ready data.
 
 ```bash
-# 1. Create / update the environment.
 uv sync
 
-# 2. Build immutable parsed data from raw text.
-uv run scripts/manage_data_store.py build --source parsed --force
-
-# 3. Build the QC-filtered, baseline-corrected, normalized analysis store.
-uv run scripts/manage_data_store.py build --source preprocessed --force
-
-# 4. Verify every generated artifact and every raw input signature.
-uv run scripts/manage_data_store.py validate --source parsed --strict
-uv run scripts/manage_data_store.py validate --source preprocessed --strict
-
-# 5. Run the selected scientific workflow.
-uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both
-
-# 6. Generate aggregate and QC spectral plots.
-uv run scripts/run_spectral_plots.py --config config/plots.yaml --source preprocessed
+# Build parsed and preprocessed stores from raw data, then strict-validate both.
+# Progress bars report raw ingestion, preprocessing, and final validation.
+uv run scripts/manage_data_store.py prepare
 ```
 
-The materializer writes to a temporary sibling directory and replaces a target
-store only after its writer completes. Do not use `clean` during a campaign.
-Use `--force` only when raw data, preprocessing settings, or materialization
-logic have changed and a deliberate rebuild is required.
+`prepare` is safe to repeat: current stores are reused when their manifests are
+valid. Use `uv run scripts/manage_data_store.py prepare --force` only for a
+deliberate full rebuild after changing raw data, preprocessing settings, or
+materialization code. It reports success only after strict validation of both
+stores. The materializer uses system-temporary staging and atomically replaces
+only completed stores.
 
 ### Fast development only
 
