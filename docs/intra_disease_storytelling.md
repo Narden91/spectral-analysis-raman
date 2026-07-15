@@ -1,5 +1,9 @@
 # Intra-Disease Raman Analysis: Storytelling Narrative
 
+> Historical interpretation note: this narrative summarizes a specific
+> disease-only run. Operational commands and current processing rules are in
+> `README.md` and `docs/preprocessing.md`.
+
 ## Core Story
 
 The study asked a biologically attractive question: within diseased subjects, do extracellular-vesicle Raman spectra carry a measurable signal of cognitive status or decline?

@@ -1,5 +1,9 @@
 # Intra-Disease Raman Analysis: Scientific Review
 
+> Historical interpretation note: this review records conclusions from a
+> specific disease-only run. For executable workflow and current processing
+> rules, use `README.md` and `docs/preprocessing.md`.
+
 ## Executive Assessment
 
 The corrected intra-disease pipeline is scientifically conservative and now supports a null/feasibility interpretation. It does not support a claim that clinical decline is significantly correlated with specific Raman shifts or molecular groups in this cohort.

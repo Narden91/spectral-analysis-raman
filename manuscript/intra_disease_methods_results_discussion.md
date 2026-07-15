@@ -1,10 +1,13 @@
 # Draft Manuscript Sections: Intra-Disease Raman Analysis
 
+> Draft results text for a specific disease-only run. For executable workflow
+> and current data contracts, use `README.md` and `docs/preprocessing.md`.
+
 ## Methods
 
 Raman spectral analyses were performed using a subject-level exploratory workflow designed to evaluate intra-disease heterogeneity while limiting overinterpretation of high-dimensional spectral data. Preprocessed extracellular-vesicle Raman spectra were loaded from the canonical preprocessed data store. Analyses were routed through the `disease_only` mode, which writes outputs to `Results_intra_disease/` and excludes control-vs-disease comparisons from the intra-disease inference layer.
 
-Spectra were analyzed in the fingerprint and high-wavenumber ranges and then combined for whole-spectrum subject-level analyses. The maintained Biological PCA layer was restricted to subject-level summaries and generated three models: `PCA_1330`, `PCA_2850`, and `PCA_whole`. Whole-spectrum PCA used unweighted concatenation of range-local median spectra while preserving spectral block identity in feature names and loadings.
+Spectra were analyzed in the fingerprint and high-wavenumber ranges and then combined for whole-spectrum subject-level analyses. The maintained Biological PCA layer was restricted to subject-level summaries and generated three models: `PCA_1330`, `PCA_2850`, and `PCA_whole`. Whole-spectrum PCA used MFA-style block scaling: each range-local matrix was centered and divided by the square root of its first eigenvalue before concatenation, while preserving spectral block identity in feature names and loadings. Unscaled concatenation is sensitivity-only.
 
 Disease-only cross-region analysis was conducted across clinical correlation matrices, longitudinal delta MoCA analyses, and disease-internal stratification tests. Candidate spectral intervals were defined from subject-level effects and evaluated using FDR and cluster-mass permutation correction. When no corrected regions were detected, largest-effect fallback intervals were retained only as transparent exploratory context. The corrected pipeline records this distinction through `selection_basis` and `significance_supported` fields.
 

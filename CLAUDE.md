@@ -93,9 +93,7 @@ QC metrics → dead-pixel screen → cosmic detection/suppression → edge trim
 
 ```bash
 # Stores
-uv run scripts/manage_data_store.py build --source parsed --force
-uv run scripts/manage_data_store.py build --source preprocessed --force
-uv run scripts/manage_data_store.py validate --source preprocessed --strict
+uv run scripts/manage_data_store.py prepare
 
 # Production workflows
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both
