@@ -900,7 +900,7 @@ def run_univariate_band_screen(frame: pd.DataFrame, y: np.ndarray, valid_rows: n
 # ---------------------------------------------------------------------------
 
 
-def _feature_importance(
+def _legacy_full_data_feature_importance(
     model_name: str,
     X: np.ndarray,
     y: np.ndarray,
@@ -948,6 +948,66 @@ def _feature_importance(
 
 
 # ---------------------------------------------------------------------------
+def _outer_fold_feature_importance(
+    model_name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: list[str],
+    *,
+    ml_cfg: dict[str, Any],
+    n_jobs: int,
+    outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Estimate importances on outer folds, never from a full-data refit.
+
+    PLS VIP and L1 coefficients are calculated from each outer-training fit.
+    Forest permutation importance is scored only on the corresponding held-out
+    outer test fold.  The long output exposes stability across all folds.
+    """
+    random_state = _random_state(ml_cfg)
+    n_inner_splits = _n_inner_splits(ml_cfg)
+    threshold_metric = _threshold_metric(ml_cfg)
+    permutation_repeats = int(ml_cfg.get("importance_permutation_repeats", 5))
+    rows: list[pd.DataFrame] = []
+    for repeat_index, repeat_splits in enumerate(outer_split_plan):
+        for fold_index, (train_idx, test_idx) in enumerate(repeat_splits):
+            fit = _fit_tuned_model(
+                model_name, X[train_idx], y[train_idx], ml_cfg=ml_cfg, n_inner_splits=n_inner_splits,
+                threshold_metric=threshold_metric, random_state=random_state + repeat_index * 101 + fold_index,
+                n_jobs=n_jobs,
+            )
+            base = {
+                "feature_name": feature_names, "repeat": repeat_index, "fold": fold_index,
+                "n_train": len(train_idx), "n_test": len(test_idx), "estimation_scope": "outer_fold",
+            }
+            if model_name == "pls_da":
+                rows.append(pd.DataFrame({**base, "importance": _calculate_vip(fit.estimator), "importance_type": "vip_outer_train"}))
+            elif model_name == "l1_logistic":
+                rows.append(pd.DataFrame({**base, "importance": fit.estimator.coef_.ravel(), "importance_type": "l1_logistic_coefficient_outer_train"}))
+            else:
+                result = permutation_importance(
+                    fit.estimator, X[test_idx], y[test_idx], n_repeats=permutation_repeats,
+                    random_state=random_state + repeat_index * 101 + fold_index, n_jobs=n_jobs,
+                    scoring="balanced_accuracy",
+                )
+                rows.append(pd.DataFrame({
+                    **base, "importance": result.importances_mean, "importance_std": result.importances_std,
+                    "importance_type": "permutation_importance_outer_test",
+                }))
+    long = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    if long.empty:
+        return long, long
+    summary = (
+        long.groupby(["feature_name", "importance_type"], as_index=False)
+        .agg(importance_mean=("importance", "mean"), importance_median=("importance", "median"),
+             importance_std_across_folds=("importance", "std"), n_outer_folds=("importance", "count"))
+        .sort_values("importance_mean", key=np.abs, ascending=False, kind="mergesort")
+        .reset_index(drop=True)
+    )
+    summary["estimation_scope"] = "outer_fold_summary"
+    return long, summary
+
+
 # Phase C: sex-confound battery
 # ---------------------------------------------------------------------------
 
@@ -1107,7 +1167,13 @@ def run_control_vs_disease_ml_pipeline(
                 metrics = _aggregate_repeat_metrics(oof)
                 observed_balanced_accuracy = metrics["balanced_accuracy_mean"]
 
-                importance_df = _feature_importance(model_name, X_valid, y_valid, feature_names, ml_cfg=ml_cfg, n_jobs=n_jobs)
+                importance_folds, importance_df = _outer_fold_feature_importance(
+                    model_name, X_valid, y_valid, feature_names, ml_cfg=ml_cfg, n_jobs=n_jobs,
+                    outer_split_plan=outer_split_plan,
+                )
+                outputs[f"{model_name}_{representation}_feature_importance_folds"] = write_csv_atomic(
+                    importance_folds, target_dir / f"{model_name}_{representation}_feature_importance_outer_folds.csv", index=False
+                )
                 outputs[f"{model_name}_{representation}_feature_importance"] = write_csv_atomic(
                     importance_df, target_dir / f"{model_name}_{representation}_feature_importance.csv", index=False
                 )

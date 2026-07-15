@@ -60,6 +60,10 @@ def configured_store_paths(tmp_path: Path) -> dict[str, Path]:
     src.config["preprocessing"]["retention"]["min_pixels_per_subject"] = 1
     src.config["preprocessing"]["quality_filter"]["spectral_quality"]["snr_threshold"] = 0.0
     src.config["preprocessing"]["quality_filter"]["spectral_quality"]["min_area_percentile"] = 0
+    src.config["preprocessing"]["interpolation"]["frozen_grids"] = {
+        "fingerprint": [1240.0, 1249.0],
+        "ch_stretch": [2840.0, 2849.0],
+    }
     src.config["output"]["keep_preprocessing_artifacts"] = False
     src.config["output"]["keep_whole_spectra_cache"] = False
 
@@ -123,15 +127,15 @@ def test_build_parsed_store_and_validate(configured_store_paths: dict[str, Path]
     assert not (store.path / "area_summaries_1300.npz").exists()
 
 
-def test_parsed_store_aligns_only_to_the_common_axis_overlap(configured_store_paths: dict[str, Path]) -> None:
+def test_parsed_store_preserves_measurement_specific_native_axes(configured_store_paths: dict[str, Path]) -> None:
     shifted = configured_store_paths["raw_dir"] / "Disease" / "Male" / "2" / "sample_1" / "2_1_1300_range_meas1.txt"
     _write_measurement_file(shifted, [1240.2 + idx for idx in range(10)], 20.0)
     store = build_parsed_store(src.config, force=True)
-    axis = np.load(store.path / "wavenumbers_1300.npy")
+    axes = np.load(store.path / "native_wavenumbers_1300.npy")
     values = np.load(store.path / "raw_spectra_1300.npy")
-    assert axis[0] >= 1240.2
-    assert axis[-1] <= 1249.0
-    assert values.shape[1] == axis.size
+    assert axes.shape == (2, 10)
+    assert np.isclose(axes[1, 0], 1240.2)
+    assert values.shape[1] == axes.shape[1]
 
 
 def test_resolve_preprocessed_source_and_group_matrix(configured_store_paths: dict[str, Path]) -> None:

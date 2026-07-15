@@ -739,17 +739,25 @@ def interpolate_spectra(
     wavenumbers: np.ndarray,
     target_spacing: Optional[float] = None,
     method: Optional[str] = None,
+    target_wavenumbers: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     if spectra.size == 0 or wavenumbers.size == 0:
         return spectra, wavenumbers
     ip_cfg = _pre_cfg().get("interpolation", {})
     spacing = float(target_spacing if target_spacing is not None else ip_cfg.get("target_spacing", 1.0))
     interp_kind = str(method if method is not None else ip_cfg.get("method", "cubic")).strip().lower()
-    wn_min = int(np.ceil(float(np.nanmin(wavenumbers))))
-    wn_max = int(np.floor(float(np.nanmax(wavenumbers))))
-    if wn_max <= wn_min:
-        return spectra, wavenumbers
-    wn_uniform = np.arange(wn_min, wn_max + spacing, spacing, dtype=float)
+    if target_wavenumbers is None:
+        wn_min = int(np.ceil(float(np.nanmin(wavenumbers))))
+        wn_max = int(np.floor(float(np.nanmax(wavenumbers))))
+        if wn_max <= wn_min:
+            return spectra, wavenumbers
+        wn_uniform = np.arange(wn_min, wn_max + spacing, spacing, dtype=float)
+    else:
+        wn_uniform = np.asarray(target_wavenumbers, dtype=float)
+        if wn_uniform.ndim != 1 or wn_uniform.size < 2 or not np.all(np.diff(wn_uniform) > 0):
+            raise ValueError("target_wavenumbers must be a strictly increasing one-dimensional axis")
+        if wn_uniform[0] < wavenumbers[0] - 1e-8 or wn_uniform[-1] > wavenumbers[-1] + 1e-8:
+            raise ValueError("Frozen target axis extends outside the measured native axis; extrapolation is forbidden")
     if wn_uniform.size < 2:
         return spectra, wavenumbers
     if interp_kind == "cubic" and wavenumbers.size < 4:
@@ -759,8 +767,7 @@ def interpolate_spectra(
         spectra,
         kind=interp_kind,
         axis=1,
-        bounds_error=False,
-        fill_value="extrapolate",
+        bounds_error=True,
     )
     return interpolator(wn_uniform), wn_uniform
 
@@ -1272,6 +1279,7 @@ def run_preprocessing(
     correct_bl: bool = True,
     smooth: Optional[bool] = None,
     interpolate: bool = False,
+    target_wavenumbers: np.ndarray | None = None,
     filter_quality: Optional[bool] = None,
     normalize: bool = True,
     trim: Optional[int] = None,
@@ -1353,7 +1361,7 @@ def run_preprocessing(
     result, wn = _apply_edge_trim(result, wn, trim=trim, trim_cm=trim_cm)
 
     if interpolate and result.size > 0:
-        result, wn = interpolate_spectra(result, wn)
+        result, wn = interpolate_spectra(result, wn, target_wavenumbers=target_wavenumbers)
 
     if correct_bl and result.size > 0:
         result, metrics_df = _apply_baseline_stage(

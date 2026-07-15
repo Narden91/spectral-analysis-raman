@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 MANIFEST_VERSION = 1
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)

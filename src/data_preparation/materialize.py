@@ -119,6 +119,10 @@ def _prepare_file_index(cfg: dict) -> pd.DataFrame:
     frame["spectral_range"] = frame["spectral_range_cm-1"].map(lambda value: str(int(float(value))))
     frame["subject_id"] = frame["subject_id"].astype(str)
     frame["area_id"] = frame["area_id"].astype(str)
+    # The source tree's sample folder is the experimental sample unit; area_id
+    # is an acquisition label and must not be used as a sample surrogate.
+    frame["sample_id"] = frame["filepath"].map(lambda value: Path(value).parent.name)
+    frame["spot_id"] = frame["measurement_number"].map(lambda value: f"spot_{int(value)}")
     frame["source_file_path"] = frame["filepath"].map(lambda value: str(Path(value).as_posix()))
     frame["source_file_name"] = frame["filename"].astype(str)
     frame["raw_file_signature"] = frame["filepath"].map(hash_file)
@@ -149,21 +153,25 @@ def _assert_same_axis(reference: np.ndarray | None, candidate: np.ndarray, range
     return axis
 
 
-def _common_overlap_axis(axes: list[np.ndarray], range_code: str, spacing: float) -> np.ndarray:
-    if not axes:
-        raise ValueError(f"Raw dataset does not contain required {range_code} range")
-    lower = max(float(axis[0]) for axis in axes)
-    upper = min(float(axis[-1]) for axis in axes)
-    if upper <= lower:
-        raise ValueError(f"{range_code} measurements have no common calibrated-axis overlap")
-    step = float(spacing)
-    if not np.isfinite(step) or step <= 0:
-        raise ValueError("preprocessing.interpolation.target_spacing must be positive")
-    start = np.ceil(lower / step) * step
-    stop = np.floor(upper / step) * step
-    axis = np.round(np.arange(start, stop + step * 0.5, step), 6)
-    if axis.size < 2:
-        raise ValueError(f"{range_code} common calibrated-axis overlap is too small")
+def _frozen_target_axis(cfg: dict, range_code: str) -> np.ndarray:
+    """Return the pre-registered analysis grid for one spectral region.
+
+    These boundaries were verified against every native acquisition *after* the
+    configured 15 cm-1 edge trim.  A missing or malformed grid is a hard error:
+    deriving it from the current data would make future campaigns non-comparable.
+    """
+    interpolation = cfg.get("preprocessing", {}).get("interpolation", {})
+    region = _range_key(range_code)
+    bounds = interpolation.get("frozen_grids", {}).get(region)
+    if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+        raise ValueError(f"Missing preprocessing.interpolation.frozen_grids.{region}")
+    start, stop = map(float, bounds)
+    spacing = float(interpolation.get("target_spacing", 1.0))
+    if not np.isfinite(spacing) or spacing <= 0 or stop <= start:
+        raise ValueError(f"Invalid frozen interpolation grid for {region}")
+    axis = np.round(np.arange(start, stop + spacing * 0.5, spacing), 6)
+    if axis.size < 2 or axis[-1] > stop + 1e-8:
+        raise ValueError(f"Invalid frozen interpolation axis for {region}")
     return axis
 
 
@@ -171,7 +179,7 @@ def _write_npy(path: Path, values: np.ndarray) -> None:
     np.save(path, np.asarray(values, dtype=float))
 
 
-def _write_parsed_payload(store_dir: Path, measurements: pd.DataFrame, spacing: float) -> tuple[pd.DataFrame, dict[str, int]]:
+def _write_parsed_payload(store_dir: Path, measurements: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     spectra_parts: dict[str, list[np.ndarray]] = {code: [] for code in RANGES}
     pixel_parts: list[pd.DataFrame] = []
     source_axes: dict[str, list[np.ndarray]] = {code: [] for code in RANGES}
@@ -182,6 +190,7 @@ def _write_parsed_payload(store_dir: Path, measurements: pd.DataFrame, spacing: 
     indexed["source_axis_min"] = np.nan
     indexed["source_axis_max"] = np.nan
     indexed["source_axis_channels"] = 0
+    indexed["native_axis_row"] = -1
 
     for idx, row in indexed.iterrows():
         code = str(row["spectral_range"])
@@ -192,6 +201,7 @@ def _write_parsed_payload(store_dir: Path, measurements: pd.DataFrame, spacing: 
         stop = start + len(values)
         indexed.loc[idx, ["raw_start", "raw_stop"]] = (start, stop)
         indexed.loc[idx, ["source_axis_min", "source_axis_max", "source_axis_channels"]] = (axis[0], axis[-1], len(axis))
+        indexed.loc[idx, "native_axis_row"] = len(source_axes[code])
         starts[code] = stop
         spectra_parts[code].append(values)
         source_axes[code].append(axis)
@@ -211,14 +221,14 @@ def _write_parsed_payload(store_dir: Path, measurements: pd.DataFrame, spacing: 
         )
 
     for code in RANGES:
-        canonical_axis = _common_overlap_axis(source_axes[code], code, spacing)
-        aligned = [
-            values if values.shape[1] == canonical_axis.size and np.allclose(axis, canonical_axis, rtol=0, atol=1e-8)
-            else np.vstack([np.interp(canonical_axis, axis, row) for row in values])
-            for values, axis in zip(spectra_parts[code], source_axes[code])
-        ]
-        _write_npy(store_dir / f"raw_spectra_{code}.npy", np.vstack(aligned))
-        _write_npy(store_dir / f"wavenumbers_{code}.npy", canonical_axis)
+        axes = source_axes[code]
+        if not axes:
+            raise ValueError(f"Raw dataset does not contain required {code} range")
+        channel_counts = {axis.size for axis in axes}
+        if len(channel_counts) != 1:
+            raise ValueError(f"{code} native channel counts differ; ragged raw storage is not supported")
+        _write_npy(store_dir / f"raw_spectra_{code}.npy", np.vstack(spectra_parts[code]))
+        _write_npy(store_dir / f"native_wavenumbers_{code}.npy", np.vstack(axes))
     pixels = pd.concat(pixel_parts, ignore_index=True)
     pixels.to_parquet(store_dir / "pixels.parquet", index=False)
     return indexed, {code: int(starts[code]) for code in RANGES}
@@ -233,7 +243,7 @@ def _append_reason(values: pd.Series, reason: str, mask: np.ndarray) -> pd.Serie
 
 def _process_measurements(parsed_dir: Path, measurements: pd.DataFrame, cfg: dict) -> tuple[dict[str, np.ndarray], pd.DataFrame, pd.DataFrame]:
     raw = {code: np.load(parsed_dir / f"raw_spectra_{code}.npy", mmap_mode="r") for code in RANGES}
-    axes = {code: np.load(parsed_dir / f"wavenumbers_{code}.npy", mmap_mode="r") for code in RANGES}
+    native_axes = {code: np.load(parsed_dir / f"native_wavenumbers_{code}.npy", mmap_mode="r") for code in RANGES}
     pixels = pd.read_parquet(parsed_dir / "pixels.parquet")
     pixel_groups = {key: group.sort_values("pixel_index") for key, group in pixels.groupby("measurement_id", sort=False)}
     processed: list[_ProcessedMeasurement] = []
@@ -241,17 +251,19 @@ def _process_measurements(parsed_dir: Path, measurements: pd.DataFrame, cfg: dic
     for _, row in measurements.iterrows():
         code = str(row["spectral_range"])
         start, stop = int(row["raw_start"]), int(row["raw_stop"])
+        native_axis = np.asarray(native_axes[code][int(row["native_axis_row"])], dtype=float)
         coordinates = pixel_groups[str(row["measurement_id"])][["x", "y"]].to_numpy(dtype=float)
         result = run_preprocessing(
             raw[code][start:stop],
-            axes[code],
+            native_axis,
             region=_range_key(code),
             pixel_coords=coordinates,
             screen_dead=True,
             suppress_cosmic=None,
             correct_bl=True,
             smooth=None,
-            interpolate=False,
+            interpolate=True,
+            target_wavenumbers=_frozen_target_axis(cfg, code),
             filter_quality=None,
             normalize=True,
             norm_for="eda",
@@ -414,11 +426,10 @@ def build_parsed_store(cfg: dict | None = None, *, force: bool = False) -> Mater
     def write(staging: Path) -> MaterializedStore:
         measurements = _prepare_file_index(config)
         subjects = load_clinical_data(data_index=measurements, write_curated=False)
-        spacing = float(config.get("preprocessing", {}).get("interpolation", {}).get("target_spacing", 1.0))
-        measurements, pixel_counts = _write_parsed_payload(staging, measurements, spacing)
+        measurements, pixel_counts = _write_parsed_payload(staging, measurements)
         measurements.to_parquet(staging / "measurements.parquet", index=False)
         subjects.to_parquet(staging / "subjects.parquet", index=False)
-        areas = measurements[["measurement_id", "file_id", "subject_id", "area_id", "spectral_range", "slide_number", "measurement_number", "acquisition_mode"]].copy()
+        areas = measurements[["measurement_id", "file_id", "subject_id", "sample_id", "spot_id", "area_id", "spectral_range", "slide_number", "measurement_number", "acquisition_mode"]].copy()
         areas.to_parquet(staging / "areas.parquet", index=False)
         _write_cohorts(staging, measurements, subjects)
         manifest = _build_manifest("parsed", staging, {"type": "raw_text", "path": str(_raw_text_dir(config)), "manifest_hash": None}, config, measurements, subjects, areas, {f"pixels_{code}": pixel_counts[code] for code in RANGES})

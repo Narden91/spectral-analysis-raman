@@ -22,6 +22,9 @@ plotting:
     prominence: 0.05  # float: minimum normalized peak prominence
     distance: 10  # int: minimum channel separation between peaks
     max_peaks: 12  # int: maximum peaks labeled per spectrum
+  raman_band_style:
+    enabled: true  # category-coloured windows on aggregate spectra only
+    alpha: 0.25
   modes:
     condition:
       enabled: true  # bool: plot group/condition comparison

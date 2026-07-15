@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from src import load_config
+from src.analysis.raman_bands import RAMAN_BANDS, validate_configured_bands
 from src.visualization.spectral_summary_plots import (
     _nearest_band_label,
     _peak_indices,
@@ -29,14 +30,18 @@ def test_plotting_profile_inherits_curated_band_definitions() -> None:
     plot_config = load_config("config/plots.yaml")
 
     assert len(plot_config["whole_spectra"]["bands"]) == 21
+    validate_configured_bands(plot_config["whole_spectra"]["bands"])
+    assert {name: band.bounds for name, band in RAMAN_BANDS.items()} == {
+        name: tuple(bounds) for name, bounds in plot_config["whole_spectra"]["bands"].items()
+    }
 
 
-def test_condition_legend_excludes_subject_counts_and_band_labels_are_unique() -> None:
+def test_condition_aggregate_uses_coloured_bands_not_peak_leader_labels() -> None:
     wavenumbers = np.arange(770.0, 802.0)
     peak = np.exp(-0.5 * ((wavenumbers - 786.0) / 2.0) ** 2)
     plot_cfg = {
         "peak_detection": {"enabled": True, "prominence": 0.05, "distance": 1, "max_peaks": 4},
-        "bands": {"cytosine_786": [773, 796]},
+        "raman_band_style": {"enabled": False},
     }
 
     fig, ax = plot_condition_region(
@@ -49,7 +54,5 @@ def test_condition_legend_excludes_subject_counts_and_band_labels_are_unique() -
 
     assert [text.get_text() for text in fig.legends[0].get_texts()] == ["Control", "Disease"]
     annotations = [text for text in ax.texts if text.get_text() == "Cytosine"]
-    assert len(annotations) == 1
-    assert np.isclose(annotations[0].xy[1], 2.0)
-    assert annotations[0].get_position()[1] > annotations[0].xy[1]
+    assert not annotations
     plt.close(fig)

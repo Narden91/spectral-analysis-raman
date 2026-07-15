@@ -231,6 +231,7 @@ analysis:
     n_inner_splits: 4
     n_permutations: 1000
     n_bootstrap: 1000
+    importance_permutation_repeats: 5  # RF held-out outer-fold permutation importance
     threshold_metric: "balanced_accuracy"
     stratify_permutation_by: "sex"
     random_state: 42

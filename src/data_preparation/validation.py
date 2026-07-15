@@ -35,7 +35,9 @@ def _required_files(store_type: str) -> tuple[str, ...]:
     tables = ("measurements.parquet", "subjects.parquet", "areas.parquet", "cohort")
     axes = tuple(f"wavenumbers_{code}.npy" for code in RANGES)
     if store_type == "parsed":
-        return tables + ("pixels.parquet",) + axes + tuple(f"raw_spectra_{code}.npy" for code in RANGES)
+        return tables + ("pixels.parquet",) + tuple(
+            name for code in RANGES for name in (f"raw_spectra_{code}.npy", f"native_wavenumbers_{code}.npy")
+        )
     if store_type == "preprocessed":
         return tables + ("qc.parquet",) + axes + tuple(
             f"{basis}_{code}.npy" for basis in ("normalized", "pre_normalization") for code in RANGES
@@ -79,11 +81,25 @@ def _validate_axis(path: Path, matrix_path: Path, errors: list[str]) -> None:
         errors.append(f"Non-finite spectral values: {matrix_path.name}")
 
 
+def _validate_native_axes(store_path: Path, measurements: pd.DataFrame, code: str, errors: list[str]) -> None:
+    spectra = np.load(store_path / f"raw_spectra_{code}.npy", mmap_mode="r")
+    axes = np.load(store_path / f"native_wavenumbers_{code}.npy", mmap_mode="r")
+    if axes.ndim != 2 or axes.shape[1] < 2 or not np.all(np.isfinite(axes)) or not np.all(np.diff(axes, axis=1) > 0):
+        errors.append(f"Invalid native axes: native_wavenumbers_{code}.npy")
+        return
+    if spectra.ndim != 2 or spectra.shape[1] != axes.shape[1]:
+        errors.append(f"Raw/native-axis shape mismatch: {code}")
+    rows = measurements.loc[measurements["spectral_range"].astype(str) == code]
+    native_rows = rows["native_axis_row"].to_numpy(dtype=int)
+    if len(native_rows) != len(rows) or len(native_rows) and (native_rows.min() < 0 or native_rows.max() >= len(axes) or len(np.unique(native_rows)) != len(rows)):
+        errors.append(f"{code} native_axis_row does not index native axes one-to-one")
+
+
 def _validate_relations(store_type: str, store_path: Path, errors: list[str]) -> None:
     measurements = pd.read_parquet(store_path / "measurements.parquet")
     subjects = pd.read_parquet(store_path / "subjects.parquet")
     areas = pd.read_parquet(store_path / "areas.parquet")
-    _require_columns(measurements, ("measurement_id", "file_id", "subject_id", "area_id", "spectral_range", "raw_start", "raw_stop"), "measurements", errors)
+    _require_columns(measurements, ("measurement_id", "file_id", "subject_id", "area_id", "spectral_range", "raw_start", "raw_stop", "native_axis_row", "sample_id", "spot_id"), "measurements", errors)
     _require_columns(subjects, ("subject_id",), "subjects", errors)
     _require_columns(areas, ("measurement_id", "subject_id", "area_id", "spectral_range"), "areas", errors)
     if "measurement_id" in measurements and measurements["measurement_id"].astype(str).duplicated().any():
@@ -101,6 +117,8 @@ def _validate_relations(store_type: str, store_path: Path, errors: list[str]) ->
         _require_columns(pixels, ("measurement_id", "spectral_range", "pixel_index", "raw_row", "x", "y"), "pixels", errors)
         if pixels.duplicated(["measurement_id", "pixel_index"]).any():
             errors.append("Duplicate pixel identity in pixels")
+        for code in RANGES:
+            _validate_native_axes(store_path, measurements, code, errors)
     else:
         qc = pd.read_parquet(store_path / "qc.parquet")
         _require_columns(qc, ("measurement_id", "spectral_range", "pixel_index", "retained", "normalized_row", "pre_normalization_row", "qc_reason"), "qc", errors)
@@ -154,9 +172,8 @@ def validate_store(path: str | Path, expected_store_type: str, config: dict, *, 
 
     _validate_relations(expected_store_type, store_path, errors)
     for code in RANGES:
-        matrix_name = f"raw_spectra_{code}.npy" if expected_store_type == "parsed" else f"normalized_{code}.npy"
-        _validate_axis(store_path / f"wavenumbers_{code}.npy", store_path / matrix_name, errors)
         if expected_store_type == "preprocessed":
+            _validate_axis(store_path / f"wavenumbers_{code}.npy", store_path / f"normalized_{code}.npy", errors)
             _validate_axis(store_path / f"wavenumbers_{code}.npy", store_path / f"pre_normalization_{code}.npy", errors)
     _validate_signatures(store_path, manifest, errors, strict=strict)
     subjects = pd.read_parquet(store_path / "subjects.parquet")

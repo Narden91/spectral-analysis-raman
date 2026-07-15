@@ -67,9 +67,37 @@ def _row_column(source: DataSource, basis: str) -> str:
 
 def _load_array(source: DataSource, spectral_range: str, basis: str) -> tuple[np.ndarray, np.ndarray]:
     code = str(spectral_range)
+    if source.source_name == "parsed":
+        raise RuntimeError(
+            "Parsed spectra retain measurement-specific native axes. "
+            "Use load_parsed_measurement_spectra() or the canonical preprocessed store."
+        )
     spectra = np.load(source.source_path / _spectra_filename(source, code, basis), mmap_mode="r")
     axis = np.load(source.source_path / f"wavenumbers_{code}.npy", mmap_mode="r")
     return spectra, axis
+
+
+def load_parsed_measurement_spectra(
+    data_source: DataSource | None,
+    measurement_id: str,
+) -> dict[str, np.ndarray]:
+    """Return raw pixels and their unmodified native axis for one acquisition."""
+    source = _source(data_source)
+    if source.source_name != "parsed":
+        raise RuntimeError("load_parsed_measurement_spectra requires the parsed data source")
+    measurements = load_file_index(source).set_index("measurement_id")
+    row = measurements.loc[str(measurement_id)]
+    if isinstance(row, pd.DataFrame):
+        raise RuntimeError(f"Duplicate parsed measurement_id: {measurement_id}")
+    code = str(row["spectral_range"])
+    raw = np.load(source.source_path / f"raw_spectra_{code}.npy", mmap_mode="r")
+    axes = np.load(source.source_path / f"native_wavenumbers_{code}.npy", mmap_mode="r")
+    start, stop = int(row["raw_start"]), int(row["raw_stop"])
+    return {
+        "spectra": raw[start:stop],
+        "wavenumbers": np.asarray(axes[int(row["native_axis_row"])], dtype=float),
+        "measurement_id": np.asarray([str(measurement_id)]),
+    }
 
 
 def _feature_names(spectral_range: str, axis: np.ndarray) -> np.ndarray:

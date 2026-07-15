@@ -9,10 +9,12 @@ from typing import Iterable
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.patches import Patch
 from matplotlib.ticker import FixedLocator
 from scipy.signal import find_peaks
 
 from src.visualization.theme import set_gallery_theme
+from src.analysis.raman_bands import RAMAN_BANDS, validate_configured_bands
 
 set_gallery_theme()
 
@@ -69,6 +71,21 @@ BAND_DISPLAY_LABELS = {
     "ch3_asym_stretch_2937": r"CH$_3$ asym. stretch",
 }
 
+BAND_CATEGORY_COLORS = {
+    "nucleic_acids": "#B9DEF6",
+    "proteins": "#BFE4C4",
+    "lipids": "#F6D6AE",
+    "carotenoids": "#FFF2AD",
+    "mixed": "#D9D9D9",
+}
+BAND_CATEGORY_LABELS = {
+    "nucleic_acids": "Nucleic acids",
+    "proteins": "Proteins",
+    "lipids": "Lipids",
+    "carotenoids": "Carotenoids",
+    "mixed": "Mixed",
+}
+
 
 def _region_key(region: str) -> str:
     key = str(region).strip().lower()
@@ -93,7 +110,44 @@ def _condition_name(condition: str) -> str:
 
 def _plot_bands(plot_cfg: dict) -> Mapping[str, Iterable[float]]:
     bands = plot_cfg.get("bands", {})
-    return bands if isinstance(bands, Mapping) else {}
+    if not isinstance(bands, Mapping):
+        return {}
+    validate_configured_bands(bands)
+    return bands
+
+
+def _add_raman_band_spans(
+    ax: plt.Axes,
+    actual_wavenumbers: np.ndarray,
+    plot_cfg: dict,
+    *,
+    display_wavenumbers: np.ndarray | None = None,
+) -> None:
+    """Draw publication-style, category-coloured pre-specified band windows."""
+    style = plot_cfg.get("raman_band_style", {})
+    if not bool(style.get("enabled", False)):
+        return
+    _plot_bands(plot_cfg)  # validates the configured analysis windows before display
+    actual = np.asarray(actual_wavenumbers, dtype=float)
+    display = actual if display_wavenumbers is None else np.asarray(display_wavenumbers, dtype=float)
+    if actual.ndim != 1 or display.shape != actual.shape:
+        raise ValueError("Raman-band display axis must match the physical wavenumber axis")
+    visible_categories: list[str] = []
+    alpha = float(style.get("alpha", 0.25))
+    for band in RAMAN_BANDS.values():
+        left, right = band.bounds
+        if right < actual[0] or left > actual[-1]:
+            continue
+        plot_left, plot_right = np.interp((left, right), actual, display)
+        ax.axvspan(plot_left, plot_right, color=BAND_CATEGORY_COLORS[band.category], alpha=alpha, linewidth=0, zorder=0)
+        if band.category not in visible_categories:
+            visible_categories.append(band.category)
+    if visible_categories:
+        handles = [
+            Patch(facecolor=BAND_CATEGORY_COLORS[category], edgecolor="none", alpha=0.8, label=BAND_CATEGORY_LABELS[category])
+            for category in visible_categories
+        ]
+        ax.legend(handles=handles, loc="upper left", ncol=len(handles), fontsize=8, frameon=True, borderpad=0.35)
 
 
 def _mean_signal(matrix: np.ndarray) -> np.ndarray:
@@ -426,16 +480,7 @@ def plot_condition_region(
     )
     ax.fill_between(wavenumbers, mean_disease, alpha=0.08, color=CONDITION_COLORS["disease"])
     _set_spectrum_limits(ax, [wavenumbers], [mean_control, mean_disease], top_pad=0.18)
-    peak_cfg = plot_cfg.get("peak_detection", {})
-    bands = _plot_bands(plot_cfg)
-    _annotate_peaks(
-        ax,
-        wavenumbers,
-        _upper_envelope((mean_control, mean_disease)),
-        wavenumbers,
-        peak_cfg,
-        bands=bands,
-    )
+    _add_raman_band_spans(ax, wavenumbers, plot_cfg)
     _finalize_axis(
         ax,
         title=f"Preprocessed spectra: Disease vs Control - {_region_title(region)}",
@@ -476,16 +521,7 @@ def plot_gender_condition_region(
     )
     ax.fill_between(wavenumbers, mean_disease, alpha=0.08, color=disease_color)
     _set_spectrum_limits(ax, [wavenumbers], [mean_control, mean_disease], top_pad=0.18)
-    peak_cfg = plot_cfg.get("peak_detection", {})
-    bands = _plot_bands(plot_cfg)
-    _annotate_peaks(
-        ax,
-        wavenumbers,
-        _upper_envelope((mean_control, mean_disease)),
-        wavenumbers,
-        peak_cfg,
-        bands=bands,
-    )
+    _add_raman_band_spans(ax, wavenumbers, plot_cfg)
     _finalize_axis(
         ax,
         title=f"Preprocessed spectra: {gender.capitalize()} Control vs Disease - {_region_title(region)}",
@@ -611,8 +647,6 @@ def plot_global_comparison(
         region_axes,
         gap_cm=float(plot_cfg.get("gap_cm", 50.0)),
     )
-    peak_cfg = plot_cfg.get("peak_detection", {})
-    annotation_signals: dict[str, list[np.ndarray]] = {}
 
     # SNV-rescale every region's series for display so regions with different
     # normalization (area norm vs SNV) share a comparable y-axis. Mirrors the
@@ -630,7 +664,6 @@ def plot_global_comparison(
         linewidth = float(entry.get("linewidth", 2.0))
         alpha = float(entry.get("alpha", 1.0))
         linestyle = str(entry.get("linestyle", "-"))
-        annotate = bool(entry.get("annotate", True))
         segments = entry["segments"]
         first_region = next(iter(segments.keys()))
         for region, y in segments.items():
@@ -643,9 +676,8 @@ def plot_global_comparison(
                 linestyle=linestyle,
                 label=str(label) if (label is not None and region == first_region) else None,
             )
-            if annotate:
+            if bool(entry.get("shade", True)):
                 ax.fill_between(display_axes[region], y, alpha=0.08, color=color)
-                annotation_signals.setdefault(region, []).append(np.asarray(y, dtype=float))
 
     _set_spectrum_limits(
         ax,
@@ -653,15 +685,8 @@ def plot_global_comparison(
         [np.asarray(entry["segments"][region], dtype=float) for entry in display_series for region in entry["segments"]],
         top_pad=0.22,
     )
-    for region, signals in annotation_signals.items():
-        _annotate_peaks(
-            ax,
-            np.asarray(display_axes[region], dtype=float),
-            _upper_envelope(signals),
-            np.asarray(region_axes[region], dtype=float),
-            peak_cfg,
-            bands=_plot_bands(plot_cfg),
-        )
+    for region, axis in region_axes.items():
+        _add_raman_band_spans(ax, np.asarray(axis, dtype=float), plot_cfg, display_wavenumbers=display_axes[region])
     _style_wavenumber_axis(ax, region_axes, display_axes, plot_cfg.get("axis", {}))
     _decorate_regions(ax, gap_spans, label_positions)
     _finalize_axis(ax, title=title, title_pad=24.0)
@@ -696,7 +721,6 @@ def plot_cohort_mean_spectra_grid(
             region: _snv_rescale(np.asarray(y, dtype=float))
             for region, y in segments.items()
         }
-        annotated_segments: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
         for region in region_axes:
             y_disp = display_segments.get(region)
             if y_disp is None:
@@ -713,28 +737,14 @@ def plot_cohort_mean_spectra_grid(
             if _region_title(region) not in legend_labels:
                 legend_handles.append(line)
                 legend_labels.append(_region_title(region))
-            annotated_segments.append(
-                (
-                    np.asarray(display_axes[region], dtype=float),
-                    y_disp,
-                    np.asarray(region_axes[region], dtype=float),
-                )
-            )
         _set_spectrum_limits(
             ax,
             display_axes.values(),
             list(display_segments.values()),
             top_pad=0.22,
         )
-        for x_values, y_values, actual_wavenumbers in annotated_segments:
-            _annotate_peaks(
-                ax,
-                x_values,
-                y_values,
-                actual_wavenumbers,
-                plot_cfg.get("peak_detection", {}),
-                bands=_plot_bands(plot_cfg),
-            )
+        for region, axis in region_axes.items():
+            _add_raman_band_spans(ax, np.asarray(axis, dtype=float), plot_cfg, display_wavenumbers=display_axes[region])
         _style_wavenumber_axis(ax, region_axes, display_axes, plot_cfg.get("axis", {}))
         _decorate_regions(ax, gap_spans, label_positions)
         _finalize_axis(

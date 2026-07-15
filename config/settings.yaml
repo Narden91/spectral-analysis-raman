@@ -109,7 +109,12 @@ preprocessing:
     edge_trim_cm: 15.0  # float: cm^-1 alternative edge width
   interpolation:
     target_spacing: 1.0  # float: target cm^-1 spacing after interpolation
-    method: "cubic"  # str: interpolation kind ("cubic", "linear", ...)
+    method: "linear"  # avoids cubic overshoot around sharp Raman features
+    # Fixed after inspecting all native acquisition axes after the 15 cm^-1 trim.
+    # No extrapolation is permitted outside these campaign-comparable grids.
+    frozen_grids:
+      fingerprint: [733.0, 1788.0]
+      ch_stretch: [2450.0, 3197.0]
   # Removed from the production pipeline: a second derivative-based pass can alter Raman peaks.
   spike_repair:
     enabled: false  # bool: retained only for legacy config compatibility; never applied

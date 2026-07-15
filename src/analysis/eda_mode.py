@@ -188,6 +188,7 @@ def validate_control_vs_disease_ml_config(cfg: dict[str, Any]) -> None:
         "n_inner_splits",
         "n_permutations",
         "n_bootstrap",
+        "importance_permutation_repeats",
     )
     for field in positive_int_fields:
         value = ml_cfg.get(field)

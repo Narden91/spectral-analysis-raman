@@ -15,6 +15,7 @@ from src.preprocessing.pipeline import (
     sample_baseline_qc_artifacts,
     smooth_spectra,
     spectral_quality_mask,
+    interpolate_spectra,
 )
 
 
@@ -52,6 +53,16 @@ def test_spectral_quality_uses_trailing_noise_channels(preprocessing_config_guar
         region="fingerprint",
     )
     assert bool(mask[0])
+
+
+def test_frozen_interpolation_rejects_any_extrapolation() -> None:
+    axis = np.array([100.0, 101.0, 102.0])
+    spectra = np.array([[1.0, 2.0, 3.0]])
+    aligned, target = interpolate_spectra(spectra, axis, target_wavenumbers=np.array([100.0, 101.0, 102.0]))
+    np.testing.assert_allclose(aligned, spectra)
+    np.testing.assert_allclose(target, axis)
+    with pytest.raises(ValueError, match="extrapolation is forbidden"):
+        interpolate_spectra(spectra, axis, target_wavenumbers=np.array([99.0, 100.0, 101.0]))
 
 
 def test_baseline_qc_artifacts_use_consistent_trimmed_shapes(tmp_path: Path, preprocessing_config_guard: None) -> None:
