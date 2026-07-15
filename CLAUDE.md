@@ -52,7 +52,7 @@ QC metrics → dead-pixel screen → cosmic detection/suppression → edge trim
 → quality gate → optional smoothing → normalization
 ```
 
-- The frozen grids are 733–1788 cm⁻¹ and 2450–3197 cm⁻¹ at 1 cm⁻¹ spacing.
+- The frozen grids are 734–1788 cm⁻¹ and 2451–3197 cm⁻¹ at 1 cm⁻¹ spacing.
   They were established from native-axis coverage after trimming. Do not derive
   new bounds from a subset, and do not permit extrapolation.
 - Cosmic correction is restricted to narrow positive artifacts. Never restore

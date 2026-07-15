@@ -12,7 +12,7 @@ import src
 from src.analysis.spectral_loader import build_group_matrix
 from src.data_preparation import validation as validation_module
 from src.data_preparation.loaders import load_area_summaries, load_file_index, load_spectra, load_whole_area_store
-from src.data_preparation.materialize import build_parsed_store, build_preprocessed_store
+from src.data_preparation.materialize import MaterializedStore, _atomic_replace, build_parsed_store, build_preprocessed_store
 from src.data_preparation.store import (
     DataSource,
     get_active_data_source,
@@ -125,6 +125,29 @@ def test_build_parsed_store_and_validate(configured_store_paths: dict[str, Path]
 
     assert not (store.path / "spectra_1300.npz").exists()
     assert not (store.path / "area_summaries_1300.npz").exists()
+
+
+def test_atomic_store_build_never_creates_staging_directories_in_data_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "data"
+    target = data_root / "parsed"
+    target.mkdir(parents=True)
+    (target / "old.txt").write_text("old", encoding="utf-8")
+    system_temp = tmp_path / "system_temp"
+    system_temp.mkdir()
+    monkeypatch.setattr("src.data_preparation.materialize.tempfile.tempdir", str(system_temp))
+
+    def writer(staging: Path) -> MaterializedStore:
+        (staging / "new.txt").write_text("new", encoding="utf-8")
+        return MaterializedStore("parsed", target, {})
+
+    _atomic_replace(target, writer)
+
+    assert (target / "new.txt").read_text(encoding="utf-8") == "new"
+    assert not list(data_root.glob(".parsed_*"))
+    assert not list(system_temp.glob("raman_parsed_*"))
 
 
 def test_parsed_store_preserves_measurement_specific_native_axes(configured_store_paths: dict[str, Path]) -> None:

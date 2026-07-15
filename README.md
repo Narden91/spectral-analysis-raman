@@ -130,8 +130,8 @@ native raw spectra
 → normalization
 ```
 
-The registered analysis grids are 733–1788 cm⁻¹ (fingerprint) and
-2450–3197 cm⁻¹ (CH stretch), at 1 cm⁻¹ spacing. They were selected from native
+The registered analysis grids are 734–1788 cm⁻¹ (fingerprint) and
+2451–3197 cm⁻¹ (CH stretch), at 1 cm⁻¹ spacing. They were selected from native
 axis coverage after the configured edge trim and must not be guessed or changed
 for a campaign without a documented calibration decision.
 

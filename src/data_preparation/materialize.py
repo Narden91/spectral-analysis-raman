@@ -398,22 +398,36 @@ def _build_manifest(
 
 
 def _atomic_replace(store_dir: Path, writer: Callable[[Path], MaterializedStore]) -> MaterializedStore:
+    """Build outside ``data/`` and atomically replace a completed store.
+
+    Temporary materialization directories live in the operating system temp
+    area, never alongside user-visible data stores.  Replacement is allowed
+    only on the same filesystem volume so it remains an atomic rename.
+    """
     store_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{store_dir.name}_", dir=store_dir.parent))
+    staging = Path(tempfile.mkdtemp(prefix=f"raman_{store_dir.name}_staging_"))
+    if staging.resolve().drive.casefold() != store_dir.resolve().drive.casefold():
+        shutil.rmtree(staging, ignore_errors=True)
+        raise RuntimeError(
+            "Atomic store replacement requires the system temporary directory and data store to share a volume"
+        )
+    backup_parent = Path(tempfile.mkdtemp(prefix=f"raman_{store_dir.name}_backup_"))
+    backup = backup_parent / store_dir.name
+    previous_store_moved = False
     try:
         output = writer(staging)
-        backup = store_dir.with_name(f".{store_dir.name}_backup")
-        if backup.exists():
-            shutil.rmtree(backup)
         if store_dir.exists():
             store_dir.replace(backup)
+            previous_store_moved = True
         staging.replace(store_dir)
-        if backup.exists():
-            shutil.rmtree(backup)
         return output
     except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
+        if previous_store_moved and not store_dir.exists() and backup.exists():
+            backup.replace(store_dir)
         raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(backup_parent, ignore_errors=True)
 
 
 def build_parsed_store(cfg: dict | None = None, *, force: bool = False) -> MaterializedStore:
