@@ -30,7 +30,7 @@ from src.terminal_output import print_kv_table
 logger = logging.getLogger(__name__)
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Manage parsed/preprocessed Raman data stores.")
     parser.add_argument("--config", type=str, default=None, help="Optional config override.")
     parser.add_argument("--dry-run", action="store_true", help="Print actions without mutating stores.")
@@ -41,7 +41,11 @@ def _parse_args() -> argparse.Namespace:
         sub = subparsers.add_parser(command)
         sub.add_argument("--source", choices=["parsed", "preprocessed"], required=True)
         sub.add_argument("--force", action="store_true", help="Rebuild even if store exists.")
-    return parser.parse_args()
+        if command == "validate":
+            # Accept the natural ``validate --source ... --strict`` form as
+            # well as the historical top-level placement before the command.
+            sub.add_argument("--strict", action="store_true", default=argparse.SUPPRESS)
+    return parser.parse_args(argv)
 
 
 def _build(source: str, force: bool, dry_run: bool) -> None:
