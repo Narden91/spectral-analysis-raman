@@ -13,7 +13,7 @@ from matplotlib.patches import Patch
 from matplotlib.ticker import FixedLocator
 from scipy.signal import find_peaks
 
-from src.visualization.theme import set_gallery_theme
+from src.visualization.theme import GROUP_COLORS, set_gallery_theme
 from src.analysis.raman_bands import RAMAN_BANDS, validate_configured_bands
 
 set_gallery_theme()
@@ -24,10 +24,10 @@ CONDITION_COLORS = {
 }
 
 COHORT_COLORS = {
-    ("control", "female"): "#0072B2",
-    ("control", "male"): "#009E73",
-    ("disease", "female"): "#D55E00",
-    ("disease", "male"): "#CC79A7",
+    ("control", "female"): GROUP_COLORS["female_control"],
+    ("control", "male"): GROUP_COLORS["male_control"],
+    ("disease", "female"): GROUP_COLORS["female_disease"],
+    ("disease", "male"): GROUP_COLORS["male_disease"],
 }
 
 REGION_COLORS = {
@@ -132,7 +132,7 @@ def _add_raman_band_spans(
     display = actual if display_wavenumbers is None else np.asarray(display_wavenumbers, dtype=float)
     if actual.ndim != 1 or display.shape != actual.shape:
         raise ValueError("Raman-band display axis must match the physical wavenumber axis")
-    visible_categories: list[str] = []
+    visible_categories = list(getattr(ax, "_raman_band_categories", ()))
     alpha = float(style.get("alpha", 0.25))
     for band in RAMAN_BANDS.values():
         left, right = band.bounds
@@ -147,7 +147,9 @@ def _add_raman_band_spans(
             Patch(facecolor=BAND_CATEGORY_COLORS[category], edgecolor="none", alpha=0.8, label=BAND_CATEGORY_LABELS[category])
             for category in visible_categories
         ]
-        ax.legend(handles=handles, loc="upper left", ncol=len(handles), fontsize=8, frameon=True, borderpad=0.35)
+        legend = ax.legend(handles=handles, loc="upper left", ncol=len(handles), fontsize=8, frameon=True, borderpad=0.35)
+        legend.set_zorder(3)
+    setattr(ax, "_raman_band_categories", visible_categories)
 
 
 def _mean_signal(matrix: np.ndarray) -> np.ndarray:
@@ -387,6 +389,11 @@ def _annotate_peaks(
     label_levels = (0.74, 0.60, 0.88, 0.48)
     y_top = float(ax.get_ylim()[1])
     cap = y_top - 0.03 * y_span
+    legend = ax.get_legend()
+    if legend is not None:
+        renderer = ax.figure.canvas.get_renderer()
+        legend_bottom = ax.transData.inverted().transform(legend.get_window_extent(renderer=renderer).get_points())[0, 1]
+        cap = min(cap, float(legend_bottom) - 0.035 * y_span)
 
     for order, idx in enumerate(sorted(peak_idx, key=lambda item: x[item])):
         band_name = _nearest_band_name(float(actual_wavenumbers[idx]), bands)
@@ -479,8 +486,16 @@ def plot_condition_region(
         label="Disease",
     )
     ax.fill_between(wavenumbers, mean_disease, alpha=0.08, color=CONDITION_COLORS["disease"])
-    _set_spectrum_limits(ax, [wavenumbers], [mean_control, mean_disease], top_pad=0.18)
+    _set_spectrum_limits(ax, [wavenumbers], [mean_control, mean_disease], top_pad=0.30)
     _add_raman_band_spans(ax, wavenumbers, plot_cfg)
+    _annotate_peaks(
+        ax,
+        wavenumbers,
+        _upper_envelope((mean_control, mean_disease)),
+        wavenumbers,
+        plot_cfg.get("peak_detection", {}),
+        bands=_plot_bands(plot_cfg),
+    )
     _finalize_axis(
         ax,
         title=f"Preprocessed spectra: Disease vs Control - {_region_title(region)}",
@@ -520,8 +535,16 @@ def plot_gender_condition_region(
         label="Disease",
     )
     ax.fill_between(wavenumbers, mean_disease, alpha=0.08, color=disease_color)
-    _set_spectrum_limits(ax, [wavenumbers], [mean_control, mean_disease], top_pad=0.18)
+    _set_spectrum_limits(ax, [wavenumbers], [mean_control, mean_disease], top_pad=0.30)
     _add_raman_band_spans(ax, wavenumbers, plot_cfg)
+    _annotate_peaks(
+        ax,
+        wavenumbers,
+        _upper_envelope((mean_control, mean_disease)),
+        wavenumbers,
+        plot_cfg.get("peak_detection", {}),
+        bands=_plot_bands(plot_cfg),
+    )
     _finalize_axis(
         ax,
         title=f"Preprocessed spectra: {gender.capitalize()} Control vs Disease - {_region_title(region)}",
@@ -658,12 +681,14 @@ def plot_global_comparison(
         for entry in series
     ]
 
+    annotation_signals: dict[str, list[np.ndarray]] = {}
     for entry in display_series:
         label = entry.get("label")
         color = str(entry["color"])
         linewidth = float(entry.get("linewidth", 2.0))
         alpha = float(entry.get("alpha", 1.0))
         linestyle = str(entry.get("linestyle", "-"))
+        annotate = bool(entry.get("annotate", True))
         segments = entry["segments"]
         first_region = next(iter(segments.keys()))
         for region, y in segments.items():
@@ -678,13 +703,24 @@ def plot_global_comparison(
             )
             if bool(entry.get("shade", True)):
                 ax.fill_between(display_axes[region], y, alpha=0.08, color=color)
+            if annotate:
+                annotation_signals.setdefault(region, []).append(np.asarray(y, dtype=float))
 
     _set_spectrum_limits(
         ax,
         display_axes.values(),
         [np.asarray(entry["segments"][region], dtype=float) for entry in display_series for region in entry["segments"]],
-        top_pad=0.22,
+        top_pad=0.30,
     )
+    for region, signals in annotation_signals.items():
+        _annotate_peaks(
+            ax,
+            np.asarray(display_axes[region], dtype=float),
+            _upper_envelope(signals),
+            np.asarray(region_axes[region], dtype=float),
+            plot_cfg.get("peak_detection", {}),
+            bands=_plot_bands(plot_cfg),
+        )
     for region, axis in region_axes.items():
         _add_raman_band_spans(ax, np.asarray(axis, dtype=float), plot_cfg, display_wavenumbers=display_axes[region])
     _style_wavenumber_axis(ax, region_axes, display_axes, plot_cfg.get("axis", {}))
@@ -741,8 +777,17 @@ def plot_cohort_mean_spectra_grid(
             ax,
             display_axes.values(),
             list(display_segments.values()),
-            top_pad=0.22,
+            top_pad=0.30,
         )
+        for region, y_disp in display_segments.items():
+            _annotate_peaks(
+                ax,
+                np.asarray(display_axes[region], dtype=float),
+                y_disp,
+                np.asarray(region_axes[region], dtype=float),
+                plot_cfg.get("peak_detection", {}),
+                bands=_plot_bands(plot_cfg),
+            )
         for region, axis in region_axes.items():
             _add_raman_band_spans(ax, np.asarray(axis, dtype=float), plot_cfg, display_wavenumbers=display_axes[region])
         _style_wavenumber_axis(ax, region_axes, display_axes, plot_cfg.get("axis", {}))
@@ -770,10 +815,11 @@ def plot_region_mean_spectrum(
     color = REGION_COLORS.get(_region_key(region), "#334155")
     ax.plot(wavenumbers, mean_spectrum, color=color, linewidth=2.0)
     ax.fill_between(wavenumbers, mean_spectrum, alpha=0.08, color=color)
-    _set_spectrum_limits(ax, [wavenumbers], [mean_spectrum], top_pad=0.18)
+    _set_spectrum_limits(ax, [wavenumbers], [mean_spectrum], top_pad=0.30)
     _annotate_peaks(
         ax, wavenumbers, mean_spectrum, wavenumbers, plot_cfg.get("peak_detection", {}), bands=_plot_bands(plot_cfg)
     )
+    _add_raman_band_spans(ax, wavenumbers, plot_cfg)
     _finalize_axis(ax, title=f"Mean spectrum - {_region_title(region)}")
     fig.tight_layout()
     return fig, ax

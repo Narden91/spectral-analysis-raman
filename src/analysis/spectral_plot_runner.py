@@ -21,6 +21,8 @@ from src.constants import CANONICAL_REGION_CHANNELS
 from src.data_preparation.loaders import load_clinical_subjects, load_file_index
 from src.metadata.clinical import merge_index_with_clinical
 from src.visualization.spectral_summary_plots import (
+    COHORT_COLORS,
+    CONDITION_COLORS,
     plot_cohort_mean_spectra_grid,
     plot_condition_region,
     plot_gender_condition_region,
@@ -761,12 +763,12 @@ def _write_spectral_plots(
             [
                 {
                     "label": "Control",
-                    "color": "#0072B2",
+                    "color": CONDITION_COLORS["control"],
                     "segments": {region: np.nanmean(values, axis=0) for region, values in control_segments.items()},
                 },
                 {
                     "label": "Disease",
-                    "color": "#D55E00",
+                    "color": CONDITION_COLORS["disease"],
                     "segments": {region: np.nanmean(values, axis=0) for region, values in disease_segments.items()},
                 },
             ],
@@ -788,12 +790,12 @@ def _write_spectral_plots(
                 [
                     {
                         "label": "Control",
-                        "color": "#0072B2" if gender == "female" else "#009E73",
+                        "color": COHORT_COLORS[("control", gender)],
                         "segments": {region: np.nanmean(values, axis=0) for region, values in control_split.items()},
                     },
                     {
                         "label": "Disease",
-                        "color": "#D55E00" if gender == "female" else "#CC79A7",
+                        "color": COHORT_COLORS[("disease", gender)],
                         "segments": {region: np.nanmean(values, axis=0) for region, values in disease_split.items()},
                     },
                 ],
@@ -810,7 +812,7 @@ def _write_spectral_plots(
             if matrix.size == 0:
                 continue
             _, split_matrix = split_whole_spectra(whole_wave, matrix, split_index)
-            color = "#0072B2" if condition == "control" else "#D55E00"
+            color = CONDITION_COLORS[condition]
             series = []
             for row_idx in range(matrix.shape[0]):
                 series.append(
@@ -820,6 +822,7 @@ def _write_spectral_plots(
                         "linewidth": 0.6,
                         "alpha": line_alpha,
                         "annotate": False,
+                        "shade": False,
                         "segments": {region: values[row_idx] for region, values in split_matrix.items()},
                     }
                 )
