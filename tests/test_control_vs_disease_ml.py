@@ -13,6 +13,7 @@ from src.analysis.control_vs_disease_ml import (
     _classification_metrics,
     _cohort_summary,
     _fit_tuned_model,
+    _locked_joint_stratified_split_plan,
     _labels,
     _load_cohort,
     _permute_labels,
@@ -502,6 +503,35 @@ def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> N
     assert p_sex_stratified > 0.05, (
         f"sex-stratified null should NOT be fooled by pure sex-confounded signal (p={p_sex_stratified})"
     )
+
+
+def test_locked_outer_plan_preserves_joint_class_sex_strata() -> None:
+    y = np.repeat(np.array([0, 1]), 12)
+    sex = np.tile(np.repeat(np.array(["female", "male"]), 6), 2)
+    plan = _locked_joint_stratified_split_plan(
+        y,
+        sex,
+        n_outer_splits=3,
+        n_outer_repeats=2,
+        random_state=42,
+    )
+    joint = np.char.add(np.char.add(y.astype(str), "__"), sex)
+    assert len(plan) == 2
+    for repeat_splits in plan:
+        assert len(repeat_splits) == 3
+        for _train, test in repeat_splits:
+            assert set(pd.Series(joint[test]).value_counts()) == {2}
+
+
+def test_locked_outer_plan_fails_when_a_joint_stratum_cannot_fill_every_fold() -> None:
+    with pytest.raises(ValueError, match="class-sex"):
+        _locked_joint_stratified_split_plan(
+            np.array([0, 0, 0, 1, 1, 1]),
+            np.array(["female", "female", "male", "female", "male", "male"]),
+            n_outer_splits=3,
+            n_outer_repeats=1,
+            random_state=42,
+        )
 
 
 # ---------------------------------------------------------------------------

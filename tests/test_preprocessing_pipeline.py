@@ -8,6 +8,7 @@ import pytest
 
 import src
 from src.preprocessing.pipeline import (
+    _detect_cosmic_spikes,
     compute_qc_metrics,
     normalize_spectra,
     run_preprocessing,
@@ -153,3 +154,73 @@ def test_pre_normalization_basis_uses_the_same_preprocessing_pass(
     )
     pre = result.stage_arrays["pre_normalization"]
     assert np.allclose(result.spectra, normalize_spectra(pre, mode="eda", region="fingerprint"))
+
+
+def test_cosmic_detection_keeps_only_positive_narrow_events() -> None:
+    spectra = np.zeros((2, 31), dtype=float)
+    spectra[0, 15] = 100.0
+    spectra[1, 15] = -100.0
+    mask, _replacement = _detect_cosmic_spikes(
+        spectra,
+        pixel_coords=None,
+        cr_cfg={"method": "local", "z_threshold": 8.0, "window": 2, "max_width": 3},
+    )
+    assert bool(mask[0, 15])
+    assert not mask[1].any()
+
+
+def test_excessive_cosmic_correction_rejects_and_keeps_qc_lineage(
+    preprocessing_config_guard: None,
+) -> None:
+    spectra = np.zeros((1, 101), dtype=float)
+    spectra[0, [20, 40, 60]] = 100.0
+    result = run_preprocessing(
+        spectra,
+        np.arange(1000.0, 1101.0),
+        region="fingerprint",
+        screen_dead=False,
+        correct_bl=False,
+        smooth=False,
+        filter_quality=False,
+        normalize=False,
+        trim=0,
+    )
+    assert result.spectra.shape == (0, 101)
+    assert not bool(result.retained_mask[0])
+    assert result.qc_flags.loc[0, "qc_reason"] == "excessive_cosmic_correction"
+    assert len(result.qc_metrics) == 1
+    assert float(result.qc_metrics.loc[0, "cosmic_spike_fraction"]) > 0.02
+
+
+def test_post_baseline_spike_repair_is_never_applied(
+    monkeypatch: pytest.MonkeyPatch,
+    preprocessing_config_guard: None,
+) -> None:
+    src.config["preprocessing"]["spike_repair"]["enabled"] = True
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("post-baseline spike repair must not run")
+
+    monkeypatch.setattr("src.preprocessing.pipeline.repair_isolated_spikes_with_mask", fail_if_called)
+    run_preprocessing(
+        np.tile(np.linspace(1.0, 2.0, 31), (2, 1)),
+        np.arange(1000.0, 1031.0),
+        region="fingerprint",
+        screen_dead=False,
+        suppress_cosmic=False,
+        correct_bl=False,
+        smooth=False,
+        filter_quality=False,
+        normalize=False,
+        trim=0,
+    )
+
+
+def test_area_normalization_uses_supplied_wavenumber_axis() -> None:
+    wavenumbers = np.array([0.0, 1.0, 3.0])
+    normalized = normalize_spectra(
+        np.array([[1.0, 1.0, 1.0]]),
+        method="area",
+        wavenumbers=wavenumbers,
+    )
+    assert np.isclose(np.trapezoid(np.abs(normalized[0]), x=wavenumbers), 1.0)

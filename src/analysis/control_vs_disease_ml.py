@@ -529,6 +529,32 @@ def _outer_splits(y: np.ndarray, n_outer_splits: int, random_state: int) -> Stra
     return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
 
 
+def _locked_joint_stratified_split_plan(
+    y: np.ndarray,
+    strata: np.ndarray,
+    *,
+    n_outer_splits: int,
+    n_outer_repeats: int,
+    random_state: int,
+) -> list[list[tuple[np.ndarray, np.ndarray]]]:
+    """Create one deterministic outer-fold plan preserving every class-sex stratum."""
+    sex = np.asarray(strata, dtype=object)
+    if sex.shape != y.shape or pd.isna(sex).any() or np.any(np.char.strip(sex.astype(str)) == ""):
+        raise ValueError("Sex-stratified evaluation requires one non-missing sex value per subject")
+    joint_labels = np.char.add(np.char.add(y.astype(str), "__"), sex.astype(str))
+    counts = pd.Series(joint_labels).value_counts()
+    if len(counts) < 2 or int(counts.min()) < n_outer_splits:
+        raise ValueError(
+            "Cannot create the locked joint class-sex outer folds: each observed class-sex stratum "
+            f"must contain at least {n_outer_splits} subjects; observed counts={counts.to_dict()}"
+        )
+    indices = np.arange(len(y))
+    return [
+        list(StratifiedKFold(n_splits=n_outer_splits, shuffle=True, random_state=random_state + repeat).split(indices, joint_labels))
+        for repeat in range(n_outer_repeats)
+    ]
+
+
 def _run_repeated_nested_cv(
     model_name: str,
     X: np.ndarray,
@@ -536,6 +562,7 @@ def _run_repeated_nested_cv(
     *,
     ml_cfg: dict[str, Any],
     n_jobs: int,
+    outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]] | None = None,
 ) -> pd.DataFrame:
     """Run RepeatedStratifiedKFold nested CV; return one row per (repeat, subject_index)."""
     n_outer_splits = _n_outer_splits(ml_cfg)
@@ -544,13 +571,21 @@ def _run_repeated_nested_cv(
     threshold_metric = _threshold_metric(ml_cfg)
     random_state = _random_state(ml_cfg)
 
-    n_splits = min(n_outer_splits, int(np.bincount(y).min()))
-    repeated_cv = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_outer_repeats, random_state=random_state)
-    all_splits = list(repeated_cv.split(X, y))
+    if outer_split_plan is None:
+        n_splits = min(n_outer_splits, int(np.bincount(y).min()))
+        repeated_cv = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_outer_repeats, random_state=random_state)
+        all_splits = list(repeated_cv.split(X, y))
+        split_plan = [
+            all_splits[repeat * n_splits : (repeat + 1) * n_splits]
+            for repeat in range(n_outer_repeats)
+        ]
+    else:
+        split_plan = [list(repeat_splits) for repeat_splits in outer_split_plan]
+        if len(split_plan) != n_outer_repeats:
+            raise ValueError("Locked outer split plan repeat count does not match n_outer_repeats")
 
     rows: list[dict[str, object]] = []
-    for repeat_index in range(n_outer_repeats):
-        repeat_splits = all_splits[repeat_index * n_splits : (repeat_index + 1) * n_splits]
+    for repeat_index, repeat_splits in enumerate(split_plan):
         y_pred, y_score = _cv_predict(
             model_name, X, y, repeat_splits,
             ml_cfg=ml_cfg, n_inner_splits=n_inner_splits, threshold_metric=threshold_metric,
@@ -620,13 +655,24 @@ def _permute_labels(y: np.ndarray, rng: np.random.Generator, strata: np.ndarray 
 
 
 def _permuted_score(
-    model_name: str, X: np.ndarray, y: np.ndarray, strata: np.ndarray | None, ml_cfg: dict[str, Any], seed: int,
+    model_name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    strata: np.ndarray | None,
+    ml_cfg: dict[str, Any],
+    seed: int,
+    outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]] | None = None,
 ) -> float:
     rng = np.random.default_rng(seed)
     y_perm = _permute_labels(y, rng, strata)
     if len(np.unique(y_perm)) < 2:
         return np.nan
-    return _single_split_balanced_accuracy(model_name, X, y_perm, ml_cfg=ml_cfg, n_jobs=1, random_state=seed)
+    if outer_split_plan is None:
+        return _single_split_balanced_accuracy(model_name, X, y_perm, ml_cfg=ml_cfg, n_jobs=1, random_state=seed)
+    oof = _run_repeated_nested_cv(
+        model_name, X, y_perm, ml_cfg=ml_cfg, n_jobs=1, outer_split_plan=outer_split_plan,
+    )
+    return _aggregate_repeat_metrics(oof)["balanced_accuracy_mean"]
 
 
 def _run_parallel(n_jobs: int, func: Callable[..., float], calls: list[tuple]) -> list[float]:
@@ -646,6 +692,7 @@ def run_permutation_test(
     ml_cfg: dict[str, Any],
     n_jobs: int,
     random_state: int,
+    outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]] | None = None,
 ) -> tuple[float, np.ndarray]:
     """Full-pipeline label-permutation test. Returns (p_value, null_distribution).
 
@@ -660,7 +707,9 @@ def run_permutation_test(
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
 
     null_scores = _run_parallel(
-        n_jobs, _permuted_score, [(model_name, X, y, strata, ml_cfg, int(seed)) for seed in seeds]
+        n_jobs,
+        _permuted_score,
+        [(model_name, X, y, strata, ml_cfg, int(seed), outer_split_plan) for seed in seeds],
     )
     null_arr = np.asarray(null_scores, dtype=float)
     finite_null = null_arr[np.isfinite(null_arr)]
@@ -1030,6 +1079,15 @@ def run_control_vs_disease_ml_pipeline(
             if (sex_column is not None and stratify_by == "sex")
             else None
         )
+        if stratify_by == "sex" and strata is None:
+            raise ValueError("Sex-stratified classification requires a non-missing sex column; unrestricted inference is not a fallback")
+        outer_split_plan = _locked_joint_stratified_split_plan(
+            y_valid,
+            strata,
+            n_outer_splits=_n_outer_splits(ml_cfg),
+            n_outer_repeats=int(ml_cfg.get("n_outer_repeats", 10)),
+            random_state=random_state,
+        )
         sex_only = _sex_only_baseline(frame, y, valid_rows)
 
         with _phase_timer(phase_timings, f"band_screen_{representation}", f"Univariate band screen ({representation})"):
@@ -1040,7 +1098,9 @@ def run_control_vs_disease_ml_pipeline(
             with _phase_timer(
                 phase_timings, f"{model_name}_{representation}", f"{model_name} ({representation}) nested CV"
             ):
-                oof = _run_repeated_nested_cv(model_name, X_valid, y_valid, ml_cfg=ml_cfg, n_jobs=n_jobs)
+                oof = _run_repeated_nested_cv(
+                    model_name, X_valid, y_valid, ml_cfg=ml_cfg, n_jobs=n_jobs, outer_split_plan=outer_split_plan,
+                )
                 outputs[f"{model_name}_{representation}_cv_predictions"] = write_csv_atomic(
                     oof, target_dir / f"{model_name}_{representation}_cv_predictions.csv", index=False
                 )
@@ -1059,6 +1119,7 @@ def run_control_vs_disease_ml_pipeline(
                 p_unrestricted, null_unrestricted = run_permutation_test(
                     model_name, X_valid, y_valid, observed_balanced_accuracy=observed_balanced_accuracy,
                     strata=None, ml_cfg=ml_cfg, n_jobs=n_jobs, random_state=random_state,
+                    outer_split_plan=outer_split_plan,
                 )
 
             p_sex_stratified, null_sex_stratified = np.nan, np.array([])
@@ -1070,6 +1131,7 @@ def run_control_vs_disease_ml_pipeline(
                     p_sex_stratified, null_sex_stratified = run_permutation_test(
                         model_name, X_valid, y_valid, observed_balanced_accuracy=observed_balanced_accuracy,
                         strata=strata, ml_cfg=ml_cfg, n_jobs=n_jobs, random_state=random_state + 1,
+                        outer_split_plan=outer_split_plan,
                     )
 
             for null_arr, null_kind in ((null_unrestricted, "unrestricted"), (null_sex_stratified, "sex_stratified")):
@@ -1122,9 +1184,9 @@ def run_control_vs_disease_ml_pipeline(
     with _phase_timer(phase_timings, "model_comparison", "Write model comparison table"):
         comparison_df = pd.DataFrame(comparison_rows)
         primary_mask = comparison_df["is_primary_model"].astype(bool)
-        family_p = comparison_df["permutation_p_value_sex_stratified"].fillna(
-            comparison_df["permutation_p_value_unrestricted"]
-        ).to_numpy(dtype=float)
+        family_p = comparison_df["permutation_p_value_sex_stratified"].to_numpy(dtype=float)
+        if not np.isfinite(family_p).all():
+            raise RuntimeError("Sex-stratified permutation inference failed; refusing to substitute an unrestricted null")
         fdr_q, fdr_significant = fdr_correction(family_p, alpha=0.05)
         comparison_df["permutation_p_fdr_q"] = fdr_q
         comparison_df["permutation_fdr_significant"] = fdr_significant

@@ -208,6 +208,26 @@ def _build_qc_flags(original_count: int) -> pd.DataFrame:
     )
 
 
+def _add_qc_reason(flags_df: pd.DataFrame, row_indices: np.ndarray, reason: str) -> None:
+    """Record one hard-failure reason per row without duplicating prior reasons."""
+    for row_index in np.asarray(row_indices, dtype=int):
+        current = str(flags_df.at[row_index, "qc_reason"] or "")
+        parts = [] if current in {"", "ok"} else [part.strip() for part in current.split(";") if part.strip()]
+        if reason not in parts:
+            parts.append(reason)
+        flags_df.at[row_index, "qc_reason"] = "; ".join(parts) if parts else "ok"
+
+
+def _update_qc_metrics(audit_metrics_df: pd.DataFrame, stage_metrics_df: pd.DataFrame) -> None:
+    """Persist metrics for retained and subsequently rejected input rows."""
+    if stage_metrics_df.empty:
+        return
+    row_indices = stage_metrics_df["row_index"].to_numpy(dtype=int)
+    for column in stage_metrics_df.columns:
+        if column != "row_index":
+            audit_metrics_df.loc[row_indices, column] = stage_metrics_df[column].to_numpy()
+
+
 def _compute_qc_metrics(spectra: np.ndarray) -> pd.DataFrame:
     if spectra.size == 0:
         return pd.DataFrame(
@@ -426,6 +446,7 @@ def _local_cosmic_detection(
     spectra: np.ndarray,
     z_threshold: float,
     window: int,
+    max_width: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Detect cosmic-ray spikes and compute local-median replacement values.
 
@@ -442,8 +463,21 @@ def _local_cosmic_detection(
     mad = np.median(np.abs(residual), axis=1, keepdims=True)
     mad[mad == 0] = 1e-10
     robust_sigma = 1.4826 * mad
-    spike_mask = np.abs(residual) > z_threshold * robust_sigma
-    return spike_mask, local_median
+    candidate_mask = residual > z_threshold * robust_sigma
+    return _limit_spike_width(candidate_mask, max_width), local_median
+
+
+def _limit_spike_width(mask: np.ndarray, max_width: int) -> np.ndarray:
+    """Keep only contiguous positive excursions no wider than ``max_width``."""
+    limited = np.zeros_like(mask, dtype=bool)
+    maximum = max(1, int(max_width))
+    for row_index, row_mask in enumerate(mask):
+        starts = np.flatnonzero(np.diff(np.r_[False, row_mask, False].astype(int)) == 1)
+        stops = np.flatnonzero(np.diff(np.r_[False, row_mask, False].astype(int)) == -1)
+        for start, stop in zip(starts, stops):
+            if stop - start <= maximum:
+                limited[row_index, start:stop] = True
+    return limited
 
 
 def _spatial_cosmic_detection(
@@ -451,17 +485,18 @@ def _spatial_cosmic_detection(
     pixel_coords: np.ndarray,
     z_threshold: float,
     n_neighbors: int,
+    max_width: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Detect cosmic-ray spikes using spatial neighbor medians.
 
     Falls back to local median detection when coordinates are missing or invalid.
     """
     if spectra.size == 0 or pixel_coords is None or len(pixel_coords) != len(spectra):
-        return _local_cosmic_detection(spectra, z_threshold=z_threshold, window=2)
+        return _local_cosmic_detection(spectra, z_threshold=z_threshold, window=2, max_width=max_width)
 
     coords = np.asarray(pixel_coords, dtype=float)
     if coords.ndim != 2 or coords.shape[1] != 2 or len(coords) < 3:
-        return _local_cosmic_detection(spectra, z_threshold=z_threshold, window=2)
+        return _local_cosmic_detection(spectra, z_threshold=z_threshold, window=2, max_width=max_width)
 
     diffs = coords[:, None, :] - coords[None, :, :]
     distances = np.sqrt(np.sum(diffs**2, axis=2))
@@ -478,8 +513,8 @@ def _spatial_cosmic_detection(
         mad = np.median(np.abs(residual))
         if mad == 0:
             mad = 1e-10
-        local_spikes = np.abs(residual) > (1.4826 * mad * z_threshold)
-        spike_mask[idx] = local_spikes
+        local_spikes = residual > (1.4826 * mad * z_threshold)
+        spike_mask[idx] = _limit_spike_width(local_spikes[np.newaxis, :], max_width)[0]
     return spike_mask, replacement
 
 
@@ -494,6 +529,7 @@ def _detect_cosmic_spikes(
         return np.zeros_like(arr, dtype=bool), np.zeros_like(arr, dtype=float)
 
     thr = float(cr_cfg.get("z_threshold", 8.0))
+    max_width = int(cr_cfg.get("max_width", 3))
     method = str(cr_cfg.get("method", "spatial")).strip().lower()
     if method == "spatial" and pixel_coords is not None:
         neighbor_count = int(cr_cfg.get("n_neighbors", 8))
@@ -502,9 +538,10 @@ def _detect_cosmic_spikes(
             pixel_coords=np.asarray(pixel_coords, dtype=float),
             z_threshold=thr,
             n_neighbors=neighbor_count,
+            max_width=max_width,
         )
     fallback_window = int(cr_cfg.get("window", 2))
-    return _local_cosmic_detection(arr, z_threshold=thr, window=fallback_window)
+    return _local_cosmic_detection(arr, z_threshold=thr, window=fallback_window, max_width=max_width)
 
 
 def _suppress_cosmic_spikes(
@@ -894,13 +931,17 @@ def normalize_spectra(
     method: Optional[str] = None,
     mode: Optional[str] = None,
     region: Optional[str] = None,
+    wavenumbers: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     chosen_method = _normalization_method(method, mode, region)
     if chosen_method == "none":
         return np.asarray(spectra, dtype=float)
     arr = np.asarray(spectra, dtype=float)
     if chosen_method == "area":
-        areas = np.trapezoid(np.abs(arr), axis=1, dx=1.0)
+        axis = np.asarray(wavenumbers, dtype=float) if wavenumbers is not None else None
+        if axis is not None and (axis.ndim != 1 or axis.size != arr.shape[1] or not np.all(np.diff(axis) > 0)):
+            raise ValueError("wavenumbers must be a strictly increasing axis matching spectra for area normalization")
+        areas = np.trapezoid(np.abs(arr), x=axis, axis=1) if axis is not None else np.trapezoid(np.abs(arr), axis=1, dx=1.0)
         areas[areas == 0] = 1e-10
         return arr / areas[:, np.newaxis]
     if chosen_method == "snv":
@@ -1064,11 +1105,7 @@ def _apply_quality_filter(
     kept_indices = np.where(retained_mask)[0]
     dropped = kept_indices[~quality_mask]
     flags_df.loc[dropped, "qc_flag"] = True
-    existing = flags_df.loc[dropped, "qc_reason"].fillna("")
-    flags_df.loc[dropped, "qc_reason"] = existing.where(
-        existing == "",
-        existing + "; quality_filter",
-    ).where(existing != "", "quality_filter")
+    _add_qc_reason(flags_df, dropped, "quality_filter")
     retained_mask = retained_mask.copy()
     retained_mask[dropped] = False
     return (
@@ -1191,6 +1228,7 @@ def _build_preprocess_result(
     retained_mask: np.ndarray,
     flags_df: pd.DataFrame,
     metrics_df: pd.DataFrame,
+    initial_metrics_df: pd.DataFrame,
     stage_arrays: dict[str, np.ndarray],
     region_key: str,
     original_count: int,
@@ -1199,12 +1237,17 @@ def _build_preprocess_result(
     cosmic_suppress_enabled: bool,
     spike_repair_enabled: bool,
 ) -> PreprocessResult:
+    full_metrics = initial_metrics_df.set_index("row_index").copy()
+    stage_metrics = metrics_df.set_index("row_index")
+    for column in stage_metrics.columns:
+        full_metrics.loc[stage_metrics.index, column] = stage_metrics[column]
+    full_metrics = full_metrics.reset_index()
     return PreprocessResult(
         spectra=result,
         wavenumbers=wavenumbers,
         retained_mask=retained_mask,
         qc_flags=flags_df,
-        qc_metrics=metrics_df.reset_index(drop=True),
+        qc_metrics=full_metrics.reset_index(drop=True),
         stage_arrays=stage_arrays,
         metadata={
             "region": region_key,
@@ -1252,6 +1295,7 @@ def run_preprocessing(
 
     original_count = arr.shape[0]
     metrics_df = _compute_qc_metrics(arr)
+    initial_metrics_df = metrics_df.copy()
     flags_df = _build_qc_flags(original_count)
     retained_mask = np.ones(original_count, dtype=bool)
     stage_arrays: dict[str, np.ndarray] = {}
@@ -1282,6 +1326,19 @@ def run_preprocessing(
         metrics_df.loc[:, "n_cosmic_channels"] = cosmic_counts
         metrics_df.loc[:, "cosmic_spike_count"] = cosmic_counts
         metrics_df.loc[:, "cosmic_spike_fraction"] = cosmic_counts / n_channels
+        _update_qc_metrics(initial_metrics_df, metrics_df)
+        max_corrected_fraction = float(cr_cfg.get("max_corrected_fraction", 0.02))
+        excessive_mask = metrics_df["cosmic_spike_fraction"].to_numpy(dtype=float) > max_corrected_fraction
+        if excessive_mask.any():
+            rejected_rows = metrics_df.loc[excessive_mask, "row_index"].to_numpy(dtype=int)
+            flags_df.loc[rejected_rows, "qc_flag"] = True
+            _add_qc_reason(flags_df, rejected_rows, "excessive_cosmic_correction")
+            retained_mask[rejected_rows] = False
+            keep_mask = ~excessive_mask
+            result = result[keep_mask]
+            metrics_df = metrics_df.loc[keep_mask].reset_index(drop=True)
+            spike_mask = spike_mask[keep_mask]
+            replacement = replacement[keep_mask]
         if cosmic_suppress_enabled:
             result = _suppress_cosmic_spikes(result, spike_mask, replacement)
             suppressed_counts = spike_mask.sum(axis=1).astype(int)
@@ -1295,6 +1352,9 @@ def run_preprocessing(
 
     result, wn = _apply_edge_trim(result, wn, trim=trim, trim_cm=trim_cm)
 
+    if interpolate and result.size > 0:
+        result, wn = interpolate_spectra(result, wn)
+
     if correct_bl and result.size > 0:
         result, metrics_df = _apply_baseline_stage(
             result,
@@ -1304,6 +1364,7 @@ def run_preprocessing(
             pre_cfg=pre_cfg,
             ranges_cfg=ranges_cfg,
         )
+        _update_qc_metrics(initial_metrics_df, metrics_df)
 
     if options.quality_enabled and result.size > 0:
         result, retained_mask, metrics_df, flags_df, quality_stats = _apply_quality_filter(
@@ -1319,16 +1380,6 @@ def run_preprocessing(
     else:
         quality_stats = {}
 
-    spike_cfg = pre_cfg.get("spike_repair", {})
-    if bool(spike_cfg.get("enabled", True)) and result.size > 0:
-        result, metrics_df = _apply_spike_repair_stage(
-            result,
-            metrics_df,
-            stage_arrays,
-            keep_stages=options.keep_stages,
-            spike_cfg=spike_cfg,
-        )
-
     if options.smooth_enabled and result.size > 0:
         sm_cfg = {**pre_cfg.get("smoothing", {}), **ranges_cfg.get("smoothing", {})}
         result = smooth_spectra(
@@ -1340,16 +1391,14 @@ def run_preprocessing(
         if options.keep_stages:
             stage_arrays["smoothed"] = result.copy()
 
-    if interpolate and result.size > 0:
-        result, wn = interpolate_spectra(result, wn)
-
     metrics_df, flags_df = _flag_outliers(metrics_df, flags_df)
+    _update_qc_metrics(initial_metrics_df, metrics_df)
 
     if return_pre_normalization:
         stage_arrays["pre_normalization"] = result.copy()
 
     if normalize and result.size > 0:
-        result = normalize_spectra(result, mode=norm_for, region=region_key)
+        result = normalize_spectra(result, mode=norm_for, region=region_key, wavenumbers=wn)
         if options.keep_stages:
             stage_arrays["normalized"] = result.copy()
 
@@ -1359,13 +1408,14 @@ def run_preprocessing(
         retained_mask=retained_mask,
         flags_df=flags_df,
         metrics_df=metrics_df,
+        initial_metrics_df=initial_metrics_df,
         stage_arrays=stage_arrays,
         region_key=region_key,
         original_count=original_count,
         quality_stats=quality_stats,
         norm_for=norm_for,
         cosmic_suppress_enabled=cosmic_suppress_enabled,
-        spike_repair_enabled=bool(spike_cfg.get("enabled", True)),
+        spike_repair_enabled=False,
     )
 
 

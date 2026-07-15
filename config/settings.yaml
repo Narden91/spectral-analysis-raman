@@ -83,6 +83,8 @@ preprocessing:
     method: "spatial"  # str: algorithm name (e.g. "spatial")
     n_neighbors: 8  # int: neighboring pixels used for comparison
     z_threshold: 8.0  # float: z-score threshold for spike detection
+    max_width: 3  # int: maximum contiguous channels for a resolution-narrow cosmic event
+    max_corrected_fraction: 0.02  # float: reject, never over-correct, spectra above this fraction
     window: 10  # int: half-width of the local window (kernel=2*window+1).
     # A narrower kernel lets wide cosmic-ray artifacts contaminate their own
     # local median, so the peak channel escapes suppression. kernel=21 fully
@@ -108,10 +110,9 @@ preprocessing:
   interpolation:
     target_spacing: 1.0  # float: target cm^-1 spacing after interpolation
     method: "cubic"  # str: interpolation kind ("cubic", "linear", ...)
-  # Whitaker-Hayes isolated-spike repair, applied post-baseline / pre-normalization.
-  # Deterministic and subject-independent (modified Z-score on the discrete difference).
+  # Removed from the production pipeline: a second derivative-based pass can alter Raman peaks.
   spike_repair:
-    enabled: true  # bool: enable isolated-spike repair
+    enabled: false  # bool: retained only for legacy config compatibility; never applied
     z_threshold: 8.0  # float: modified Z-score threshold for spike flagging
     window: 5  # int: local window width used for spike replacement
     max_corrected_fraction: 0.02  # float: abort per-spectrum repair above this flagged fraction
@@ -188,7 +189,7 @@ preprocessing:
   artifacts:
     save_qc_tables: true  # bool: write per-area QC tables
     save_stage_arrays: false  # bool: save intermediate per-stage spectra
-    stage_arrays: ["raw", "cosmic_corrected", "baseline", "baseline_corrected", "spike_repaired", "smoothed", "normalized"]  # list[str]: stages to persist if enabled
+    stage_arrays: ["raw", "cosmic_corrected", "baseline", "baseline_corrected", "smoothed", "normalized"]  # list[str]: stages to persist if enabled
     format: "npz"  # str: file format for saved arrays
 
 # ---------------------------------------------------------------------------
