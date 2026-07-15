@@ -21,8 +21,9 @@ safe for an active experimental campaign.
 
 `parsed` is immutable ingestion state. It stores native per-measurement axes
 in `native_wavenumbers_{1300,2850}.npy`, raw pixel spectra, coordinates, and
-source signatures. Do not interpolate parsed spectra or expose them as a
-single globally aligned matrix.
+source signatures. The subject directory in the raw hierarchy is authoritative;
+a legacy filename prefix is provenance only. Do not interpolate parsed spectra
+or expose them as a single globally aligned matrix.
 
 `preprocessed` is the canonical analysis source. It stores aligned normalized
 and pre-normalization matrices, fixed wavenumber axes, QC provenance, and

@@ -35,9 +35,11 @@ uv sync
 ## Raw-data contract
 
 Place source files under `data/raw/` in the repository's existing hierarchy.
-The filename parser extracts subject, slide, spectral range, acquisition mode,
-and measurement number. Each file must contain one strictly increasing
-wavenumber axis and its pixel spectra.
+The enclosing subject directory is the authoritative participant identity;
+filename prefixes are retained only as provenance because legacy filenames can
+contain obsolete identifiers. The filename parser extracts slide, spectral
+range, acquisition mode, and measurement number. Each file must contain one
+strictly increasing wavenumber axis and its pixel spectra.
 
 ```text
 data/

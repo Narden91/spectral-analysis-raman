@@ -47,6 +47,20 @@ _REORG_STEM_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def _subject_id_from_folder(path: Path) -> str | None:
+    """Return the subject directory immediately above a ``sample_*`` folder.
+
+    The raw directory hierarchy is the authoritative participant identity.  A
+    legacy filename can contain an obsolete participant prefix, so it is kept
+    as provenance but must never override the enclosing subject folder.
+    """
+    for parent in path.parents:
+        if parent.name.lower().startswith("sample_"):
+            subject_dir = parent.parent.name.strip()
+            return clean_subject_id(subject_dir) if subject_dir else None
+    return None
+
 def parse_filename(filepath: str | Path) -> dict[str, Any]:
     """
     Parse a reorganized measurement filename.
@@ -86,7 +100,10 @@ def parse_filename(filepath: str | Path) -> dict[str, Any]:
         return metadata
 
     try:
-        metadata["subject_id"] = clean_subject_id(match.group("subject_id"))
+        filename_subject_id = clean_subject_id(match.group("subject_id"))
+        folder_subject_id = _subject_id_from_folder(path)
+        metadata["filename_subject_id"] = filename_subject_id
+        metadata["subject_id"] = folder_subject_id or filename_subject_id
         metadata["slide_number"] = match.group("slide")
         metadata["spectral_range"] = float(match.group("range"))
         metadata["measurement_number"] = int(match.group("meas"))
