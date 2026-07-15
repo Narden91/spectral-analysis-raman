@@ -187,8 +187,12 @@ def test_normality(data: np.ndarray, alpha: float = 0.05) -> dict:
     Returns
     -------
     dict
-        Keys: 'is_normal' (bool array), 'p_values' (float array),
-              'fraction_normal' (float), 'n_tested' (int).
+        Keys: 'is_normal' (bool array, valid only where 'p_values' is finite),
+              'p_values' (float array, NaN for untested/under-sampled channels),
+              'fraction_normal' (float, fraction normal among channels with a
+              finite p-value; NaN if none were tested), 'n_tested' (int,
+              channels selected for testing), 'n_tested_finite' (int, of those,
+              channels with a valid Shapiro p-value).
     """
     n_features = data.shape[1]
     max_test = int(
@@ -214,14 +218,21 @@ def test_normality(data: np.ndarray, alpha: float = 0.05) -> dict:
         else:
             _, p_values[j] = stats.shapiro(col_clean)
 
+    # is_normal is only meaningful where a p-value was actually computed; NaN-p
+    # channels (untested, or tested but under n=8) evaluate to False here and
+    # must not be mixed into fraction_normal, or under-sampled channels would
+    # silently count as non-normal.
     is_normal = p_values > alpha
-    fraction = np.nanmean(is_normal[test_idx])
+    tested_in_idx = np.isfinite(p_values[test_idx])
+    n_tested_finite = int(tested_in_idx.sum())
+    fraction = float(np.mean(is_normal[test_idx][tested_in_idx])) if n_tested_finite else float("nan")
 
     logger.debug(
-        "Normality test (%d/%d features): %.1f%% are normal (alpha=%.3f)",
+        "Normality test (%d/%d requested, %d with valid p-value): %.1f%% are normal (alpha=%.3f)",
         len(test_idx),
         n_features,
-        fraction * 100,
+        n_tested_finite,
+        fraction * 100 if np.isfinite(fraction) else float("nan"),
         alpha,
     )
     return {
@@ -229,6 +240,7 @@ def test_normality(data: np.ndarray, alpha: float = 0.05) -> dict:
         "p_values": p_values,
         "fraction_normal": fraction,
         "n_tested": len(test_idx),
+        "n_tested_finite": n_tested_finite,
     }
 
 
@@ -408,6 +420,18 @@ def run_pca(
         spectra = spectra[:, ~all_nan_cols]
     if spectra.size == 0:
         raise ValueError("No valid features remain after dropping all-NaN columns.")
+
+    # A column that is only partially non-finite is ambiguous (which rows are
+    # trustworthy?) rather than uninformative like an all-NaN column, so it is
+    # refused instead of silently dropped or imputed.
+    partial_nan_cols = np.any(~np.isfinite(spectra), axis=0)
+    if partial_nan_cols.any():
+        raise ValueError(
+            f"run_pca: {int(partial_nan_cols.sum())} feature column(s) contain some but not "
+            "all non-finite values; PCA cannot fit on partial NaN/inf. Aggregate or impute "
+            "these channels before calling run_pca (all-NaN columns are dropped automatically "
+            "above; partial-NaN is ambiguous and is refused)."
+        )
 
     # Clamp n_components to valid range
     max_components = min(spectra.shape[0], spectra.shape[1])

@@ -1,4 +1,11 @@
-"""Fixed Raman panel: provenance snapshot, integrals, and named indices."""
+"""Fixed Raman panel: provenance snapshot, integrals, and named indices.
+
+Naming note: "preregistered"/"confirmatory" are historical directory and label
+names. Unless `provenance_type == "externally_preregistered"` with a real
+`registration_id`, the panel is a fixed POST HOC hypothesis (see
+`panel_provenance` and `_primary_hypothesis_lines`) — it is not an
+independently pre-registered or confirmed test for this cohort.
+"""
 
 from __future__ import annotations
 

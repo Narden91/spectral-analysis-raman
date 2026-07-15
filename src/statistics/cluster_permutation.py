@@ -125,8 +125,8 @@ def _binary_cluster_maxima(
     n_jobs: int = 1,
 ) -> np.ndarray:
     n_jobs = _normalize_n_jobs(n_jobs)
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
     if n_jobs != 1:
-        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
         return np.array(
             Parallel(n_jobs=n_jobs)(
                 delayed(_binary_cluster_maximum)(values, labels, cluster_alpha, int(seed))
@@ -135,11 +135,10 @@ def _binary_cluster_maxima(
             dtype=float,
         )
 
-    maxima = np.zeros(n_permutations, dtype=float)
-    for perm_index in range(n_permutations):
-        order = rng.permutation(len(labels))
-        maxima[perm_index] = _binary_cluster_mass_for_order(values, order, int((labels == 0).sum()), cluster_alpha)
-    return maxima
+    return np.array(
+        [_binary_cluster_maximum(values, labels, cluster_alpha, int(seed)) for seed in seeds],
+        dtype=float,
+    )
 
 
 def _binary_cluster_maximum(values: np.ndarray, labels: np.ndarray, cluster_alpha: float, seed: int) -> float:
@@ -180,14 +179,13 @@ def _spearman_cluster_maxima(
     rng: np.random.Generator,
     n_jobs: int = 1,
 ) -> np.ndarray:
-    maxima = np.zeros(n_permutations, dtype=float)
     prepared_columns, centered_features, feature_denoms = _prepare_ranked_features(values)
     ranked_target = stats.rankdata(target_values, method="average")
     centered_target = ranked_target - float(np.mean(ranked_target))
 
     n_jobs = _normalize_n_jobs(n_jobs)
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
     if n_jobs != 1:
-        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
         return np.array(
             Parallel(n_jobs=n_jobs)(
                 delayed(_spearman_cluster_maximum)(
@@ -203,16 +201,20 @@ def _spearman_cluster_maxima(
             dtype=float,
         )
 
-    for perm_index in range(n_permutations):
-        permuted_target = centered_target[rng.permutation(len(centered_target))]
-        maxima[perm_index] = _spearman_cluster_mass_for_target(
-            prepared_columns,
-            centered_features,
-            feature_denoms,
-            permuted_target,
-            cluster_alpha,
-        )
-    return maxima
+    return np.array(
+        [
+            _spearman_cluster_maximum(
+                prepared_columns,
+                centered_features,
+                feature_denoms,
+                centered_target,
+                cluster_alpha,
+                int(seed),
+            )
+            for seed in seeds
+        ],
+        dtype=float,
+    )
 
 
 def _spearman_cluster_maximum(

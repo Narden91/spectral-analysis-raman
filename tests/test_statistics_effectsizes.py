@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from src.analysis.statistics import cliffs_delta, partial_spearman, variance_homogeneity_test
+from src.analysis.statistics import (
+    cliffs_delta,
+    partial_spearman,
+    run_pca,
+    variance_homogeneity_test,
+)
+from src.analysis.statistics import test_normality as check_normality
 
 
 def test_cliffs_delta_known_cases() -> None:
@@ -59,3 +66,47 @@ def test_variance_homogeneity() -> None:
 
     assert equal_p > 0.05
     assert unequal_p < 0.05
+
+
+def test_normality_fraction_excludes_undersampled_channels() -> None:
+    rng = np.random.default_rng(0)
+    n_samples = 30
+    normal_col = rng.normal(size=n_samples)
+    undersampled_col = np.full(n_samples, np.nan)
+    undersampled_col[:5] = rng.normal(size=5)
+    data = np.column_stack([normal_col, undersampled_col])
+
+    result = check_normality(data, alpha=0.05)
+
+    assert result["n_tested"] == 2
+    assert result["n_tested_finite"] == 1
+    assert np.isnan(result["p_values"][1])
+    assert result["is_normal"][1] == False  # noqa: E712 — untested channel, not a claim of non-normality
+    assert result["fraction_normal"] == float(result["is_normal"][0])
+
+
+def test_normality_fraction_is_nan_when_nothing_tested() -> None:
+    data = np.full((3, 2), np.nan)
+    result = check_normality(data, alpha=0.05)
+
+    assert result["n_tested_finite"] == 0
+    assert np.isnan(result["fraction_normal"])
+
+
+def test_run_pca_raises_on_partially_nan_column() -> None:
+    rng = np.random.default_rng(0)
+    spectra = rng.normal(size=(10, 5))
+    spectra[3, 2] = np.nan
+
+    with pytest.raises(ValueError, match="partial NaN"):
+        run_pca(spectra, n_components=2, scale=False)
+
+
+def test_run_pca_still_drops_all_nan_column() -> None:
+    rng = np.random.default_rng(0)
+    spectra = rng.normal(size=(10, 5))
+    spectra[:, 2] = np.nan
+
+    result = run_pca(spectra, n_components=2, scale=False)
+
+    assert result["scores"].shape == (10, 2)

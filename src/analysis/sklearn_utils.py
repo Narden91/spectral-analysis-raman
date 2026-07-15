@@ -18,8 +18,9 @@ LOGISTIC_TOL = 1e-4
 def l1_logistic_model(*, c: float, random_state: int) -> LogisticRegression:
     return LogisticRegression(
         solver="liblinear",
+        penalty="l1",
+        dual=False,
         C=c,
-        l1_ratio=1.0,
         class_weight="balanced",
         random_state=random_state,
         max_iter=LOGISTIC_MAX_ITER,

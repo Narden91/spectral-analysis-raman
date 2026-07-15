@@ -15,7 +15,7 @@ Covariate-adjusted models were fitted for candidate regions and biochemical rati
 
 Multivariate continuous associations were assessed with PLS1 regression and permutation testing. PLS VIP coverage was allowed to contribute to integrated evidence only if the corresponding PLS target passed the permutation gate. PLS-L1DA exploratory classification was similarly gated on PLS permutation significance; when no PLS model passed, classifier outputs were written as empty skip artifacts to prevent stale selected-band files from entering integrated evidence.
 
-Targeted biochemical ratios were computed from pre-specified band integrals and assessed against clinical endpoints using Spearman association tests with FDR correction. Minimal candidate panels were evaluated with nested cross-validated ElasticNet or L1-penalized logistic models and permutation testing. Disease subgroup structure was assessed by exploratory clustering and bootstrap adjusted Rand index.
+Targeted biochemical ratios were computed from pre-specified band integrals and assessed against clinical endpoints using Spearman association tests with FDR correction. Whole-spectrum channel-wise screens against clinical endpoints used marginal (age/sex-unadjusted) Spearman correlations with cluster-permutation control; only the confirmatory fixed panel and candidate-region models applied covariate adjustment (partial Spearman, age and sex). Whole-spectrum screen results are therefore exploratory and may reflect age/sex confounding. Minimal candidate panels were evaluated with nested cross-validated ElasticNet or L1-penalized logistic models and permutation testing. Disease subgroup structure was assessed by exploratory clustering and bootstrap adjusted Rand index.
 
 ## Results
 

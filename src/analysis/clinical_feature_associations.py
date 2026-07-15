@@ -60,14 +60,31 @@ def load_subject_feature_matrix(
 
 
 def filter_disease_subjects(frame: pd.DataFrame) -> pd.DataFrame:
+    """Select subjects with an explicit disease (is_control=False) label.
+
+    Subjects with missing/unknown clinical status are excluded rather than
+    coerced to disease, since defaulting an unlabeled subject into the disease
+    arm would silently bias disease-only analyses.
+    """
     disease_only = frame.copy()
     if "is_control" in disease_only.columns:
-        mask = ~disease_only["is_control"].fillna(False).astype(bool)
-        return disease_only.loc[mask].copy()
-    if "condition" in disease_only.columns:
-        mask = disease_only["condition"].astype(str).str.lower() != "control"
-        return disease_only.loc[mask].copy()
-    raise ValueError("Subject feature matrix must include is_control or condition for disease-only filtering")
+        is_control = disease_only["is_control"]
+        keep = is_control.notna() & ~is_control.astype("boolean").fillna(True)
+    elif "condition" in disease_only.columns:
+        condition = disease_only["condition"].astype("string").str.lower()
+        keep = condition.notna() & ~condition.isin({"control", "unknown", ""})
+    else:
+        raise ValueError("Subject feature matrix must include is_control or condition for disease-only filtering")
+
+    dropped = disease_only.loc[~keep]
+    if not dropped.empty and "subject_id" in disease_only.columns:
+        logger.warning(
+            "filter_disease_subjects: excluding %d subject(s) without an explicit "
+            "disease label (missing/unknown clinical status): %s",
+            len(dropped),
+            dropped["subject_id"].astype(str).tolist(),
+        )
+    return disease_only.loc[keep].copy()
 
 
 def feature_columns(frame: pd.DataFrame) -> list[str]:
@@ -232,6 +249,15 @@ def compute_spearman_feature_tests(
     min_subjects: int = 5,
     fdr_alpha: float = 0.05,
 ) -> pd.DataFrame:
+    """Whole-spectrum channel-wise screen against a clinical endpoint.
+
+    Uses marginal (unadjusted) Spearman correlation, not covariate-residualized
+    `partial_spearman`. The cluster-permutation null in
+    `apply_spearman_cluster_permutation` is also marginal, so the screen is
+    internally consistent, but it remains exposed to age/sex confounding.
+    Covariate adjustment is applied only in the confirmatory fixed panel
+    (see `src.analysis.robust_contrasts`). Treat this screen as exploratory.
+    """
     if target not in frame.columns:
         logger.warning("Target '%s' not found in disease-only feature matrix", target)
         return pd.DataFrame()

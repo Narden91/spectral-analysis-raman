@@ -896,58 +896,6 @@ def run_univariate_band_screen(frame: pd.DataFrame, y: np.ndarray, valid_rows: n
 
 
 # ---------------------------------------------------------------------------
-# Feature importance (final full-data descriptive fit — not a CV estimate)
-# ---------------------------------------------------------------------------
-
-
-def _legacy_full_data_feature_importance(
-    model_name: str,
-    X: np.ndarray,
-    y: np.ndarray,
-    feature_names: list[str],
-    *,
-    ml_cfg: dict[str, Any],
-    n_jobs: int,
-) -> pd.DataFrame:
-    """Feature importance from one final full-data descriptive fit (not a CV estimate).
-
-    Reuses the exact same tuning path as every CV fold (`_fit_tuned_model`), just
-    fit once on all of X/y, then reads importance off the fitted estimator:
-    VIP for PLS-DA, raw coefficients for L1-logistic, permutation importance
-    (scored on held-in data, since this is descriptive not a CV estimate) for
-    Random Forest — impurity importance is skipped as it is biased toward
-    high-cardinality continuous features across 1802 correlated channels.
-    """
-    random_state = _random_state(ml_cfg)
-    n_inner_splits = _n_inner_splits(ml_cfg)
-    threshold_metric = _threshold_metric(ml_cfg)
-    fit = _fit_tuned_model(
-        model_name, X, y, ml_cfg=ml_cfg, n_inner_splits=n_inner_splits,
-        threshold_metric=threshold_metric, random_state=random_state, n_jobs=n_jobs,
-    )
-    base_columns = {"feature_name": feature_names, "estimation_scope": "full_data_descriptive", "validated": False}
-
-    if model_name == "pls_da":
-        return pd.DataFrame({**base_columns, "importance": _calculate_vip(fit.estimator), "importance_type": "vip"})
-    if model_name == "l1_logistic":
-        return pd.DataFrame(
-            {**base_columns, "importance": fit.estimator.coef_.ravel(), "importance_type": "l1_logistic_coefficient"}
-        )
-
-    result = permutation_importance(
-        fit.estimator, X, y, n_repeats=30, random_state=random_state, n_jobs=n_jobs, scoring="balanced_accuracy"
-    )
-    return pd.DataFrame(
-        {
-            **base_columns,
-            "importance": result.importances_mean,
-            "importance_std": result.importances_std,
-            "importance_type": "permutation_importance",
-        }
-    )
-
-
-# ---------------------------------------------------------------------------
 def _outer_fold_feature_importance(
     model_name: str,
     X: np.ndarray,
