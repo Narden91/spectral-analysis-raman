@@ -19,7 +19,7 @@ from src.analysis.control_vs_disease_ml_report import (
     POSITIVE_CLASS_LABEL,
     run_control_vs_disease_ml_report,
     write_all_figures,
-    write_ml_report,
+    write_final_performance_summary,
 )
 
 
@@ -138,8 +138,8 @@ def test_class_label_constants_match_core_module() -> None:
     assert NEGATIVE_CLASS_LABEL == core_negative
 
 
-def test_write_ml_report_contains_claims_discipline_language(ml_output_dir: Path) -> None:
-    report_path = write_ml_report(ml_output_dir)
+def test_final_performance_summary_contains_claims_discipline_language(ml_output_dir: Path) -> None:
+    report_path = write_final_performance_summary(ml_output_dir)
     assert report_path is not None
     text = report_path.read_text(encoding="utf-8")
     assert "exploratory only" in text.lower()
@@ -147,22 +147,22 @@ def test_write_ml_report_contains_claims_discipline_language(ml_output_dir: Path
     assert "no external" in text.lower() or "external validation" in text.lower()
 
 
-def test_write_ml_report_includes_primary_result(ml_output_dir: Path) -> None:
-    text = write_ml_report(ml_output_dir).read_text(encoding="utf-8")
+def test_final_performance_summary_includes_primary_result(ml_output_dir: Path) -> None:
+    text = write_final_performance_summary(ml_output_dir).read_text(encoding="utf-8")
     assert "PLS-DA" in text
     assert "0.650" in text or "0.65" in text
 
 
-def test_write_ml_report_reports_sex_confound(ml_output_dir: Path) -> None:
-    text = write_ml_report(ml_output_dir).read_text(encoding="utf-8")
+def test_final_performance_summary_reports_sex_confound(ml_output_dir: Path) -> None:
+    text = write_final_performance_summary(ml_output_dir).read_text(encoding="utf-8")
     assert "sex" in text.lower()
     assert "female-only" in text.lower() or "sensitivity refit" in text.lower()
 
 
-def test_write_ml_report_missing_comparison_returns_none(tmp_path: Path) -> None:
+def test_final_performance_summary_missing_comparison_returns_none(tmp_path: Path) -> None:
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
-    assert write_ml_report(empty_dir) is None
+    assert write_final_performance_summary(empty_dir) is None
 
 
 def test_write_all_figures_produces_expected_files(ml_output_dir: Path) -> None:
@@ -187,5 +187,5 @@ def test_write_all_figures_missing_comparison_returns_empty(tmp_path: Path) -> N
 
 def test_run_control_vs_disease_ml_report_writes_both(ml_output_dir: Path) -> None:
     outputs = run_control_vs_disease_ml_report(ml_output_dir, cfg=None)
-    assert "ml_report" in outputs
+    assert "final_performance_summary" in outputs
     assert any(key.startswith("figure_") for key in outputs)

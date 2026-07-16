@@ -73,7 +73,9 @@ def test_fig2_falls_back_to_valid_trajectory_contrast(tmp_path: Path):
             "status": ["insufficient_n", "ok"],
         }
     ).to_csv(contrasts_path, index=False)
-    pd.DataFrame({"feature_name": ["oxidative_index"], "robust_score": [3]}).to_csv(ranking_path, index=False)
+    pd.DataFrame({"feature_name": ["oxidative_index"], "permutation_flag": [True]}).to_csv(
+        ranking_path, index=False
+    )
 
     assert _fig2_effect_forest(contrasts_path, ranking_path, "oxidative_index", output_path) is True
     assert output_path.exists()

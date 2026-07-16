@@ -810,7 +810,7 @@ def test_runner_smoke_produces_expected_outputs(
             assert pred_path.exists()
             assert importance_path.exists()
 
-    report_path = out_dir / "ml_report.md"
+    report_path = out_dir / "final_performance_summary.md"
     assert report_path.exists()
     report_text = report_path.read_text(encoding="utf-8")
     assert "exploratory only" in report_text.lower()
@@ -828,7 +828,7 @@ def test_runner_smoke_produces_expected_outputs(
     assert "model_comparison" in outputs
     assert "confounder_analysis" in outputs
     assert "univariate_band_screen" in outputs
-    assert "ml_report" in outputs
+    assert "final_performance_summary" in outputs
     _mock_write_provenance.assert_called_once()
 
 

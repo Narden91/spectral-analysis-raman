@@ -151,8 +151,8 @@ def input_paths(tmp_path: Path) -> dict[str, Path]:
     covariate_path = tmp_path / "covariate_adjusted_region_models.csv"
     _covariate_models().to_csv(covariate_path, index=False)
 
-    vip_path = tmp_path / "pls_vip_bands.csv"
-    _pls_vip().to_csv(vip_path, index=False)
+    vip_path = tmp_path / "pls_feature_effects.parquet"
+    _pls_vip().to_parquet(vip_path, index=False)
 
     splsda_path = tmp_path / "pls_l1da_selected_bands.csv"
     _splsda_bands().to_csv(splsda_path, index=False)
