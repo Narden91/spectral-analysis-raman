@@ -162,6 +162,11 @@ matrix.
 | Disease-only clinical/cross-region analysis | `Results_intra_disease/` |
 | Spectral plotting and QC | `Output_plot/` |
 
+The disease-vs-control whole-range run also writes
+`07_ml_classification/final_performance_summary.md`, a conservative summary
+of the cohort, nested-CV performance, confidence intervals, permutation tests,
+confounding checks, and limitations.
+
 Each EDA run records provenance in `00_run_metadata/`, including the resolved
 configuration and data-manifest snapshot. ML output is subject-level only;
 nested CV tuning remains inside outer training folds, permutation tests include

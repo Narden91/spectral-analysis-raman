@@ -19,7 +19,7 @@ order; each phase's docstring covers its own rationale):
     D  run_permutation_test               unrestricted + sex-stratified significance
     E  run_bootstrap_ci                   out-of-bag 95% CIs on headline metrics
     F  run_univariate_band_screen         descriptive per-band Mann-Whitney + FDR
-    G  (src/analysis/control_vs_disease_ml_report.py)  figures + ml_report.md,
+    G  (src/analysis/control_vs_disease_ml_report.py)  figures + final performance summary,
        reading only the CSVs this module writes — never refits a model.
 """
 

@@ -383,8 +383,8 @@ def _build_report_text(
     return "\n".join(lines)
 
 
-def write_ml_report(target_dir: Path) -> Path | None:
-    """Assemble ml_report.md from the CSVs already written to target_dir."""
+def write_final_performance_summary(target_dir: Path) -> Path | None:
+    """Write the final performance summary from completed ML artifacts."""
     comparison_path = target_dir / "model_comparison.csv"
     if not comparison_path.exists():
         logger.warning("model_comparison.csv not found in %s; skipping report", target_dir)
@@ -396,7 +396,7 @@ def write_ml_report(target_dir: Path) -> Path | None:
     band_screen_df = pd.read_csv(target_dir / "univariate_band_screen.csv") if (target_dir / "univariate_band_screen.csv").exists() else pd.DataFrame()
 
     report_text = _build_report_text(cohort_df, comparison_df, confounder_df, band_screen_df)
-    return write_text_atomic(target_dir / "ml_report.md", report_text)
+    return write_text_atomic(target_dir / "final_performance_summary.md", report_text)
 
 
 def run_control_vs_disease_ml_report(target_dir: str | Path, cfg: dict[str, Any] | None = None) -> dict[str, Path]:
@@ -405,7 +405,7 @@ def run_control_vs_disease_ml_report(target_dir: str | Path, cfg: dict[str, Any]
     outputs: dict[str, Path] = {}
     for name, path in write_all_figures(target_dir).items():
         outputs[f"figure_{name}"] = path
-    report_path = write_ml_report(target_dir)
+    report_path = write_final_performance_summary(target_dir)
     if report_path is not None:
-        outputs["ml_report"] = report_path
+        outputs["final_performance_summary"] = report_path
     return outputs
