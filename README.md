@@ -163,7 +163,7 @@ matrix.
 | Spectral plotting and QC | `Output_plot/` |
 
 The disease-vs-control whole-range run also writes
-`07_ml_classification/final_performance_summary.md`, a conservative summary
+`05_ml_classification/06_report/final_performance_summary.md`, a conservative summary
 of the cohort, nested-CV performance, confidence intervals, permutation tests,
 confounding checks, and limitations.
 

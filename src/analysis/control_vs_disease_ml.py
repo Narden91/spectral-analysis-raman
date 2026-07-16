@@ -2,8 +2,8 @@
 
 Subject-level, nested-CV supervised classification of Control vs. Disease from
 whole Raman spectra. This module is a separate, read-only downstream consumer
-of the Biological PCA subject feature matrix — see plan_ml.md for the full
-scientific-rigor rationale (confound handling, claims discipline, data facts).
+of the Biological PCA subject feature matrix. Config validation and phase
+docstrings define the confound handling, claims discipline, and data limits.
 
 Positive class = Disease (is_control == False -> 1). Exploratory only: no
 diagnostic, biomarker, causal, or clinical-utility claims. Age is not modeled
@@ -11,16 +11,13 @@ anywhere in this pipeline because no age data exists for control subjects in
 this cohort (49/50 missing) and no proxy exists in the repository; inventing
 one would inject bias rather than remove it.
 
-Phase map (public entry point at the bottom of this file runs all of them in
-order; each phase's docstring covers its own rationale):
-    A  _cohort_summary                    class balance, sex/age confound counts
-    B  _run_repeated_nested_cv            nested-CV point estimate per model
-    C  _sex_only_baseline / _sex_stratified_refit   confound sensitivity checks
-    D  run_permutation_test               unrestricted + sex-stratified significance
-    E  run_bootstrap_ci                   out-of-bag 95% CIs on headline metrics
-    F  run_univariate_band_screen         descriptive per-band Mann-Whitney + FDR
-    G  (src/analysis/control_vs_disease_ml_report.py)  figures + final performance summary,
-       reading only the CSVs this module writes — never refits a model.
+Output map:
+    01_cohort                  class balance and confound counts
+    02_model_evaluation        nested CV, importance, metrics, bootstrap CIs
+    03_confounder_checks       sex-only baseline and female-only refits
+    04_permutation_tests       unrestricted and sex-stratified nulls
+    05_univariate_band_screen  descriptive Mann-Whitney tests with FDR
+    06_report                  figures and final performance summary
 """
 
 from __future__ import annotations
@@ -52,7 +49,12 @@ from sklearn.metrics import (
 from sklearn.model_selection import RepeatedStratifiedKFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from src import config, get_ml_classification_dir, get_run_metadata_dir
+from src import (
+    config,
+    get_ml_classification_dir,
+    get_ml_classification_phase_dir,
+    get_run_metadata_dir,
+)
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_subject_feature_matrix,
@@ -230,7 +232,7 @@ def _band_feature(frame: pd.DataFrame, all_columns: list[str], block: str, lower
 
 
 def _band_panel(frame: pd.DataFrame, all_columns: list[str], cfg_in: dict[str, Any]) -> pd.DataFrame:
-    """Shared by the band_panel feature representation and the Phase F univariate screen."""
+    """Shared by the band-panel representation and univariate band screen."""
     bands_cfg = cfg_in.get("whole_spectra", {}).get("bands", {})
     if not bands_cfg:
         raise ValueError("config whole_spectra.bands is empty; band_panel representation requires the 21-band panel")
@@ -260,7 +262,7 @@ def _representation_matrix(
 
 
 # ---------------------------------------------------------------------------
-# Phase A: cohort description
+# Cohort description
 # ---------------------------------------------------------------------------
 
 
@@ -492,8 +494,8 @@ def _fit_tuned_model(
 
 
 # ---------------------------------------------------------------------------
-# Nested CV — single generic implementation shared by the Phase B repeated-CV
-# point estimate and the Phase D single-split permutation workhorse.
+# Nested CV — one implementation shared by repeated-CV point estimates and the
+# single-split permutation workhorse.
 # ---------------------------------------------------------------------------
 
 
@@ -619,7 +621,7 @@ def _single_split_balanced_accuracy(
     This is the permutation-test workhorse. Permutation only needs a point
     estimate per null draw — the null distribution's spread across draws
     already captures Monte Carlo noise, so repeating the outer CV per
-    permutation (as Phase B does for the observed estimate) would multiply
+    permutation (as the observed estimate does) would multiply
     cost by n_outer_repeats for no statistical benefit. This mirrors the
     single-split-per-permutation convention already used by
     `splsda._permuted_splsda_score` and `pls_regression._permuted_pls_r2`
@@ -639,7 +641,7 @@ def _single_split_balanced_accuracy(
 
 
 # ---------------------------------------------------------------------------
-# Phase D: permutation tests
+# Permutation tests
 # ---------------------------------------------------------------------------
 
 
@@ -760,7 +762,7 @@ def _aggregate_repeat_metrics(oof_predictions: pd.DataFrame) -> dict[str, float]
 
 
 # ---------------------------------------------------------------------------
-# Phase E: bootstrap confidence intervals
+# Bootstrap confidence intervals
 # ---------------------------------------------------------------------------
 
 
@@ -843,7 +845,7 @@ def run_bootstrap_ci(
 
 
 # ---------------------------------------------------------------------------
-# Phase F: univariate band screen (descriptive context, not a model)
+# Univariate band screen (descriptive context, not a model)
 # ---------------------------------------------------------------------------
 
 
@@ -956,7 +958,7 @@ def _outer_fold_feature_importance(
     return long, summary
 
 
-# Phase C: sex-confound battery
+# Sex-confound battery
 # ---------------------------------------------------------------------------
 
 
@@ -1049,6 +1051,11 @@ def run_control_vs_disease_ml_pipeline(
 
     target_dir = Path(output_dir) if output_dir is not None else get_ml_classification_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
+    cohort_dir = get_ml_classification_phase_dir("cohort", root=target_dir, create=False)
+    model_dir = get_ml_classification_phase_dir("model_evaluation", root=target_dir, create=False)
+    confounder_dir = get_ml_classification_phase_dir("confounder_checks", root=target_dir, create=False)
+    permutation_dir = get_ml_classification_phase_dir("permutation_tests", root=target_dir, create=False)
+    band_screen_dir = get_ml_classification_phase_dir("band_screen", root=target_dir, create=False)
     phase_timings: list[dict[str, object]] = []
     outputs: dict[str, Path] = {}
 
@@ -1058,7 +1065,7 @@ def run_control_vs_disease_ml_pipeline(
 
     with _phase_timer(phase_timings, "cohort_summary", "Cohort summary"):
         cohort_df = _cohort_summary(frame)
-        outputs["cohort_summary"] = write_csv_atomic(cohort_df, target_dir / "cohort_summary.csv", index=False)
+        outputs["cohort_summary"] = write_csv_atomic(cohort_df, cohort_dir / "cohort_summary.csv", index=False)
 
     representations = list(ml_cfg.get("representations", ["whole", "band_panel"]))
     n_jobs = _normalize_n_jobs(int(ml_cfg.get("n_jobs", -1)))
@@ -1110,7 +1117,7 @@ def run_control_vs_disease_ml_pipeline(
                     model_name, X_valid, y_valid, ml_cfg=ml_cfg, n_jobs=n_jobs, outer_split_plan=outer_split_plan,
                 )
                 outputs[f"{model_name}_{representation}_cv_predictions"] = write_csv_atomic(
-                    oof, target_dir / f"{model_name}_{representation}_cv_predictions.csv", index=False
+                    oof, model_dir / f"{model_name}_{representation}_cv_predictions.csv", index=False
                 )
                 metrics = _aggregate_repeat_metrics(oof)
                 observed_balanced_accuracy = metrics["balanced_accuracy_mean"]
@@ -1120,10 +1127,10 @@ def run_control_vs_disease_ml_pipeline(
                     outer_split_plan=outer_split_plan,
                 )
                 outputs[f"{model_name}_{representation}_feature_importance_folds"] = write_csv_atomic(
-                    importance_folds, target_dir / f"{model_name}_{representation}_feature_importance_outer_folds.csv", index=False
+                    importance_folds, model_dir / f"{model_name}_{representation}_feature_importance_outer_folds.csv", index=False
                 )
                 outputs[f"{model_name}_{representation}_feature_importance"] = write_csv_atomic(
-                    importance_df, target_dir / f"{model_name}_{representation}_feature_importance.csv", index=False
+                    importance_df, model_dir / f"{model_name}_{representation}_feature_importance.csv", index=False
                 )
 
             with _phase_timer(
@@ -1205,7 +1212,7 @@ def run_control_vs_disease_ml_pipeline(
         comparison_df["permutation_p_fdr_q"] = fdr_q
         comparison_df["permutation_fdr_significant"] = fdr_significant
         comparison_df.insert(0, "positive_class", POSITIVE_CLASS_LABEL)
-        outputs["model_comparison"] = write_csv_atomic(comparison_df, target_dir / "model_comparison.csv", index=False)
+        outputs["model_comparison"] = write_csv_atomic(comparison_df, model_dir / "model_comparison.csv", index=False)
         if primary_mask.any():
             primary_summary_columns = [
                 "model", "representation", "balanced_accuracy_mean", "permutation_p_value_sex_stratified",
@@ -1217,27 +1224,33 @@ def run_control_vs_disease_ml_pipeline(
 
     with _phase_timer(phase_timings, "confounder_analysis", "Write confounder analysis table"):
         outputs["confounder_analysis"] = write_csv_atomic(
-            pd.DataFrame(confounder_rows), target_dir / "confounder_analysis.csv", index=False
+            pd.DataFrame(confounder_rows), confounder_dir / "confounder_analysis.csv", index=False
         )
 
     with _phase_timer(phase_timings, "null_distributions", "Write permutation null distributions"):
         outputs["permutation_null_distributions"] = write_csv_atomic(
-            pd.DataFrame(null_distribution_rows), target_dir / "permutation_null_distributions.csv", index=False
+            pd.DataFrame(null_distribution_rows), permutation_dir / "permutation_null_distributions.csv", index=False
         )
 
     with _phase_timer(phase_timings, "univariate_band_screen", "Write univariate band screen"):
         band_screen_df = pd.concat(band_screen_frames, ignore_index=True) if band_screen_frames else pd.DataFrame()
         outputs["univariate_band_screen"] = write_csv_atomic(
-            band_screen_df, target_dir / "univariate_band_screen.csv", index=False
+            band_screen_df, band_screen_dir / "univariate_band_screen.csv", index=False
         )
 
     with _phase_timer(phase_timings, "report_and_figures", "Write figures and narrative report"):
         outputs.update(run_control_vs_disease_ml_report(target_dir, cfg_in))
 
-    with _phase_timer(phase_timings, "provenance", "Write provenance artifacts"):
-        write_analysis_provenance(target_dir, resolve_data_source(cfg_in), cfg_in, command="run_control_vs_disease_ml_pipeline")
+    if output_dir is not None:
+        with _phase_timer(phase_timings, "provenance", "Write provenance artifacts"):
+            write_analysis_provenance(
+                target_dir / "00_run_metadata",
+                resolve_data_source(cfg_in),
+                cfg_in,
+                command="run_control_vs_disease_ml_pipeline",
+            )
 
-    metadata_dir = get_run_metadata_dir() if output_dir is None else target_dir
+    metadata_dir = get_run_metadata_dir() if output_dir is None else target_dir / "00_run_metadata"
     timing_path = _write_phase_timings(phase_timings, metadata_dir)
     if timing_path is not None:
         outputs["phase_timing"] = timing_path

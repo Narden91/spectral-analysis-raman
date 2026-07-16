@@ -26,6 +26,23 @@ from src.analysis.joint_dr import joint_pca_mfa
 from src.analysis.subject_features import build_subject_feature_matrices, write_subject_feature_exports
 
 
+def test_single_range_phase_numbering_matches_analysis_mode() -> None:
+    control = get_single_range_phase_dirs("disease_vs_control")
+    disease_only = get_single_range_phase_dirs("disease_only")
+
+    assert list(control.values()) == [
+        "01_group_comparisons",
+        "02_area_level_pca_qc",
+        "03_known_band_context",
+        "04_variance_context",
+        "05_region_robustness",
+        "06_biological_pca",
+    ]
+    assert disease_only["intra_disease"] == "05_intra_disease"
+    assert disease_only["biological_pca"] == "06_biological_pca"
+    assert disease_only["robustness"] == "07_region_robustness"
+
+
 def _cfg() -> dict:
     return {
         "analysis": {"random_state": 42},

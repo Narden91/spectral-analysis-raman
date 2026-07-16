@@ -272,9 +272,6 @@ def _estimate_variance_decomposition(
     )
 
 
-_PHASE_DIRS = get_single_range_phase_dirs()
-
-
 def _run_intra_disease_correlation_phase(
     *,
     df_index: pd.DataFrame,
@@ -376,8 +373,10 @@ def _run_single_range_eda(
 ):
     """Run the full EDA pipeline."""
 
+    phase_dirs: dict[str, str]
+
     def phase_dir(key: str) -> Path:
-        return get_eda_phase_dir(spectral_range, _PHASE_DIRS[key])
+        return get_eda_phase_dir(spectral_range, phase_dirs[key])
 
     df_index = load_file_index()
     if df_index.empty:
@@ -392,6 +391,7 @@ def _run_single_range_eda(
     )
 
     analysis_mode = resolve_eda_analysis_mode(config)
+    phase_dirs = get_single_range_phase_dirs(analysis_mode)
     validate_eda_mode_config(config, analysis_mode, df_index)
     if analysis_mode == "disease_only":
         n_before = df_index["subject_id"].nunique()
@@ -795,8 +795,9 @@ def _run_single_range_eda(
 
     robust_cfg = config.get("analysis", {}).get("advanced", {}).get("robustness", {})
     if spectral_range != "both" and robust_cfg.get("enabled", False):
-        _log_phase("PHASE 7: Region-influence robustness")
-        robust_dir = get_eda_phase_dir(spectral_range, "07_region_robustness")
+        phase_number = phase_dirs["robustness"].split("_", 1)[0]
+        _log_phase(f"PHASE {phase_number}: Region-influence robustness")
+        robust_dir = phase_dir("robustness")
         try:
             suspect_windows = robust_cfg.get("suspect_windows", [])
             downweight_factor = float(robust_cfg.get("downweight_factor", 0.0))

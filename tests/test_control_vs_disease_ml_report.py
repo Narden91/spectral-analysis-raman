@@ -1,4 +1,4 @@
-"""Small, fast tests for the Phase G figures/report module.
+"""Small, fast tests for the control-vs-disease figures/report module.
 
 Deliberately does not run the ML pipeline (nested CV, permutation, bootstrap
 are all seconds-to-minutes; this module should be verifiable in milliseconds)
@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from src import get_ml_classification_phase_dir
 from src.analysis.control_vs_disease_ml_report import (
     NEGATIVE_CLASS_LABEL,
     POSITIVE_CLASS_LABEL,
@@ -26,8 +27,13 @@ from src.analysis.control_vs_disease_ml_report import (
 @pytest.fixture
 def ml_output_dir(tmp_path: Path) -> Path:
     """A minimal but schema-correct set of control_vs_disease_ml.py output CSVs."""
-    target_dir = tmp_path / "07_ml_classification"
+    target_dir = tmp_path / "05_ml_classification"
     target_dir.mkdir()
+    cohort_dir = get_ml_classification_phase_dir("cohort", root=target_dir)
+    model_dir = get_ml_classification_phase_dir("model_evaluation", root=target_dir)
+    confounder_dir = get_ml_classification_phase_dir("confounder_checks", root=target_dir)
+    permutation_dir = get_ml_classification_phase_dir("permutation_tests", root=target_dir)
+    band_screen_dir = get_ml_classification_phase_dir("band_screen", root=target_dir)
 
     pd.DataFrame(
         {
@@ -38,7 +44,7 @@ def ml_output_dir(tmp_path: Path) -> Path:
             ],
             "value": [10, 4, 6, 1.5, 0.6, 0.5, 3.2, 0.07, "not_attempted_no_control_age_data"],
         }
-    ).to_csv(target_dir / "cohort_summary.csv", index=False)
+    ).to_csv(cohort_dir / "cohort_summary.csv", index=False)
 
     comparison_rows = []
     for model_name in ("pls_da", "l1_logistic", "random_forest"):
@@ -64,7 +70,7 @@ def ml_output_dir(tmp_path: Path) -> Path:
                     "is_primary_model": model_name == "pls_da" and representation == "whole",
                 }
             )
-    pd.DataFrame(comparison_rows).to_csv(target_dir / "model_comparison.csv", index=False)
+    pd.DataFrame(comparison_rows).to_csv(model_dir / "model_comparison.csv", index=False)
 
     confounder_rows = [
         {
@@ -80,7 +86,7 @@ def ml_output_dir(tmp_path: Path) -> Path:
         for model_name in ("pls_da", "l1_logistic", "random_forest")
         for representation in ("whole", "band_panel")
     ]
-    pd.DataFrame(confounder_rows).to_csv(target_dir / "confounder_analysis.csv", index=False)
+    pd.DataFrame(confounder_rows).to_csv(confounder_dir / "confounder_analysis.csv", index=False)
 
     null_rows = []
     for model_name in ("pls_da", "l1_logistic", "random_forest"):
@@ -90,7 +96,7 @@ def ml_output_dir(tmp_path: Path) -> Path:
                     null_rows.append(
                         {"model": model_name, "representation": representation, "null_type": null_type, "null_balanced_accuracy": value}
                     )
-    pd.DataFrame(null_rows).to_csv(target_dir / "permutation_null_distributions.csv", index=False)
+    pd.DataFrame(null_rows).to_csv(permutation_dir / "permutation_null_distributions.csv", index=False)
 
     pd.DataFrame(
         {
@@ -101,7 +107,7 @@ def ml_output_dir(tmp_path: Path) -> Path:
             "fdr_q": [0.02, 0.5],
             "significant_fdr": [True, False],
         }
-    ).to_csv(target_dir / "univariate_band_screen.csv", index=False)
+    ).to_csv(band_screen_dir / "univariate_band_screen.csv", index=False)
 
     for model_name in ("pls_da", "l1_logistic", "random_forest"):
         for representation in ("whole", "band_panel"):
@@ -119,7 +125,7 @@ def ml_output_dir(tmp_path: Path) -> Path:
                         }
                     )
             pd.DataFrame(oof_rows).to_csv(
-                target_dir / f"{model_name}_{representation}_cv_predictions.csv", index=False
+                model_dir / f"{model_name}_{representation}_cv_predictions.csv", index=False
             )
 
     return target_dir
@@ -136,6 +142,27 @@ def test_class_label_constants_match_core_module() -> None:
 
     assert POSITIVE_CLASS_LABEL == core_positive
     assert NEGATIVE_CLASS_LABEL == core_negative
+
+
+def test_ml_output_phase_numbering_is_contiguous(tmp_path: Path) -> None:
+    root = tmp_path / "05_ml_classification"
+    phases = [
+        "cohort",
+        "model_evaluation",
+        "confounder_checks",
+        "permutation_tests",
+        "band_screen",
+        "report",
+    ]
+
+    assert [get_ml_classification_phase_dir(phase, root=root, create=False).name for phase in phases] == [
+        "01_cohort",
+        "02_model_evaluation",
+        "03_confounder_checks",
+        "04_permutation_tests",
+        "05_univariate_band_screen",
+        "06_report",
+    ]
 
 
 def test_final_performance_summary_contains_claims_discipline_language(ml_output_dir: Path) -> None:
@@ -167,7 +194,7 @@ def test_final_performance_summary_missing_comparison_returns_none(tmp_path: Pat
 
 def test_write_all_figures_produces_expected_files(ml_output_dir: Path) -> None:
     paths = write_all_figures(ml_output_dir)
-    figures_dir = ml_output_dir / "figures"
+    figures_dir = get_ml_classification_phase_dir("report", root=ml_output_dir) / "figures"
 
     assert any(figures_dir.glob("roc_curves_*.png"))
     assert any(figures_dir.glob("pr_curves_*.png"))

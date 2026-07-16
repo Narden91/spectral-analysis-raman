@@ -218,8 +218,8 @@ analysis:
 
   # ---------------------------------------------------------------------------
   # Control-vs-disease ML classification (disease_vs_control mode only).
-  # Writes to Results_control_vs_disease/07_ml_classification/. See plan_ml.md
-  # for scientific-rigor rationale. Full-resampling defaults below; use
+  # Writes to Results_control_vs_disease/05_ml_classification/. Full-resampling
+  # defaults below; use
   # config/eda_disease_control_fast.yaml for iteration, not final science.
   # ---------------------------------------------------------------------------
   control_vs_disease_ml:

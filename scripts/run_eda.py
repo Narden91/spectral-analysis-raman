@@ -45,12 +45,39 @@ from src.analysis.eda_mode import (
     validate_control_vs_disease_ml_config,
     validate_eda_mode_config,
 )
+from src.analysis.io_utils import write_text_atomic
 from src.analysis.run_eda import run_eda
 from src.clinical.endpoints import build_and_write_clinical_endpoints
 from src.data_preparation import data_source_summary, resolve_data_source, write_analysis_provenance
 from src.terminal_output import print_kv_table, print_status
 
 logger = logging.getLogger(__name__)
+
+
+_CONTROL_VS_DISEASE_LAYOUT = """# Control vs. Disease Results
+
+Folders follow execution order. `00_run_metadata/run.log` records progress and
+ends with `EDA complete` after a successful run.
+
+## Top-level workflow
+
+1. `00_run_metadata/` — resolved config, data manifest, command, log, timings
+2. `01_fingerprint_1300/` — fingerprint-region EDA
+3. `02_ch_stretch_2850/` — CH-stretch-region EDA
+4. `03_whole_spectrum_1300_plus_2850/` — fused whole-spectrum EDA
+5. `04_cross_region_summary/` — subject feature matrices and PCA summaries
+6. `05_ml_classification/` — exploratory subject-level classification
+
+Single-range folders use: `01_group_comparisons`, `02_area_level_pca_qc`,
+`03_known_band_context`, `04_variance_context`, `05_region_robustness`, and
+`06_biological_pca`.
+
+ML folders use: `01_cohort`, `02_model_evaluation`, `03_confounder_checks`,
+`04_permutation_tests`, `05_univariate_band_screen`, and `06_report`.
+
+Only generated artifacts belong here. Raw data, caches, and disease-only
+clinical analyses belong outside this result root.
+"""
 
 
 def _attach_run_log_file(log_path: Path) -> None:
@@ -65,6 +92,10 @@ def _attach_run_log_file(log_path: Path) -> None:
         logging.Formatter("%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
     )
     root_logger.addHandler(handler)
+
+
+def _write_control_vs_disease_layout(output_root: Path) -> Path:
+    return write_text_atomic(output_root / "README.md", _CONTROL_VS_DISEASE_LAYOUT)
 
 
 def _set_analysis_output_root(mode: str) -> None:
@@ -269,17 +300,13 @@ def _main() -> None:
         f"output={_output_dir('eda_subdir')}"
     )
     write_analysis_provenance(
-        _output_dir("eda_subdir"),
-        data_source,
-        config,
-        command=" ".join(sys.argv),
-    )
-    write_analysis_provenance(
         metadata_dir,
         data_source,
         config,
         command=" ".join(sys.argv),
     )
+    if analysis_mode == "disease_vs_control":
+        _write_control_vs_disease_layout(_output_dir("eda_subdir"))
 
     try:
         _validate_ranges(ranges)

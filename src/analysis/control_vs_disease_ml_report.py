@@ -1,11 +1,10 @@
-"""Phase G: figures and narrative report for the control-vs-disease ML layer.
+"""Figures and narrative report for the control-vs-disease ML layer.
 
 Reads only the CSVs written by `control_vs_disease_ml.run_control_vs_disease_ml_pipeline`
 — this module never re-fits a model or recomputes a statistic, so figures and
 report text are always a direct rendering of the numbers already on disk.
 Conservative language throughout: exploratory classifier, no diagnostic,
-biomarker, causal, or clinical-utility claims. See plan_ml.md §0.2 for the
-claims-discipline rationale this report follows.
+biomarker, causal, or clinical-utility claims.
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import auc, precision_recall_curve, roc_curve
 
+from src import get_ml_classification_phase_dir
 from src.analysis._reporting import dataframe_to_markdown
 from src.analysis.io_utils import write_text_atomic
 from src.visualization.theme import finalize_axis, pastelize_color, set_gallery_theme
@@ -60,7 +60,7 @@ def _model_label(model_name: str) -> str:
 
 # ---------------------------------------------------------------------------
 # ROC / PR curves — recomputed from per-subject out-of-fold scores, which are
-# already leakage-safe (Phase B); no refitting happens here.
+# already leakage-safe; no refitting happens here.
 # ---------------------------------------------------------------------------
 
 
@@ -188,18 +188,24 @@ def plot_permutation_null(
 
 def write_all_figures(target_dir: Path) -> dict[str, Path]:
     """Render every figure from the CSVs already written to target_dir."""
-    figures_dir = target_dir / "figures"
-    figures_dir.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {}
 
-    comparison_path = target_dir / "model_comparison.csv"
+    model_dir = get_ml_classification_phase_dir("model_evaluation", root=target_dir, create=False)
+    confounder_dir = get_ml_classification_phase_dir("confounder_checks", root=target_dir, create=False)
+    permutation_dir = get_ml_classification_phase_dir("permutation_tests", root=target_dir, create=False)
+    report_dir = get_ml_classification_phase_dir("report", root=target_dir, create=False)
+    comparison_path = model_dir / "model_comparison.csv"
     if not comparison_path.exists():
         logger.warning("model_comparison.csv not found in %s; skipping figures", target_dir)
         return paths
+    figures_dir = report_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
     comparison_df = pd.read_csv(comparison_path)
 
-    confounder_df = pd.read_csv(target_dir / "confounder_analysis.csv") if (target_dir / "confounder_analysis.csv").exists() else pd.DataFrame()
-    null_df = pd.read_csv(target_dir / "permutation_null_distributions.csv") if (target_dir / "permutation_null_distributions.csv").exists() else pd.DataFrame()
+    confounder_path = confounder_dir / "confounder_analysis.csv"
+    permutation_path = permutation_dir / "permutation_null_distributions.csv"
+    confounder_df = pd.read_csv(confounder_path) if confounder_path.exists() else pd.DataFrame()
+    null_df = pd.read_csv(permutation_path) if permutation_path.exists() else pd.DataFrame()
 
     for representation in comparison_df["representation"].unique():
         sex_only_auc = None
@@ -208,13 +214,13 @@ def write_all_figures(target_dir: Path) -> dict[str, Path]:
             if "sex_only_roc_auc" in rep_confounders.columns and not rep_confounders.empty:
                 sex_only_auc = float(rep_confounders["sex_only_roc_auc"].iloc[0])
 
-        _save(plot_roc_curves(target_dir, representation, sex_only_auc), figures_dir / f"roc_curves_{representation}.png")
+        _save(plot_roc_curves(model_dir, representation, sex_only_auc), figures_dir / f"roc_curves_{representation}.png")
         paths[f"roc_curves_{representation}"] = figures_dir / f"roc_curves_{representation}.png"
 
-        _save(plot_pr_curves(target_dir, representation), figures_dir / f"pr_curves_{representation}.png")
+        _save(plot_pr_curves(model_dir, representation), figures_dir / f"pr_curves_{representation}.png")
         paths[f"pr_curves_{representation}"] = figures_dir / f"pr_curves_{representation}.png"
 
-        _save(plot_confusion_matrices(target_dir, representation), figures_dir / f"confusion_matrices_{representation}.png")
+        _save(plot_confusion_matrices(model_dir, representation), figures_dir / f"confusion_matrices_{representation}.png")
         paths[f"confusion_matrices_{representation}"] = figures_dir / f"confusion_matrices_{representation}.png"
 
     for metric in ("balanced_accuracy", "roc_auc"):
@@ -273,7 +279,7 @@ def _build_report_text(
         "",
         "**Status: exploratory only.** No diagnostic, biomarker, causal, or clinical-utility",
         "claim is made anywhere in this report. Single-cohort, single-site, no external",
-        "validation. See plan_ml.md §0 for the full scientific-rigor rationale.",
+        "validation. Confound checks and uncertainty estimates are reported below.",
         "",
         "## Cohort",
         "",
@@ -385,22 +391,29 @@ def _build_report_text(
 
 def write_final_performance_summary(target_dir: Path) -> Path | None:
     """Write the final performance summary from completed ML artifacts."""
-    comparison_path = target_dir / "model_comparison.csv"
+    cohort_dir = get_ml_classification_phase_dir("cohort", root=target_dir, create=False)
+    model_dir = get_ml_classification_phase_dir("model_evaluation", root=target_dir, create=False)
+    confounder_dir = get_ml_classification_phase_dir("confounder_checks", root=target_dir, create=False)
+    band_screen_dir = get_ml_classification_phase_dir("band_screen", root=target_dir, create=False)
+    report_dir = get_ml_classification_phase_dir("report", root=target_dir, create=False)
+    comparison_path = model_dir / "model_comparison.csv"
     if not comparison_path.exists():
         logger.warning("model_comparison.csv not found in %s; skipping report", target_dir)
         return None
 
-    cohort_df = pd.read_csv(target_dir / "cohort_summary.csv")
+    cohort_df = pd.read_csv(cohort_dir / "cohort_summary.csv")
     comparison_df = pd.read_csv(comparison_path)
-    confounder_df = pd.read_csv(target_dir / "confounder_analysis.csv") if (target_dir / "confounder_analysis.csv").exists() else pd.DataFrame()
-    band_screen_df = pd.read_csv(target_dir / "univariate_band_screen.csv") if (target_dir / "univariate_band_screen.csv").exists() else pd.DataFrame()
+    confounder_path = confounder_dir / "confounder_analysis.csv"
+    band_screen_path = band_screen_dir / "univariate_band_screen.csv"
+    confounder_df = pd.read_csv(confounder_path) if confounder_path.exists() else pd.DataFrame()
+    band_screen_df = pd.read_csv(band_screen_path) if band_screen_path.exists() else pd.DataFrame()
 
     report_text = _build_report_text(cohort_df, comparison_df, confounder_df, band_screen_df)
-    return write_text_atomic(target_dir / "final_performance_summary.md", report_text)
+    return write_text_atomic(report_dir / "final_performance_summary.md", report_text)
 
 
 def run_control_vs_disease_ml_report(target_dir: str | Path, cfg: dict[str, Any] | None = None) -> dict[str, Path]:
-    """Phase G entry point: figures + narrative report from an already-completed ML run."""
+    """Write figures and narrative report from an already-completed ML run."""
     target_dir = Path(target_dir)
     outputs: dict[str, Path] = {}
     for name, path in write_all_figures(target_dir).items():

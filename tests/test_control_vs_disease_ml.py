@@ -1,4 +1,4 @@
-"""Tests for the control-vs-disease ML classification layer (Phase A-D)."""
+"""Tests for the control-vs-disease ML classification layer."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def _make_feature_matrix(
     sex_confound_strength: how much sex shifts feature means (confound channel).
     Sex is distributed unevenly across class by construction when > 0, mirroring
     the real cohort's sex/class association (used only in the mandatory
-    sex-stratified-null test; not implemented until Phase C).
+    sex-stratified-null test).
     """
     rng = np.random.default_rng(random_state)
     n_total = n_control + n_disease
@@ -208,7 +208,7 @@ def test_unknown_representation_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase A: cohort summary
+# Cohort summary
 # ---------------------------------------------------------------------------
 
 
@@ -363,7 +363,7 @@ def test_repeated_nested_cv_is_deterministic(base_ml_cfg: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase D: permutation tests
+# Permutation tests
 # ---------------------------------------------------------------------------
 
 
@@ -449,8 +449,8 @@ def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> N
         within sex strata preserves the sex-class association the model is
         actually exploiting, so permuted data score just as well as real data.
 
-    This is the test that proves the confound-handling machinery in Phase C/D
-    actually does its job, per plan_ml.md §2 invariant 5 and §0.1.
+    This is the test that proves the confound-handling machinery
+    actually does its job for the pre-specified sex-confound check.
     """
     rng = np.random.default_rng(99)
     n_female, n_male = 30, 30
@@ -535,7 +535,7 @@ def test_locked_outer_plan_fails_when_a_joint_stratum_cannot_fill_every_fold() -
 
 
 # ---------------------------------------------------------------------------
-# Phase E: bootstrap confidence intervals
+# Bootstrap confidence intervals
 # ---------------------------------------------------------------------------
 
 
@@ -605,7 +605,7 @@ def test_bootstrap_ci_deterministic_with_same_seed(base_ml_cfg: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase F: univariate band screen
+# Univariate band screen
 # ---------------------------------------------------------------------------
 
 
@@ -651,7 +651,7 @@ def test_univariate_band_screen_reports_insufficient_data_status() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase C: sex-confound battery
+# Sex-confound battery
 # ---------------------------------------------------------------------------
 
 
@@ -762,13 +762,20 @@ def test_runner_smoke_produces_expected_outputs(
         cfg=base_ml_cfg,
     )
 
-    assert (out_dir / "cohort_summary.csv").exists()
-    assert (out_dir / "model_comparison.csv").exists()
-    assert (out_dir / "confounder_analysis.csv").exists()
-    assert (out_dir / "permutation_null_distributions.csv").exists()
-    assert (out_dir / "univariate_band_screen.csv").exists()
+    cohort_dir = out_dir / "01_cohort"
+    model_dir = out_dir / "02_model_evaluation"
+    confounder_dir = out_dir / "03_confounder_checks"
+    permutation_dir = out_dir / "04_permutation_tests"
+    band_screen_dir = out_dir / "05_univariate_band_screen"
+    report_dir = out_dir / "06_report"
 
-    comparison = pd.read_csv(out_dir / "model_comparison.csv")
+    assert (cohort_dir / "cohort_summary.csv").exists()
+    assert (model_dir / "model_comparison.csv").exists()
+    assert (confounder_dir / "confounder_analysis.csv").exists()
+    assert (permutation_dir / "permutation_null_distributions.csv").exists()
+    assert (band_screen_dir / "univariate_band_screen.csv").exists()
+
+    comparison = pd.read_csv(model_dir / "model_comparison.csv")
     n_models = 3
     n_representations = 2
     assert len(comparison) == n_models * n_representations
@@ -783,7 +790,7 @@ def test_runner_smoke_produces_expected_outputs(
     assert "permutation_p_fdr_q" in comparison.columns
     p_unrestricted = comparison["permutation_p_value_unrestricted"].dropna()
     assert (p_unrestricted > 0).all() and (p_unrestricted <= 1).all()
-    # Exactly one (model, representation) row is pre-specified as primary per plan_ml.md §2.
+    # Exactly one (model, representation) row is pre-specified as primary.
     assert comparison["is_primary_model"].sum() == 1
 
     assert "bootstrap_balanced_accuracy_ci_low" in comparison.columns
@@ -792,31 +799,31 @@ def test_runner_smoke_produces_expected_outputs(
     ci_high = comparison["bootstrap_balanced_accuracy_ci_high"].dropna()
     assert (ci_low <= ci_high).all()
 
-    confounder = pd.read_csv(out_dir / "confounder_analysis.csv")
+    confounder = pd.read_csv(confounder_dir / "confounder_analysis.csv")
     assert len(confounder) == n_models * n_representations
     assert "status" in confounder.columns
 
-    null_dist = pd.read_csv(out_dir / "permutation_null_distributions.csv")
+    null_dist = pd.read_csv(permutation_dir / "permutation_null_distributions.csv")
     assert set(null_dist["null_type"].unique()) <= {"unrestricted", "sex_stratified"}
 
-    band_screen = pd.read_csv(out_dir / "univariate_band_screen.csv")
+    band_screen = pd.read_csv(band_screen_dir / "univariate_band_screen.csv")
     assert set(band_screen["band"]) == {"band_a", "band_b", "band_c"}
     assert "fdr_q" in band_screen.columns
 
     for model_name in ("pls_da", "l1_logistic", "random_forest"):
         for representation in ("whole", "band_panel"):
-            pred_path = out_dir / f"{model_name}_{representation}_cv_predictions.csv"
-            importance_path = out_dir / f"{model_name}_{representation}_feature_importance.csv"
+            pred_path = model_dir / f"{model_name}_{representation}_cv_predictions.csv"
+            importance_path = model_dir / f"{model_name}_{representation}_feature_importance.csv"
             assert pred_path.exists()
             assert importance_path.exists()
 
-    report_path = out_dir / "final_performance_summary.md"
+    report_path = report_dir / "final_performance_summary.md"
     assert report_path.exists()
     report_text = report_path.read_text(encoding="utf-8")
     assert "exploratory only" in report_text.lower()
     assert "diagnostic" in report_text.lower()
 
-    figures_dir = out_dir / "figures"
+    figures_dir = report_dir / "figures"
     assert figures_dir.exists()
     assert any(figures_dir.glob("roc_curves_*.png"))
     assert any(figures_dir.glob("pr_curves_*.png"))

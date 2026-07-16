@@ -45,36 +45,52 @@ CLASSIFICATION_PHASE_DIRS = {
     "disease_subgroups": "disease_subgroups",
 }
 
-# Ordered sequence of single-range EDA phases.  Numbers are derived from
-# position (1-indexed, zero-padded to 2 digits) so inserting or reordering
-# here automatically renumbers all downstream folders.
-SINGLE_RANGE_PHASE_SEQUENCE: list[tuple[str, str]] = [
+# Shared descriptive single-range EDA phases. Mode-specific phases are appended
+# below without changing the established disease-only output contract.
+SINGLE_RANGE_BASE_PHASE_SEQUENCE: list[tuple[str, str]] = [
     ("group_comp",     "group_comparisons"),
     ("pca",            "area_level_pca_qc"),
     ("band",           "known_band_context"),
     ("variance",       "variance_context"),
-    ("intra_disease",  "intra_disease"),
-    ("biological_pca", "biological_pca"),
 ]
 
 
-def get_single_range_phase_dirs() -> dict[str, str]:
-    """Return {key: 'NN_suffix'} for every single-range EDA phase."""
+def get_single_range_phase_dirs(analysis_mode: str = "disease_only") -> dict[str, str]:
+    """Return numbered single-range phase directories for one analysis mode."""
+    sequence = list(SINGLE_RANGE_BASE_PHASE_SEQUENCE)
+    if analysis_mode == "disease_only":
+        sequence.extend(
+            [
+                ("intra_disease", "intra_disease"),
+                ("biological_pca", "biological_pca"),
+                ("robustness", "region_robustness"),
+            ]
+        )
+    else:
+        sequence.extend(
+            [
+                ("robustness", "region_robustness"),
+                ("biological_pca", "biological_pca"),
+            ]
+        )
     return {
         key: f"{i + 1:02d}_{suffix}"
-        for i, (key, suffix) in enumerate(SINGLE_RANGE_PHASE_SEQUENCE)
+        for i, (key, suffix) in enumerate(sequence)
     }
 
 
-def _bio_pca_range_dir(range_label: str) -> Path:
-    dirs = get_single_range_phase_dirs()
+def _bio_pca_range_dir(range_label: str, analysis_mode: str) -> Path:
+    dirs = get_single_range_phase_dirs(analysis_mode)
     return Path(range_label) / dirs["biological_pca"]
 
 
-BIOLOGICAL_PCA_CANONICAL_DIRS = {
-    "PCA_1330": _bio_pca_range_dir("01_fingerprint_1300"),
-    "PCA_2850": _bio_pca_range_dir("02_ch_stretch_2850"),
-    "PCA_whole": Path("03_whole_spectrum_1300_plus_2850") / "04_biological_pca",
+CONTROL_VS_DISEASE_ML_PHASE_DIRS = {
+    "cohort": "01_cohort",
+    "model_evaluation": "02_model_evaluation",
+    "confounder_checks": "03_confounder_checks",
+    "permutation_tests": "04_permutation_tests",
+    "band_screen": "05_univariate_band_screen",
+    "report": "06_report",
 }
 
 
@@ -327,14 +343,33 @@ def get_spectral_interpretability_dir(phase: str) -> Path:
 
 def get_ml_classification_dir() -> Path:
     """Return the control-vs-disease ML classification output root (disease_vs_control mode)."""
-    path = _output_dir("eda_subdir") / "07_ml_classification"
+    path = _output_dir("eda_subdir") / "05_ml_classification"
     path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_ml_classification_phase_dir(
+    phase: str,
+    *,
+    root: str | Path | None = None,
+    create: bool = True,
+) -> Path:
+    """Return one numbered control-vs-disease ML artifact directory."""
+    base = Path(root) if root is not None else get_ml_classification_dir()
+    path = base / CONTROL_VS_DISEASE_ML_PHASE_DIRS.get(phase, phase)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def get_biological_pca_canonical_dir(model_name: str) -> Path:
     """Return the canonical range-local directory for a Biological PCA model."""
-    relative = BIOLOGICAL_PCA_CANONICAL_DIRS.get(str(model_name))
+    analysis_mode = str(config.get("analysis", {}).get("mode", "disease_only"))
+    relative = {
+        "PCA_1330": _bio_pca_range_dir("01_fingerprint_1300", analysis_mode),
+        "PCA_2850": _bio_pca_range_dir("02_ch_stretch_2850", analysis_mode),
+        "PCA_whole": Path("03_whole_spectrum_1300_plus_2850") / "04_biological_pca",
+    }.get(str(model_name))
     if relative is None:
         raise ValueError(f"Unknown Biological PCA model: {model_name}")
     path = _output_dir("eda_subdir") / relative
