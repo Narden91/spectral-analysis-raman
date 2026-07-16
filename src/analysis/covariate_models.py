@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import stats
+import statsmodels.api as sm
+from statsmodels.tools.sm_exceptions import PerfectSeparationWarning
 
 from src import get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
@@ -17,7 +19,6 @@ from src.analysis.clinical_feature_associations import (
     load_disease_feature_frame,
 )
 from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, PhaseStatus
-from src.analysis.sklearn_utils import covariate_logistic_model, fit_with_convergence_capture
 from src.analysis.spectral_regions import candidate_region_feature_names
 
 logger = logging.getLogger(__name__)
@@ -138,70 +139,16 @@ def _fit_ols(
     design = pd.concat([predictor.rename("predictor"), covariates], axis=1)
     design = design.dropna()
     y = outcome.loc[design.index]
-    design_matrix = np.column_stack([np.ones(len(design)), design.to_numpy(dtype=float)])
+    design_matrix = sm.add_constant(design.to_numpy(dtype=float), has_constant="add")
     if np.linalg.matrix_rank(design_matrix) < design_matrix.shape[1]:
         raise ValueError("rank_deficient")
-    beta, *_ = np.linalg.lstsq(design_matrix, y.to_numpy(dtype=float), rcond=None)
-    fitted = design_matrix @ beta
-    residual = y.to_numpy(dtype=float) - fitted
-    ss_res = float(np.sum(residual**2))
-    ss_tot = float(np.sum((y.to_numpy(dtype=float) - float(y.mean())) ** 2))
-    r_squared = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-    rank = int(np.linalg.matrix_rank(design_matrix))
-    dof = len(design_matrix) - rank
-    p_value = np.nan
-    if dof > 0:
-        sigma2 = ss_res / dof
-        cov_beta = sigma2 * np.linalg.pinv(design_matrix.T @ design_matrix)
-        se = float(np.sqrt(max(cov_beta[1, 1], 0.0)))
-        if se > 0.0 and np.isfinite(se):
-            t_stat = float(beta[1] / se)
-            p_value = float(2.0 * stats.t.sf(abs(t_stat), dof))
-    return float(beta[1]), float(beta[0]), r_squared, p_value
-
-
-def _fit_logistic_wald(
-    outcome: pd.Series,
-    predictor: pd.Series,
-    covariates: pd.DataFrame,
-    *,
-    max_iter: int = 100,
-    tol: float = 1e-8,
-) -> tuple[float, float, float]:
-    """Fit unpenalized logistic regression and return predictor Wald p-value."""
-    design = pd.concat([predictor.rename("predictor"), covariates], axis=1)
-    design = design.dropna()
-    y = outcome.loc[design.index].to_numpy(dtype=float)
-    x = np.column_stack([np.ones(len(design)), design.to_numpy(dtype=float)])
-    if np.linalg.matrix_rank(x) < x.shape[1]:
-        raise ValueError("rank_deficient")
-    beta = np.zeros(x.shape[1], dtype=float)
-    eps = 1e-9
-
-    for _ in range(max_iter):
-        linear = np.clip(x @ beta, -35.0, 35.0)
-        prob = 1.0 / (1.0 + np.exp(-linear))
-        weight = np.clip(prob * (1.0 - prob), eps, None)
-        hessian = x.T @ (x * weight[:, None])
-        gradient = x.T @ (y - prob)
-        step = np.linalg.pinv(hessian) @ gradient
-        beta_next = beta + step
-        if np.max(np.abs(step)) < tol:
-            beta = beta_next
-            break
-        beta = beta_next
-
-    linear = np.clip(x @ beta, -35.0, 35.0)
-    prob = 1.0 / (1.0 + np.exp(-linear))
-    weight = np.clip(prob * (1.0 - prob), eps, None)
-    hessian = x.T @ (x * weight[:, None])
-    cov_beta = np.linalg.pinv(hessian)
-    se = float(np.sqrt(max(cov_beta[1, 1], 0.0)))
-    p_value = np.nan
-    if se > 0.0 and np.isfinite(se):
-        z_stat = float(beta[1] / se)
-        p_value = float(2.0 * stats.norm.sf(abs(z_stat)))
-    return float(beta[1]), float(beta[0]), p_value
+    fitted = sm.OLS(y.to_numpy(dtype=float), design_matrix).fit(cov_type="HC3")
+    return (
+        float(fitted.params[1]),
+        float(fitted.params[0]),
+        float(fitted.rsquared),
+        float(fitted.pvalues[1]),
+    )
 
 
 def _fit_logistic(
@@ -214,16 +161,17 @@ def _fit_logistic(
     design = pd.concat([predictor.rename("predictor"), covariates], axis=1)
     design = design.dropna()
     y = outcome.loc[design.index].to_numpy(dtype=int)
-    model = covariate_logistic_model(random_state=random_state)
-    fit_with_convergence_capture(
-        model,
-        design.to_numpy(dtype=float),
-        y,
-        context="covariate logistic",
-    )
-    accuracy = float(np.mean(model.predict(design.to_numpy(dtype=float)) == y))
-    coefficient, intercept, p_value = _fit_logistic_wald(outcome, predictor, covariates)
-    return coefficient, intercept, accuracy, p_value
+    design_matrix = sm.add_constant(design.to_numpy(dtype=float), has_constant="add")
+    if np.linalg.matrix_rank(design_matrix) < design_matrix.shape[1]:
+        raise ValueError("rank_deficient")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PerfectSeparationWarning)
+        fitted = sm.GLM(y, design_matrix, family=sm.families.Binomial()).fit()
+    if not fitted.converged or not np.all(np.isfinite(fitted.params)):
+        raise ValueError("separation")
+    probabilities = fitted.predict(design_matrix)
+    accuracy = float(np.mean((probabilities >= 0.5).astype(int) == y))
+    return float(fitted.params[1]), float(fitted.params[0]), accuracy, float(fitted.pvalues[1])
 
 
 def _fdr_bh(values: pd.Series) -> pd.Series:

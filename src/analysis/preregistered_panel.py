@@ -79,16 +79,13 @@ def _integral_spec(name: str, spec: list[Any]) -> tuple[str, str, float, float]:
 def _primary_hypothesis_lines(primary: dict[str, Any]) -> list[str]:
     feature = primary.get("feature", "oxidative_index")
     endpoint = primary.get("endpoint", "delta_moca")
-    direction = str(primary.get("direction", "negative"))
-    direction_text = "Lower" if direction == "negative" else "Higher"
     covariates = primary.get("covariates", ["age", "sex"])
     covariate_text = ", ".join(str(item) for item in covariates)
     return [
         "## Primary exploratory anchor",
         "",
         f"H₀: {feature} is not associated with {endpoint} (partial Spearman | {covariate_text}).",
-        f"H₁: {direction_text} {feature} is associated with worse {endpoint} "
-        f"(partial Spearman ρ {'<' if direction == 'negative' else '>'} 0).",
+        f"H₁: {feature} is associated with {endpoint} (two-sided partial Spearman test).",
         "",
         "For this cohort this is a fixed post hoc hypothesis, not an independently confirmed test.",
         "",

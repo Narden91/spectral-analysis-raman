@@ -12,7 +12,12 @@ import src
 from src.analysis.spectral_loader import build_group_matrix
 from src.data_preparation import validation as validation_module
 from src.data_preparation.loaders import load_area_summaries, load_file_index, load_spectra, load_whole_area_store
-from src.data_preparation.materialize import MaterializedStore, _atomic_replace, build_parsed_store, build_preprocessed_store
+from src.data_preparation.materialize import (
+    MaterializedStore,
+    _atomic_replace,
+    build_parsed_store,
+    build_preprocessed_store,
+)
 from src.data_preparation.store import (
     DataSource,
     get_active_data_source,

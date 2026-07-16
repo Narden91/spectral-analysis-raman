@@ -13,8 +13,8 @@ from matplotlib.patches import Patch
 from matplotlib.ticker import FixedLocator
 from scipy.signal import find_peaks
 
-from src.visualization.theme import GROUP_COLORS, set_gallery_theme
 from src.analysis.raman_bands import RAMAN_BANDS, validate_configured_bands
+from src.visualization.theme import GROUP_COLORS, set_gallery_theme
 
 set_gallery_theme()
 

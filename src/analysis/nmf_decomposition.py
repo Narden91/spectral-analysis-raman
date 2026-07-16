@@ -2,7 +2,7 @@
 
 Decomposes the fingerprint block (``1300__*`` columns) into ``n_components``
 non-negative latent profiles using multi-seed NMF. Component stability is
-assessed via reconstruction-error variance across initializations. Subject
+assessed by matching component spectra across seeded random initializations. Subject
 weights are correlated with clinical endpoints (Spearman + partial Spearman,
 BH-FDR). All outputs go to ``06_spectral_interpretability/nmf_decomposition/``.
 
@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import logging
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.optimize import linear_sum_assignment
 from sklearn.decomposition import NMF
 from sklearn.exceptions import ConvergenceWarning
 
@@ -80,6 +82,36 @@ def _reconstruction_error(X: np.ndarray, W: np.ndarray, H: np.ndarray) -> float:
     return float(np.mean((X - W @ H) ** 2))
 
 
+@dataclass(frozen=True)
+class NMFMultiInitResult:
+    W: np.ndarray
+    H: np.ndarray
+    best_error: float
+    reconstruction_error_std: float
+    component_stability: np.ndarray
+    n_successful_initializations: int
+
+
+def _matched_component_stability(reference: np.ndarray, components: list[np.ndarray]) -> np.ndarray:
+    """Return median cosine similarity after permutation-invariant matching."""
+    if not components:
+        return np.full(reference.shape[0], np.nan, dtype=float)
+
+    def _normalize(rows: np.ndarray) -> np.ndarray:
+        norms = np.linalg.norm(rows, axis=1, keepdims=True)
+        return np.divide(rows, norms, out=np.zeros_like(rows), where=norms > 0)
+
+    reference_norm = _normalize(reference)
+    matched_scores: list[np.ndarray] = []
+    for candidate in components:
+        similarity = reference_norm @ _normalize(candidate).T
+        row_idx, col_idx = linear_sum_assignment(-similarity)
+        ordered = np.empty(reference.shape[0], dtype=float)
+        ordered[row_idx] = similarity[row_idx, col_idx]
+        matched_scores.append(ordered)
+    return np.median(np.vstack(matched_scores), axis=0)
+
+
 def _fit_nmf_multi_init(
     X: np.ndarray,
     *,
@@ -88,8 +120,8 @@ def _fit_nmf_multi_init(
     alpha_h: float,
     n_init: int,
     random_state: int,
-) -> tuple[np.ndarray, np.ndarray, float, float]:
-    """Fit NMF ``n_init`` times; return (W, H, best_error, error_std_across_inits)."""
+) -> NMFMultiInitResult:
+    """Fit seeded NMF starts and quantify matched component-spectrum stability."""
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_init, dtype=np.int64).tolist()
 
@@ -100,7 +132,7 @@ def _fit_nmf_multi_init(
         try:
             model = NMF(
                 n_components=n_components,
-                init="nndsvda",
+                init="random",
                 l1_ratio=1.0,
                 alpha_W=alpha_w,
                 alpha_H=alpha_h,
@@ -120,7 +152,16 @@ def _fit_nmf_multi_init(
 
     best_idx = int(np.argmin(errors))
     error_std = float(np.std(errors, ddof=1)) if len(errors) > 1 else 0.0
-    return solutions[best_idx][0], solutions[best_idx][1], float(errors[best_idx]), error_std
+    best_w, best_h = solutions[best_idx]
+    other_components = [h for index, (_, h) in enumerate(solutions) if index != best_idx]
+    return NMFMultiInitResult(
+        W=best_w,
+        H=best_h,
+        best_error=float(errors[best_idx]),
+        reconstruction_error_std=error_std,
+        component_stability=_matched_component_stability(best_h, other_components),
+        n_successful_initializations=len(solutions),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -209,14 +250,18 @@ def run_nmf_decomposition(
     # NMF requires non-negative input; shift per-row to ≥ 0
     X_shifted = np.clip(X_clean - X_clean.min(axis=1, keepdims=True), 0.0, None)
 
-    W, H, best_error, error_std = _fit_nmf_multi_init(
+    fit_result = _fit_nmf_multi_init(
         X_shifted, n_components=n_components_actual,
         alpha_w=alpha, alpha_h=0.0, n_init=n_init, random_state=random_state,
     )
-    stability_metric = float(error_std / (best_error + 1e-12))
+    W, H = fit_result.W, fit_result.H
+    component_stability = fit_result.component_stability
+    stability_metric = float(np.nanmin(component_stability)) if np.isfinite(component_stability).any() else np.nan
+    if not np.isfinite(stability_metric):
+        logger.warning("Phase N: component stability unavailable; fewer than two successful initializations")
     logger.info(
-        "Phase N: NMF fitted (%d components, best_error=%.4f, error_std=%.4f, stability=%.4f)",
-        n_components_actual, best_error, error_std, stability_metric,
+        "Phase N: NMF fitted (%d components, best_error=%.4f, error_std=%.4f, min_component_stability=%.4f)",
+        n_components_actual, fit_result.best_error, fit_result.reconstruction_error_std, stability_metric,
     )
 
     annotations = [_annotate_component(H[i], wavenumbers) for i in range(n_components_actual)]
@@ -232,9 +277,12 @@ def run_nmf_decomposition(
         "loading": H.ravel(),
         "annotation": np.repeat(annotations, n_wn),
         "n_components_fitted": n_components_actual,
-        "best_reconstruction_error": best_error,
-        "reconstruction_error_std": error_std,
+        "best_reconstruction_error": fit_result.best_error,
+        "reconstruction_error_std": fit_result.reconstruction_error_std,
+        "component_stability_cosine": np.repeat(component_stability, n_wn),
         "stability_metric": stability_metric,
+        "n_initializations_requested": n_init,
+        "n_initializations_succeeded": fit_result.n_successful_initializations,
         "exploratory": True,
     })
     components_path = target_dir / "nmf_components.csv"

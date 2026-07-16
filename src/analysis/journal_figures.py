@@ -29,6 +29,7 @@ from src import get_confirmatory_panel_dir, get_spectral_interpretability_dir
 from src import resolve_cfg as _cfg
 from src.analysis.feature_coupling import REGIME_PALETTE, coupling_df_to_matrix
 from src.analysis.io_utils import load_csv_or_empty
+from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, STATUS_OK, PhaseStatus
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +41,6 @@ _INDEX_COLS = [
 ]
 _COLORS = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00"]
 _SMALL_EFFECT_THRESHOLD = 0.147
-
-
-
-def _interp_root() -> Path:
-    from src import _output_dir
-    return _output_dir("eda_subdir") / "06_spectral_interpretability"
-
 
 def _save_and_close(fig: plt.Figure, path: Path) -> None:
     fig.savefig(path, dpi=200, bbox_inches="tight")
@@ -115,19 +109,17 @@ def _fig1_cohort_rainclouds(panel_matrix_path: Path, output_path: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _rank_lookup(ranking: pd.DataFrame) -> dict[str, int]:
+def _rank_lookup(ranking: pd.DataFrame) -> dict[str, bool]:
     if ranking.empty or "feature_name" not in ranking.columns:
         return {}
-    return {str(r["feature_name"]): int(r.get("robust_score", 0)) for _, r in ranking.iterrows()}
+    return {str(r["feature_name"]): bool(r.get("permutation_flag", False)) for _, r in ranking.iterrows()}
 
 
-def _feature_color(feature: str, score: int, anchor: str) -> str:
+def _feature_color(feature: str, has_nominal_permutation_flag: bool, anchor: str) -> str:
     if feature == anchor:
         return "#D55E00"
-    if score >= 3:
+    if has_nominal_permutation_flag:
         return "#0072B2"
-    if score == 2:
-        return "#009E73"
     return "#AAAAAA"
 
 
@@ -141,12 +133,26 @@ def _fig2_effect_forest(
     if contrasts.empty or "feature_name" not in contrasts.columns:
         return False
 
-    severity = (
-        contrasts[contrasts["contrast_name"] == "severity_extreme"]
-        if "contrast_name" in contrasts.columns else contrasts
-    )
+    required_numeric = ("cliffs_delta", "bootstrap_ci_lower", "bootstrap_ci_upper")
+    if "contrast_name" not in contrasts.columns or any(column not in contrasts.columns for column in required_numeric):
+        return False
+    eligible = contrasts.copy()
+    if "status" in eligible.columns:
+        eligible = eligible.loc[eligible["status"].eq("ok")].copy()
+    for column in required_numeric:
+        eligible[column] = pd.to_numeric(eligible[column], errors="coerce")
+    eligible = eligible.loc[np.isfinite(eligible[list(required_numeric)]).all(axis=1)].copy()
+
+    selected_contrast = None
+    severity = pd.DataFrame()
+    for contrast_name in ("severity_extreme", "trajectory_extreme"):
+        candidate = eligible.loc[eligible["contrast_name"].eq(contrast_name)].copy()
+        if not candidate.empty:
+            severity = candidate
+            selected_contrast = contrast_name
+            break
     if severity.empty:
-        severity = contrasts
+        return False
 
     features = severity["feature_name"].unique().tolist()
     if not features:
@@ -180,7 +186,10 @@ def _fig2_effect_forest(
     ax.set_yticks(y_pos)
     ax.set_yticklabels([f.replace("_", " ") for f in features], fontsize=8)
     ax.set_xlabel("Cliff's δ (95 % bootstrap CI)")
-    ax.set_title("Effect-size forest — robustness ranking\n(anchor = orange; strong trend = blue; moderate = green)")
+    ax.set_title(
+        f"Effect-size forest — {selected_contrast.replace('_', ' ')}\n"
+        "(anchor = orange; nominal permutation flag = blue; all checks are exploratory)"
+    )
     ax.invert_yaxis()
     fig.tight_layout()
     _save_and_close(fig, output_path)
@@ -428,6 +437,7 @@ def _try_figure(
 
     All figure builders accept output_path as their final positional argument.
     """
+    path.unlink(missing_ok=True)
     try:
         if fn(*args, path):
             return key, path
@@ -440,7 +450,7 @@ def run_journal_figures(
     *,
     panel_matrix_path: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
-) -> dict[str, Path]:
+) -> dict[str, object]:
     """Phase U orchestrator: assemble 5 journal figures from prior phase outputs."""
     cfg = _cfg(cfg)
     phase_cfg = cfg.get("analysis", {}).get("journal_figures", {})
@@ -448,7 +458,6 @@ def run_journal_figures(
         return {}
 
     panel_dir = get_confirmatory_panel_dir()
-    interp = _interp_root()
     figures_dir = get_spectral_interpretability_dir("figures")
     figures_dir.mkdir(parents=True, exist_ok=True)
 
@@ -464,26 +473,33 @@ def run_journal_figures(
         ("fig2", figures_dir / "fig2_effect_size_forest_robustness.png",
          _fig2_effect_forest,
          panel_dir / "panel_contrast_tests.csv",
-         panel_dir / "feature_robustness_ranking.csv",
+         panel_dir / "panel_evidence_flags.csv",
          anchor_feature),
         ("fig3", figures_dir / "fig3_difference_spectrum_signed_effect.png",
          _fig3_difference_spectrum,
-         interp / "discriminant_signatures" / "difference_spectrum.csv"),
+         get_spectral_interpretability_dir("discriminant") / "difference_spectrum.csv"),
         ("fig4", figures_dir / "fig4_nmf_components_entropy.png",
          _fig4_nmf_entropy,
-         interp / "nmf_decomposition" / "nmf_components.csv",
-         interp / "spectral_entropy" / "spectral_entropy.csv"),
+         get_spectral_interpretability_dir("nmf") / "nmf_components.csv",
+         get_spectral_interpretability_dir("entropy") / "spectral_entropy.csv"),
         ("fig5", figures_dir / "fig5_feature_coupling_regimes.png",
          _fig5_coupling_regimes,
-         interp / "feature_coupling" / "feature_coupling_matrix.csv",
-         interp / "feature_coupling" / "ratio_ratio_regimes.csv"),
+         get_spectral_interpretability_dir("coupling") / "feature_coupling_matrix.csv",
+         get_spectral_interpretability_dir("coupling") / "ratio_ratio_regimes.csv"),
     ]
 
-    outputs: dict[str, Path] = {}
+    outputs: dict[str, object] = {}
     for key, path, fn, *args in fig_specs:
         result = _try_figure(key, path, fn, *args)
         if result:
             outputs[result[0]] = result[1]
 
-    logger.info("Phase U: %d/%d figures produced in %s", len(outputs), len(fig_specs), figures_dir)
+    missing = [key for key, *_ in fig_specs if key not in outputs]
+    outputs["_status"] = PhaseStatus(
+        phase_key="journal_figures",
+        status=STATUS_OK if not missing else STATUS_MISSING_REQUIRED_DATA,
+        reason="" if not missing else f"missing figure inputs or valid data: {', '.join(missing)}",
+        n_artifacts=len(outputs),
+    ).as_row()
+    logger.info("Phase U: %d/%d figures produced in %s", len(outputs) - 1, len(fig_specs), figures_dir)
     return outputs

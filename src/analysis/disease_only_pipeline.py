@@ -319,7 +319,7 @@ def run_disease_only_cross_region_pipeline(
                     )
 
             if _phase_enabled(cfg, "robustness_ranking"):
-                with _phase_timer(phase_timings, "robustness_ranking", "Graded robustness ranking", _progress, _task):
+                with _phase_timer(phase_timings, "robustness_ranking", "Descriptive evidence flags", _progress, _task):
                     outputs["robustness_ranking"] = run_robustness_ranking(
                         contrasts_path=outputs["confirmatory_panel"].get("panel_contrast_tests"),
                         consistency_path=outputs.get("endpoint_consistency", {}).get("endpoint_consistency"),
@@ -331,7 +331,7 @@ def run_disease_only_cross_region_pipeline(
             with _phase_timer(phase_timings, "integrated_candidates", "Integrated candidate evidence table", _progress, _task):
                 integrated_outputs = run_integrated_candidates(
                     feature_matrix_path=feature_matrix_path,
-                    pls_vip_path=pls_outputs.get("pls_vip_bands"),
+                    pls_feature_effects_path=pls_outputs.get("pls_feature_effects"),
                     pls_performance_path=pls_outputs.get("pls_regression_performance"),
                     splsda_bands_path=splsda_outputs.get("pls_l1da_selected_bands", ""),
                     cfg=cfg,
@@ -380,7 +380,7 @@ def run_disease_only_cross_region_pipeline(
         if preregistered_outputs and _phase_enabled(cfg, "panel_report"):
             with _phase_timer(phase_timings, "panel_report", "Four-domain panel report", _progress, _task):
                 panel_report_outputs = run_panel_report_section(
-                    robustness_ranking_path=outputs.get("robustness_ranking", {}).get("feature_robustness_ranking"),
+                    evidence_flags_path=outputs.get("robustness_ranking", {}).get("panel_evidence_flags"),
                     anchor_result_path=outputs.get("confirmatory_panel", {}).get("primary_anchor_result"),
                     cfg=cfg,
                 )
@@ -391,6 +391,7 @@ def run_disease_only_cross_region_pipeline(
                 outputs["publication_report"] = run_candidate_region_report(
                     integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
                     minimal_panel_path=panel_outputs.get("minimal_candidate_panel"),
+                    minimal_panel_status=panel_outputs.get("_status"),
                     panel_report_section_path=panel_report_outputs.get("panel_report_section"),
                     cfg=cfg,
                 )

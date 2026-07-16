@@ -19,6 +19,7 @@ import pandas as pd
 from src import get_biological_pca_canonical_dir, get_classification_phase_dir, get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import load_subject_feature_matrix
+from src.analysis.io_utils import load_csv_or_empty
 from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, PhaseStatus
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ def _holm_adjust(values: pd.Series) -> pd.Series:
     return result
 
 
-def _load_csv_if_exists(path: str | Path | None) -> pd.DataFrame | None:
+def _load_table_if_exists(path: str | Path | None) -> pd.DataFrame | None:
     if path is None:
         return None
     if isinstance(path, str) and not path.strip():
@@ -86,7 +87,9 @@ def _load_csv_if_exists(path: str | Path | None) -> pd.DataFrame | None:
     if not path.exists():
         logger.warning("Expected input table not found: %s", path)
         return None
-    return pd.read_csv(path)
+    if path.suffix.lower() == ".parquet":
+        return pd.read_parquet(path)
+    return load_csv_or_empty(path)
 
 
 def _region_feature_names(feature_columns: list[str], region: pd.Series) -> list[str]:
@@ -143,11 +146,19 @@ def _significant_pls_targets(
 ) -> set[str] | None:
     if pls_performance is None or pls_performance.empty:
         return None
-    required = {"target", "permutation_p_value"}
+    required = {"target"}
     if not required.issubset(pls_performance.columns):
         logger.warning("PLS performance table missing expected columns; skipping VIP gate")
         return None
-    mask = pd.to_numeric(pls_performance["permutation_p_value"], errors="coerce").lt(alpha).fillna(False)
+    if "model_supported" in pls_performance.columns:
+        mask = pls_performance["model_supported"].fillna(False).astype(bool)
+    elif "permutation_p_value_holm" in pls_performance.columns:
+        mask = pd.to_numeric(pls_performance["permutation_p_value_holm"], errors="coerce").lt(alpha).fillna(False)
+    elif "permutation_p_value" in pls_performance.columns:
+        mask = pd.to_numeric(pls_performance["permutation_p_value"], errors="coerce").lt(alpha).fillna(False)
+    else:
+        logger.warning("PLS performance table lacks a permutation p-value; skipping VIP gate")
+        return None
     return set(pls_performance.loc[mask, "target"].astype(str).unique())
 
 
@@ -361,7 +372,7 @@ def run_integrated_candidates(
     *,
     candidate_regions_path: str | Path | None = None,
     covariate_models_path: str | Path | None = None,
-    pls_vip_path: str | Path | None = None,
+    pls_feature_effects_path: str | Path | None = None,
     pls_performance_path: str | Path | None = None,
     splsda_bands_path: str | Path | None = None,
     feature_matrix_path: str | Path | None = None,
@@ -386,14 +397,14 @@ def run_integrated_candidates(
         candidate_regions_path = get_cross_region_phase_dir("candidate_regions") / "candidate_regions_cluster_corrected.csv"
     if covariate_models_path is None:
         covariate_models_path = get_cross_region_phase_dir("covariate_models") / "covariate_adjusted_region_models.csv"
-    if pls_vip_path is None:
-        pls_vip_path = get_classification_phase_dir("pls_regression") / "pls_vip_bands.csv"
+    if pls_feature_effects_path is None:
+        pls_feature_effects_path = get_classification_phase_dir("pls_regression") / "pls_feature_effects.parquet"
         if pls_performance_path is None:
             pls_performance_path = get_classification_phase_dir("pls_regression") / "pls_regression_performance.csv"
     if splsda_bands_path is None:
         splsda_bands_path = get_classification_phase_dir("splsda") / "pls_l1da_selected_bands.csv"
 
-    candidates = _load_csv_if_exists(candidate_regions_path)
+    candidates = _load_table_if_exists(candidate_regions_path)
     if candidates is None or candidates.empty:
         logger.warning("No candidate regions available; skipping integrated candidate table write")
         return {
@@ -406,10 +417,10 @@ def run_integrated_candidates(
             ).as_row()
         }
 
-    covariate_models = _load_csv_if_exists(covariate_models_path)
-    pls_vip = _load_csv_if_exists(pls_vip_path)
-    pls_performance = _load_csv_if_exists(pls_performance_path)
-    splsda_bands = _load_csv_if_exists(splsda_bands_path)
+    covariate_models = _load_table_if_exists(covariate_models_path)
+    pls_vip = _load_table_if_exists(pls_feature_effects_path)
+    pls_performance = _load_table_if_exists(pls_performance_path)
+    splsda_bands = _load_table_if_exists(splsda_bands_path)
 
     feature_columns: list[str] = []
     if feature_matrix_path is not None and Path(feature_matrix_path).exists():

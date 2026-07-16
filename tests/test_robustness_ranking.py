@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.analysis.robustness_ranking import compute_robustness_scores
+from src.analysis.robustness_ranking import compute_evidence_flags
 
 
-def test_compute_robustness_scores_is_deterministic() -> None:
+def test_compute_evidence_flags_is_deterministic() -> None:
     contrasts = pd.DataFrame(
         {
             "feature_name": ["oxidative_index", "membrane_integrity_index", "protein_remodeling_index"],
@@ -24,7 +24,7 @@ def test_compute_robustness_scores_is_deterministic() -> None:
         }
     )
 
-    ranking = compute_robustness_scores(
+    ranking = compute_evidence_flags(
         contrasts,
         consistency,
         effect_size_threshold=0.147,
@@ -33,11 +33,14 @@ def test_compute_robustness_scores_is_deterministic() -> None:
     )
 
     assert ranking["feature_name"].tolist() == [
-        "oxidative_index",
         "membrane_integrity_index",
+        "oxidative_index",
         "protein_remodeling_index",
     ]
-    assert ranking.loc[0, "robust_score"] == 4
-    assert ranking.loc[0, "evidence_tier"] == "strong_trend"
-    assert bool(ranking.loc[0, "is_anchor_feature"])
-    assert ranking["rank"].tolist() == [1, 2, 3]
+    anchor = ranking.loc[ranking["feature_name"] == "oxidative_index"].iloc[0]
+    assert bool(anchor["effect_size_flag"])
+    assert bool(anchor["bootstrap_ci_excludes_zero"])
+    assert bool(anchor["permutation_flag"])
+    assert bool(anchor["is_anchor_feature"])
+    assert "robust_score" not in ranking.columns
+    assert "evidence_tier" not in ranking.columns

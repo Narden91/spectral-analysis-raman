@@ -87,17 +87,18 @@ def _rank_covariates(covars: np.ndarray | pd.DataFrame | pd.Series, valid: np.nd
     return np.column_stack(ranked_columns)
 
 
-def partial_spearman(
+def partial_spearman_residuals(
     x: np.ndarray | pd.Series,
     y: np.ndarray | pd.Series,
     covars: np.ndarray | pd.DataFrame | pd.Series,
-) -> tuple[float, float, int]:
-    """Partial Spearman correlation of x and y after residualizing rank covariates."""
-    x_series = pd.Series(x)
-    y_series = pd.Series(y)
-    x_numeric = pd.to_numeric(x_series, errors="coerce")
-    y_numeric = pd.to_numeric(y_series, errors="coerce")
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """Return ranked residuals, covariate rank, and complete-case count.
 
+    The residuals are the nuisance-adjusted quantities used for both the
+    partial correlation and the Freedman--Lane permutation test.
+    """
+    x_numeric = pd.to_numeric(pd.Series(x), errors="coerce")
+    y_numeric = pd.to_numeric(pd.Series(y), errors="coerce")
     covar_frame = covars.to_frame() if isinstance(covars, pd.Series) else pd.DataFrame(covars)
     valid = x_numeric.notna() & y_numeric.notna()
     for column in covar_frame.columns:
@@ -105,24 +106,28 @@ def partial_spearman(
     valid_array = valid.to_numpy(dtype=bool)
     n = int(valid_array.sum())
     if n < 3:
-        return np.nan, np.nan, n
+        return np.array([]), np.array([]), 0, n
 
     x_rank = stats.rankdata(x_numeric.loc[valid_array].to_numpy(dtype=float), method="average")
     y_rank = stats.rankdata(y_numeric.loc[valid_array].to_numpy(dtype=float), method="average")
     covar_ranks = _rank_covariates(covar_frame, valid_array)
-
     if covar_ranks.shape[1] == 0:
-        if np.std(x_rank) == 0 or np.std(y_rank) == 0:
-            return np.nan, np.nan, n
-        rho, p_value = stats.spearmanr(x_rank, y_rank)
-        return float(rho), float(p_value), n
+        return x_rank - x_rank.mean(), y_rank - y_rank.mean(), 0, n
 
     design = np.column_stack([np.ones(n, dtype=float), covar_ranks])
-    rank = int(np.linalg.matrix_rank(design) - 1)
-    outcomes = np.column_stack([x_rank, y_rank])
-    fitted = design @ np.linalg.lstsq(design, outcomes, rcond=None)[0]
-    x_resid = x_rank - fitted[:, 0]
-    y_resid = y_rank - fitted[:, 1]
+    fitted = design @ np.linalg.lstsq(design, np.column_stack([x_rank, y_rank]), rcond=None)[0]
+    return x_rank - fitted[:, 0], y_rank - fitted[:, 1], int(np.linalg.matrix_rank(design) - 1), n
+
+
+def partial_spearman(
+    x: np.ndarray | pd.Series,
+    y: np.ndarray | pd.Series,
+    covars: np.ndarray | pd.DataFrame | pd.Series,
+) -> tuple[float, float, int]:
+    """Partial Spearman correlation of x and y after residualizing rank covariates."""
+    x_resid, y_resid, rank, n = partial_spearman_residuals(x, y, covars)
+    if n < 3:
+        return np.nan, np.nan, n
 
     if np.std(x_resid) == 0 or np.std(y_resid) == 0:
         return np.nan, np.nan, n

@@ -16,6 +16,8 @@ assert _spec.loader is not None
 _spec.loader.exec_module(_cli_util)
 _cli_util.apply_config_override("config/eda.yaml", ROOT)
 
+from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
+
 from src import config, setup_logging
 from src.data_preparation import (
     build_parsed_store,
@@ -27,7 +29,6 @@ from src.data_preparation import (
 from src.data_preparation.store import _store_dir, _validated_source
 from src.data_preparation.validation import validate_store
 from src.terminal_output import print_kv_table
-from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 
 logger = logging.getLogger(__name__)
 

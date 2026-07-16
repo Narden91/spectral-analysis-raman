@@ -76,6 +76,22 @@ def _cfg() -> dict:
     }
 
 
+def test_biological_pca_filters_cohort_before_subject_limit() -> None:
+    index = pd.DataFrame(
+        {
+            "subject_id": ["C01", "D01", "D02", "U01", "X01", "X01"],
+            "is_control": [True, False, False, np.nan, True, False],
+        }
+    )
+    disease_statuses, excluded = biological_pca._eligible_subject_control_statuses(index, "disease_only")
+    comparison_statuses, _ = biological_pca._eligible_subject_control_statuses(index, "disease_vs_control")
+
+    assert select_subjects(disease_statuses, max_subjects=1) == ["D01"]
+    assert disease_statuses == {"D01": False, "D02": False}
+    assert comparison_statuses == {"C01": True, "D01": False, "D02": False}
+    assert {item["subject_id"] for item in excluded} == {"U01", "X01"}
+
+
 def _inputs(n_subjects: int = 4) -> SubjectInputs:
     subjects = [f"S{i:02d}" for i in range(n_subjects)]
     axes = {

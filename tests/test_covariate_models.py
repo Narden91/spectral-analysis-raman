@@ -2,9 +2,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
-from src.analysis.covariate_models import run_covariate_region_models
+from src.analysis.covariate_models import _fit_logistic, _fit_ols, run_covariate_region_models
+
+
+def test_standard_covariate_models_return_predictor_inference() -> None:
+    rng = np.random.default_rng(42)
+    predictor = pd.Series(rng.normal(size=80))
+    covariates = pd.DataFrame({"age": rng.normal(65, 6, size=80)})
+    continuous = pd.Series(0.7 * predictor + 0.03 * covariates["age"] + rng.normal(scale=0.4, size=80))
+    coefficient, _intercept, r_squared, p_value = _fit_ols(continuous, predictor, covariates)
+    assert coefficient > 0
+    assert r_squared > 0
+    assert p_value < 0.05
+
+    logits = -0.4 + 1.2 * predictor + 0.02 * covariates["age"]
+    binary = pd.Series(rng.binomial(1, 1.0 / (1.0 + np.exp(-logits))))
+    coefficient, _intercept, accuracy, p_value = _fit_logistic(
+        binary, predictor, covariates, random_state=42
+    )
+    assert coefficient > 0
+    assert accuracy > 0.5
+    assert p_value < 0.05
 
 
 def _feature_matrix() -> pd.DataFrame:

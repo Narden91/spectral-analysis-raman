@@ -16,6 +16,14 @@ STATUS_NOT_TESTED_GATE = "not_tested_gate"
 STATUS_MISSING_REQUIRED_DATA = "missing_required_data"
 STATUS_DISABLED_OR_SKIPPED = "disabled_or_skipped"
 
+EVIDENCE_NOT_APPLICABLE = "not_applicable"
+EVIDENCE_NO_SUPPORTED_SIGNAL = "no_supported_evidence"
+EVIDENCE_EXPLORATORY_SIGNAL = "exploratory_signal"
+
+_VALID_EVIDENCE_STATUSES = frozenset(
+    {EVIDENCE_NOT_APPLICABLE, EVIDENCE_NO_SUPPORTED_SIGNAL, EVIDENCE_EXPLORATORY_SIGNAL}
+)
+
 _VALID_STATUSES = frozenset(
     {
         STATUS_OK,
@@ -36,10 +44,15 @@ class PhaseStatus:
     reason: str = ""
     n_subjects: int | None = None
     n_artifacts: int = 0
+    evidence_status: str = EVIDENCE_NOT_APPLICABLE
 
     def __post_init__(self) -> None:
         if self.status not in _VALID_STATUSES:
             raise ValueError(f"Unknown phase status '{self.status}' for phase '{self.phase_key}'")
+        if self.evidence_status not in _VALID_EVIDENCE_STATUSES:
+            raise ValueError(
+                f"Unknown evidence status '{self.evidence_status}' for phase '{self.phase_key}'"
+            )
 
     def as_row(self) -> dict[str, object]:
         return {
@@ -48,4 +61,5 @@ class PhaseStatus:
             "reason": self.reason,
             "n_subjects": self.n_subjects,
             "n_artifacts": self.n_artifacts,
+            "evidence_status": self.evidence_status,
         }

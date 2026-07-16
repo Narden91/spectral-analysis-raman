@@ -21,7 +21,14 @@ from src.analysis.clinical_feature_associations import (
     load_subject_feature_matrix,
 )
 from src.analysis.discriminant_spectra import run_subgroup_mean_spectra
-from src.analysis.phase_status import STATUS_INSUFFICIENT_N, PhaseStatus
+from src.analysis.io_utils import write_csv_atomic
+from src.analysis.phase_status import (
+    EVIDENCE_EXPLORATORY_SIGNAL,
+    EVIDENCE_NO_SUPPORTED_SIGNAL,
+    STATUS_INSUFFICIENT_N,
+    STATUS_OK,
+    PhaseStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -183,11 +190,26 @@ def _gap_statistic(
                 "observed_log_dispersion": float(np.log(observed)),
                 "reference_log_dispersion_mean": float(np.mean(reference_arr)),
                 "reference_log_dispersion_sd": float(np.std(reference_arr, ddof=1)) if len(reference_arr) > 1 else 0.0,
+                "reference_log_dispersion_se": (
+                    float(np.std(reference_arr, ddof=1) * np.sqrt(1.0 + 1.0 / n_bootstrap))
+                    if len(reference_arr) > 1
+                    else 0.0
+                ),
                 "gap": float(np.mean(reference_arr) - np.log(observed)),
                 "n_bootstrap": n_bootstrap,
             }
         )
     return pd.DataFrame(rows)
+
+
+def _select_gap_k(gap: pd.DataFrame) -> int:
+    """Use the Tibshirani one-standard-error rule, allowing the null k=1 model."""
+    ordered = gap.sort_values("n_clusters").reset_index(drop=True)
+    for index in range(len(ordered) - 1):
+        current, following = ordered.iloc[index], ordered.iloc[index + 1]
+        if float(current["gap"]) >= float(following["gap"]) - float(following["reference_log_dispersion_se"]):
+            return int(current["n_clusters"])
+    return int(ordered.iloc[-1]["n_clusters"])
 
 
 def _bootstrap_ari(
@@ -274,19 +296,18 @@ def run_disease_subgroups(
             n_subjects=int(len(disease_only)),
         )
 
-    min_clusters = int(subgroup_cfg.get("min_clusters", 2))
     max_clusters = int(subgroup_cfg.get("max_clusters", 4))
     n_bootstrap = int(subgroup_cfg.get("n_bootstrap", 100))
     random_state = int(subgroup_cfg.get("random_state", 42))
     k_values = [
         k
-        for k in range(min_clusters, max_clusters + 1)
-        if 1 < k < len(disease_only)
+        for k in range(1, max_clusters + 1)
+        if k < len(disease_only)
     ]
     if not k_values:
         logger.info("Disease subgroup analysis has no valid cluster counts; skipping CSV writes")
         return _empty_outputs(
-            "no valid cluster count in [min_clusters, max_clusters] for this cohort size",
+            "no valid cluster count in [1, max_clusters] for this cohort size",
             n_subjects=int(len(disease_only)),
         )
 
@@ -296,7 +317,29 @@ def run_disease_subgroups(
         n_bootstrap=n_bootstrap,
         random_state=random_state,
     )
-    selected_k = int(gap.sort_values("gap", ascending=False)["n_clusters"].iloc[0])
+    selected_k = _select_gap_k(gap)
+    gap_path = target_dir / "disease_subgroup_gap_statistic.csv"
+    write_csv_atomic(gap, gap_path, index=False)
+    if selected_k == 1:
+        for stale_name in (
+            "disease_subgroup_assignments.csv",
+            "disease_subgroup_stability.csv",
+            "disease_subgroup_feature_matrix.csv",
+            "subgroup_mean_spectra.csv",
+        ):
+            (target_dir / stale_name).unlink(missing_ok=True)
+        logger.info("Gap statistic did not support disease subgroups; retaining only the audit table")
+        return {
+            "disease_subgroup_gap_statistic": gap_path,
+            "_status": PhaseStatus(
+                phase_key="disease_subgroups",
+                status=STATUS_OK,
+                evidence_status=EVIDENCE_NO_SUPPORTED_SIGNAL,
+                reason="gap statistic selected k=1; no disease subgroups were emitted",
+                n_subjects=int(len(disease_only)),
+                n_artifacts=1,
+            ).as_row(),
+        }
     labels = _cluster_labels(X, selected_k)
     stability = _bootstrap_ari(
         X,
@@ -319,13 +362,11 @@ def run_disease_subgroups(
     )
 
     assignments_path = target_dir / "disease_subgroup_assignments.csv"
-    gap_path = target_dir / "disease_subgroup_gap_statistic.csv"
     stability_path = target_dir / "disease_subgroup_stability.csv"
     feature_path = target_dir / "disease_subgroup_feature_matrix.csv"
-    assignments.to_csv(assignments_path, index=False)
-    gap.to_csv(gap_path, index=False)
-    stability.to_csv(stability_path, index=False)
-    output_features.to_csv(feature_path, index=False)
+    write_csv_atomic(assignments, assignments_path, index=False)
+    write_csv_atomic(stability, stability_path, index=False)
+    write_csv_atomic(output_features, feature_path, index=False)
 
     # Emit per-subgroup mean spectra (reviewer request: "show the average spectrum per ML group")
     subgroup_cfg_emit = bool(subgroup_cfg.get("emit_cluster_mean_spectra", True))
@@ -350,4 +391,12 @@ def run_disease_subgroups(
         "disease_subgroup_stability": stability_path,
         "disease_subgroup_feature_matrix": feature_path,
         **mean_spectra_outputs,
+        "_status": PhaseStatus(
+            phase_key="disease_subgroups",
+            status=STATUS_OK,
+            evidence_status=EVIDENCE_EXPLORATORY_SIGNAL,
+            reason=f"gap statistic selected k={selected_k}; exploratory subgroup labels only",
+            n_subjects=int(len(disease_only)),
+            n_artifacts=4 + len(mean_spectra_outputs),
+        ).as_row(),
     }

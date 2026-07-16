@@ -34,3 +34,18 @@ def test_filter_disease_subjects_condition_fallback_drops_unknown() -> None:
     result = filter_disease_subjects(frame)
 
     assert result["subject_id"].tolist() == ["S1"]
+
+
+def test_filter_disease_subjects_routine_control_exclusion_does_not_warn(caplog) -> None:
+    frame = pd.DataFrame(
+        {
+            "subject_id": ["S1", "S2", "S3"],
+            "is_control": [True, True, False],
+        }
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = filter_disease_subjects(frame)
+
+    assert result["subject_id"].tolist() == ["S3"]
+    assert caplog.text == ""

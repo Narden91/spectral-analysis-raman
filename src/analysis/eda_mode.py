@@ -188,12 +188,18 @@ def validate_control_vs_disease_ml_config(cfg: dict[str, Any]) -> None:
         "n_inner_splits",
         "n_permutations",
         "n_bootstrap",
-        "importance_permutation_repeats",
     )
     for field in positive_int_fields:
         value = ml_cfg.get(field)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"analysis.control_vs_disease_ml.{field} must be a positive integer, got {value!r}")
+
+    importance_repeats = ml_cfg.get("importance_permutation_repeats", 5)
+    if not isinstance(importance_repeats, int) or isinstance(importance_repeats, bool) or importance_repeats <= 0:
+        raise ValueError(
+            "analysis.control_vs_disease_ml.importance_permutation_repeats "
+            f"must be a positive integer, got {importance_repeats!r}"
+        )
 
     grid_fields = (
         "pls_components_grid",

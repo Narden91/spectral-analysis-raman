@@ -171,7 +171,7 @@ def test_run_integrated_candidates_produces_expected_outputs(input_paths: dict[s
         feature_matrix_path=input_paths["feature_matrix"],
         candidate_regions_path=input_paths["candidate_regions"],
         covariate_models_path=input_paths["covariate_models"],
-        pls_vip_path=input_paths["pls_vip"],
+        pls_feature_effects_path=input_paths["pls_vip"],
         splsda_bands_path=input_paths["splsda_bands"],
         output_dir=tmp_path,
         cfg={

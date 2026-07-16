@@ -6,6 +6,7 @@ import pytest
 from src.analysis.nmf_decomposition import (
     _annotate_component,
     _fit_nmf_multi_init,
+    _matched_component_stability,
     _reconstruction_error,
 )
 
@@ -57,33 +58,34 @@ def test_reconstruction_error_positive():
 
 def test_fit_nmf_non_negative():
     X = _make_synthetic_spectra()
-    W, H, best_error, error_std = _fit_nmf_multi_init(
+    result = _fit_nmf_multi_init(
         X, n_components=3, alpha_w=0.1, alpha_h=0.0, n_init=3, random_state=0
     )
-    assert np.all(W >= -1e-10), "W should be non-negative"
-    assert np.all(H >= -1e-10), "H should be non-negative"
-    assert np.isfinite(best_error)
-    assert best_error >= 0.0
+    assert np.all(result.W >= -1e-10), "W should be non-negative"
+    assert np.all(result.H >= -1e-10), "H should be non-negative"
+    assert np.isfinite(result.best_error)
+    assert result.best_error >= 0.0
 
 
 def test_fit_nmf_stability_metric_finite():
     X = _make_synthetic_spectra()
-    W, H, best_error, error_std = _fit_nmf_multi_init(
+    result = _fit_nmf_multi_init(
         X, n_components=2, alpha_w=0.0, alpha_h=0.0, n_init=5, random_state=42
     )
-    assert np.isfinite(error_std)
-    assert error_std >= 0.0
+    assert np.isfinite(result.reconstruction_error_std)
+    assert result.reconstruction_error_std >= 0.0
+    assert np.all((result.component_stability >= 0.0) & (result.component_stability <= 1.0))
 
 
 def test_fit_nmf_sparsity_applied():
     """With L1 sparsity, W should be sparser than without."""
     X = _make_synthetic_spectra(n_subjects=20, n_channels=50)
-    W_sparse, _, _, _ = _fit_nmf_multi_init(
+    W_sparse = _fit_nmf_multi_init(
         X, n_components=3, alpha_w=1.0, alpha_h=0.0, n_init=3, random_state=0
-    )
-    W_dense, _, _, _ = _fit_nmf_multi_init(
+    ).W
+    W_dense = _fit_nmf_multi_init(
         X, n_components=3, alpha_w=0.0, alpha_h=0.0, n_init=3, random_state=0
-    )
+    ).W
     # Sparsity should produce at least as many near-zero entries
     n_zero_sparse = int(np.sum(W_sparse < 1e-6))
     n_zero_dense = int(np.sum(W_dense < 1e-6))
@@ -92,13 +94,28 @@ def test_fit_nmf_sparsity_applied():
 
 def test_fit_nmf_reproducible():
     X = _make_synthetic_spectra()
-    W1, H1, e1, _ = _fit_nmf_multi_init(
+    result1 = _fit_nmf_multi_init(
         X, n_components=2, alpha_w=0.0, alpha_h=0.0, n_init=3, random_state=7
     )
-    W2, H2, e2, _ = _fit_nmf_multi_init(
+    result2 = _fit_nmf_multi_init(
         X, n_components=2, alpha_w=0.0, alpha_h=0.0, n_init=3, random_state=7
     )
-    np.testing.assert_allclose(e1, e2, rtol=1e-6)
+    np.testing.assert_allclose(result1.best_error, result2.best_error, rtol=1e-6)
+    np.testing.assert_allclose(result1.component_stability, result2.component_stability, rtol=1e-6)
+
+
+def test_component_stability_matches_permuted_components() -> None:
+    reference = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    swapped = reference[[1, 0]]
+    np.testing.assert_allclose(_matched_component_stability(reference, [swapped]), [1.0, 1.0])
+
+
+def test_component_stability_is_unavailable_for_one_successful_start() -> None:
+    X = _make_synthetic_spectra()
+    result = _fit_nmf_multi_init(
+        X, n_components=2, alpha_w=0.0, alpha_h=0.0, n_init=1, random_state=42
+    )
+    assert np.isnan(result.component_stability).all()
 
 
 # ---------------------------------------------------------------------------

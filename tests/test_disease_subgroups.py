@@ -91,7 +91,8 @@ def test_run_disease_subgroups_writes_expected_outputs(tmp_path: Path) -> None:
     assert (tmp_path / "12_disease_subgroups" / "subgroup_mean_spectra.csv").exists()
     assert len(assignments) == 16
     assert assignments["subgroup_label"].nunique() >= 2
-    assert set(gap["n_clusters"]) == {2, 3}
+    assert set(gap["n_clusters"]) == {1, 2, 3}
+    assert "reference_log_dispersion_se" in gap.columns
     assert int(stability["n_bootstrap_requested"].iloc[0]) == 6
     assert "region__1300_R1" in features.columns
 

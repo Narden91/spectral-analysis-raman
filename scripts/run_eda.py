@@ -13,6 +13,7 @@ import argparse
 import importlib.util
 import json
 import logging
+import subprocess
 import sys
 from pathlib import Path
 
@@ -164,7 +165,39 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show detailed INFO logs in the terminal. Detailed logs are always written to run.log.",
     )
+    parser.add_argument(
+        "--publication-run",
+        action="store_true",
+        help=(
+            "Refuse quick/subset runs and require a clean Git worktree before generating a publication run. "
+            "This does not make private results public; use export_publication_bundle afterwards."
+        ),
+    )
     return parser.parse_args()
+
+
+def _validate_publication_run(args: argparse.Namespace, ranges: list[str]) -> None:
+    """Reject non-reproducible shortcuts before any publication-run artifact is written."""
+    if not args.publication_run:
+        return
+    violations: list[str] = []
+    if args.max_subjects is not None:
+        violations.append("--max-subjects is not allowed")
+    if args.skip_preprocess:
+        violations.append("--skip-preprocess is not allowed")
+    if ranges != ["1300", "2850", "both"]:
+        violations.append("the full fused range set (1300, 2850, both) is required")
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if status.stdout.strip():
+        violations.append("a clean tracked Git worktree is required")
+    if violations:
+        raise ValueError("Publication-run preflight failed: " + "; ".join(violations))
 
 
 def _write_warning_summaries(output_root: Path) -> list[str]:
@@ -224,12 +257,13 @@ def _main() -> None:
     validate_eda_mode_config(config, analysis_mode)
     if analysis_mode == "disease_vs_control":
         validate_control_vs_disease_ml_config(config)
+    ranges = _requested_ranges(args.range)
+    _validate_publication_run(args, ranges)
     _set_analysis_output_root(analysis_mode)
     metadata_dir = get_run_metadata_dir()
     _attach_run_log_file(metadata_dir / "run.log")
     data_source = resolve_data_source(config, source_override=args.source)
     print_kv_table("Active Data Source", data_source_summary(data_source))
-    ranges = _requested_ranges(args.range)
     print_status(
         f"Running EDA mode={analysis_mode} ranges={', '.join(ranges)} "
         f"output={_output_dir('eda_subdir')}"

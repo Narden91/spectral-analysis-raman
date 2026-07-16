@@ -69,7 +69,7 @@ def test_pls_regression_produces_expected_outputs(mock_load, synthetic_feature_m
     )
 
     assert len(outputs) == 4
-    for key in ["pls_regression_performance", "pls_vip_bands", "pls_coefficients", "pls_permutation_results"]:
+    for key in ["pls_regression_performance", "pls_feature_effects", "pls_permutation_results"]:
         assert key in outputs
         assert outputs[key].exists()
 
@@ -81,13 +81,16 @@ def test_pls_regression_produces_expected_outputs(mock_load, synthetic_feature_m
     assert not perf_df["high_variance_flag"].iloc[0]
     assert perf_df["cv_strategy"].iloc[0] == "KFold"
 
-    vip_df = pd.read_csv(outputs["pls_vip_bands"])
-    assert len(vip_df) == 10  # 2 targets * 5 features
-    assert "vip_score" in vip_df.columns
-    assert {"estimation_scope", "validated", "selection_frequency", "sign_stability"}.issubset(vip_df.columns)
-    assert not vip_df["validated"].any()
+    effects_df = pd.read_parquet(outputs["pls_feature_effects"])
+    assert len(effects_df) == 10  # 2 targets * 5 features
+    assert "vip_score" in effects_df.columns
+    assert {"estimation_scope", "validated", "selection_frequency", "sign_stability"}.issubset(effects_df.columns)
+    assert {"permutation_p_value_holm", "model_supported", "inference_role"}.issubset(effects_df.columns)
+    assert not effects_df["validated"].any()
     permutation = pd.read_csv(outputs["pls_permutation_results"])
     assert (permutation["permutation_p_value"] >= 1 / 11).all()
+    assert "permutation_p_value_holm" in permutation.columns
+    assert outputs["_status"]["phase_key"] == "pls_regression"
 
 
 @patch("src.analysis.pls_regression.load_disease_feature_frame")

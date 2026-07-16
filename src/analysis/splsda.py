@@ -254,7 +254,7 @@ def run_splsda_classifier(
     pls_outputs: dict[str, Path] | None = None,
     output_dir: str | Path | None = None,
     cfg: dict | None = None,
-) -> dict[str, Path]:
+) -> dict[str, object]:
     cfg = _cfg(cfg)
     splsda_cfg = _splsda_cfg(cfg)
 
@@ -333,6 +333,13 @@ def run_splsda_classifier(
                 return {
                     "pls_l1da_cv_performance": perf_path,
                     "pls_l1da_permutation_results": perm_path,
+                    "_status": PhaseStatus(
+                        phase_key="splsda",
+                        status=STATUS_NOT_TESTED_GATE,
+                        reason=f"no PLS model passed permutation gate (p < {gate_p:g})",
+                        n_subjects=None,
+                        n_artifacts=2,
+                    ).as_row(),
                 }
         except Exception as e:
             logger.warning("Could not read PLS permutation results to check gate: %s", e)

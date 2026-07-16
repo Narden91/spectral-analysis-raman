@@ -23,6 +23,7 @@ from src import (
     get_cross_region_summary_dir,
     resolve_project_path,
 )
+from src.analysis.eda_mode import resolve_eda_analysis_mode
 from src.analysis.joint_dr import joint_pca_mfa
 from src.analysis.statistics import run_pca
 from src.analysis.subject_features import write_subject_feature_exports
@@ -83,8 +84,6 @@ class ModelResult:
     region_contributions: pd.DataFrame
     region_annotation_candidates: pd.DataFrame
     loading_region_summary: pd.DataFrame
-    band_contributions: pd.DataFrame
-    biochemical_summary: pd.DataFrame
     pc1_warning: str | None = None
     method_metadata: dict[str, object] = field(default_factory=dict)
 
@@ -180,13 +179,46 @@ def build_subject_inputs(max_subjects: int | None = None, cfg: dict | None = Non
     """Load the already-preprocessed store and aggregate one median per subject."""
     cfg = config if cfg is None else cfg
     validate_biological_pca_config(cfg)
-    return _build_subject_inputs_from_materialized_store(max_subjects=max_subjects)
+    return _build_subject_inputs_from_materialized_store(max_subjects=max_subjects, cfg=cfg)
 
 
-def _build_subject_inputs_from_materialized_store(max_subjects: int | None = None) -> SubjectInputs:
+def _eligible_subject_control_statuses(
+    df_index: pd.DataFrame, mode: str
+) -> tuple[dict[str, bool], list[dict[str, str]]]:
+    """Return explicit, internally consistent cohort labels for the EDA mode."""
+    if "is_control" not in df_index.columns:
+        raise ValueError("Biological PCA input index is missing required 'is_control' labels")
+
+    statuses: dict[str, bool] = {}
+    excluded: list[dict[str, str]] = []
+    for subject_id, rows in df_index.groupby(df_index["subject_id"].astype(str), sort=True):
+        values = rows["is_control"].dropna().unique().tolist()
+        if len(values) != 1 or not isinstance(values[0], (bool, np.bool_)):
+            excluded.append({"subject_id": str(subject_id), "reason": "missing or inconsistent is_control label"})
+            continue
+        is_control = bool(values[0])
+        if mode == "disease_only" and is_control:
+            continue
+        statuses[str(subject_id)] = is_control
+
+    if excluded:
+        logger.warning(
+            "BioPCA excluded %d subject(s) with missing or inconsistent cohort labels: %s",
+            len(excluded),
+            ", ".join(item["subject_id"] for item in excluded[:10]),
+        )
+    return statuses, excluded
+
+
+def _build_subject_inputs_from_materialized_store(
+    max_subjects: int | None = None, cfg: dict | None = None
+) -> SubjectInputs:
+    cfg = config if cfg is None else cfg
     df_index = load_file_index()
     clinical = load_clinical_subjects()
-    subjects = select_subjects(df_index["subject_id"], max_subjects=max_subjects)
+    mode = resolve_eda_analysis_mode(cfg)
+    cohort_statuses, excluded_subjects = _eligible_subject_control_statuses(df_index, mode)
+    subjects = select_subjects(cohort_statuses, max_subjects=max_subjects)
     df_index = df_index[df_index["subject_id"].astype(str).isin(subjects)].copy()
     clinical = clinical[clinical["subject_id"].astype(str).isin(subjects)].copy()
 
@@ -204,7 +236,7 @@ def _build_subject_inputs_from_materialized_store(max_subjects: int | None = Non
     region_rows: list[dict[str, object]] = []
     subject_rows: list[dict[str, object]] = []
 
-    excluded_subjects: list[dict[str, str]] = []
+    missing_spectral_subjects: list[dict[str, str]] = []
     for subject_id in subjects:
         has_all_blocks = all(
             np.any(payloads[block]["subject_ids"].astype(str) == str(subject_id))
@@ -212,15 +244,17 @@ def _build_subject_inputs_from_materialized_store(max_subjects: int | None = Non
         )
         if not has_all_blocks:
             missing_blocks = [b for b in BLOCKS if not np.any(payloads[b]["subject_ids"].astype(str) == str(subject_id))]
-            excluded_subjects.append({"subject_id": str(subject_id), "reason": f"missing blocks: {', '.join(missing_blocks)}"})
+            exclusion = {"subject_id": str(subject_id), "reason": f"missing blocks: {', '.join(missing_blocks)}"}
+            excluded_subjects.append(exclusion)
+            missing_spectral_subjects.append(exclusion)
             continue
         included_subjects.append(str(subject_id))
 
-    if excluded_subjects:
+    if missing_spectral_subjects:
         logger.warning(
             "BioPCA excluded %d subject(s) for missing spectral data: %s",
-            len(excluded_subjects),
-            ", ".join(d["subject_id"] for d in excluded_subjects[:10]),
+            len(missing_spectral_subjects),
+            ", ".join(d["subject_id"] for d in missing_spectral_subjects[:10]),
         )
 
     for subject_id in included_subjects:
@@ -229,12 +263,12 @@ def _build_subject_inputs_from_materialized_store(max_subjects: int | None = Non
         subject_areas: set[str] = set()
         subject_pixels = 0
         clinical_row = clinical.loc[clinical["subject_id"].astype(str) == str(subject_id)]
-        if clinical_row.empty:
-            is_control = False
-            gender = "unknown"
-        else:
-            is_control = bool(clinical_row["is_control"].iloc[0]) if "is_control" in clinical_row.columns else False
-            gender = str(clinical_row["gender"].iloc[0]).lower() if "gender" in clinical_row.columns else "unknown"
+        is_control = cohort_statuses[str(subject_id)]
+        gender = (
+            str(clinical_row["gender"].iloc[0]).lower()
+            if not clinical_row.empty and "gender" in clinical_row.columns and pd.notna(clinical_row["gender"].iloc[0])
+            else "unknown"
+        )
 
         for block in BLOCKS:
             mask = payloads[block]["subject_ids"].astype(str) == str(subject_id)
@@ -823,15 +857,6 @@ def fit_biological_pca_models(inputs: SubjectInputs, cfg: dict | None = None) ->
             region_contributions,
             region_annotations,
         )
-        compatibility_contributions = region_contributions.rename(
-            columns={
-                "region_id": "band_name",
-                "region_label": "assignment",
-            }
-        ).copy()
-        compatibility_summary = loading_region_summary.rename(
-            columns={"dominant_context": "dominant_biochemical_class"}
-        ).copy()
         pc1_ratio = float(pca_result.get("pc1_variance_ratio", np.nan))
         pc1_warning = (
             f"PC1 explains {pc1_ratio * 100:.1f}% variance. Inspect baseline/background and score structure."
@@ -848,8 +873,6 @@ def fit_biological_pca_models(inputs: SubjectInputs, cfg: dict | None = None) ->
                 region_contributions=region_contributions,
                 region_annotation_candidates=region_annotations,
                 loading_region_summary=loading_region_summary,
-                band_contributions=compatibility_contributions,
-                biochemical_summary=compatibility_summary,
                 pc1_warning=pc1_warning,
                 method_metadata=method_metadata,
             )
@@ -1038,7 +1061,7 @@ def _plot_loadings(result: ModelResult, output_dir: Path, pcs: list[str] | None 
     available = [pc for pc in pcs if f"{pc}_loading" in result.loadings.columns]
     if not available:
         return
-    is_compatibility = available == ["PC1", "PC2"]
+    has_two_pcs = available == ["PC1", "PC2"]
     file_suffix = "_".join(pc.lower() for pc in available)
     if result.name == "PCA_whole":
         fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=False)
@@ -1071,7 +1094,7 @@ def _plot_loadings(result: ModelResult, output_dir: Path, pcs: list[str] | None 
         ax.set_title(f"{result.name} loadings", fontsize=12, loc="center")
         _place_outside_legend(ax, title="PC")
     fig.tight_layout()
-    filename = "loadings_pc1_pc2.png" if is_compatibility else f"loadings_{file_suffix}.png"
+    filename = "loadings_pc1_pc2.png" if has_two_pcs else f"loadings_{file_suffix}.png"
     _save_plot(fig, output_dir / filename)
 
 
@@ -1130,28 +1153,6 @@ def _plot_band_contributions(
     fig.tight_layout()
     filename = "loading_regions_pc1_pc2.png" if available_pcs == ["PC1", "PC2"] else f"loading_regions_{'_'.join(pc.lower() for pc in available_pcs)}.png"
     _save_plot(fig, output_dir / filename)
-
-    if available_pcs == ["PC1", "PC2"]:
-        fig2, ax2 = plt.subplots(figsize=(8, max(4, 0.35 * len(pivot))))
-        for i, pc in enumerate(available_pcs):
-            ax2.barh(
-                y + np.array([-0.175, 0.175])[i],
-                pivot[pc],
-                0.35,
-                label=pc,
-                color=PC_COLORS.get(pc, "#6B7280"),
-                alpha=0.85,
-                edgecolor="#334155",
-                linewidth=0.3,
-            )
-        ax2.set_yticks(y)
-        ax2.set_yticklabels(display_labels, fontsize=9)
-        ax2.set_xlabel("Relative absolute contribution")
-        ax2.set_title(f"{result.name} loading-derived regions", fontsize=12, loc="center")
-        _place_outside_legend(ax2, title="PC")
-        fig2.tight_layout()
-        _save_plot(fig2, output_dir / "band_contributions_pc1_pc2.png")
-
 
 def _plot_biochemical_summary(result: ModelResult, output_dir: Path, pcs: list[str] | None = None) -> None:
     if pcs is None:
@@ -1378,29 +1379,17 @@ def _write_biological_pca_summary_markdown(summary_df: pd.DataFrame, output_dir:
 
 
 def _write_model_readme(output_dir: Path) -> None:
-    (output_dir / "README.md").write_text("\n".join(
-            [
-                "# Biological PCA Outputs",
-                "",
-                "Canonical PC1-PC3 figures:",
-                "",
-                "- scores_pc1_pc2.png",
-                "- scores_pc1_pc3.png",
-                "- scores_pc2_pc3.png",
-                "- scores_pc_pairgrid.png",
-                "- loadings_pc1_pc2_pc3.png",
-                "- loading_regions_pc1_pc2_pc3.png",
-                "",
-                "Compatibility figures retained for one cycle:",
-                "",
-                "- loadings_pc1_pc2.png",
-                "- loading_regions_pc1_pc2.png",
-                "- band_contributions_pc1_pc2.png",
-                "- biochemical_summary_pc1_pc2.png",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    lines = [
+        "# Biological PCA Outputs",
+        "",
+        "- scores_pc1_pc2.png",
+        "- scores_pc1_pc3.png",
+        "- scores_pc2_pc3.png",
+        "- scores_pc_pairgrid.png",
+        "- loadings_pc1_pc2_pc3.png",
+        "- loading_regions_pc1_pc2_pc3.png",
+    ]
+    (output_dir / "README.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_outputs(
@@ -1472,8 +1461,6 @@ def _write_outputs(
             "region_contributions.csv": result.region_contributions,
             "region_annotation_candidates.csv": result.region_annotation_candidates,
             "loading_region_summary.csv": result.loading_region_summary,
-            "band_contributions.csv": result.band_contributions,
-            "biochemical_summary.csv": result.biochemical_summary,
         }
         for filename, df in model_tables.items():
             df.to_csv(model_dir / filename, index=False)
@@ -1534,11 +1521,8 @@ def _write_outputs(
         _plot_scores_pairgrid(result, model_dir)
         _plot_scree(result, model_dir)
         _plot_loadings(result, model_dir, pcs=pcs)
-        _plot_loadings(result, model_dir, pcs=["PC1", "PC2"])
         _plot_band_contributions(result, model_dir, pcs=pcs)
-        _plot_band_contributions(result, model_dir, pcs=["PC1", "PC2"])
         _plot_biochemical_summary(result, model_dir, pcs=pcs)
-        _plot_biochemical_summary(result, model_dir, pcs=["PC1", "PC2"])
         _write_interpretation_md(result, model_dir)
         _write_pc1_dominance_report(result, model_dir)
         _write_model_readme(model_dir)

@@ -133,7 +133,10 @@ def test_splsda_gates_on_pls_p_value(mock_load, synthetic_feature_matrix, mock_s
     assert set(outputs) == {
         "pls_l1da_cv_performance",
         "pls_l1da_permutation_results",
+        "_status",
     }
+    assert outputs["_status"]["status"] == "not_tested_gate"
+    assert outputs["_status"]["n_artifacts"] == 2
     perf_df = pd.read_csv(outputs["pls_l1da_cv_performance"])
     assert set(perf_df["status"]) == {"not_tested_gate"}
 

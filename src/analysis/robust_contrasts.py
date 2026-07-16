@@ -6,6 +6,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -22,6 +25,7 @@ from src.analysis.statistics import (
     cohens_d,
     fdr_correction,
     partial_spearman,
+    partial_spearman_residuals,
     variance_homogeneity_test,
 )
 
@@ -291,23 +295,22 @@ def _permutation_partial_spearman_p_value(
     if len(complete) < 3 or n_permutations <= 0:
         return np.nan
 
-    observed = abs(partial_spearman(complete[feature], complete[endpoint], complete[covariates])[0])
-    if not np.isfinite(observed):
+    feature_residual, endpoint_residual, _rank, _n = partial_spearman_residuals(
+        complete[feature], complete[endpoint], complete[covariates]
+    )
+    if np.std(feature_residual) == 0 or np.std(endpoint_residual) == 0:
         return np.nan
+    observed = abs(float(np.corrcoef(feature_residual, endpoint_residual)[0, 1]))
 
     rng = np.random.default_rng(random_state)
-    endpoint_values = complete[endpoint].to_numpy(dtype=float)
     n_jobs = 1 if n_jobs == 0 else n_jobs
     if n_jobs != 1:
         seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
         exceedances = sum(
             Parallel(n_jobs=n_jobs)(
                 delayed(_permuted_partial_spearman_exceeds)(
-                    complete,
-                    feature,
-                    endpoint,
-                    covariates,
-                    endpoint_values,
+                    feature_residual,
+                    endpoint_residual,
                     observed,
                     int(seed),
                 )
@@ -317,9 +320,7 @@ def _permutation_partial_spearman_p_value(
     else:
         exceedances = 0
         for _ in range(n_permutations):
-            shuffled = complete.copy()
-            shuffled[endpoint] = rng.permutation(endpoint_values)
-            permuted = abs(partial_spearman(shuffled[feature], shuffled[endpoint], shuffled[covariates])[0])
+            permuted = abs(float(np.corrcoef(feature_residual, rng.permutation(endpoint_residual))[0, 1]))
             if np.isfinite(permuted) and permuted >= observed - 1e-12:
                 exceedances += 1
     return float((exceedances + 1) / (n_permutations + 1))
@@ -362,18 +363,13 @@ def _permuted_cliffs_delta_exceeds(
 
 
 def _permuted_partial_spearman_exceeds(
-    complete: pd.DataFrame,
-    feature: str,
-    endpoint: str,
-    covariates: list[str],
-    endpoint_values: np.ndarray,
+    feature_residual: np.ndarray,
+    endpoint_residual: np.ndarray,
     observed: float,
     seed: int,
 ) -> bool:
     rng = np.random.default_rng(seed)
-    shuffled = complete.copy()
-    shuffled[endpoint] = rng.permutation(endpoint_values)
-    permuted = abs(partial_spearman(shuffled[feature], shuffled[endpoint], shuffled[covariates])[0])
+    permuted = abs(float(np.corrcoef(feature_residual, rng.permutation(endpoint_residual))[0, 1]))
     return bool(np.isfinite(permuted) and permuted >= observed - 1e-12)
 
 

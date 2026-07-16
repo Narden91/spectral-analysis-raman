@@ -19,13 +19,36 @@ from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
 )
-from src.analysis.phase_status import STATUS_INSUFFICIENT_N, PhaseStatus
+from src.analysis.io_utils import write_csv_atomic, write_parquet_atomic
+from src.analysis.phase_status import (
+    EVIDENCE_EXPLORATORY_SIGNAL,
+    EVIDENCE_NO_SUPPORTED_SIGNAL,
+    STATUS_INSUFFICIENT_N,
+    STATUS_OK,
+    PhaseStatus,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _pls_cfg(cfg: dict) -> dict:
     return cfg.get("analysis", {}).get("pls_regression", {})
+
+
+def _holm_adjust(p_values: pd.Series) -> pd.Series:
+    """Return Holm-adjusted p-values while preserving missing values."""
+    numeric = pd.to_numeric(p_values, errors="coerce")
+    adjusted = pd.Series(np.nan, index=p_values.index, dtype=float)
+    valid = numeric.dropna()
+    if valid.empty:
+        return adjusted
+    order = np.argsort(valid.to_numpy(dtype=float))
+    ordered = valid.to_numpy(dtype=float)[order]
+    values = np.maximum.accumulate(ordered * (len(valid) - np.arange(len(valid))))
+    restored = np.empty(len(valid), dtype=float)
+    restored[order] = np.minimum(values, 1.0)
+    adjusted.loc[valid.index] = restored
+    return adjusted
 
 
 def _calculate_vip(model: PLSRegression) -> np.ndarray:
@@ -117,7 +140,7 @@ def _permutation_test(
     random_state: int,
     n_jobs: int = 1,
 ) -> tuple[float, float, float]:
-    """Perform permutation test on the PLS model using the fixed optimal component count."""
+    """Evaluate the entire nested-CV PLS procedure against permuted outcomes."""
     n_jobs = 1 if n_jobs == 0 else n_jobs
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
@@ -396,20 +419,58 @@ def run_pls_regression(
             ).as_row()
         }
 
+    gate_alpha = float(pls_cfg.get("permutation_family_alpha", 0.05))
+    perf_df["permutation_p_value_holm"] = _holm_adjust(perf_df["permutation_p_value"])
+    perf_df["model_supported"] = perf_df["permutation_p_value_holm"].lt(gate_alpha).fillna(False)
+    perm_df = perm_df.merge(
+        perf_df[["target", "permutation_p_value_holm", "model_supported"]],
+        on="target",
+        how="left",
+        validate="one_to_one",
+    )
+    feature_df = vip_df.merge(
+        coef_df[["target", "feature_name", "coefficient"]],
+        on=["target", "feature_name"],
+        how="inner",
+        validate="one_to_one",
+    ).merge(
+        perf_df[["target", "permutation_p_value_holm", "model_supported"]],
+        on="target",
+        how="left",
+        validate="many_to_one",
+    )
+    feature_df["inference_role"] = "descriptive_model_audit"
+
     perf_path = target_dir / "pls_regression_performance.csv"
-    vip_path = target_dir / "pls_vip_bands.csv"
-    coef_path = target_dir / "pls_coefficients.csv"
+    effects_path = target_dir / "pls_feature_effects.parquet"
     perm_path = target_dir / "pls_permutation_results.csv"
 
-    perf_df.to_csv(perf_path, index=False)
-    vip_df.to_csv(vip_path, index=False)
-    coef_df.to_csv(coef_path, index=False)
-    perm_df.to_csv(perm_path, index=False)
+    write_csv_atomic(perf_df, perf_path, index=False)
+    write_parquet_atomic(feature_df, effects_path, index=False)
+    write_csv_atomic(perm_df, perm_path, index=False)
+    for obsolete_path in (target_dir / "pls_vip_bands.csv", target_dir / "pls_coefficients.csv"):
+        obsolete_path.unlink(missing_ok=True)
 
     logger.info("PLS1 regression outputs written to %s", target_dir)
+    evidence_status = (
+        EVIDENCE_EXPLORATORY_SIGNAL
+        if bool(perf_df["model_supported"].any())
+        else EVIDENCE_NO_SUPPORTED_SIGNAL
+    )
     return {
         "pls_regression_performance": perf_path,
-        "pls_vip_bands": vip_path,
-        "pls_coefficients": coef_path,
+        "pls_feature_effects": effects_path,
         "pls_permutation_results": perm_path,
+        "_status": PhaseStatus(
+            phase_key="pls_regression",
+            status=STATUS_OK,
+            evidence_status=evidence_status,
+            reason=(
+                "at least one endpoint survived the Holm-adjusted permutation gate"
+                if evidence_status == EVIDENCE_EXPLORATORY_SIGNAL
+                else "no endpoint survived the Holm-adjusted permutation gate"
+            ),
+            n_subjects=int(disease_only["subject_id"].nunique()),
+            n_artifacts=3,
+        ).as_row(),
     }

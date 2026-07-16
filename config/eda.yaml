@@ -137,6 +137,7 @@ analysis:
     min_subjects: 10
     vip_threshold: 1.0
     n_permutations: 1000
+    permutation_family_alpha: 0.05  # Holm correction across configured continuous endpoints
     n_jobs: -1
     random_state: 42
   splsda:

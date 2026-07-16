@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import matplotlib
 
@@ -61,19 +61,16 @@ def _load_csv_if_exists(path: str | Path | None) -> pd.DataFrame | None:
     return None if frame.empty else frame
 
 
-def _panel_tier_counts(ranking: pd.DataFrame) -> pd.DataFrame:
-    if ranking.empty or "evidence_tier" not in ranking.columns:
-        return pd.DataFrame(
-            {
-                "evidence_tier": ["strong_trend", "moderate_trend", "weak_or_unstable"],
-                "n_features": [0, 0, 0],
-            }
-        )
-    counts = ranking["evidence_tier"].value_counts()
+def _panel_flag_counts(ranking: pd.DataFrame) -> pd.DataFrame:
+    """Count descriptive checks separately; they are not independent evidence tiers."""
+    checks = ("effect_size_flag", "bootstrap_ci_excludes_zero", "permutation_flag")
     return pd.DataFrame(
         {
-            "evidence_tier": ["strong_trend", "moderate_trend", "weak_or_unstable"],
-            "n_features": [int(counts.get(tier, 0)) for tier in ["strong_trend", "moderate_trend", "weak_or_unstable"]],
+            "descriptive_check": checks,
+            "n_features": [
+                int(ranking.get(check, pd.Series(dtype=bool)).fillna(False).sum())
+                for check in checks
+            ],
         }
     )
 
@@ -84,10 +81,10 @@ def _top_feature_line(ranking: pd.DataFrame, feature_names: list[str]) -> str:
     subset = ranking.loc[ranking["feature_name"].isin(feature_names)].copy()
     if subset.empty:
         return "No ranked panel feature available yet."
-    row = subset.sort_values(["robust_score", "max_abs_cliffs_delta", "feature_name"], ascending=[False, False, True]).iloc[0]
+    row = subset.sort_values(["max_abs_cliffs_delta", "feature_name"], ascending=[False, True]).iloc[0]
     return (
-        f"Highest-ranked available feature: `{row['feature_name']}` "
-        f"({row['evidence_tier']}, robust_score={int(row['robust_score'])})."
+        f"Largest observed available effect: `{row['feature_name']}` "
+        f"(|Cliff's delta|={row['max_abs_cliffs_delta']:.3g}; exploratory descriptive check only)."
     )
 
 
@@ -113,7 +110,7 @@ def _build_panel_readme(ranking: pd.DataFrame, anchor: pd.DataFrame | None) -> s
         "- `preregistration.md`: provenance-aware frozen panel snapshot.\n"
         "- `panel_provenance.csv`: registration/provenance fields.\n"
         "- `panel_feature_matrix.csv`: subject-level fixed-panel features.\n"
-        "- `feature_robustness_ranking.csv`: graded Phase L evidence score.\n"
+        "- `panel_evidence_flags.csv`: separate descriptive Phase L evidence flags (not a score).\n"
         "- `panel_report_section.md`: four-domain conservative synthesis.\n"
         "- `primary_anchor_result.csv`: prespecified primary hypothesis test.\n"
     )
@@ -134,16 +131,16 @@ def build_panel_report_section(
             f"permutation p={row.get('perm_p_value', pd.NA)}."
         )
 
-    tier_counts = _panel_tier_counts(ranking)
+    flag_counts = _panel_flag_counts(ranking)
     lines = [
         "# Fixed Post Hoc Panel Report Section",
         "",
         "This section summarizes region-overlapping, tentatively assigned Raman panel features. "
-        "It reports graded exploratory evidence only and avoids clinical classification claims.",
+        "It reports separate descriptive checks only; these dependent checks are not combined into an evidence score.",
         "",
-        "## Robustness Summary",
+        "## Descriptive Check Summary",
         "",
-        dataframe_to_markdown(tier_counts),
+        dataframe_to_markdown(flag_counts),
         "",
         "## Membrane Remodeling",
         "",
@@ -175,7 +172,7 @@ def build_panel_report_section(
 
 def run_panel_report_section(
     *,
-    robustness_ranking_path: str | Path | None = None,
+    evidence_flags_path: str | Path | None = None,
     anchor_result_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
@@ -188,7 +185,7 @@ def run_panel_report_section(
 
     target_dir = Path(output_dir) if output_dir is not None else get_confirmatory_panel_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
-    ranking = _load_csv_if_exists(robustness_ranking_path or target_dir / "feature_robustness_ranking.csv")
+    ranking = _load_csv_if_exists(evidence_flags_path or target_dir / "panel_evidence_flags.csv")
     anchor = _load_csv_if_exists(anchor_result_path or target_dir / "primary_anchor_result.csv")
     text = build_panel_report_section(
         ranking=ranking if ranking is not None else pd.DataFrame(),
@@ -326,6 +323,8 @@ def _build_report(
     figures: dict[str, Path | None],
     analysis_mode: str,
     panel_report_section_path: Path | None = None,
+    minimal_panel_path: Path | None = None,
+    minimal_panel_status: Mapping[str, object] | None = None,
 ) -> str:
     has_significant_regions = bool(candidates.get("significance_supported", pd.Series(dtype=bool)).fillna(False).any())
     if has_significant_regions:
@@ -383,18 +382,34 @@ def _build_report(
     for class_name in _CLASS_ORDER:
         lines.append(_section_for_class(class_name, candidates))
 
+    minimal_panel_state = str((minimal_panel_status or {}).get("status", ""))
+    minimal_panel = load_csv_or_empty(minimal_panel_path) if minimal_panel_path is not None else pd.DataFrame()
+    if not minimal_panel.empty and minimal_panel_state in {"", "ok"}:
+        minimal_panel_note = (
+            "The candidate-derived minimal panel was selected by nested cross-validated ElasticNet / "
+            "L1-penalized logistic regression with permutation testing and bootstrap stability summaries."
+        )
+    elif minimal_panel_state == "not_tested_gate":
+        minimal_panel_note = (
+            "The candidate-derived minimal panel was not tested because no cluster-supported candidate region passed "
+            "the prespecified gate."
+        )
+    else:
+        minimal_panel_note = "No candidate-derived minimal-panel result was available for this run."
+
     lines.extend([
         "",
         "## Methods note",
         "",
         "Candidate regions were detected at the subject level across clinical correlations, "
         "longitudinal ΔMoCA analyses, and disease-internal stratification tests, with cluster-mass permutation correction. "
+        "These whole-spectrum screens and their cluster-permutation nulls are marginal and unadjusted for age and sex. "
         "When no corrected intervals were detected, fallback largest-effect intervals were retained only for transparent "
         "hypothesis generation and are not treated as statistical findings. "
         "Post-selection sensitivity models included age and sex only; SEC fraction, concentration, column/batch age, "
         "sample volume, acquisition batch, and other technical confounders were unavailable. These models do not validate selection. "
-        "The minimal panel was selected by nested cross-validated ElasticNet / L1-penalized logistic regression "
-        "with permutation testing and bootstrap stability summaries.",
+        "Results may therefore reflect residual confounding. ",
+        minimal_panel_note,
         "",
     ])
     return "\n".join(lines)
@@ -404,6 +419,7 @@ def run_candidate_region_report(
     *,
     integrated_candidates_path: str | Path | None = None,
     minimal_panel_path: str | Path | None = None,
+    minimal_panel_status: Mapping[str, object] | None = None,
     panel_report_section_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
@@ -467,6 +483,8 @@ def run_candidate_region_report(
         figures,
         _analysis_mode(cfg),
         Path(panel_report_section_path) if panel_report_section_path is not None else None,
+        Path(minimal_panel_path) if minimal_panel_path is not None else None,
+        minimal_panel_status,
     )
 
     report_path = target_dir / "candidate_region_report.md"

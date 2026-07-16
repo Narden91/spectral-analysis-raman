@@ -76,8 +76,9 @@ def test_build_panel_report_section_contains_four_domains_without_blocked_terms(
     ranking = pd.DataFrame(
         {
             "feature_name": ["oxidative_index", "membrane_integrity_index", "protein_remodeling_index"],
-            "evidence_tier": ["strong_trend", "moderate_trend", "weak_or_unstable"],
-            "robust_score": [3, 2, 1],
+            "effect_size_flag": [True, True, True],
+            "bootstrap_ci_excludes_zero": [True, False, False],
+            "permutation_flag": [True, False, False],
             "max_abs_cliffs_delta": [0.8, 0.4, 0.2],
         }
     )
@@ -97,18 +98,19 @@ def test_build_panel_report_section_contains_four_domains_without_blocked_terms(
 
 
 def test_run_panel_report_section_writes_section_and_readme(tmp_path: Path) -> None:
-    ranking_path = tmp_path / "feature_robustness_ranking.csv"
+    evidence_flags_path = tmp_path / "panel_evidence_flags.csv"
     pd.DataFrame(
         {
             "feature_name": ["oxidative_index"],
-            "evidence_tier": ["strong_trend"],
-            "robust_score": [4],
+            "effect_size_flag": [True],
+            "bootstrap_ci_excludes_zero": [True],
+            "permutation_flag": [True],
             "max_abs_cliffs_delta": [0.9],
         }
-    ).to_csv(ranking_path, index=False)
+    ).to_csv(evidence_flags_path, index=False)
 
     outputs = run_panel_report_section(
-        robustness_ranking_path=ranking_path,
+        evidence_flags_path=evidence_flags_path,
         output_dir=tmp_path,
         cfg={"analysis": {"panel_report": {"enabled": True}}},
     )
@@ -136,3 +138,37 @@ def test_run_candidate_region_report_handles_missing_integrated_table(tmp_path: 
     assert outputs["candidate_region_summary"].exists()
     summary = pd.read_csv(outputs["candidate_region_summary"])
     assert summary["n_regions"].sum() == 0
+
+
+def test_report_discloses_marginal_screen_and_gated_minimal_panel(tmp_path: Path) -> None:
+    integrated_path = tmp_path / "integrated_candidate_regions.csv"
+    _integrated_candidates().to_csv(integrated_path, index=False)
+
+    outputs = run_candidate_region_report(
+        integrated_candidates_path=integrated_path,
+        minimal_panel_status={"status": "not_tested_gate"},
+        output_dir=tmp_path,
+        cfg={"analysis": {"publication_report": {"enabled": True}}},
+    )
+
+    report_text = outputs["candidate_region_report"].read_text(encoding="utf-8")
+    assert "marginal and unadjusted for age and sex" in report_text
+    assert "was not tested because no cluster-supported candidate region passed" in report_text
+    assert "The candidate-derived minimal panel was selected" not in report_text
+
+
+def test_report_claims_minimal_panel_only_for_nonempty_artifact(tmp_path: Path) -> None:
+    integrated_path = tmp_path / "integrated_candidate_regions.csv"
+    panel_path = tmp_path / "minimal_candidate_panel.csv"
+    _integrated_candidates().to_csv(integrated_path, index=False)
+    pd.DataFrame({"feature_name": ["region__1300_R1"], "status": ["ok"]}).to_csv(panel_path, index=False)
+
+    outputs = run_candidate_region_report(
+        integrated_candidates_path=integrated_path,
+        minimal_panel_path=panel_path,
+        minimal_panel_status={"status": "ok"},
+        output_dir=tmp_path,
+        cfg={"analysis": {"publication_report": {"enabled": True}}},
+    )
+    report_text = outputs["candidate_region_report"].read_text(encoding="utf-8")
+    assert "The candidate-derived minimal panel was selected" in report_text

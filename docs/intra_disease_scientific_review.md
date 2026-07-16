@@ -1,8 +1,10 @@
 # Intra-Disease Raman Analysis: Scientific Review
 
 > Historical interpretation note: this review records conclusions from a
-> specific disease-only run. For executable workflow and current processing
-> rules, use `README.md` and `docs/preprocessing.md`.
+> specific disease-only run. Its archived numerical outputs predate the
+> current analysis code and must not be published as a current run. For
+> executable workflow and current processing rules, use `README.md` and
+> `docs/preprocessing.md`.
 
 ## Executive Assessment
 
@@ -14,13 +16,13 @@ The strongest defensible conclusion is that the analysis searched for subject-le
 
 The corrected Phase 6 provenance reports 295 candidate intervals, with 0 FDR- or cluster-supported intervals and 295 fallback-selected intervals. Phase 14 reports 0 robust, 0 exploratory, 38 unstable, and 0 confounded integrated candidate regions.
 
-PLS regression did not pass permutation testing for any continuous endpoint. Cross-validated R2 values were negative for baseline MoCA, 3-month MoCA, and delta MoCA, with permutation p-values of 0.999, 0.341, and 0.983. Therefore, multivariate continuous modeling performs worse than a baseline predictor and should not be interpreted as predictive.
+PLS regression did not pass permutation testing for any continuous endpoint in the archived run. Exact performance values must be regenerated with the current Holm-adjusted permutation gate before any publication. The archived result must not be interpreted as predictive.
 
 The minimal candidate panel also failed to provide reliable models. Continuous endpoint R2 values were negative, and binary balanced accuracy was weak: 0.559 for MoCA severity and 0.442 for delta MoCA group, with permutation p-values of 0.157 and 0.847. These values do not justify classification or prognostic language.
 
 Targeted biochemical ratio testing did not identify any FDR-significant associations. Note: previous iterations of this pipeline searched for generic protein/lipid ratios, but these have been replaced by the current pre-registered targeted EV markers, which similarly lack FDR-significant associations with outcomes in the current cohort.
 
-Disease subgrouping selected 4 clusters with mean bootstrap ARI around 0.52. This is moderate exploratory structure, not a validated disease subtype solution.
+The archived subgrouping run selected 4 clusters with mean bootstrap ARI around 0.52. The current code uses the gap-statistic one-standard-error rule and permits the `k=1` no-subgroup result, so this archived selection must be regenerated before publication. It was exploratory structure, not a validated disease subtype solution.
 
 ## Code Defects Corrected
 

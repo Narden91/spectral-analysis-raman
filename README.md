@@ -167,6 +167,25 @@ configuration and data-manifest snapshot. ML output is subject-level only;
 nested CV tuning remains inside outer training folds, permutation tests include
 a sex-stratified null, and importance summaries are derived across outer folds.
 
+`Results_*/` directories are private analysis products and are intentionally
+ignored by Git: they can contain pseudonymized identifiers and sensitive
+clinical metadata. To prepare a public supplement, create an allowlisted
+aggregate-only bundle from a completed private run:
+
+```bash
+uv run python scripts/export_publication_bundle.py \
+  --source Results_intra_disease \
+  --output publication_bundle
+```
+
+Review `publication_bundle_manifest.json` before release. The exporter refuses
+direct identifier/clinical columns and never copies raw spectra, subject-level
+feature matrices, logs, or data paths.
+
+For a final reproducible analysis, use `--publication-run`. It rejects subject
+subsetting, skipped preprocessing, incomplete spectral ranges, and a dirty
+tracked worktree before the pipeline writes any run artifacts.
+
 Aggregate spectral plots use the curated 21 Raman windows. Their coloured bands
 indicate broad biochemical context (nucleic acids, proteins, lipids,
 carotenoids, or mixed), not molecule-specific abundance or diagnostic identity.

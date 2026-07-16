@@ -69,20 +69,22 @@ def filter_disease_subjects(frame: pd.DataFrame) -> pd.DataFrame:
     disease_only = frame.copy()
     if "is_control" in disease_only.columns:
         is_control = disease_only["is_control"]
-        keep = is_control.notna() & ~is_control.astype("boolean").fillna(True)
+        unknown = is_control.isna()
+        keep = ~unknown & ~is_control.astype("boolean").fillna(True)
     elif "condition" in disease_only.columns:
         condition = disease_only["condition"].astype("string").str.lower()
-        keep = condition.notna() & ~condition.isin({"control", "unknown", ""})
+        unknown = condition.isna() | condition.eq("unknown") | condition.eq("")
+        keep = ~unknown & ~condition.eq("control")
     else:
         raise ValueError("Subject feature matrix must include is_control or condition for disease-only filtering")
 
-    dropped = disease_only.loc[~keep]
-    if not dropped.empty and "subject_id" in disease_only.columns:
+    dropped_unknown = disease_only.loc[unknown]
+    if not dropped_unknown.empty and "subject_id" in disease_only.columns:
         logger.warning(
-            "filter_disease_subjects: excluding %d subject(s) without an explicit "
-            "disease label (missing/unknown clinical status): %s",
-            len(dropped),
-            dropped["subject_id"].astype(str).tolist(),
+            "filter_disease_subjects: excluding %d subject(s) with missing/unknown "
+            "clinical status: %s",
+            len(dropped_unknown),
+            dropped_unknown["subject_id"].astype(str).tolist(),
         )
     return disease_only.loc[keep].copy()
 

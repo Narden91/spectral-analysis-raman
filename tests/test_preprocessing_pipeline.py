@@ -10,12 +10,12 @@ import src
 from src.preprocessing.pipeline import (
     _detect_cosmic_spikes,
     compute_qc_metrics,
+    interpolate_spectra,
     normalize_spectra,
     run_preprocessing,
     sample_baseline_qc_artifacts,
     smooth_spectra,
     spectral_quality_mask,
-    interpolate_spectra,
 )
 
 
