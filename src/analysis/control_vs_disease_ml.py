@@ -22,8 +22,11 @@ Output map:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
+import warnings
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -33,6 +36,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from scipy import stats
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -60,11 +64,12 @@ from src.analysis.clinical_feature_associations import (
     load_subject_feature_matrix,
 )
 from src.analysis.control_vs_disease_ml_report import run_control_vs_disease_ml_report
-from src.analysis.io_utils import write_csv_atomic
+from src.analysis.io_utils import write_csv_atomic, write_json_atomic, write_parquet_atomic
 from src.analysis.pls_regression import _calculate_vip
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
 from src.analysis.statistics import fdr_correction
 from src.data_preparation import resolve_data_source, write_analysis_provenance
+from src.data_preparation.manifest import config_hash
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +79,8 @@ NEGATIVE_CLASS_LABEL = "Control"
 _MIN_SUBJECTS_PER_CLASS = 10
 _MIN_SUBJECTS_PER_CLASS_STRATIFIED = 10
 _MODEL_NAMES = ("pls_da", "l1_logistic", "random_forest")
+_CHECKPOINT_SCHEMA_VERSION = 1
+_CHECKPOINT_FLUSH_EVERY = 25
 
 PredictFn = Callable[[np.ndarray], np.ndarray]
 
@@ -131,6 +138,83 @@ def _normalize_n_jobs(n_jobs: int) -> int:
     return 1 if n_jobs == 0 else n_jobs
 
 
+def _file_sha256(path: str | Path | None) -> str:
+    """Return a content fingerprint for a feature matrix used by resumable work."""
+    if path is None:
+        return "default_feature_matrix"
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class _CheckpointStore:
+    """Small, fingerprinted store for expensive ML resampling outputs."""
+
+    directory: Path
+    identity: dict[str, object]
+    resume: bool
+    legacy_compatible: bool
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        metadata_dir: Path,
+        cfg_in: dict[str, Any],
+        feature_matrix_path: str | Path | None,
+        data_manifest_hash: str | None,
+        resume: bool,
+        legacy_run_manifest: dict[str, object] | None,
+    ) -> "_CheckpointStore":
+        if resume and feature_matrix_path is None:
+            raise ValueError("Resuming ML requires an explicit subject feature matrix path")
+        identity = {
+            "schema_version": _CHECKPOINT_SCHEMA_VERSION,
+            "analysis_config_hash": config_hash(cfg_in),
+            "ml_config_hash": config_hash(_ml_cfg(cfg_in)),
+            "data_manifest_hash": data_manifest_hash or "not_supplied",
+            "feature_matrix_sha256": _file_sha256(feature_matrix_path),
+        }
+        fingerprint = config_hash(identity)
+        directory = metadata_dir / "control_vs_disease_ml_checkpoints" / fingerprint
+        metadata_path = directory / "checkpoint_manifest.json"
+        preexisting = metadata_path.exists()
+        legacy_compatible = bool(
+            legacy_run_manifest
+            and legacy_run_manifest.get("analysis_config_hash") == identity["analysis_config_hash"]
+            and legacy_run_manifest.get("data_manifest_hash") == identity["data_manifest_hash"]
+            and legacy_run_manifest.get("analysis_mode") == "disease_vs_control"
+        )
+
+        if resume and preexisting:
+            stored = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if stored != identity:
+                raise ValueError(
+                    "ML resume checkpoint does not match current config, data manifest, or feature matrix. "
+                    "Run without --resume-ml to start a new ML resampling run."
+                )
+        directory.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(metadata_path, identity)
+        return cls(directory=directory, identity=identity, resume=resume, legacy_compatible=legacy_compatible)
+
+    def resampling_path(self, kind: str, model_name: str, representation: str, label: str) -> Path:
+        return self.directory / f"{kind}_{model_name}_{representation}_{label}.parquet"
+
+    def stage_path(self, model_name: str, representation: str, label: str) -> Path:
+        return self.directory / f"stage_{model_name}_{representation}_{label}.json"
+
+    def stage_complete(self, model_name: str, representation: str, label: str) -> bool:
+        return self.resume and self.stage_path(model_name, representation, label).exists()
+
+    def mark_stage_complete(self, model_name: str, representation: str, label: str) -> None:
+        write_json_atomic(
+            self.stage_path(model_name, representation, label), {"identity": self.identity, "status": "ok"}
+        )
+
+
 # ---------------------------------------------------------------------------
 # Phase timing (local — mirrors disease_only_pipeline._phase_timer without
 # importing that module's private symbols across a module boundary)
@@ -138,23 +222,42 @@ def _normalize_n_jobs(n_jobs: int) -> int:
 
 
 @contextmanager
-def _phase_timer(timings: list[dict[str, object]], phase_key: str, phase_label: str):
+def _phase_timer(
+    timings: list[dict[str, object]],
+    phase_key: str,
+    phase_label: str,
+    *,
+    metadata_dir: Path,
+    progress: Progress | None = None,
+    task_id: int | None = None,
+):
+    if progress is not None and task_id is not None:
+        progress.update(task_id, description=f"[bold blue]{phase_label}")
+    logger.info("Starting control-vs-disease ML phase: %s", phase_label)
     start = time.perf_counter()
     status = "ok"
     try:
         yield
+    except KeyboardInterrupt:
+        status = "interrupted"
+        raise
     except Exception:
         status = "failed"
         raise
     finally:
+        elapsed = time.perf_counter() - start
         timings.append(
             {
                 "phase": phase_key,
                 "label": phase_label,
-                "elapsed_seconds": time.perf_counter() - start,
+                "elapsed_seconds": elapsed,
                 "status": status,
             }
         )
+        _write_phase_timings(timings, metadata_dir)
+        logger.info("Finished control-vs-disease ML phase: %s status=%s elapsed=%.2fs", phase_label, status, elapsed)
+        if progress is not None and task_id is not None:
+            progress.advance(task_id)
 
 
 def _write_phase_timings(timings: list[dict[str, object]], metadata_dir: Path) -> Path | None:
@@ -163,6 +266,16 @@ def _write_phase_timings(timings: list[dict[str, object]], metadata_dir: Path) -
     path = metadata_dir / "control_vs_disease_ml_phase_timing.csv"
     write_csv_atomic(pd.DataFrame(timings), path, index=False)
     return path
+
+
+@contextmanager
+def _progress_task(progress: Progress, description: str, total: int):
+    """Create a temporary detailed progress task and always remove it."""
+    task_id = progress.add_task(description, total=total)
+    try:
+        yield task_id
+    finally:
+        progress.remove_task(task_id)
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +390,10 @@ def _cohort_summary(frame: pd.DataFrame) -> pd.DataFrame:
         {"metric": "n_control", "value": n_control},
         {"metric": "n_disease", "value": n_disease},
         {"metric": "imbalance_ratio_disease_to_control", "value": n_disease / n_control if n_control else np.nan},
-        {"metric": "majority_class_baseline_accuracy", "value": max(n_control, n_disease) / n_total if n_total else np.nan},
+        {
+            "metric": "majority_class_baseline_accuracy",
+            "value": max(n_control, n_disease) / n_total if n_total else np.nan,
+        },
         {"metric": "majority_class_baseline_balanced_accuracy", "value": 0.5},
         {"metric": "positive_class", "value": POSITIVE_CLASS_LABEL},
         {"metric": "negative_class", "value": NEGATIVE_CLASS_LABEL},
@@ -316,20 +432,29 @@ def _cohort_summary(frame: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def _tune_threshold(y_true: np.ndarray, scores: np.ndarray, metric: str) -> float:
-    """Pick the decision threshold maximizing `metric` on given (in-fold) scores."""
+def _tune_threshold_and_score(y_true: np.ndarray, scores: np.ndarray, metric: str) -> tuple[float, float]:
+    """Pick threshold maximizing balanced accuracy without repeated sklearn calls."""
     if metric != "balanced_accuracy":
         raise ValueError(f"Unsupported threshold_metric '{metric}'")
     candidates = np.unique(scores)
     if candidates.size == 0:
-        return 0.5
-    thresholds = np.concatenate([[candidates[0] - 1e-6], (candidates[:-1] + candidates[1:]) / 2.0, [candidates[-1] + 1e-6]])
-    best_threshold, best_score = 0.5, -np.inf
-    for threshold in thresholds:
-        score = balanced_accuracy_score(y_true, (scores >= threshold).astype(int))
-        if score > best_score:
-            best_score, best_threshold = score, float(threshold)
-    return best_threshold
+        return 0.5, np.nan
+    thresholds = np.concatenate(
+        [[candidates[0] - 1e-6], (candidates[:-1] + candidates[1:]) / 2.0, [candidates[-1] + 1e-6]]
+    )
+    predictions = scores[None, :] >= thresholds[:, None]
+    positive = y_true == 1
+    negative = ~positive
+    sensitivity = predictions[:, positive].mean(axis=1) if positive.any() else np.full(len(thresholds), np.nan)
+    specificity = (~predictions[:, negative]).mean(axis=1) if negative.any() else np.full(len(thresholds), np.nan)
+    balanced_accuracy = (sensitivity + specificity) / 2.0
+    best_index = int(np.argmax(balanced_accuracy))
+    return float(thresholds[best_index]), float(balanced_accuracy[best_index])
+
+
+def _tune_threshold(y_true: np.ndarray, scores: np.ndarray, metric: str) -> float:
+    """Pick the decision threshold maximizing `metric` on given (in-fold) scores."""
+    return _tune_threshold_and_score(y_true, scores, metric)[0]
 
 
 def _inner_cv_folds(X_train: np.ndarray, y_train: np.ndarray, n_inner_splits: int, random_state: int) -> list | None:
@@ -338,6 +463,18 @@ def _inner_cv_folds(X_train: np.ndarray, y_train: np.ndarray, n_inner_splits: in
         return None
     inner_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     return list(inner_cv.split(X_train, y_train))
+
+
+def _scaled_inner_folds(
+    X_train: np.ndarray,
+    folds: Sequence[tuple[np.ndarray, np.ndarray]],
+) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """Scale each inner training/test pair once and share it across a model grid."""
+    scaled: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    for tr_idx, te_idx in folds:
+        scaler = StandardScaler()
+        scaled.append((tr_idx, te_idx, scaler.fit_transform(X_train[tr_idx]), scaler.transform(X_train[te_idx])))
+    return scaled
 
 
 @dataclass(frozen=True)
@@ -358,27 +495,29 @@ class _ModelFit:
 
 
 def _fit_pls_da(
-    X_train: np.ndarray, y_train: np.ndarray, ml_cfg: dict[str, Any], n_inner_splits: int, threshold_metric: str,
-    random_state: int, n_jobs: int,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    ml_cfg: dict[str, Any],
+    n_inner_splits: int,
+    threshold_metric: str,
+    random_state: int,
+    n_jobs: int,
 ) -> _ModelFit:
     component_grid = _pls_component_grid(ml_cfg)
     folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state)
     best_n_comp, best_threshold, best_score = component_grid[0], 0.5, -np.inf
 
     if folds is not None:
+        scaled_folds = _scaled_inner_folds(X_train, folds)
         max_valid_comp = min(X_train.shape[0] - 2, X_train.shape[1])
         valid_grid = [c for c in component_grid if 1 <= c <= max_valid_comp] or [1]
         for n_comp in valid_grid:
             oof_scores = np.zeros(len(y_train), dtype=float)
-            for tr_idx, te_idx in folds:
-                scaler = StandardScaler()
-                X_tr = scaler.fit_transform(X_train[tr_idx])
-                X_te = scaler.transform(X_train[te_idx])
+            for tr_idx, te_idx, X_tr, X_te in scaled_folds:
                 pls = PLSRegression(n_components=n_comp, scale=False)
                 pls.fit(X_tr, y_train[tr_idx])
                 oof_scores[te_idx] = pls.predict(X_te).ravel()
-            threshold = _tune_threshold(y_train, oof_scores, threshold_metric)
-            score = balanced_accuracy_score(y_train, (oof_scores >= threshold).astype(int))
+            threshold, score = _tune_threshold_and_score(y_train, oof_scores, threshold_metric)
             if score > best_score:
                 best_score, best_n_comp, best_threshold = score, n_comp, threshold
 
@@ -389,30 +528,34 @@ def _fit_pls_da(
     model.fit(X_scaled, y_train)
     return _ModelFit(
         predict_proba=lambda X: model.predict(scaler.transform(X)).ravel(),
-        threshold=best_threshold, estimator=model, scaler=scaler,
+        threshold=best_threshold,
+        estimator=model,
+        scaler=scaler,
     )
 
 
 def _fit_l1_logistic(
-    X_train: np.ndarray, y_train: np.ndarray, ml_cfg: dict[str, Any], n_inner_splits: int, threshold_metric: str,
-    random_state: int, n_jobs: int,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    ml_cfg: dict[str, Any],
+    n_inner_splits: int,
+    threshold_metric: str,
+    random_state: int,
+    n_jobs: int,
 ) -> _ModelFit:
     c_grid = _logistic_c_grid(ml_cfg)
     folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state)
     best_c, best_threshold, best_score = c_grid[0], 0.5, -np.inf
 
     if folds is not None:
+        scaled_folds = _scaled_inner_folds(X_train, folds)
         for c in c_grid:
             oof_scores = np.zeros(len(y_train), dtype=float)
-            for tr_idx, te_idx in folds:
-                scaler = StandardScaler()
-                X_tr = scaler.fit_transform(X_train[tr_idx])
-                X_te = scaler.transform(X_train[te_idx])
+            for tr_idx, te_idx, X_tr, X_te in scaled_folds:
                 model = l1_logistic_model(c=c, random_state=random_state)
                 fit_with_convergence_capture(model, X_tr, y_train[tr_idx], context="cvd_ml logistic inner CV")
                 oof_scores[te_idx] = model.predict_proba(X_te)[:, 1]
-            threshold = _tune_threshold(y_train, oof_scores, threshold_metric)
-            score = balanced_accuracy_score(y_train, (oof_scores >= threshold).astype(int))
+            threshold, score = _tune_threshold_and_score(y_train, oof_scores, threshold_metric)
             if score > best_score:
                 best_score, best_c, best_threshold = score, c, threshold
 
@@ -422,13 +565,20 @@ def _fit_l1_logistic(
     fit_with_convergence_capture(model, X_scaled, y_train, context="cvd_ml logistic final")
     return _ModelFit(
         predict_proba=lambda X: model.predict_proba(scaler.transform(X))[:, 1],
-        threshold=best_threshold, estimator=model, scaler=scaler,
+        threshold=best_threshold,
+        estimator=model,
+        scaler=scaler,
     )
 
 
 def _fit_random_forest(
-    X_train: np.ndarray, y_train: np.ndarray, ml_cfg: dict[str, Any], n_inner_splits: int, threshold_metric: str,
-    random_state: int, n_jobs: int,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    ml_cfg: dict[str, Any],
+    n_inner_splits: int,
+    threshold_metric: str,
+    random_state: int,
+    n_jobs: int,
 ) -> _ModelFit:
     n_estimators_grid = _rf_n_estimators_grid(ml_cfg)
     max_depth_grid = _rf_max_depth_grid(ml_cfg)
@@ -436,29 +586,60 @@ def _fit_random_forest(
     best_params, best_threshold, best_score = (n_estimators_grid[0], max_depth_grid[0]), 0.5, -np.inf
 
     if folds is not None:
+        unique_estimators = sorted(set(n_estimators_grid))
+        oof_by_params: dict[tuple[int, int | None], np.ndarray] = {
+            (n_estimators, max_depth): np.zeros(len(y_train), dtype=float)
+            for n_estimators in unique_estimators
+            for max_depth in max_depth_grid
+        }
+        for max_depth in max_depth_grid:
+            for tr_idx, te_idx in folds:
+                model: RandomForestClassifier | None = None
+                for n_estimators in unique_estimators:
+                    if model is None:
+                        model = RandomForestClassifier(
+                            n_estimators=n_estimators,
+                            max_depth=max_depth,
+                            class_weight="balanced_subsample",
+                            random_state=random_state,
+                            n_jobs=n_jobs,
+                            warm_start=True,
+                        )
+                    else:
+                        model.set_params(n_estimators=n_estimators)
+                    # Training data never changes while this forest grows; sklearn's
+                    # generic warm-start warning only applies when it does.
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            message='class_weight presets "balanced" or "balanced_subsample" are not recommended for warm_start.*',
+                            category=UserWarning,
+                        )
+                        model.fit(X_train[tr_idx], y_train[tr_idx])
+                    oof_by_params[(n_estimators, max_depth)][te_idx] = model.predict_proba(X_train[te_idx])[:, 1]
+
+        # Preserve configured grid order for deterministic tie breaking.
         for n_estimators in n_estimators_grid:
             for max_depth in max_depth_grid:
-                oof_scores = np.zeros(len(y_train), dtype=float)
-                for tr_idx, te_idx in folds:
-                    model = RandomForestClassifier(
-                        n_estimators=n_estimators, max_depth=max_depth, class_weight="balanced_subsample",
-                        random_state=random_state, n_jobs=n_jobs,
-                    )
-                    model.fit(X_train[tr_idx], y_train[tr_idx])
-                    oof_scores[te_idx] = model.predict_proba(X_train[te_idx])[:, 1]
-                threshold = _tune_threshold(y_train, oof_scores, threshold_metric)
-                score = balanced_accuracy_score(y_train, (oof_scores >= threshold).astype(int))
+                threshold, score = _tune_threshold_and_score(
+                    y_train, oof_by_params[(n_estimators, max_depth)], threshold_metric
+                )
                 if score > best_score:
                     best_score, best_params, best_threshold = score, (n_estimators, max_depth), threshold
 
     final_model = RandomForestClassifier(
-        n_estimators=best_params[0], max_depth=best_params[1], class_weight="balanced_subsample",
-        random_state=random_state, n_jobs=n_jobs,
+        n_estimators=best_params[0],
+        max_depth=best_params[1],
+        class_weight="balanced_subsample",
+        random_state=random_state,
+        n_jobs=n_jobs,
     )
     final_model.fit(X_train, y_train)
     return _ModelFit(
         predict_proba=lambda X: final_model.predict_proba(X)[:, 1],
-        threshold=best_threshold, estimator=final_model, scaler=None,
+        threshold=best_threshold,
+        estimator=final_model,
+        scaler=None,
     )
 
 
@@ -510,19 +691,27 @@ def _cv_predict(
     threshold_metric: str,
     random_state: int,
     n_jobs: int,
+    fold_callback: Callable[[], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fit+predict across one set of outer folds. Returns (y_pred, y_score) out-of-fold arrays."""
     y_pred = np.zeros_like(y, dtype=int)
     y_score = np.zeros_like(y, dtype=float)
     for train_idx, test_idx in outer_cv:
         fit = _fit_tuned_model(
-            model_name, X[train_idx], y[train_idx],
-            ml_cfg=ml_cfg, n_inner_splits=n_inner_splits, threshold_metric=threshold_metric,
-            random_state=random_state, n_jobs=n_jobs,
+            model_name,
+            X[train_idx],
+            y[train_idx],
+            ml_cfg=ml_cfg,
+            n_inner_splits=n_inner_splits,
+            threshold_metric=threshold_metric,
+            random_state=random_state,
+            n_jobs=n_jobs,
         )
         scores = fit.predict_proba(X[test_idx])
         y_score[test_idx] = scores
         y_pred[test_idx] = (scores >= fit.threshold).astype(int)
+        if fold_callback is not None:
+            fold_callback()
     return y_pred, y_score
 
 
@@ -552,7 +741,11 @@ def _locked_joint_stratified_split_plan(
         )
     indices = np.arange(len(y))
     return [
-        list(StratifiedKFold(n_splits=n_outer_splits, shuffle=True, random_state=random_state + repeat).split(indices, joint_labels))
+        list(
+            StratifiedKFold(n_splits=n_outer_splits, shuffle=True, random_state=random_state + repeat).split(
+                indices, joint_labels
+            )
+        )
         for repeat in range(n_outer_repeats)
     ]
 
@@ -565,6 +758,7 @@ def _run_repeated_nested_cv(
     ml_cfg: dict[str, Any],
     n_jobs: int,
     outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]] | None = None,
+    fold_callback: Callable[[], None] | None = None,
 ) -> pd.DataFrame:
     """Run RepeatedStratifiedKFold nested CV; return one row per (repeat, subject_index)."""
     n_outer_splits = _n_outer_splits(ml_cfg)
@@ -577,10 +771,7 @@ def _run_repeated_nested_cv(
         n_splits = min(n_outer_splits, int(np.bincount(y).min()))
         repeated_cv = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_outer_repeats, random_state=random_state)
         all_splits = list(repeated_cv.split(X, y))
-        split_plan = [
-            all_splits[repeat * n_splits : (repeat + 1) * n_splits]
-            for repeat in range(n_outer_repeats)
-        ]
+        split_plan = [all_splits[repeat * n_splits : (repeat + 1) * n_splits] for repeat in range(n_outer_repeats)]
     else:
         split_plan = [list(repeat_splits) for repeat_splits in outer_split_plan]
         if len(split_plan) != n_outer_repeats:
@@ -589,9 +780,16 @@ def _run_repeated_nested_cv(
     rows: list[dict[str, object]] = []
     for repeat_index, repeat_splits in enumerate(split_plan):
         y_pred, y_score = _cv_predict(
-            model_name, X, y, repeat_splits,
-            ml_cfg=ml_cfg, n_inner_splits=n_inner_splits, threshold_metric=threshold_metric,
-            random_state=random_state + repeat_index, n_jobs=n_jobs,
+            model_name,
+            X,
+            y,
+            repeat_splits,
+            ml_cfg=ml_cfg,
+            n_inner_splits=n_inner_splits,
+            threshold_metric=threshold_metric,
+            random_state=random_state + repeat_index,
+            n_jobs=n_jobs,
+            fold_callback=fold_callback,
         )
         rows.extend(
             {
@@ -633,9 +831,38 @@ def _single_split_balanced_accuracy(
     outer_cv = list(_outer_splits(y, n_outer_splits, random_state).split(X, y))
     # Parallelism is applied across permutations by the caller, not within one.
     y_pred, _y_score = _cv_predict(
-        model_name, X, y, outer_cv,
-        ml_cfg=ml_cfg, n_inner_splits=n_inner_splits, threshold_metric=threshold_metric,
-        random_state=random_state, n_jobs=1,
+        model_name,
+        X,
+        y,
+        outer_cv,
+        ml_cfg=ml_cfg,
+        n_inner_splits=n_inner_splits,
+        threshold_metric=threshold_metric,
+        random_state=random_state,
+        n_jobs=1,
+    )
+    return float(balanced_accuracy_score(y, y_pred))
+
+
+def _fixed_plan_balanced_accuracy(
+    model_name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    ml_cfg: dict[str, Any],
+    outer_cv: Sequence[tuple[np.ndarray, np.ndarray]],
+) -> float:
+    """Score one fixed locked outer plan for observed and permuted labels alike."""
+    y_pred, _y_score = _cv_predict(
+        model_name,
+        X,
+        y,
+        outer_cv,
+        ml_cfg=ml_cfg,
+        n_inner_splits=_n_inner_splits(ml_cfg),
+        threshold_metric=_threshold_metric(ml_cfg),
+        random_state=_random_state(ml_cfg),
+        n_jobs=1,
     )
     return float(balanced_accuracy_score(y, y_pred))
 
@@ -671,17 +898,36 @@ def _permuted_score(
         return np.nan
     if outer_split_plan is None:
         return _single_split_balanced_accuracy(model_name, X, y_perm, ml_cfg=ml_cfg, n_jobs=1, random_state=seed)
-    oof = _run_repeated_nested_cv(
-        model_name, X, y_perm, ml_cfg=ml_cfg, n_jobs=1, outer_split_plan=outer_split_plan,
-    )
-    return _aggregate_repeat_metrics(oof)["balanced_accuracy_mean"]
+    return _fixed_plan_balanced_accuracy(model_name, X, y_perm, ml_cfg=ml_cfg, outer_cv=outer_split_plan[0])
 
 
-def _run_parallel(n_jobs: int, func: Callable[..., float], calls: list[tuple]) -> list[float]:
-    """Shared parallel-map helper for permutation draws and bootstrap resamples."""
+def _resampling_seeds(random_state: int, count: int) -> np.ndarray:
+    rng = np.random.default_rng(random_state)
+    return rng.integers(0, np.iinfo(np.int32).max, size=count, dtype=np.int64)
+
+
+def _load_checkpoint_rows(path: Path | None, *, resume: bool) -> pd.DataFrame:
+    if not resume or path is None or not path.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
+
+
+def _stream_parallel(
+    n_jobs: int,
+    func: Callable[..., Any],
+    calls: Sequence[tuple[int, tuple[Any, ...]]],
+    on_result: Callable[[int, Any], None],
+) -> None:
+    """Yield completed deterministic jobs to parent process for progress/checkpointing."""
     if n_jobs == 1 or len(calls) <= 1:
-        return [func(*args) for args in calls]
-    return Parallel(n_jobs=n_jobs)(delayed(func)(*args) for args in calls)
+        for seed, args in calls:
+            on_result(seed, func(*args))
+        return
+
+    parallel = Parallel(n_jobs=n_jobs, return_as="generator")
+    results = parallel(delayed(func)(*args) for _seed, args in calls)
+    for (seed, _args), result in zip(calls, results, strict=True):
+        on_result(seed, result)
 
 
 def run_permutation_test(
@@ -695,6 +941,10 @@ def run_permutation_test(
     n_jobs: int,
     random_state: int,
     outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]] | None = None,
+    checkpoint_path: Path | None = None,
+    resume: bool = False,
+    progress: Progress | None = None,
+    progress_task_id: int | None = None,
 ) -> tuple[float, np.ndarray]:
     """Full-pipeline label-permutation test. Returns (p_value, null_distribution).
 
@@ -705,20 +955,48 @@ def run_permutation_test(
     better under this null than under the unpermuted data.
     """
     n_permutations = _n_permutations(ml_cfg)
-    rng = np.random.default_rng(random_state)
-    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
+    seeds = _resampling_seeds(random_state, n_permutations)
+    existing = _load_checkpoint_rows(checkpoint_path, resume=resume)
+    score_by_seed = {
+        int(row.seed): float(row.null_balanced_accuracy)
+        for row in existing.itertuples(index=False)
+        if hasattr(row, "seed") and hasattr(row, "null_balanced_accuracy")
+    }
+    pending = [
+        (int(seed), (model_name, X, y, strata, ml_cfg, int(seed), outer_split_plan))
+        for seed in seeds
+        if int(seed) not in score_by_seed
+    ]
+    if progress is not None and progress_task_id is not None:
+        progress.update(progress_task_id, completed=len(score_by_seed), total=n_permutations)
 
-    null_scores = _run_parallel(
-        n_jobs,
-        _permuted_score,
-        [(model_name, X, y, strata, ml_cfg, int(seed), outer_split_plan) for seed in seeds],
-    )
-    null_arr = np.asarray(null_scores, dtype=float)
+    def on_result(seed: int, score: float) -> None:
+        score_by_seed[seed] = float(score)
+        if checkpoint_path is not None and len(score_by_seed) % _CHECKPOINT_FLUSH_EVERY == 0:
+            write_parquet_atomic(
+                pd.DataFrame({"seed": list(score_by_seed), "null_balanced_accuracy": list(score_by_seed.values())}),
+                checkpoint_path,
+                index=False,
+            )
+        if progress is not None and progress_task_id is not None:
+            progress.advance(progress_task_id)
+
+    try:
+        _stream_parallel(n_jobs, _permuted_score, pending, on_result)
+    finally:
+        if checkpoint_path is not None:
+            write_parquet_atomic(
+                pd.DataFrame({"seed": list(score_by_seed), "null_balanced_accuracy": list(score_by_seed.values())}),
+                checkpoint_path,
+                index=False,
+            )
+
+    null_arr = np.asarray([score_by_seed[int(seed)] for seed in seeds], dtype=float)
     finite_null = null_arr[np.isfinite(null_arr)]
     if len(finite_null) == 0:
-        return np.nan, finite_null
+        return np.nan, null_arr
     p_value = float((1 + np.sum(finite_null >= observed_balanced_accuracy)) / (len(finite_null) + 1))
-    return p_value, finite_null
+    return p_value, null_arr
 
 
 # ---------------------------------------------------------------------------
@@ -767,7 +1045,11 @@ def _aggregate_repeat_metrics(oof_predictions: pd.DataFrame) -> dict[str, float]
 
 
 def _bootstrap_metric_sample(
-    model_name: str, X: np.ndarray, y: np.ndarray, ml_cfg: dict[str, Any], seed: int,
+    model_name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    ml_cfg: dict[str, Any],
+    seed: int,
 ) -> dict[str, float] | None:
     """One out-of-bag bootstrap draw: fit on the in-bag resample, score on subjects never drawn.
 
@@ -796,8 +1078,14 @@ def _bootstrap_metric_sample(
     n_inner_splits = _n_inner_splits(ml_cfg)
     threshold_metric = _threshold_metric(ml_cfg)
     fit = _fit_tuned_model(
-        model_name, X_in, y_in, ml_cfg=ml_cfg, n_inner_splits=n_inner_splits,
-        threshold_metric=threshold_metric, random_state=seed, n_jobs=1,
+        model_name,
+        X_in,
+        y_in,
+        ml_cfg=ml_cfg,
+        n_inner_splits=n_inner_splits,
+        threshold_metric=threshold_metric,
+        random_state=seed,
+        n_jobs=1,
     )
     scores = fit.predict_proba(X_out)
     y_pred = (scores >= fit.threshold).astype(int)
@@ -812,6 +1100,10 @@ def run_bootstrap_ci(
     ml_cfg: dict[str, Any],
     n_jobs: int,
     random_state: int,
+    checkpoint_path: Path | None = None,
+    resume: bool = False,
+    progress: Progress | None = None,
+    progress_task_id: int | None = None,
 ) -> dict[str, float]:
     """Bootstrap 95% percentile CIs on headline metrics, via out-of-bag scoring.
 
@@ -821,13 +1113,40 @@ def run_bootstrap_ci(
     percentile of each metric across draws.
     """
     n_bootstrap = int(ml_cfg.get("n_bootstrap", 1000))
-    rng = np.random.default_rng(random_state)
-    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_bootstrap, dtype=np.int64)
+    seeds = _resampling_seeds(random_state, n_bootstrap)
+    existing = _load_checkpoint_rows(checkpoint_path, resume=resume)
+    sample_by_seed: dict[int, dict[str, float] | None] = {}
+    if not existing.empty and "seed" in existing:
+        for row in existing.to_dict("records"):
+            seed = int(row.pop("seed"))
+            valid = bool(row.pop("valid", False))
+            sample_by_seed[seed] = (
+                {key: float(value) for key, value in row.items() if pd.notna(value)} if valid else None
+            )
+    pending = [(int(seed), (model_name, X, y, ml_cfg, int(seed))) for seed in seeds if int(seed) not in sample_by_seed]
+    if progress is not None and progress_task_id is not None:
+        progress.update(progress_task_id, completed=len(sample_by_seed), total=n_bootstrap)
 
-    samples = _run_parallel(
-        n_jobs, _bootstrap_metric_sample, [(model_name, X, y, ml_cfg, int(seed)) for seed in seeds]
-    )
-    valid_samples = [s for s in samples if s is not None]
+    def checkpoint_frame() -> pd.DataFrame:
+        rows: list[dict[str, object]] = []
+        for seed, sample in sample_by_seed.items():
+            rows.append({"seed": seed, "valid": sample is not None, **(sample or {})})
+        return pd.DataFrame(rows)
+
+    def on_result(seed: int, sample: dict[str, float] | None) -> None:
+        sample_by_seed[seed] = sample
+        if checkpoint_path is not None and len(sample_by_seed) % _CHECKPOINT_FLUSH_EVERY == 0:
+            write_parquet_atomic(checkpoint_frame(), checkpoint_path, index=False)
+        if progress is not None and progress_task_id is not None:
+            progress.advance(progress_task_id)
+
+    try:
+        _stream_parallel(n_jobs, _bootstrap_metric_sample, pending, on_result)
+    finally:
+        if checkpoint_path is not None:
+            write_parquet_atomic(checkpoint_frame(), checkpoint_path, index=False)
+
+    valid_samples = [sample_by_seed[int(seed)] for seed in seeds if sample_by_seed[int(seed)] is not None]
     if not valid_samples:
         return {}
 
@@ -849,7 +1168,9 @@ def run_bootstrap_ci(
 # ---------------------------------------------------------------------------
 
 
-def run_univariate_band_screen(frame: pd.DataFrame, y: np.ndarray, valid_rows: np.ndarray, cfg_in: dict[str, Any]) -> pd.DataFrame:
+def run_univariate_band_screen(
+    frame: pd.DataFrame, y: np.ndarray, valid_rows: np.ndarray, cfg_in: dict[str, Any]
+) -> pd.DataFrame:
     """Mann-Whitney U per biochemical band (Control vs. Disease) + BH-FDR.
 
     Purely descriptive context for the multivariate models above — this is
@@ -907,6 +1228,7 @@ def _outer_fold_feature_importance(
     ml_cfg: dict[str, Any],
     n_jobs: int,
     outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]],
+    fold_callback: Callable[[], None] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Estimate importances on outer folds, never from a full-data refit.
 
@@ -922,35 +1244,72 @@ def _outer_fold_feature_importance(
     for repeat_index, repeat_splits in enumerate(outer_split_plan):
         for fold_index, (train_idx, test_idx) in enumerate(repeat_splits):
             fit = _fit_tuned_model(
-                model_name, X[train_idx], y[train_idx], ml_cfg=ml_cfg, n_inner_splits=n_inner_splits,
-                threshold_metric=threshold_metric, random_state=random_state + repeat_index * 101 + fold_index,
+                model_name,
+                X[train_idx],
+                y[train_idx],
+                ml_cfg=ml_cfg,
+                n_inner_splits=n_inner_splits,
+                threshold_metric=threshold_metric,
+                random_state=random_state + repeat_index * 101 + fold_index,
                 n_jobs=n_jobs,
             )
             base = {
-                "feature_name": feature_names, "repeat": repeat_index, "fold": fold_index,
-                "n_train": len(train_idx), "n_test": len(test_idx), "estimation_scope": "outer_fold",
+                "feature_name": feature_names,
+                "repeat": repeat_index,
+                "fold": fold_index,
+                "n_train": len(train_idx),
+                "n_test": len(test_idx),
+                "estimation_scope": "outer_fold",
             }
             if model_name == "pls_da":
-                rows.append(pd.DataFrame({**base, "importance": _calculate_vip(fit.estimator), "importance_type": "vip_outer_train"}))
+                rows.append(
+                    pd.DataFrame(
+                        {**base, "importance": _calculate_vip(fit.estimator), "importance_type": "vip_outer_train"}
+                    )
+                )
             elif model_name == "l1_logistic":
-                rows.append(pd.DataFrame({**base, "importance": fit.estimator.coef_.ravel(), "importance_type": "l1_logistic_coefficient_outer_train"}))
+                rows.append(
+                    pd.DataFrame(
+                        {
+                            **base,
+                            "importance": fit.estimator.coef_.ravel(),
+                            "importance_type": "l1_logistic_coefficient_outer_train",
+                        }
+                    )
+                )
             else:
                 result = permutation_importance(
-                    fit.estimator, X[test_idx], y[test_idx], n_repeats=permutation_repeats,
-                    random_state=random_state + repeat_index * 101 + fold_index, n_jobs=n_jobs,
+                    fit.estimator,
+                    X[test_idx],
+                    y[test_idx],
+                    n_repeats=permutation_repeats,
+                    random_state=random_state + repeat_index * 101 + fold_index,
+                    n_jobs=n_jobs,
                     scoring="balanced_accuracy",
                 )
-                rows.append(pd.DataFrame({
-                    **base, "importance": result.importances_mean, "importance_std": result.importances_std,
-                    "importance_type": "permutation_importance_outer_test",
-                }))
+                rows.append(
+                    pd.DataFrame(
+                        {
+                            **base,
+                            "importance": result.importances_mean,
+                            "importance_std": result.importances_std,
+                            "importance_type": "permutation_importance_outer_test",
+                        }
+                    )
+                )
+            if fold_callback is not None:
+                fold_callback()
     long = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
     if long.empty:
         return long, long
     summary = (
         long.groupby(["feature_name", "importance_type"], as_index=False)
-        .agg(importance_mean=("importance", "mean"), importance_median=("importance", "median"),
-             importance_std_across_folds=("importance", "std"), n_outer_folds=("importance", "count"))
+        .agg(
+            importance_mean=("importance", "mean"),
+            importance_median=("importance", "median"),
+            importance_std_across_folds=("importance", "std"),
+            n_outer_folds=("importance", "count"),
+        )
         .sort_values("importance_mean", key=np.abs, ascending=False, kind="mergesort")
         .reset_index(drop=True)
     )
@@ -1038,11 +1397,70 @@ def _sex_stratified_refit(
 # ---------------------------------------------------------------------------
 
 
+def _legacy_observed_outputs_are_compatible(
+    model_dir: Path,
+    model_name: str,
+    representation: str,
+    *,
+    n_subjects: int,
+    n_outer_repeats: int,
+) -> bool:
+    """Allow one-time reuse of pre-checkpoint observed outputs from this run root."""
+    paths = (
+        model_dir / f"{model_name}_{representation}_cv_predictions.csv",
+        model_dir / f"{model_name}_{representation}_feature_importance_outer_folds.csv",
+        model_dir / f"{model_name}_{representation}_feature_importance.csv",
+    )
+    if not all(path.exists() for path in paths):
+        return False
+    try:
+        oof = pd.read_csv(paths[0])
+        importance = pd.read_csv(paths[2])
+    except (OSError, pd.errors.ParserError):
+        return False
+    return len(oof) == n_subjects * n_outer_repeats and not importance.empty
+
+
+def _append_null_distribution_rows(
+    rows: list[dict[str, object]],
+    *,
+    model_name: str,
+    representation: str,
+    null_type: str,
+    random_state: int,
+    null_scores: np.ndarray,
+    n_permutations: int,
+    n_splits: int,
+) -> None:
+    """Append deterministic permutation rows while validating a completed null."""
+    if null_scores.size == 0:
+        return
+    if null_scores.size != n_permutations:
+        raise RuntimeError(
+            f"{null_type} permutation test returned {null_scores.size} scores; expected {n_permutations}"
+        )
+    rows.extend(
+        {
+            "model": model_name,
+            "representation": representation,
+            "null_type": null_type,
+            "seed": int(seed),
+            "permutation_cv_splits": n_splits,
+            "permutation_cv_repeats": 1,
+            "null_balanced_accuracy": float(score),
+        }
+        for seed, score in zip(_resampling_seeds(random_state, n_permutations), null_scores, strict=True)
+    )
+
+
 def run_control_vs_disease_ml_pipeline(
     *,
     feature_matrix_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
+    resume: bool = False,
+    data_manifest_hash: str | None = None,
+    legacy_run_manifest: dict[str, object] | None = None,
 ) -> dict[str, Path]:
     cfg_in = _cfg(cfg)
     ml_cfg = _ml_cfg(cfg_in)
@@ -1056,201 +1474,439 @@ def run_control_vs_disease_ml_pipeline(
     confounder_dir = get_ml_classification_phase_dir("confounder_checks", root=target_dir, create=False)
     permutation_dir = get_ml_classification_phase_dir("permutation_tests", root=target_dir, create=False)
     band_screen_dir = get_ml_classification_phase_dir("band_screen", root=target_dir, create=False)
+    metadata_dir = get_run_metadata_dir() if output_dir is None else target_dir / "00_run_metadata"
+    checkpoints = _CheckpointStore.create(
+        metadata_dir=metadata_dir,
+        cfg_in=cfg_in,
+        feature_matrix_path=feature_matrix_path,
+        data_manifest_hash=data_manifest_hash,
+        resume=resume,
+        legacy_run_manifest=legacy_run_manifest,
+    )
     phase_timings: list[dict[str, object]] = []
     outputs: dict[str, Path] = {}
-
-    with _phase_timer(phase_timings, "load_cohort", "Load cohort and labels"):
-        frame = _load_cohort(feature_matrix_path)
-        y = _labels(frame)
-
-    with _phase_timer(phase_timings, "cohort_summary", "Cohort summary"):
-        cohort_df = _cohort_summary(frame)
-        outputs["cohort_summary"] = write_csv_atomic(cohort_df, cohort_dir / "cohort_summary.csv", index=False)
 
     representations = list(ml_cfg.get("representations", ["whole", "band_panel"]))
     n_jobs = _normalize_n_jobs(int(ml_cfg.get("n_jobs", -1)))
     random_state = _random_state(ml_cfg)
-    stratify_by = ml_cfg.get("stratify_permutation_by")
-    sex_column = _sex_column(frame)
-
     comparison_rows: list[dict[str, object]] = []
     confounder_rows: list[dict[str, object]] = []
     null_distribution_rows: list[dict[str, object]] = []
     band_screen_frames: list[pd.DataFrame] = []
+    phase_count = 2 + len(representations) * (2 + len(_MODEL_NAMES) * 5) + 5 + int(output_dir is not None)
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        transient=False,
+    )
+    overall_task = progress.add_task("Control-vs-disease ML", total=phase_count)
 
-    for representation in representations:
-        with _phase_timer(phase_timings, f"features_{representation}", f"Build {representation} feature matrix"):
-            X, feature_names = _representation_matrix(frame, representation, cfg_in)
-            valid_rows = np.isfinite(X).all(axis=1)
-            if not valid_rows.all():
-                logger.warning(
-                    "%d subject(s) dropped from representation '%s' due to non-finite features",
-                    int((~valid_rows).sum()), representation,
-                )
-            X_valid, y_valid = X[valid_rows], y[valid_rows]
+    with progress:
+        with _phase_timer(
+            phase_timings,
+            "load_cohort",
+            "Load cohort and labels",
+            metadata_dir=metadata_dir,
+            progress=progress,
+            task_id=overall_task,
+        ):
+            frame = _load_cohort(feature_matrix_path)
+            y = _labels(frame)
 
-        strata = (
-            frame.loc[valid_rows, sex_column].astype(str).to_numpy()
-            if (sex_column is not None and stratify_by == "sex")
-            else None
-        )
-        if stratify_by == "sex" and strata is None:
-            raise ValueError("Sex-stratified classification requires a non-missing sex column; unrestricted inference is not a fallback")
-        outer_split_plan = _locked_joint_stratified_split_plan(
-            y_valid,
-            strata,
-            n_outer_splits=_n_outer_splits(ml_cfg),
-            n_outer_repeats=int(ml_cfg.get("n_outer_repeats", 10)),
-            random_state=random_state,
-        )
-        sex_only = _sex_only_baseline(frame, y, valid_rows)
+        with _phase_timer(
+            phase_timings,
+            "cohort_summary",
+            "Cohort summary",
+            metadata_dir=metadata_dir,
+            progress=progress,
+            task_id=overall_task,
+        ):
+            cohort_df = _cohort_summary(frame)
+            outputs["cohort_summary"] = write_csv_atomic(cohort_df, cohort_dir / "cohort_summary.csv", index=False)
 
-        with _phase_timer(phase_timings, f"band_screen_{representation}", f"Univariate band screen ({representation})"):
-            if representation == "band_panel":
-                band_screen_frames.append(run_univariate_band_screen(frame, y, valid_rows, cfg_in))
-
-        for model_name in _MODEL_NAMES:
+        stratify_by = ml_cfg.get("stratify_permutation_by")
+        sex_column = _sex_column(frame)
+        for representation in representations:
             with _phase_timer(
-                phase_timings, f"{model_name}_{representation}", f"{model_name} ({representation}) nested CV"
+                phase_timings,
+                f"features_{representation}",
+                f"Build {representation} feature matrix",
+                metadata_dir=metadata_dir,
+                progress=progress,
+                task_id=overall_task,
             ):
-                oof = _run_repeated_nested_cv(
-                    model_name, X_valid, y_valid, ml_cfg=ml_cfg, n_jobs=n_jobs, outer_split_plan=outer_split_plan,
-                )
-                outputs[f"{model_name}_{representation}_cv_predictions"] = write_csv_atomic(
-                    oof, model_dir / f"{model_name}_{representation}_cv_predictions.csv", index=False
-                )
-                metrics = _aggregate_repeat_metrics(oof)
-                observed_balanced_accuracy = metrics["balanced_accuracy_mean"]
+                X, feature_names = _representation_matrix(frame, representation, cfg_in)
+                valid_rows = np.isfinite(X).all(axis=1)
+                if not valid_rows.all():
+                    logger.warning(
+                        "%d subject(s) dropped from representation '%s' due to non-finite features",
+                        int((~valid_rows).sum()),
+                        representation,
+                    )
+                X_valid, y_valid = X[valid_rows], y[valid_rows]
 
-                importance_folds, importance_df = _outer_fold_feature_importance(
-                    model_name, X_valid, y_valid, feature_names, ml_cfg=ml_cfg, n_jobs=n_jobs,
-                    outer_split_plan=outer_split_plan,
+            strata = (
+                frame.loc[valid_rows, sex_column].astype(str).to_numpy()
+                if (sex_column is not None and stratify_by == "sex")
+                else None
+            )
+            if stratify_by == "sex" and strata is None:
+                raise ValueError(
+                    "Sex-stratified classification requires a non-missing sex column; unrestricted inference is not a fallback"
                 )
-                outputs[f"{model_name}_{representation}_feature_importance_folds"] = write_csv_atomic(
-                    importance_folds, model_dir / f"{model_name}_{representation}_feature_importance_outer_folds.csv", index=False
-                )
-                outputs[f"{model_name}_{representation}_feature_importance"] = write_csv_atomic(
-                    importance_df, model_dir / f"{model_name}_{representation}_feature_importance.csv", index=False
-                )
+            outer_split_plan = _locked_joint_stratified_split_plan(
+                y_valid,
+                strata,
+                n_outer_splits=_n_outer_splits(ml_cfg),
+                n_outer_repeats=int(ml_cfg.get("n_outer_repeats", 10)),
+                random_state=random_state,
+            )
+            permutation_outer_fits = 2 * _n_permutations(ml_cfg) * len(outer_split_plan[0])
+            workload_message = (
+                f"{representation}: subjects={len(y_valid)}, features={X_valid.shape[1]}, models={len(_MODEL_NAMES)}, "
+                f"workers={n_jobs}, permutation outer fits/model={permutation_outer_fits} "
+                f"({len(outer_split_plan[0])} locked folds × 2 nulls × {_n_permutations(ml_cfg)} draws)"
+            )
+            logger.info("Control-vs-disease ML workload: %s", workload_message)
+            progress.console.print(f"[cyan]ML workload:[/] {workload_message}")
+            sex_only = _sex_only_baseline(frame, y, valid_rows)
 
             with _phase_timer(
-                phase_timings, f"{model_name}_{representation}_permutation",
-                f"{model_name} ({representation}) permutation test (unrestricted)",
+                phase_timings,
+                f"band_screen_{representation}",
+                f"Univariate band screen ({representation})",
+                metadata_dir=metadata_dir,
+                progress=progress,
+                task_id=overall_task,
             ):
-                p_unrestricted, null_unrestricted = run_permutation_test(
-                    model_name, X_valid, y_valid, observed_balanced_accuracy=observed_balanced_accuracy,
-                    strata=None, ml_cfg=ml_cfg, n_jobs=n_jobs, random_state=random_state,
-                    outer_split_plan=outer_split_plan,
-                )
+                if representation == "band_panel":
+                    band_screen_frames.append(run_univariate_band_screen(frame, y, valid_rows, cfg_in))
 
-            p_sex_stratified, null_sex_stratified = np.nan, np.array([])
-            if strata is not None:
+            for model_name in _MODEL_NAMES:
+                cv_path = model_dir / f"{model_name}_{representation}_cv_predictions.csv"
+                importance_folds_path = model_dir / f"{model_name}_{representation}_feature_importance_outer_folds.csv"
+                importance_path = model_dir / f"{model_name}_{representation}_feature_importance.csv"
+                observed_complete = checkpoints.stage_complete(model_name, representation, "observed") or (
+                    checkpoints.legacy_compatible
+                    and _legacy_observed_outputs_are_compatible(
+                        model_dir,
+                        model_name,
+                        representation,
+                        n_subjects=len(y_valid),
+                        n_outer_repeats=len(outer_split_plan),
+                    )
+                )
                 with _phase_timer(
-                    phase_timings, f"{model_name}_{representation}_permutation_sex",
-                    f"{model_name} ({representation}) permutation test (sex-stratified)",
+                    phase_timings,
+                    f"{model_name}_{representation}",
+                    f"{model_name} ({representation}) nested CV",
+                    metadata_dir=metadata_dir,
+                    progress=progress,
+                    task_id=overall_task,
                 ):
-                    p_sex_stratified, null_sex_stratified = run_permutation_test(
-                        model_name, X_valid, y_valid, observed_balanced_accuracy=observed_balanced_accuracy,
-                        strata=strata, ml_cfg=ml_cfg, n_jobs=n_jobs, random_state=random_state + 1,
-                        outer_split_plan=outer_split_plan,
+                    if (
+                        observed_complete
+                        and cv_path.exists()
+                        and importance_folds_path.exists()
+                        and importance_path.exists()
+                    ):
+                        oof = pd.read_csv(cv_path)
+                        metrics = _aggregate_repeat_metrics(oof)
+                        logger.info("Reused compatible observed ML outputs for %s (%s)", model_name, representation)
+                    else:
+                        with _progress_task(
+                            progress,
+                            f"{model_name} ({representation}) nested folds",
+                            sum(len(splits) for splits in outer_split_plan),
+                        ) as fold_task:
+                            oof = _run_repeated_nested_cv(
+                                model_name,
+                                X_valid,
+                                y_valid,
+                                ml_cfg=ml_cfg,
+                                n_jobs=n_jobs,
+                                outer_split_plan=outer_split_plan,
+                                fold_callback=lambda: progress.advance(fold_task),
+                            )
+                        outputs[f"{model_name}_{representation}_cv_predictions"] = write_csv_atomic(
+                            oof, cv_path, index=False
+                        )
+                        metrics = _aggregate_repeat_metrics(oof)
+                        with _progress_task(
+                            progress,
+                            f"{model_name} ({representation}) importance folds",
+                            sum(len(splits) for splits in outer_split_plan),
+                        ) as importance_task:
+                            importance_folds, importance_df = _outer_fold_feature_importance(
+                                model_name,
+                                X_valid,
+                                y_valid,
+                                feature_names,
+                                ml_cfg=ml_cfg,
+                                n_jobs=n_jobs,
+                                outer_split_plan=outer_split_plan,
+                                fold_callback=lambda: progress.advance(importance_task),
+                            )
+                        outputs[f"{model_name}_{representation}_feature_importance_folds"] = write_csv_atomic(
+                            importance_folds, importance_folds_path, index=False
+                        )
+                        outputs[f"{model_name}_{representation}_feature_importance"] = write_csv_atomic(
+                            importance_df, importance_path, index=False
+                        )
+                        checkpoints.mark_stage_complete(model_name, representation, "observed")
+
+                permutation_observed_score = _fixed_plan_balanced_accuracy(
+                    model_name, X_valid, y_valid, ml_cfg=ml_cfg, outer_cv=outer_split_plan[0]
+                )
+                logger.info(
+                    "Permutation observed score %s (%s): %.4f on locked 5-fold plan",
+                    model_name,
+                    representation,
+                    permutation_observed_score,
+                )
+
+                with _progress_task(
+                    progress,
+                    f"{model_name} ({representation}) unrestricted permutations",
+                    _n_permutations(ml_cfg),
+                ) as unrestricted_task:
+                    with _phase_timer(
+                        phase_timings,
+                        f"{model_name}_{representation}_permutation",
+                        f"{model_name} ({representation}) permutation test (unrestricted)",
+                        metadata_dir=metadata_dir,
+                        progress=progress,
+                        task_id=overall_task,
+                    ):
+                        p_unrestricted, null_unrestricted = run_permutation_test(
+                            model_name,
+                            X_valid,
+                            y_valid,
+                            observed_balanced_accuracy=permutation_observed_score,
+                            strata=None,
+                            ml_cfg=ml_cfg,
+                            n_jobs=n_jobs,
+                            random_state=random_state,
+                            outer_split_plan=outer_split_plan,
+                            checkpoint_path=checkpoints.resampling_path(
+                                "permutation", model_name, representation, "unrestricted"
+                            ),
+                            resume=resume,
+                            progress=progress,
+                            progress_task_id=unrestricted_task,
+                        )
+
+                p_sex_stratified, null_sex_stratified = np.nan, np.array([])
+                if strata is not None:
+                    with _progress_task(
+                        progress,
+                        f"{model_name} ({representation}) sex-stratified permutations",
+                        _n_permutations(ml_cfg),
+                    ) as sex_task:
+                        with _phase_timer(
+                            phase_timings,
+                            f"{model_name}_{representation}_permutation_sex",
+                            f"{model_name} ({representation}) permutation test (sex-stratified)",
+                            metadata_dir=metadata_dir,
+                            progress=progress,
+                            task_id=overall_task,
+                        ):
+                            p_sex_stratified, null_sex_stratified = run_permutation_test(
+                                model_name,
+                                X_valid,
+                                y_valid,
+                                observed_balanced_accuracy=permutation_observed_score,
+                                strata=strata,
+                                ml_cfg=ml_cfg,
+                                n_jobs=n_jobs,
+                                random_state=random_state + 1,
+                                outer_split_plan=outer_split_plan,
+                                checkpoint_path=checkpoints.resampling_path(
+                                    "permutation", model_name, representation, "sex_stratified"
+                                ),
+                                resume=resume,
+                                progress=progress,
+                                progress_task_id=sex_task,
+                            )
+
+                for null_scores, null_type, null_seed in (
+                    (null_unrestricted, "unrestricted", random_state),
+                    (null_sex_stratified, "sex_stratified", random_state + 1),
+                ):
+                    _append_null_distribution_rows(
+                        null_distribution_rows,
+                        model_name=model_name,
+                        representation=representation,
+                        null_type=null_type,
+                        random_state=null_seed,
+                        null_scores=null_scores,
+                        n_permutations=_n_permutations(ml_cfg),
+                        n_splits=len(outer_split_plan[0]),
                     )
 
-            for null_arr, null_kind in ((null_unrestricted, "unrestricted"), (null_sex_stratified, "sex_stratified")):
-                null_distribution_rows.extend(
+                with _progress_task(
+                    progress,
+                    f"{model_name} ({representation}) bootstrap draws",
+                    int(ml_cfg.get("n_bootstrap", 1000)),
+                ) as bootstrap_task:
+                    with _phase_timer(
+                        phase_timings,
+                        f"{model_name}_{representation}_bootstrap",
+                        f"{model_name} ({representation}) bootstrap CI",
+                        metadata_dir=metadata_dir,
+                        progress=progress,
+                        task_id=overall_task,
+                    ):
+                        bootstrap_ci = run_bootstrap_ci(
+                            model_name,
+                            X_valid,
+                            y_valid,
+                            ml_cfg=ml_cfg,
+                            n_jobs=n_jobs,
+                            random_state=random_state,
+                            checkpoint_path=checkpoints.resampling_path(
+                                "bootstrap", model_name, representation, "metrics"
+                            ),
+                            resume=resume,
+                            progress=progress,
+                            progress_task_id=bootstrap_task,
+                        )
+
+                comparison_rows.append(
                     {
                         "model": model_name,
                         "representation": representation,
-                        "null_type": null_kind,
-                        "null_balanced_accuracy": float(value),
+                        "n_subjects": int(len(y_valid)),
+                        **metrics,
+                        **{f"bootstrap_{k}": v for k, v in bootstrap_ci.items()},
+                        "permutation_observed_balanced_accuracy": permutation_observed_score,
+                        "permutation_cv_splits": len(outer_split_plan[0]),
+                        "permutation_cv_repeats": 1,
+                        "permutation_p_value_unrestricted": p_unrestricted,
+                        "permutation_p_value_sex_stratified": p_sex_stratified,
+                        "n_permutations": _n_permutations(ml_cfg),
+                        "is_primary_model": model_name == ml_cfg.get("primary_model")
+                        and representation == ml_cfg.get("primary_representation"),
                     }
-                    for value in null_arr
                 )
 
+                with _phase_timer(
+                    phase_timings,
+                    f"{model_name}_{representation}_sex_refit",
+                    f"{model_name} ({representation}) female-only sensitivity refit",
+                    metadata_dir=metadata_dir,
+                    progress=progress,
+                    task_id=overall_task,
+                ):
+                    female_refit = _sex_stratified_refit(
+                        model_name, frame, X_valid, y_valid, valid_rows, ml_cfg=ml_cfg, n_jobs=n_jobs
+                    )
+                confounder_rows.append(
+                    {"model": model_name, "representation": representation, **female_refit, **sex_only}
+                )
+
+        with _phase_timer(
+            phase_timings,
+            "model_comparison",
+            "Write model comparison table",
+            metadata_dir=metadata_dir,
+            progress=progress,
+            task_id=overall_task,
+        ):
+            comparison_df = pd.DataFrame(comparison_rows)
+            primary_mask = comparison_df["is_primary_model"].astype(bool)
+            family_p = comparison_df["permutation_p_value_sex_stratified"].to_numpy(dtype=float)
+            if not np.isfinite(family_p).all():
+                raise RuntimeError(
+                    "Sex-stratified permutation inference failed; refusing to substitute an unrestricted null"
+                )
+            fdr_q, fdr_significant = fdr_correction(family_p, alpha=0.05)
+            comparison_df["permutation_p_fdr_q"] = fdr_q
+            comparison_df["permutation_fdr_significant"] = fdr_significant
+            comparison_df.insert(0, "positive_class", POSITIVE_CLASS_LABEL)
+            outputs["model_comparison"] = write_csv_atomic(
+                comparison_df, model_dir / "model_comparison.csv", index=False
+            )
+            if primary_mask.any():
+                primary_summary_columns = [
+                    "model",
+                    "representation",
+                    "balanced_accuracy_mean",
+                    "permutation_p_value_sex_stratified",
+                ]
+                logger.info(
+                    "Primary result: %s", comparison_df.loc[primary_mask, primary_summary_columns].to_dict("records")
+                )
+
+        with _phase_timer(
+            phase_timings,
+            "confounder_analysis",
+            "Write confounder analysis table",
+            metadata_dir=metadata_dir,
+            progress=progress,
+            task_id=overall_task,
+        ):
+            outputs["confounder_analysis"] = write_csv_atomic(
+                pd.DataFrame(confounder_rows), confounder_dir / "confounder_analysis.csv", index=False
+            )
+
+        with _phase_timer(
+            phase_timings,
+            "null_distributions",
+            "Write permutation null distributions",
+            metadata_dir=metadata_dir,
+            progress=progress,
+            task_id=overall_task,
+        ):
+            outputs["permutation_null_distributions"] = write_csv_atomic(
+                pd.DataFrame(null_distribution_rows),
+                permutation_dir / "permutation_null_distributions.csv",
+                index=False,
+            )
+
+        with _phase_timer(
+            phase_timings,
+            "univariate_band_screen",
+            "Write univariate band screen",
+            metadata_dir=metadata_dir,
+            progress=progress,
+            task_id=overall_task,
+        ):
+            band_screen_df = pd.concat(band_screen_frames, ignore_index=True) if band_screen_frames else pd.DataFrame()
+            outputs["univariate_band_screen"] = write_csv_atomic(
+                band_screen_df, band_screen_dir / "univariate_band_screen.csv", index=False
+            )
+
+        with _phase_timer(
+            phase_timings,
+            "report_and_figures",
+            "Write figures and narrative report",
+            metadata_dir=metadata_dir,
+            progress=progress,
+            task_id=overall_task,
+        ):
+            outputs.update(run_control_vs_disease_ml_report(target_dir, cfg_in))
+
+        if output_dir is not None:
             with _phase_timer(
-                phase_timings, f"{model_name}_{representation}_bootstrap",
-                f"{model_name} ({representation}) bootstrap CI",
+                phase_timings,
+                "provenance",
+                "Write provenance artifacts",
+                metadata_dir=metadata_dir,
+                progress=progress,
+                task_id=overall_task,
             ):
-                bootstrap_ci = run_bootstrap_ci(
-                    model_name, X_valid, y_valid, ml_cfg=ml_cfg, n_jobs=n_jobs, random_state=random_state
+                write_analysis_provenance(
+                    target_dir / "00_run_metadata",
+                    resolve_data_source(cfg_in),
+                    cfg_in,
+                    command="run_control_vs_disease_ml_pipeline",
                 )
 
-            comparison_rows.append(
-                {
-                    "model": model_name,
-                    "representation": representation,
-                    "n_subjects": int(len(y_valid)),
-                    **metrics,
-                    **{f"bootstrap_{k}": v for k, v in bootstrap_ci.items()},
-                    "permutation_p_value_unrestricted": p_unrestricted,
-                    "permutation_p_value_sex_stratified": p_sex_stratified,
-                    "n_permutations": _n_permutations(ml_cfg),
-                    "is_primary_model": (
-                        model_name == ml_cfg.get("primary_model") and representation == ml_cfg.get("primary_representation")
-                    ),
-                }
-            )
-
-            with _phase_timer(
-                phase_timings, f"{model_name}_{representation}_sex_refit",
-                f"{model_name} ({representation}) female-only sensitivity refit",
-            ):
-                female_refit = _sex_stratified_refit(
-                    model_name, frame, X_valid, y_valid, valid_rows, ml_cfg=ml_cfg, n_jobs=n_jobs
-                )
-
-            confounder_rows.append(
-                {"model": model_name, "representation": representation, **female_refit, **sex_only}
-            )
-
-    with _phase_timer(phase_timings, "model_comparison", "Write model comparison table"):
-        comparison_df = pd.DataFrame(comparison_rows)
-        primary_mask = comparison_df["is_primary_model"].astype(bool)
-        family_p = comparison_df["permutation_p_value_sex_stratified"].to_numpy(dtype=float)
-        if not np.isfinite(family_p).all():
-            raise RuntimeError("Sex-stratified permutation inference failed; refusing to substitute an unrestricted null")
-        fdr_q, fdr_significant = fdr_correction(family_p, alpha=0.05)
-        comparison_df["permutation_p_fdr_q"] = fdr_q
-        comparison_df["permutation_fdr_significant"] = fdr_significant
-        comparison_df.insert(0, "positive_class", POSITIVE_CLASS_LABEL)
-        outputs["model_comparison"] = write_csv_atomic(comparison_df, model_dir / "model_comparison.csv", index=False)
-        if primary_mask.any():
-            primary_summary_columns = [
-                "model", "representation", "balanced_accuracy_mean", "permutation_p_value_sex_stratified",
-            ]
-            logger.info(
-                "Primary result: %s",
-                comparison_df.loc[primary_mask, primary_summary_columns].to_dict("records"),
-            )
-
-    with _phase_timer(phase_timings, "confounder_analysis", "Write confounder analysis table"):
-        outputs["confounder_analysis"] = write_csv_atomic(
-            pd.DataFrame(confounder_rows), confounder_dir / "confounder_analysis.csv", index=False
-        )
-
-    with _phase_timer(phase_timings, "null_distributions", "Write permutation null distributions"):
-        outputs["permutation_null_distributions"] = write_csv_atomic(
-            pd.DataFrame(null_distribution_rows), permutation_dir / "permutation_null_distributions.csv", index=False
-        )
-
-    with _phase_timer(phase_timings, "univariate_band_screen", "Write univariate band screen"):
-        band_screen_df = pd.concat(band_screen_frames, ignore_index=True) if band_screen_frames else pd.DataFrame()
-        outputs["univariate_band_screen"] = write_csv_atomic(
-            band_screen_df, band_screen_dir / "univariate_band_screen.csv", index=False
-        )
-
-    with _phase_timer(phase_timings, "report_and_figures", "Write figures and narrative report"):
-        outputs.update(run_control_vs_disease_ml_report(target_dir, cfg_in))
-
-    if output_dir is not None:
-        with _phase_timer(phase_timings, "provenance", "Write provenance artifacts"):
-            write_analysis_provenance(
-                target_dir / "00_run_metadata",
-                resolve_data_source(cfg_in),
-                cfg_in,
-                command="run_control_vs_disease_ml_pipeline",
-            )
-
-    metadata_dir = get_run_metadata_dir() if output_dir is None else target_dir / "00_run_metadata"
     timing_path = _write_phase_timings(phase_timings, metadata_dir)
     if timing_path is not None:
         outputs["phase_timing"] = timing_path

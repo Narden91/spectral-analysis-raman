@@ -8,8 +8,11 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import balanced_accuracy_score
 
 from src.analysis.control_vs_disease_ml import (
+    _append_null_distribution_rows,
     _classification_metrics,
     _cohort_summary,
     _fit_tuned_model,
@@ -17,12 +20,14 @@ from src.analysis.control_vs_disease_ml import (
     _load_cohort,
     _locked_joint_stratified_split_plan,
     _permute_labels,
+    _permuted_score,
     _representation_matrix,
     _run_repeated_nested_cv,
     _sex_only_baseline,
     _sex_stratified_refit,
     _single_split_balanced_accuracy,
     _tune_threshold,
+    _tune_threshold_and_score,
     run_bootstrap_ci,
     run_control_vs_disease_ml_pipeline,
     run_permutation_test,
@@ -31,6 +36,42 @@ from src.analysis.control_vs_disease_ml import (
 from src.analysis.eda_mode import validate_control_vs_disease_ml_config
 
 N_FEATURES = 12
+
+
+def test_append_null_distribution_rows_skips_absent_optional_null() -> None:
+    rows: list[dict[str, object]] = []
+
+    _append_null_distribution_rows(
+        rows,
+        model_name="pls_da",
+        representation="whole",
+        null_type="sex_stratified",
+        random_state=123,
+        null_scores=np.array([]),
+        n_permutations=5,
+        n_splits=5,
+    )
+
+    assert rows == []
+
+
+def test_append_null_distribution_rows_records_deterministic_metadata() -> None:
+    rows: list[dict[str, object]] = []
+
+    _append_null_distribution_rows(
+        rows,
+        model_name="pls_da",
+        representation="whole",
+        null_type="unrestricted",
+        random_state=123,
+        null_scores=np.array([0.4, 0.5]),
+        n_permutations=2,
+        n_splits=5,
+    )
+
+    assert [row["seed"] for row in rows] == [33158374, 1465339467]
+    assert [row["null_balanced_accuracy"] for row in rows] == [0.4, 0.5]
+    assert {row["permutation_cv_splits"] for row in rows} == {5}
 
 
 def _make_feature_matrix(
@@ -269,8 +310,11 @@ def test_pls_da_threshold_uses_only_inner_fold_scores(monkeypatch: pytest.Monkey
     X_train = rng.normal(size=(30, 6))
     y_train = np.array([0] * 15 + [1] * 15)
     kwargs = dict(
-        ml_cfg={"pls_components_grid": [1, 2, 3]}, n_inner_splits=3,
-        threshold_metric="balanced_accuracy", random_state=42, n_jobs=1,
+        ml_cfg={"pls_components_grid": [1, 2, 3]},
+        n_inner_splits=3,
+        threshold_metric="balanced_accuracy",
+        random_state=42,
+        n_jobs=1,
     )
 
     fit_a = _fit_tuned_model("pls_da", X_train, y_train, **kwargs)
@@ -305,9 +349,14 @@ def test_nested_cv_scaler_never_fit_on_test_fold(monkeypatch: pytest.MonkeyPatch
     for train_idx, test_idx in outer_cv:
         seen_fit_arrays.clear()
         _fit_tuned_model(
-            "l1_logistic", X[train_idx], y[train_idx],
-            ml_cfg={"logistic_c_grid": [0.1, 1.0]}, n_inner_splits=2,
-            threshold_metric="balanced_accuracy", random_state=42, n_jobs=1,
+            "l1_logistic",
+            X[train_idx],
+            y[train_idx],
+            ml_cfg={"logistic_c_grid": [0.1, 1.0]},
+            n_inner_splits=2,
+            threshold_metric="balanced_accuracy",
+            random_state=42,
+            n_jobs=1,
         )
         test_rows = X[test_idx]
         for fit_array in seen_fit_arrays:
@@ -362,6 +411,43 @@ def test_repeated_nested_cv_is_deterministic(base_ml_cfg: dict) -> None:
     pd.testing.assert_frame_equal(oof_a, oof_b)
 
 
+def test_vectorized_threshold_matches_bruteforce_reference() -> None:
+    y = np.array([0, 1, 0, 1, 1, 0])
+    scores = np.array([0.2, 0.2, 0.4, 0.8, 0.8, 0.9])
+    candidates = np.unique(scores)
+    thresholds = np.concatenate(
+        [[candidates[0] - 1e-6], (candidates[:-1] + candidates[1:]) / 2.0, [candidates[-1] + 1e-6]]
+    )
+    brute_scores = [balanced_accuracy_score(y, (scores >= threshold).astype(int)) for threshold in thresholds]
+    expected_index = int(np.argmax(brute_scores))
+    threshold, score = _tune_threshold_and_score(y, scores, "balanced_accuracy")
+    assert threshold == pytest.approx(thresholds[expected_index])
+    assert score == pytest.approx(brute_scores[expected_index])
+    assert _tune_threshold(y, scores, "balanced_accuracy") == threshold
+
+
+def test_random_forest_warm_start_matches_independent_estimator_counts() -> None:
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(30, 5))
+    y = np.array([0] * 15 + [1] * 15)
+    warm = RandomForestClassifier(
+        n_estimators=10, random_state=42, class_weight="balanced_subsample", warm_start=True, n_jobs=1
+    )
+    warm.fit(X, y)
+    warm_10 = warm.predict_proba(X)
+    warm.set_params(n_estimators=20)
+    warm.fit(X, y)
+    warm_20 = warm.predict_proba(X)
+    independent_10 = RandomForestClassifier(
+        n_estimators=10, random_state=42, class_weight="balanced_subsample", n_jobs=1
+    ).fit(X, y)
+    independent_20 = RandomForestClassifier(
+        n_estimators=20, random_state=42, class_weight="balanced_subsample", n_jobs=1
+    ).fit(X, y)
+    np.testing.assert_allclose(warm_10, independent_10.predict_proba(X))
+    np.testing.assert_allclose(warm_20, independent_20.predict_proba(X))
+
+
 # ---------------------------------------------------------------------------
 # Permutation tests
 # ---------------------------------------------------------------------------
@@ -401,7 +487,9 @@ def test_permutation_p_value_bounded(base_ml_cfg: dict) -> None:
 
     observed = _single_split_balanced_accuracy("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
     p_value, null_dist = run_permutation_test(
-        "l1_logistic", X, y,
+        "l1_logistic",
+        X,
+        y,
         observed_balanced_accuracy=observed,
         strata=None,
         ml_cfg=ml_cfg,
@@ -425,7 +513,9 @@ def test_permutation_null_centers_near_chance_on_pure_noise(base_ml_cfg: dict) -
 
     observed = _single_split_balanced_accuracy("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
     p_value, null_dist = run_permutation_test(
-        "l1_logistic", X, y,
+        "l1_logistic",
+        X,
+        y,
         observed_balanced_accuracy=observed,
         strata=None,
         ml_cfg=ml_cfg,
@@ -481,7 +571,9 @@ def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> N
     assert observed > 0.9, "sanity check: sex-driven signal should be trivially separable"
 
     p_unrestricted, _null_u = run_permutation_test(
-        "l1_logistic", Xw, y,
+        "l1_logistic",
+        Xw,
+        y,
         observed_balanced_accuracy=observed,
         strata=None,
         ml_cfg=ml_cfg,
@@ -489,7 +581,9 @@ def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> N
         random_state=1,
     )
     p_sex_stratified, _null_s = run_permutation_test(
-        "l1_logistic", Xw, y,
+        "l1_logistic",
+        Xw,
+        y,
         observed_balanced_accuracy=observed,
         strata=sex,
         ml_cfg=ml_cfg,
@@ -532,6 +626,63 @@ def test_locked_outer_plan_fails_when_a_joint_stratum_cannot_fill_every_fold() -
             n_outer_repeats=1,
             random_state=42,
         )
+
+
+def test_permuted_score_uses_only_first_locked_repeat(monkeypatch: pytest.MonkeyPatch, base_ml_cfg: dict) -> None:
+    y = np.array([0] * 12 + [1] * 12)
+    X = np.arange(len(y) * 2, dtype=float).reshape(len(y), 2)
+    sex = np.tile(np.repeat(np.array(["female", "male"]), 6), 2)
+    plan = _locked_joint_stratified_split_plan(y, sex, n_outer_splits=3, n_outer_repeats=2, random_state=42)
+    captured: dict[str, object] = {}
+
+    def fake_fixed(*args, **kwargs):
+        captured["outer_cv"] = kwargs["outer_cv"]
+        return 0.5
+
+    monkeypatch.setattr("src.analysis.control_vs_disease_ml._fixed_plan_balanced_accuracy", fake_fixed)
+    value = _permuted_score("l1_logistic", X, y, None, base_ml_cfg["analysis"]["control_vs_disease_ml"], 7, plan)
+    assert value == 0.5
+    assert captured["outer_cv"] == plan[0]
+
+
+def test_permutation_resume_reuses_seeded_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, base_ml_cfg: dict
+) -> None:
+    ml_cfg = _small_permutation_cfg(base_ml_cfg)
+    ml_cfg["n_permutations"] = 3
+    X = np.zeros((12, 2))
+    y = np.array([0] * 6 + [1] * 6)
+    checkpoint = tmp_path / "permutation.parquet"
+    monkeypatch.setattr("src.analysis.control_vs_disease_ml._permuted_score", lambda *_args: 0.5)
+    first_p, first_null = run_permutation_test(
+        "l1_logistic",
+        X,
+        y,
+        observed_balanced_accuracy=0.5,
+        strata=None,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=9,
+        checkpoint_path=checkpoint,
+    )
+    monkeypatch.setattr(
+        "src.analysis.control_vs_disease_ml._permuted_score",
+        lambda *_args: pytest.fail("checkpointed draw was recomputed"),
+    )
+    resumed_p, resumed_null = run_permutation_test(
+        "l1_logistic",
+        X,
+        y,
+        observed_balanced_accuracy=0.5,
+        strata=None,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=9,
+        checkpoint_path=checkpoint,
+        resume=True,
+    )
+    assert resumed_p == first_p
+    np.testing.assert_array_equal(resumed_null, first_null)
 
 
 # ---------------------------------------------------------------------------
@@ -682,9 +833,7 @@ def test_sex_stratified_refit_reports_female_only_metrics(base_ml_cfg: dict) -> 
     X, _names = _representation_matrix(frame, "whole", {})
     ml_cfg = _small_permutation_cfg(base_ml_cfg)
 
-    result = _sex_stratified_refit(
-        "l1_logistic", frame, X, y, valid_rows, ml_cfg=ml_cfg, n_jobs=1
-    )
+    result = _sex_stratified_refit("l1_logistic", frame, X, y, valid_rows, ml_cfg=ml_cfg, n_jobs=1)
     assert result["status"] == "ok"
     assert "female_only_balanced_accuracy_mean" in result
 
@@ -698,9 +847,7 @@ def test_sex_stratified_refit_insufficient_n_reports_status(base_ml_cfg: dict) -
     X, _names = _representation_matrix(frame, "whole", {})
     ml_cfg = _small_permutation_cfg(base_ml_cfg)
 
-    result = _sex_stratified_refit(
-        "l1_logistic", frame, X, y, valid_rows, ml_cfg=ml_cfg, n_jobs=1
-    )
+    result = _sex_stratified_refit("l1_logistic", frame, X, y, valid_rows, ml_cfg=ml_cfg, n_jobs=1)
     assert result["status"] == "insufficient_n"
 
 
@@ -752,8 +899,7 @@ def test_validate_config_skips_when_disabled(base_ml_cfg: dict) -> None:
 @patch("src.analysis.control_vs_disease_ml.write_analysis_provenance")
 @patch("src.analysis.control_vs_disease_ml.resolve_data_source", return_value=MagicMock())
 def test_runner_smoke_produces_expected_outputs(
-    _mock_resolve_source, _mock_write_provenance,
-    small_matrix_path: Path, base_ml_cfg: dict, tmp_path: Path
+    _mock_resolve_source, _mock_write_provenance, small_matrix_path: Path, base_ml_cfg: dict, tmp_path: Path
 ) -> None:
     out_dir = tmp_path / "ml_out"
     outputs = run_control_vs_disease_ml_pipeline(
@@ -783,6 +929,11 @@ def test_runner_smoke_produces_expected_outputs(
     assert set(comparison["representation"]) == {"whole", "band_panel"}
     assert (comparison["positive_class"] == "Disease").all()
     assert "balanced_accuracy_mean" in comparison.columns
+    assert "permutation_observed_balanced_accuracy" in comparison.columns
+    assert (
+        comparison["permutation_cv_splits"] == base_ml_cfg["analysis"]["control_vs_disease_ml"]["n_outer_splits"]
+    ).all()
+    assert (comparison["permutation_cv_repeats"] == 1).all()
     assert "roc_auc_mean" in comparison.columns
 
     assert "permutation_p_value_unrestricted" in comparison.columns

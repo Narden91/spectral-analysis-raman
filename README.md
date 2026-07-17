@@ -141,6 +141,9 @@ uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range 2850
 # Fused case-control workflow: EDA, Biological PCA, and exploratory ML.
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both
 
+# Resume compatible interrupted case-control ML resampling.
+uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both --resume-ml
+
 # Disease-only exploratory clinical workflow.
 uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range both
 
@@ -171,6 +174,10 @@ Each EDA run records provenance in `00_run_metadata/`, including the resolved
 configuration and data-manifest snapshot. ML output is subject-level only;
 nested CV tuning remains inside outer training folds, permutation tests include
 a sex-stratified null, and importance summaries are derived across outer folds.
+The 10-repeat nested-CV estimate is descriptive; permutation p-values compare
+the real and permuted labels on the same fixed locked 5-fold plan. ML shows
+phase/resampling progress and atomically checkpoints compatible permutation and
+bootstrap draws under `00_run_metadata/` for `--resume-ml`.
 
 `Results_*/` directories are private analysis products and are intentionally
 ignored by Git: they can contain pseudonymized identifiers and sensitive

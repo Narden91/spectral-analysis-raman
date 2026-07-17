@@ -169,7 +169,7 @@ def plot_permutation_null(
     row = comparison_df.loc[(comparison_df["model"] == model_name) & (comparison_df["representation"] == representation)]
     if row.empty:
         return None
-    observed = float(row["balanced_accuracy_mean"].iloc[0])
+    observed = float(row["permutation_observed_balanced_accuracy"].iloc[0])
     p_column = "permutation_p_value_sex_stratified" if null_type == "sex_stratified" else "permutation_p_value_unrestricted"
     p_value = row[p_column].iloc[0]
 
@@ -311,6 +311,8 @@ def _build_report_text(
                 f"- ROC-AUC: {_fmt(primary['roc_auc_mean'])} "
                 f"(95% CI {_fmt(primary.get('bootstrap_roc_auc_ci_low'))}–{_fmt(primary.get('bootstrap_roc_auc_ci_high'))})",
                 f"- MCC: {_fmt(primary['mcc_mean'])}; sensitivity: {_fmt(primary['sensitivity_mean'])}; specificity: {_fmt(primary['specificity_mean'])}",
+                f"- Permutation-test observed balanced accuracy (one locked 5-fold plan): "
+                f"{_fmt(primary['permutation_observed_balanced_accuracy'])}",
                 f"- Unrestricted permutation p-value: {_fmt(primary['permutation_p_value_unrestricted'], 4)}",
                 f"- **Sex-stratified permutation p-value (primary inferential test, §0.1): "
                 f"{_fmt(primary['permutation_p_value_sex_stratified'], 4)}** "
@@ -351,7 +353,7 @@ def _build_report_text(
             dataframe_to_markdown(
                 comparison_df[
                     [
-                        "model", "representation", "n_subjects", "balanced_accuracy_mean", "roc_auc_mean", "mcc_mean",
+                        "model", "representation", "n_subjects", "balanced_accuracy_mean", "permutation_observed_balanced_accuracy", "roc_auc_mean", "mcc_mean",
                         "permutation_p_value_unrestricted", "permutation_p_value_sex_stratified", "permutation_p_fdr_q",
                     ]
                 ].round(4)

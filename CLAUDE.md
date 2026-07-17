@@ -66,7 +66,10 @@ QC metrics → dead-pixel screen → cosmic detection/suppression → edge trim
   Preserve `spectral_block__raman_shift` identity for fused features.
 - The case-control ML layer is read-only downstream of Biological PCA. All
   tuning, scaling, and threshold selection must remain inside outer training
-  folds. Permutations must reuse the locked outer-fold plan. Report only
+  folds. Permutations must reuse one fixed repeat of the locked outer-fold plan
+  for both the observed and every null score; repeated CV remains descriptive.
+  Persist resumable resampling checkpoints keyed by configuration, data, and
+  feature-matrix identity. Report only
   outer-fold feature-importance summaries; forest importances use held-out-fold
   permutation scoring.
 - The curated 21 Raman windows are centrally registered in
@@ -97,6 +100,7 @@ uv run scripts/manage_data_store.py prepare
 
 # Production workflows
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both
+uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both --resume-ml
 uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range both
 uv run scripts/run_spectral_plots.py --config config/plots.yaml --source preprocessed
 

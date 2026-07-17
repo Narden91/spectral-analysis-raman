@@ -204,6 +204,14 @@ def _parse_args() -> argparse.Namespace:
             "This does not make private results public; use export_publication_bundle afterwards."
         ),
     )
+    parser.add_argument(
+        "--resume-ml",
+        action="store_true",
+        help=(
+            "Resume compatible control-vs-disease ML permutation/bootstrap checkpoints. "
+            "Requires disease_vs_control mode with Biological PCA enabled."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -289,9 +297,21 @@ def _main() -> None:
     if analysis_mode == "disease_vs_control":
         validate_control_vs_disease_ml_config(config)
     ranges = _requested_ranges(args.range)
+    if args.resume_ml and (
+        analysis_mode != "disease_vs_control" or not _should_run_biological_pca(ranges, args.skip_biological_pca)
+    ):
+        raise ValueError("--resume-ml requires disease_vs_control mode and a run that includes Biological PCA/ML")
     _validate_publication_run(args, ranges)
     _set_analysis_output_root(analysis_mode)
     metadata_dir = get_run_metadata_dir()
+    legacy_run_manifest: dict[str, object] | None = None
+    if args.resume_ml:
+        prior_manifest = metadata_dir / "run_manifest.json"
+        if prior_manifest.exists():
+            try:
+                legacy_run_manifest = json.loads(prior_manifest.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Cannot resume ML: prior run manifest is invalid JSON: {prior_manifest}") from exc
     _attach_run_log_file(metadata_dir / "run.log")
     data_source = resolve_data_source(config, source_override=args.source)
     print_kv_table("Active Data Source", data_source_summary(data_source))
@@ -351,6 +371,9 @@ def _main() -> None:
                 run_control_vs_disease_ml_pipeline(
                     feature_matrix_path=feature_matrix_path,
                     cfg=config,
+                    resume=args.resume_ml,
+                    data_manifest_hash=data_source.manifest_hash,
+                    legacy_run_manifest=legacy_run_manifest,
                 )
                 print_status("Finished control-vs-disease ML classification")
         warnings = _write_warning_summaries(_output_dir("eda_subdir")) if biological_ran else []
@@ -359,6 +382,10 @@ def _main() -> None:
     except (ValueError, RuntimeError) as exc:
         logger.error("%s", exc)
         sys.exit(1)
+    except KeyboardInterrupt:
+        logger.warning("EDA interrupted; completed ML resampling checkpoints are available for --resume-ml")
+        print_status("EDA interrupted. Re-run with --resume-ml to continue compatible ML resampling.")
+        sys.exit(130)
 
 
 if __name__ == "__main__":
