@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,6 +12,7 @@ import pandas as pd
 import pytest
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import balanced_accuracy_score
+from sklearn.model_selection import StratifiedKFold
 
 from src.analysis.control_vs_disease_ml import (
     _append_null_distribution_rows,
@@ -20,6 +22,7 @@ from src.analysis.control_vs_disease_ml import (
     _labels,
     _load_cohort,
     _locked_joint_stratified_split_plan,
+    _outer_fold_feature_importance,
     _permute_labels,
     _permuted_score,
     _representation_matrix,
@@ -40,7 +43,8 @@ from src.analysis.eda_mode import validate_control_vs_disease_ml_config
 N_FEATURES = 12
 
 
-def _double(value: int) -> int:
+def _delayed_double(value: int) -> int:
+    time.sleep(0.05 if value == 2 else 0.0)
     return value * 2
 
 
@@ -54,12 +58,12 @@ def test_stream_parallel_uses_scikit_learn_parallel_api() -> None:
         )
         _stream_parallel(
             2,
-            _double,
+            _delayed_double,
             [(11, (2,)), (12, (3,))],
             lambda seed, value: received.append((seed, value)),
         )
 
-    assert received == [(11, 4), (12, 6)]
+    assert sorted(received) == [(11, 4), (12, 6)]
 
 
 def test_append_null_distribution_rows_skips_absent_optional_null() -> None:
@@ -433,6 +437,38 @@ def test_repeated_nested_cv_is_deterministic(base_ml_cfg: dict) -> None:
     oof_b = _run_repeated_nested_cv("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1)
 
     pd.testing.assert_frame_equal(oof_a, oof_b)
+
+
+def test_random_forest_outer_fold_parallelism_matches_serial(base_ml_cfg: dict) -> None:
+    frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=1.0, random_state=31)
+    X, _names = _representation_matrix(frame, "whole", base_ml_cfg["whole_spectra"])
+    y = _labels(frame)
+    ml_cfg = base_ml_cfg["analysis"]["control_vs_disease_ml"]
+
+    serial = _run_repeated_nested_cv("random_forest", X, y, ml_cfg=ml_cfg, n_jobs=1)
+    parallel = _run_repeated_nested_cv("random_forest", X, y, ml_cfg=ml_cfg, n_jobs=2)
+
+    pd.testing.assert_frame_equal(serial, parallel)
+
+
+def test_random_forest_importance_outer_fold_parallelism_matches_serial(base_ml_cfg: dict) -> None:
+    frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=1.0, random_state=32)
+    X, feature_names = _representation_matrix(frame, "whole", base_ml_cfg["whole_spectra"])
+    y = _labels(frame)
+    ml_cfg = base_ml_cfg["analysis"]["control_vs_disease_ml"] | {"importance_permutation_repeats": 1}
+    outer_split_plan = [
+        list(StratifiedKFold(n_splits=3, shuffle=True, random_state=42 + repeat).split(X, y)) for repeat in range(2)
+    ]
+
+    serial = _outer_fold_feature_importance(
+        "random_forest", X, y, feature_names, ml_cfg=ml_cfg, n_jobs=1, outer_split_plan=outer_split_plan
+    )
+    parallel = _outer_fold_feature_importance(
+        "random_forest", X, y, feature_names, ml_cfg=ml_cfg, n_jobs=2, outer_split_plan=outer_split_plan
+    )
+
+    pd.testing.assert_frame_equal(serial[0], parallel[0])
+    pd.testing.assert_frame_equal(serial[1], parallel[1])
 
 
 def test_vectorized_threshold_matches_bruteforce_reference() -> None:
