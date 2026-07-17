@@ -35,7 +35,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from joblib import Parallel, delayed
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from scipy import stats
 from sklearn.cross_decomposition import PLSRegression
@@ -52,6 +51,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import RepeatedStratifiedKFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils.parallel import Parallel, delayed
 
 from src import (
     config,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +27,7 @@ from src.analysis.control_vs_disease_ml import (
     _sex_only_baseline,
     _sex_stratified_refit,
     _single_split_balanced_accuracy,
+    _stream_parallel,
     _tune_threshold,
     _tune_threshold_and_score,
     run_bootstrap_ci,
@@ -36,6 +38,28 @@ from src.analysis.control_vs_disease_ml import (
 from src.analysis.eda_mode import validate_control_vs_disease_ml_config
 
 N_FEATURES = 12
+
+
+def _double(value: int) -> int:
+    return value * 2
+
+
+def test_stream_parallel_uses_scikit_learn_parallel_api() -> None:
+    received: list[tuple[int, int]] = []
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "error",
+            message="`sklearn.utils.parallel.delayed` should be used with `sklearn.utils.parallel.Parallel`.*",
+            category=UserWarning,
+        )
+        _stream_parallel(
+            2,
+            _double,
+            [(11, (2,)), (12, (3,))],
+            lambda seed, value: received.append((seed, value)),
+        )
+
+    assert received == [(11, 4), (12, 6)]
 
 
 def test_append_null_distribution_rows_skips_absent_optional_null() -> None:
