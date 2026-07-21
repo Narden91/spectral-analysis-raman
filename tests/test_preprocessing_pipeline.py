@@ -207,8 +207,6 @@ def test_post_baseline_spike_repair_is_never_applied(
     monkeypatch: pytest.MonkeyPatch,
     preprocessing_config_guard: None,
 ) -> None:
-    src.config["preprocessing"]["spike_repair"]["enabled"] = True
-
     def fail_if_called(*args, **kwargs):
         raise AssertionError("post-baseline spike repair must not run")
 

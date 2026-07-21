@@ -5,6 +5,13 @@ from __future__ import annotations
 import pandas as pd
 
 import src.analysis.disease_only_pipeline as pipeline
+from src.analysis.phase_status import STATUS_FAILED_EXECUTION, PhaseStatus
+
+
+def test_phase_status_accepts_failed_execution() -> None:
+    status = PhaseStatus(phase_key="cross_phase_multiplicity", status=STATUS_FAILED_EXECUTION, reason="synthetic failure")
+
+    assert status.as_row()["status"] == STATUS_FAILED_EXECUTION
 
 
 def test_phase_status_manifest_preserves_explicit_status_with_artifacts(monkeypatch, tmp_path):

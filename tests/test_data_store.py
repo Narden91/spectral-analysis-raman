@@ -14,6 +14,7 @@ from src.data_preparation import validation as validation_module
 from src.data_preparation.loaders import load_area_summaries, load_file_index, load_spectra, load_whole_area_store
 from src.data_preparation.materialize import (
     MaterializedStore,
+    _append_reason,
     _atomic_replace,
     build_parsed_store,
     build_preprocessed_store,
@@ -25,6 +26,15 @@ from src.data_preparation.store import (
     write_analysis_provenance,
 )
 from src.data_preparation.validation import validate_store
+
+
+def test_append_reason_never_duplicates_existing_token() -> None:
+    values = pd.Series(["ok", "area_min_pixels", "area_min_pixels; quality_filter"])
+    mask = np.array([True, True, True])
+
+    result = _append_reason(values, "area_min_pixels", mask)
+
+    assert result.tolist() == ["area_min_pixels", "area_min_pixels", "area_min_pixels; quality_filter"]
 
 
 def _write_measurement_file(path: Path, waves: list[float], base: float) -> None:

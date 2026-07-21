@@ -243,8 +243,11 @@ def _write_parsed_payload(
 
 def _append_reason(values: pd.Series, reason: str, mask: np.ndarray) -> pd.Series:
     out = values.fillna("").astype(str).copy()
-    out.loc[mask & (out == "ok")] = reason
-    out.loc[mask & (out != "ok")] = out.loc[mask & (out != "ok")] + "; " + reason
+    active = np.asarray(mask, dtype=bool)
+    existing = out.copy()
+    out.loc[active & (existing == "ok")] = reason
+    append = active & (existing != "ok") & ~existing.str.split("; ").map(lambda parts: reason in parts)
+    out.loc[append] = existing.loc[append] + "; " + reason
     return out
 
 

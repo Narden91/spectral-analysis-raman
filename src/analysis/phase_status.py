@@ -15,6 +15,7 @@ STATUS_INSUFFICIENT_N = "insufficient_n"
 STATUS_NOT_TESTED_GATE = "not_tested_gate"
 STATUS_MISSING_REQUIRED_DATA = "missing_required_data"
 STATUS_DISABLED_OR_SKIPPED = "disabled_or_skipped"
+STATUS_FAILED_EXECUTION = "failed_execution"
 
 EVIDENCE_NOT_APPLICABLE = "not_applicable"
 EVIDENCE_NO_SUPPORTED_SIGNAL = "no_supported_evidence"
@@ -31,6 +32,7 @@ _VALID_STATUSES = frozenset(
         STATUS_NOT_TESTED_GATE,
         STATUS_MISSING_REQUIRED_DATA,
         STATUS_DISABLED_OR_SKIPPED,
+        STATUS_FAILED_EXECUTION,
     }
 )
 

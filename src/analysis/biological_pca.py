@@ -32,6 +32,7 @@ from src.data_preparation.loaders import (
     load_clinical_subjects,
     load_file_index,
 )
+from src.data_preparation.store import get_active_data_source, resolve_data_source
 from src.visualization.eda_plots import plot_scree
 from src.visualization.theme import GROUP_COLORS, GROUP_LABELS
 
@@ -230,6 +231,22 @@ def _build_subject_inputs_from_materialized_store(
         block: np.asarray([float(name) for name in payloads[block]["feature_names"].astype(str)], dtype=float)
         for block in BLOCKS
     }
+    source = get_active_data_source() or resolve_data_source(cfg)
+    if source.source_name != "preprocessed":
+        raise RuntimeError("Biological PCA requires the canonical preprocessed store")
+    qc = pd.read_parquet(
+        source.source_path / "qc.parquet",
+        columns=["measurement_id", "subject_id", "area_id", "spectral_range", "retained"],
+    )
+    measurement_counts = (
+        qc.groupby(["measurement_id", "subject_id", "area_id", "spectral_range"], sort=False)
+        .agg(n_total_pixels=("retained", "size"), n_retained_pixels=("retained", "sum"))
+        .reset_index()
+    )
+    measurement_counts["measurement_id"] = measurement_counts["measurement_id"].astype(str)
+    measurement_counts["subject_id"] = measurement_counts["subject_id"].astype(str)
+    measurement_counts["area_id"] = measurement_counts["area_id"].astype(str)
+    measurement_counts["spectral_range"] = measurement_counts["spectral_range"].astype(str)
 
     included_subjects: list[str] = []
     matrices: dict[str, list[np.ndarray]] = {"1300": [], "2850": []}
@@ -259,9 +276,10 @@ def _build_subject_inputs_from_materialized_store(
 
     for subject_id in included_subjects:
         feature_values: dict[str, float] = {}
-        subject_samples: set[str] = set()
+        subject_measurements: set[str] = set()
         subject_areas: set[str] = set()
-        subject_pixels = 0
+        subject_total_pixels = 0
+        subject_retained_pixels = 0
         clinical_row = clinical.loc[clinical["subject_id"].astype(str) == str(subject_id)]
         is_control = cohort_statuses[str(subject_id)]
         gender = (
@@ -273,21 +291,24 @@ def _build_subject_inputs_from_materialized_store(
         for block in BLOCKS:
             mask = payloads[block]["subject_ids"].astype(str) == str(subject_id)
             block_matrix = np.asarray(payloads[block]["area_summary"][mask], dtype=float)
-            block_area_ids = payloads[block]["area_ids"][mask].astype(str)
-            block_measurement_ids = payloads[block]["measurement_ids"][mask].astype(str)
             median = np.nanmedian(block_matrix, axis=0)
             matrices[block].append(median)
-            subject_samples.update(block_measurement_ids.tolist())
-            subject_areas.update(block_area_ids.tolist())
-            subject_pixels += int(block_matrix.shape[0])
+            block_counts = measurement_counts.loc[
+                (measurement_counts["subject_id"] == str(subject_id))
+                & (measurement_counts["spectral_range"] == block)
+            ]
+            subject_measurements.update(block_counts["measurement_id"].tolist())
+            subject_areas.update(block_counts["area_id"].tolist())
+            subject_total_pixels += int(block_counts["n_total_pixels"].sum())
+            subject_retained_pixels += int(block_counts["n_retained_pixels"].sum())
             region_rows.append(
                 {
                     "subject_id": str(subject_id),
                     "spectral_range": block,
-                    "n_samples": len(block_measurement_ids),
-                    "n_spots": len(block_area_ids),
-                    "n_pixels": int(block_matrix.shape[0]),
-                    "n_retained_pixels": int(block_matrix.shape[0]),
+                    "n_measurements": int(block_counts["measurement_id"].nunique()),
+                    "n_areas": int(block_counts["area_id"].nunique()),
+                    "n_total_pixels": int(block_counts["n_total_pixels"].sum()),
+                    "n_retained_pixels": int(block_counts["n_retained_pixels"].sum()),
                 }
             )
             for shift, value in zip(axes[block], median):
@@ -308,34 +329,41 @@ def _build_subject_inputs_from_materialized_store(
                 "condition": "control" if is_control else "disease",
                 "gender": gender,
                 "group": f"{gender}_{'control' if is_control else 'disease'}",
-                "n_samples": len(subject_samples),
-                "n_spots": len(subject_areas),
-                "n_pixels": subject_pixels,
+                "n_measurements": len(subject_measurements),
+                "n_areas": len(subject_areas),
+                "n_total_pixels": subject_total_pixels,
+                "n_retained_pixels": subject_retained_pixels,
                 **feature_values,
             }
         )
 
     matrix_arrays = {block: np.vstack(rows) if rows else np.empty((0, 0)) for block, rows in matrices.items()}
-    input_provenance = df_index[
-        ["subject_id", "slide_number", "area_id", "measurement_id", "filepath", "spectral_range_cm-1"]
-    ].rename(
+    input_provenance = df_index.loc[
+        df_index["subject_id"].astype(str).isin(included_subjects),
+        ["subject_id", "slide_number", "area_id", "measurement_id", "filepath"],
+    ].merge(
+        measurement_counts[["measurement_id", "spectral_range", "n_total_pixels", "n_retained_pixels"]],
+        on="measurement_id",
+        how="left",
+    ).rename(
         columns={
             "slide_number": "sample_id",
             "area_id": "spot_id",
-            "measurement_id": "pixel_id",
             "filepath": "filepath",
-            "spectral_range_cm-1": "spectral_range",
         }
     ).copy()
     input_provenance["x_coord"] = np.nan
     input_provenance["y_coord"] = np.nan
-    input_provenance["retained_after_qc"] = True
+    input_provenance["retained_after_qc"] = input_provenance["n_retained_pixels"].fillna(0).astype(int) > 0
 
     return SubjectInputs(
         subject_spectra=pd.DataFrame(subject_rows),
         subject_region_counts=pd.DataFrame(region_rows),
         input_provenance=input_provenance[
-            ["subject_id", "sample_id", "spot_id", "pixel_id", "x_coord", "y_coord", "spectral_range", "filepath", "retained_after_qc"]
+            [
+                "subject_id", "sample_id", "spot_id", "measurement_id", "x_coord", "y_coord",
+                "spectral_range", "filepath", "n_total_pixels", "n_retained_pixels", "retained_after_qc",
+            ]
         ],
         axes=axes,
         matrices=matrix_arrays,
@@ -392,7 +420,7 @@ def _scores_frame(
     subject_spectra: pd.DataFrame,
 ) -> pd.DataFrame:
     pc_cols = {f"PC{i + 1}": scores[:, i] for i in range(scores.shape[1])}
-    merge_cols = ["subject_id", "n_samples", "n_spots", "n_pixels"]
+    merge_cols = ["subject_id", "n_measurements", "n_areas", "n_total_pixels", "n_retained_pixels"]
     for col in ("condition", "gender", "group"):
         if col in subject_spectra.columns:
             merge_cols.append(col)
@@ -1424,7 +1452,7 @@ def _write_outputs(
             continue
         grouped = retention_detail.groupby(["spectral_range", stratum], dropna=False, sort=True)
         for (spectral_range, level), group in grouped:
-            n_input = int(group["n_pixels"].sum())
+            n_input = int(group["n_total_pixels"].sum())
             n_retained = int(group["n_retained_pixels"].sum())
             retention_rows.append(
                 {

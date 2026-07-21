@@ -19,6 +19,7 @@ from src import config, get_output_root, load_config, whole_spectra_split_index
 from src.analysis.spectral_loader import build_group_matrix, build_whole_spectra_group_matrices
 from src.constants import CANONICAL_REGION_CHANNELS
 from src.data_preparation.loaders import load_clinical_subjects, load_file_index
+from src.data_preparation.store import get_active_data_source, resolve_data_source
 from src.metadata.clinical import merge_index_with_clinical
 from src.visualization.spectral_summary_plots import (
     COHORT_COLORS,
@@ -314,6 +315,37 @@ def _summarize_qc_artifact(meta_row: pd.Series, metrics_path: Path, flags_path: 
 
 
 def _load_qc_subject_summary(df_index: pd.DataFrame) -> pd.DataFrame:
+    source = get_active_data_source() or resolve_data_source()
+    if source.source_name == "preprocessed":
+        qc = pd.read_parquet(source.source_path / "qc.parquet")
+        required = {"subject_id", "spectral_range", *QC_METRICS}
+        missing = required.difference(qc.columns)
+        if missing:
+            raise RuntimeError(f"Canonical QC table is missing columns: {', '.join(sorted(missing))}")
+        subject_meta = (
+            df_index.groupby("subject_id", sort=False)
+            .agg(gender=("gender", "first"), is_control=("is_control", "first"))
+            .reset_index()
+        )
+        metric_columns = [*QC_METRICS]
+        area_df = (
+            qc.groupby(["subject_id", "spectral_range"], dropna=False)[metric_columns]
+            .mean()
+            .reset_index()
+            .merge(subject_meta, on="subject_id", how="left")
+        )
+        area_df["gender"] = area_df["gender"].fillna("unknown").astype(str).str.lower()
+        area_df["condition"] = np.where(area_df["is_control"].fillna(False).astype(bool), "control", "disease")
+        area_df = area_df.rename(columns={"spectral_range": "region_code"})
+        subject_df = area_df[["subject_id", "gender", "condition", "region_code", *QC_METRICS]]
+        global_df = (
+            subject_df.groupby(["subject_id", "gender", "condition"], dropna=False)[QC_METRICS]
+            .mean()
+            .reset_index()
+            .assign(region_code="global")
+        )
+        return pd.concat([subject_df, global_df], ignore_index=True)
+
     artifact_dir = _existing_qc_artifact_dir()
     if artifact_dir is None or not artifact_dir.exists():
         return pd.DataFrame(columns=["subject_id", "gender", "condition", "region_code", *QC_METRICS])

@@ -29,7 +29,7 @@ from src.analysis.journal_figures import run_journal_figures
 from src.analysis.longitudinal_moca import run_longitudinal_moca
 from src.analysis.minimal_panel import run_minimal_panel
 from src.analysis.nmf_decomposition import run_nmf_decomposition
-from src.analysis.phase_status import STATUS_DISABLED_OR_SKIPPED, STATUS_OK, PhaseStatus
+from src.analysis.phase_status import STATUS_DISABLED_OR_SKIPPED, STATUS_FAILED_EXECUTION, STATUS_OK, PhaseStatus
 from src.analysis.pls_regression import run_pls_regression
 from src.analysis.preregistered_panel import run_preregistered_panel
 from src.analysis.robust_contrasts import run_confirmatory_panel_statistics
@@ -463,7 +463,16 @@ def run_disease_only_cross_region_pipeline(
                 int(multiplicity_df["cross_phase_significant_holm05"].sum()),
             )
     except Exception as exc:
-        logger.warning("Cross-phase multiplicity summary failed (non-fatal): %s", exc)
+        if bool(cfg.get("analysis", {}).get("publication_run", False)):
+            raise RuntimeError("Cross-phase multiplicity summary failed") from exc
+        logger.warning("Cross-phase multiplicity summary failed: %s", exc)
+        outputs["cross_phase_multiplicity"] = {
+            "_status": PhaseStatus(
+                phase_key="cross_phase_multiplicity",
+                status=STATUS_FAILED_EXECUTION,
+                reason=str(exc),
+            ).as_row()
+        }
 
     _write_phase_status_manifest(outputs)
     _write_phase_timings(phase_timings)

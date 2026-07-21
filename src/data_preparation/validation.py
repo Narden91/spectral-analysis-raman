@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.constants import CANONICAL_REGION_BOUNDS
 from src.data_preparation.manifest import (
     MANIFEST_VERSION,
     SCHEMA_VERSION,
@@ -81,6 +82,41 @@ def _validate_axis(path: Path, matrix_path: Path, errors: list[str]) -> None:
         errors.append(f"Non-finite spectral values: {matrix_path.name}")
 
 
+def _validate_preprocessed_invariants(store_path: Path, code: str, config: dict, errors: list[str]) -> None:
+    axis = np.asarray(np.load(store_path / f"wavenumbers_{code}.npy", mmap_mode="r"), dtype=float)
+    region = "fingerprint" if code == "1300" else "ch_stretch"
+    interpolation = config.get("preprocessing", {}).get("interpolation", {})
+    lower, upper = interpolation.get("frozen_grids", {}).get(region, CANONICAL_REGION_BOUNDS[region])
+    spacing = float(interpolation.get("target_spacing", 1.0))
+    expected = np.arange(float(lower), float(upper) + spacing, spacing, dtype=float)
+    if axis.shape != expected.shape or not np.allclose(axis, expected, rtol=0.0, atol=1e-8):
+        errors.append(f"{code} axis does not match the frozen canonical grid")
+
+    spectra = np.asarray(np.load(store_path / f"normalized_{code}.npy", mmap_mode="r"), dtype=float)
+    normalization = config.get("preprocessing", {}).get("ranges", {}).get(region, {}).get("normalization", {})
+    method = str(normalization.get("method", "none")).lower()
+    if spectra.size and method == "snv":
+        means = spectra.mean(axis=1)
+        scales = spectra.std(axis=1, ddof=0)
+        if not np.allclose(means, 0.0, rtol=0.0, atol=1e-8):
+            errors.append(f"{code} normalized spectra violate the SNV mean invariant")
+        if not np.allclose(scales, 1.0, rtol=1e-6, atol=1e-6):
+            errors.append(f"{code} normalized spectra violate the SNV scale invariant")
+
+    if spectra.size and method == "area":
+        areas = np.trapezoid(np.abs(spectra), axis, axis=1)
+        if areas.size and not np.allclose(areas, 1.0, rtol=1e-6, atol=1e-6):
+            errors.append("2850 normalized spectra violate absolute-area normalization")
+
+
+def _validate_qc_reasons(qc: pd.DataFrame, errors: list[str]) -> None:
+    for reason in qc["qc_reason"].dropna().astype(str):
+        tokens = [token.strip() for token in reason.split(";") if token.strip() and token.strip() != "ok"]
+        if len(tokens) != len(set(tokens)):
+            errors.append("qc_reason contains duplicated reason tokens")
+            return
+
+
 def _validate_native_axes(store_path: Path, measurements: pd.DataFrame, code: str, errors: list[str]) -> None:
     spectra = np.load(store_path / f"raw_spectra_{code}.npy", mmap_mode="r")
     axes = np.load(store_path / f"native_wavenumbers_{code}.npy", mmap_mode="r")
@@ -125,6 +161,7 @@ def _validate_relations(store_type: str, store_path: Path, errors: list[str]) ->
         if qc.duplicated(["measurement_id", "pixel_index"]).any():
             errors.append("Duplicate pixel identity in qc")
         retained = qc.loc[qc.get("retained", pd.Series(False, index=qc.index)).astype(bool)]
+        _validate_qc_reasons(qc, errors)
         for code in RANGES:
             subset = retained.loc[retained["spectral_range"].astype(str) == code]
             for column in ("normalized_row", "pre_normalization_row"):
@@ -175,6 +212,7 @@ def validate_store(path: str | Path, expected_store_type: str, config: dict, *, 
         if expected_store_type == "preprocessed":
             _validate_axis(store_path / f"wavenumbers_{code}.npy", store_path / f"normalized_{code}.npy", errors)
             _validate_axis(store_path / f"wavenumbers_{code}.npy", store_path / f"pre_normalization_{code}.npy", errors)
+            _validate_preprocessed_invariants(store_path, code, config, errors)
     _validate_signatures(store_path, manifest, errors, strict=strict)
     subjects = pd.read_parquet(store_path / "subjects.parquet")
     _validate_cohorts(store_path, subjects, errors)

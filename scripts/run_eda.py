@@ -302,6 +302,7 @@ def _main() -> None:
     ):
         raise ValueError("--resume-ml requires disease_vs_control mode and a run that includes Biological PCA/ML")
     _validate_publication_run(args, ranges)
+    config.setdefault("analysis", {})["publication_run"] = bool(args.publication_run)
     _set_analysis_output_root(analysis_mode)
     metadata_dir = get_run_metadata_dir()
     legacy_run_manifest: dict[str, object] | None = None

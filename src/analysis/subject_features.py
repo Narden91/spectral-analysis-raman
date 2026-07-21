@@ -94,7 +94,7 @@ def _region_qc_wide(subject_region_counts: pd.DataFrame) -> pd.DataFrame:
 
 
 def _subject_source_provenance(inputs: "SubjectInputs", cfg: dict) -> pd.DataFrame:
-    base = inputs.subject_spectra[["subject_id", "n_samples", "n_spots", "n_pixels"]].copy()
+    base = inputs.subject_spectra[["subject_id", "n_measurements", "n_areas", "n_total_pixels", "n_retained_pixels"]].copy()
     base["subject_id"] = base["subject_id"].astype(str)
     if "condition" in inputs.subject_spectra.columns:
         base["condition"] = inputs.subject_spectra["condition"]
@@ -152,9 +152,9 @@ def _ordered_columns(frame: pd.DataFrame, feature_columns: list[str]) -> list[st
         "data_source",
     ]
     qc_prefixes = (
-        "n_samples",
-        "n_spots",
-        "n_pixels",
+        "n_measurements",
+        "n_areas",
+        "n_total_pixels",
         "n_retained_pixels",
         "n_source_rows",
         "n_unique_files",

@@ -50,7 +50,7 @@ analysis:
     decline_threshold: 0
     mild_threshold: 25
     recovery_threshold: 2
-  statistical_test: "auto"  # str: "auto", "parametric", or "non-parametric"
+  statistical_test: "parametric"  # str: primary "parametric" or sensitivity "non-parametric"
   pca_n_components: 10  # int: number of principal components to compute
   random_state: 42  # int: reproducibility seed
   expected_files_per_subject: 12  # int: expected spectrum files per subject

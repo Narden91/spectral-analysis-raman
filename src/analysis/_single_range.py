@@ -60,7 +60,7 @@ from src.analysis.statistics import (
 )
 from src.data_preparation.loaders import load_clinical_subjects, load_file_index
 from src.metadata.clinical import merge_index_with_clinical
-from src.preprocessing.pipeline import apply_region_weights, preprocess_spectra
+from src.preprocessing.pipeline import apply_region_weights
 from src.visualization.advanced_plots import plot_all_bands_raincloud
 from src.visualization.eda_plots import (
     GROUP_COLORS,
@@ -172,7 +172,7 @@ def _estimate_variance_decomposition(
     groups: dict[str, np.ndarray],
 ) -> tuple[float, float, float]:
     """
-    ANOVA-style variance decomposition of *preprocessed* subject-level means.
+    ANOVA-style variance decomposition of canonical subject-level means.
 
     The `groups` dict contains preprocessed (baseline-corrected, smoothed,
     normalized) subject-mean spectra.  Mixing in raw pixel variance would
@@ -180,10 +180,9 @@ def _estimate_variance_decomposition(
 
         Total = Between-group (SSB/N) + Within-group / Between-subject (SSW/N)
 
-    We still report a third "measurement-noise" component - the fraction of
-    within-group variance that can be attributed to finite spatial averaging
-    (Var(pixel) / n_pixels).  This is estimated by preprocessing pixel
-    spectra from a subsample of subjects.
+    We also report the fraction of within-group variance attributable to finite
+    technical/spatial sampling (Var(pixel) / n_pixels). Canonical pixel spectra
+    are already preprocessed and must not be preprocessed again here.
 
     **CRITICAL CAVEAT**: Inter-subject variance conflates biological and unmeasured
     technical variance (SEC fraction composition, 5x concentration state, column
@@ -221,9 +220,7 @@ def _estimate_variance_decomposition(
             float(inter_group_var / total_var * 100),
         )
 
-    # --- Measurement noise estimate (optional third component) ---
-    # Preprocess a subsample of subjects' pixel spectra to estimate how
-    # much of the inter-subject variance is due to finite spatial sampling.
+    # Estimate finite technical/spatial sampling variance from canonical pixels.
     noise_var = 0.0
     try:
         rng = np.random.default_rng(42)
@@ -235,21 +232,17 @@ def _estimate_variance_decomposition(
             ),
             replace=False,
         )
-        pix_vars, pix_counts = [], []
+        pix_vars: list[float] = []
         for sid in sample_sids:
-            wave, raw_pix = load_subject_spectra(df_index, sid, spectral_range)
-            if raw_pix.size == 0 or raw_pix.shape[0] < 2:
+            _, pixel_spectra = load_subject_spectra(df_index, sid, spectral_range)
+            if pixel_spectra.size == 0 or pixel_spectra.shape[0] < 2:
                 continue
-            proc_pix, _ = preprocess_spectra(raw_pix, wave, region=spectral_range)  # same pipeline as groups
-            if proc_pix.size == 0 or proc_pix.shape[0] < 2:
-                continue
-            pix_var = np.nanmean(np.nanvar(proc_pix, axis=0))
+            pix_var = np.nanmean(np.nanvar(pixel_spectra, axis=0, ddof=1))
             if not np.isfinite(pix_var):
                 continue
-            pix_vars.append(float(pix_var))
-            pix_counts.append(proc_pix.shape[0])
+            pix_vars.append(float(pix_var / pixel_spectra.shape[0]))
         if pix_vars:
-            raw_noise_var = np.mean(pix_vars) / np.mean(pix_counts)
+            raw_noise_var = float(np.mean(pix_vars))
             if not np.isfinite(raw_noise_var):
                 raw_noise_var = 0.0
             if raw_noise_var > inter_subject_var:
@@ -259,8 +252,8 @@ def _estimate_variance_decomposition(
                     raw_noise_var, inter_subject_var
                 )
             noise_var = min(raw_noise_var, inter_subject_var)
-    except Exception as exc:
-        logger.debug("Noise estimation skipped: %s", exc)
+    except (OSError, ValueError, KeyError) as exc:
+        logger.warning("Technical/spatial sampling variance unavailable: %s", exc)
 
     # Partition inter-subject into "biological" + "noise"
     bio_subject_var = max(inter_subject_var - noise_var, 0.0)
@@ -363,6 +356,8 @@ def _run_intra_disease_correlation_phase(
             summary_df.shape[0],
         )
     except Exception as exc:
+        if bool(config.get("analysis", {}).get("publication_run", False)):
+            raise RuntimeError("Intra-disease correlation phase failed") from exc
         logger.warning("Intra-disease correlation phase failed: %s", exc)
 
 
@@ -834,6 +829,8 @@ def _run_single_range_eda(
                 robust_dir / f"region_influence_{spectral_range}.md",
             )
         except Exception as exc:
+            if bool(config.get("analysis", {}).get("publication_run", False)):
+                raise RuntimeError("Region robustness phase failed") from exc
             logger.warning("Region robustness phase failed: %s", exc, exc_info=True)
 
     if spectral_range == "both":

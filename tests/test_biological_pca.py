@@ -122,9 +122,10 @@ def _inputs(n_subjects: int = 4) -> SubjectInputs:
     subject_spectra = pd.DataFrame(
         {
             "subject_id": subjects,
-            "n_samples": [2] * n_subjects,
-            "n_spots": [2] * n_subjects,
-            "n_pixels": [10] * n_subjects,
+            "n_measurements": [2] * n_subjects,
+            "n_areas": [2] * n_subjects,
+            "n_total_pixels": [10] * n_subjects,
+            "n_retained_pixels": [10] * n_subjects,
             **{f"1300__{x:.1f}": matrices["1300"][:, i] for i, x in enumerate(axes["1300"])},
             **{f"2850__{x:.1f}": matrices["2850"][:, i] for i, x in enumerate(axes["2850"])},
         }
@@ -135,9 +136,9 @@ def _inputs(n_subjects: int = 4) -> SubjectInputs:
             {
                 "subject_id": np.repeat(subjects, 2),
                 "spectral_range": ["1300", "2850"] * n_subjects,
-                "n_samples": [1] * (n_subjects * 2),
-                "n_spots": [1] * (n_subjects * 2),
-                "n_pixels": [5] * (n_subjects * 2),
+                "n_measurements": [1] * (n_subjects * 2),
+                "n_areas": [1] * (n_subjects * 2),
+                "n_total_pixels": [5] * (n_subjects * 2),
                 "n_retained_pixels": [5] * (n_subjects * 2),
             }
         ),
@@ -146,7 +147,7 @@ def _inputs(n_subjects: int = 4) -> SubjectInputs:
                 "subject_id",
                 "sample_id",
                 "spot_id",
-                "pixel_id",
+                "measurement_id",
                 "x_coord",
                 "y_coord",
                 "spectral_range",

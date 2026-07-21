@@ -115,12 +115,6 @@ preprocessing:
     frozen_grids:
       fingerprint: [734.0, 1788.0]
       ch_stretch: [2451.0, 3197.0]
-  # Removed from the production pipeline: a second derivative-based pass can alter Raman peaks.
-  spike_repair:
-    enabled: false  # bool: retained only for legacy config compatibility; never applied
-    z_threshold: 8.0  # float: modified Z-score threshold for spike flagging
-    window: 5  # int: local window width used for spike replacement
-    max_corrected_fraction: 0.02  # float: abort per-spectrum repair above this flagged fraction
   retention:
     min_pixels_per_area: 4  # int: drop a file/measurement if fewer pixels survive QC
     min_pixels_per_subject: 10  # int: drop a subject-range if fewer pixels survive QC
@@ -144,10 +138,6 @@ preprocessing:
       anchor_windows:
         fingerprint: [[995.0, 1015.0], [1435.0, 1470.0], [1630.0, 1680.0]]
         ch_stretch: [[2840.0, 2975.0]]
-    coffee_ring:
-      enabled: true  # bool: enable coffee-ring artifact filter
-      intensity_ratio_threshold: 2.0  # float: intensity ratio threshold
-      min_surviving_pixels: 4  # int: minimum pixels to keep an area
     baseline_clip:
       enabled: false  # signed baseline residuals are preserved; metrics remain descriptive
     axis_extrapolation:

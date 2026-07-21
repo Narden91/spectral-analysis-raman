@@ -6,6 +6,8 @@ import pytest
 
 from src.analysis.statistics import (
     cliffs_delta,
+    compare_band_intensities_between_groups,
+    hedges_g,
     partial_spearman,
     run_pca,
     variance_homogeneity_test,
@@ -17,6 +19,27 @@ def test_cliffs_delta_known_cases() -> None:
     assert cliffs_delta([3, 4], [1, 2]) == 1.0
     assert cliffs_delta([1, 2], [3, 4]) == -1.0
     assert cliffs_delta([1, 2], [2, 3]) == -0.75
+
+
+def test_band_comparisons_emit_effect_type_without_sample_size_switching() -> None:
+    values = pd.DataFrame({"band": [0.0, 1.0, 2.0, 4.0]})
+    labels = np.array(["control", "control", "disease", "disease"])
+
+    parametric = compare_band_intensities_between_groups(values, labels, "control", "disease", method="parametric")
+    non_parametric = compare_band_intensities_between_groups(values, labels, "control", "disease", method="non-parametric")
+
+    assert parametric.loc[0, "effect_size_type"] == "hedges_g"
+    assert np.isclose(parametric.loc[0, "effect_size"], hedges_g(np.array([0.0, 1.0]), np.array([2.0, 4.0])))
+    assert non_parametric.loc[0, "effect_size_type"] == "cliffs_delta"
+
+
+def test_partial_spearman_rejects_multilevel_nominal_covariates() -> None:
+    with pytest.raises(ValueError, match="numeric or binary"):
+        partial_spearman(
+            np.arange(6, dtype=float),
+            np.arange(6, dtype=float),
+            pd.DataFrame({"site": ["a", "b", "c", "a", "b", "c"]}),
+        )
 
 
 def test_partial_spearman_recovers_raw_when_covariate_constant() -> None:

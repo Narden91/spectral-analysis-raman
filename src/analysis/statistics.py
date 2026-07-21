@@ -40,6 +40,17 @@ def cohens_d(left: np.ndarray, right: np.ndarray) -> float:
     return float((np.mean(left) - np.mean(right)) / np.sqrt(pooled_var))
 
 
+def hedges_g(left: np.ndarray, right: np.ndarray) -> float:
+    """Return the small-sample corrected standardized mean difference."""
+    d_value = cohens_d(left, right)
+    if not np.isfinite(d_value):
+        return d_value
+    degrees_of_freedom = len(left) + len(right) - 2
+    if degrees_of_freedom <= 0:
+        return np.nan
+    return float(d_value * (1.0 - 3.0 / (4.0 * degrees_of_freedom - 1.0)))
+
+
 def _finite_1d(values: np.ndarray | pd.Series) -> np.ndarray:
     array = np.asarray(values, dtype=float).ravel()
     return array[np.isfinite(array)]
@@ -77,6 +88,11 @@ def _rank_covariates(covars: np.ndarray | pd.DataFrame | pd.Series, valid: np.nd
         if numeric.notna().all():
             encoded = numeric.to_numpy(dtype=float)
         else:
+            categories = pd.Index(values.astype("string").unique())
+            if len(categories) != 2:
+                raise ValueError(
+                    f"Partial Spearman requires numeric or binary covariates; '{column}' has {len(categories)} categories"
+                )
             encoded = pd.factorize(values.astype("string"), sort=True)[0].astype(float)
         ranked = stats.rankdata(encoded, method="average")
         if np.nanstd(ranked) > 0:
@@ -584,8 +600,7 @@ def compare_band_intensities_between_groups(
     group_a, group_b : str
         Labels identifying the two groups to compare within ``group_labels``.
     method : str or None
-        'parametric' (Welch t-test), 'non-parametric' (Mann-Whitney U), or
-        'auto' (Welch t if both groups have n >= 20, else Mann-Whitney U).
+        'parametric' (primary Welch t-test) or 'non-parametric' (Mann-Whitney U).
     alpha : float
         Significance level for the BH-FDR correction.
 
@@ -593,10 +608,12 @@ def compare_band_intensities_between_groups(
     -------
     pd.DataFrame
         Columns: band, statistic, p_value, fdr_q, significant, mean_a, mean_b,
-        effect_size (Cohen's d).
+        effect_size and effect_size_type.
     """
     analysis_cfg = config.get("analysis", {})
-    method = method if method is not None else analysis_cfg.get("statistical_test", "auto")
+    method = method if method is not None else analysis_cfg.get("statistical_test", "parametric")
+    if method not in {"parametric", "non-parametric"}:
+        raise ValueError("method must be 'parametric' or 'non-parametric'")
 
     mask_a = np.asarray(group_labels) == group_a
     mask_b = np.asarray(group_labels) == group_b
@@ -613,6 +630,7 @@ def compare_band_intensities_between_groups(
                 {
                     "band": band, "statistic": np.nan, "p_value": np.nan,
                     "mean_a": np.nan, "mean_b": np.nan, "effect_size": np.nan,
+                    "effect_size_type": np.nan,
                 }
             )
             continue
@@ -623,17 +641,14 @@ def compare_band_intensities_between_groups(
         # n is typically <20 so Mann-Whitney is chosen anyway, and FDR correction
         # is applied across bands.  Note that adjacent wavenumber bands are
         # correlated; the FDR correction does not account for this dependency.
-        use_parametric = (
-            method == "parametric"
-            or (method == "auto" and len(a) >= 20 and len(b) >= 20)
-        )
-        if use_parametric:
+        if method == "parametric":
             stat, p = stats.ttest_ind(a, b, equal_var=False)
+            effect_size = hedges_g(a, b)
+            effect_size_type = "hedges_g"
         else:
             stat, p = stats.mannwhitneyu(a, b, alternative="two-sided")
-
-        pooled_std = np.sqrt((a.var(ddof=1) + b.var(ddof=1)) / 2)
-        effect_size = float((a.mean() - b.mean()) / pooled_std) if pooled_std > 0 else np.nan
+            effect_size = cliffs_delta(a, b)
+            effect_size_type = "cliffs_delta"
 
         rows.append(
             {
@@ -643,6 +658,7 @@ def compare_band_intensities_between_groups(
                 "mean_a": float(a.mean()),
                 "mean_b": float(b.mean()),
                 "effect_size": effect_size,
+                "effect_size_type": effect_size_type,
             }
         )
 
