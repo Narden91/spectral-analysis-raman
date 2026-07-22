@@ -28,7 +28,19 @@ or expose them as a single globally aligned matrix.
 `preprocessed` is the canonical analysis source. It stores aligned normalized
 and pre-normalization matrices, fixed wavenumber axes, QC provenance, and
 materialized cohort tables. Read it through `src.data_preparation.store` and
-`src.data_preparation.loaders`.
+`src.data_preparation.loaders`, or the typed `IngestedRamanDataset` /
+`AnalysisRamanDataset` wrappers in `src.data_preparation.dataset`
+(`open_ingested_dataset`, `open_analysis_dataset`, `prepare_dataset`) — these
+never build, rebuild, or fall back silently.
+
+`loaders.py` caches Parquet tables, memmap handles, and derived area/whole-area
+summaries per process, keyed by data-source identity (`source_path` +
+`manifest_hash`), so a forced rebuild invalidates the cache automatically.
+This removes the repeated `read_parquet`/`np.load`/`nanmedian` passes that
+previously ran once per caller (Biological PCA, `intra_disease`,
+`spectral_loader`) instead of once per dataset. Cache scope is table handles
+and small derived summaries only — never densified pixel-level matrices. Call
+`clear_loader_caches()` after any out-of-band store mutation.
 
 The manifest schema is an internal compatibility guard. Do not weaken its
 validation or add compatibility fallbacks. If materialization changes, rebuild
@@ -84,6 +96,18 @@ QC metrics → dead-pixel screen → cosmic detection/suppression → edge trim
   shared family-wise max-statistic null (compared against many simultaneous
   cluster p-values per spectral block) — that case is not curtailed and keeps
   its fixed `n_permutations` draw count.
+  Simulated under a plausible outcome mixture (mostly clear non-significant,
+  some clear signal, a minority borderline near α), clear-cut cases resolve at
+  the `permutation_min` floor (~80% fewer draws than the 1000-draw ceiling);
+  genuinely borderline cases near α=0.05 save little to nothing, because the
+  Clopper-Pearson interval cannot resolve there and correctly keeps drawing —
+  this is the statistically required behavior, not a shortfall. Weighted
+  average across that mixture: ~72% fewer permutation draws. Applied to
+  `control_vs_disease_ml`, whose permutation testing is ~90% of its total
+  outer-fold-fit cost, this is a ~65% reduction in that module's total
+  compute. Both figures are simulation estimates for planning, not measured
+  wall-clock times — actual savings depend on the true, unknown tail
+  probabilities of the specific dataset and hypothesis being tested.
 - The curated 21 Raman windows are centrally registered in
   `src.analysis.raman_bands`. Keep configuration, analysis, and aggregate plot
   styling aligned with that registry. Assignments are biochemical context, not
@@ -114,7 +138,7 @@ uv run scripts/manage_data_store.py prepare
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both
 uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both --resume-ml
 uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range both
-uv run scripts/run_spectral_plots.py --config config/plots.yaml --source preprocessed
+uv run scripts/run_spectral_plots.py --config config/plots.yaml
 
 # Verification
 uv run pytest -q

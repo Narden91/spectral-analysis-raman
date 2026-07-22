@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from joblib import Parallel, delayed
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import GroupKFold, KFold, LeaveOneGroupOut, LeaveOneOut
@@ -29,7 +28,7 @@ from src.analysis.phase_status import (
 )
 from src.statistics.sequential_permutation import (
     resolve_sequential_stopping_config,
-    should_stop,
+    run_curtailed_permutation_draws,
     validate_sequential_stopping_config,
 )
 
@@ -159,28 +158,15 @@ def _permutation_test(
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)
 
-    null_r2: list[float] = []
-    successes = 0
-    offset = 0
-    while offset < len(seeds) and not should_stop(successes=successes, draws=len(null_r2), config=stopping):
-        chunk = seeds[offset : offset + stopping.check_interval]
-        offset += stopping.check_interval
-        if n_jobs != 1 and len(chunk) > 1:
-            chunk_r2 = Parallel(n_jobs=n_jobs)(
-                delayed(_permuted_pls_r2)(
-                    X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, int(seed)
-                )
-                for seed in chunk
-            )
-        else:
-            chunk_r2 = [
-                _permuted_pls_r2(
-                    X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, int(seed)
-                )
-                for seed in chunk
-            ]
-        null_r2.extend(chunk_r2)
-        successes += sum(1 for value in chunk_r2 if np.isfinite(value) and value >= observed_r2)
+    null_r2 = run_curtailed_permutation_draws(
+        lambda seed: _permuted_pls_r2(
+            X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, seed
+        ),
+        [(int(seed),) for seed in seeds],
+        observed=observed_r2,
+        config=stopping,
+        n_jobs=n_jobs,
+    )
 
     null_r2_arr = np.array(null_r2)
     finite_null = null_r2_arr[np.isfinite(null_r2_arr)]

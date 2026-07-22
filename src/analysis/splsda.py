@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from joblib import Parallel, delayed
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
@@ -23,7 +22,7 @@ from src.analysis.phase_status import STATUS_NOT_TESTED_GATE, PhaseStatus
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
 from src.statistics.sequential_permutation import (
     resolve_sequential_stopping_config,
-    should_stop,
+    run_curtailed_permutation_draws,
     validate_sequential_stopping_config,
 )
 
@@ -155,45 +154,17 @@ def _permutation_test(
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)
 
-    null_scores: list[float] = []
-    successes = 0
-    offset = 0
-    while offset < len(seeds) and not should_stop(successes=successes, draws=len(null_scores), config=stopping):
-        chunk = seeds[offset : offset + stopping.check_interval]
-        offset += stopping.check_interval
-        if n_jobs != 1 and len(chunk) > 1:
-            chunk_scores = Parallel(n_jobs=n_jobs)(
-                delayed(_permuted_splsda_score)(
-                    X,
-                    y,
-                    cv_strategy,
-                    groups,
-                    component_grid,
-                    c_range,
-                    n_inner_splits,
-                    random_state,
-                    int(seed),
-                )
-                for seed in chunk
-            )
-        else:
-            chunk_scores = [
-                _permuted_splsda_score(
-                    X,
-                    y,
-                    cv_strategy,
-                    groups,
-                    component_grid,
-                    c_range,
-                    n_inner_splits,
-                    random_state,
-                    int(seed),
-                )
-                for seed in chunk
-            ]
-        null_scores.extend(chunk_scores)
-        successes += sum(1 for value in chunk_scores if value >= observed_bal_acc)
+    null_scores = run_curtailed_permutation_draws(
+        lambda seed: _permuted_splsda_score(
+            X, y, cv_strategy, groups, component_grid, c_range, n_inner_splits, random_state, seed
+        ),
+        [(int(seed),) for seed in seeds],
+        observed=observed_bal_acc,
+        config=stopping,
+        n_jobs=n_jobs,
+    )
 
+    successes = sum(1 for value in null_scores if value >= observed_bal_acc)
     p_value = float((1 + successes) / (len(null_scores) + 1)) if null_scores else float("nan")
     return p_value, len(null_scores)
 
