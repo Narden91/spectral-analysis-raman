@@ -28,6 +28,11 @@ from src.analysis.statistics import (
     partial_spearman_residuals,
     variance_homogeneity_test,
 )
+from src.statistics.sequential_permutation import (
+    resolve_sequential_stopping_config,
+    run_curtailed_permutation_draws,
+    validate_sequential_stopping_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +256,13 @@ def _permutation_p_value(
     n_permutations: int,
     random_state: int,
     n_jobs: int = 1,
+    stopping_cfg: dict | None = None,
 ) -> float:
+    """Draws stop early once the Monte Carlo p-value's CI clears alpha.
+
+    Besag & Clifford (1991) curtailment; see
+    `src.statistics.sequential_permutation`.
+    """
     left = left[np.isfinite(left)]
     right = right[np.isfinite(right)]
     if left.size == 0 or right.size == 0 or n_permutations <= 0:
@@ -260,24 +271,20 @@ def _permutation_p_value(
     observed = abs(cliffs_delta(left, right))
     pooled = np.concatenate([left, right])
     n_left = left.size
-    rng = np.random.default_rng(random_state)
     n_jobs = 1 if n_jobs == 0 else n_jobs
-    if n_jobs != 1:
-        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
-        exceedances = sum(
-            Parallel(n_jobs=n_jobs)(
-                delayed(_permuted_cliffs_delta_exceeds)(pooled, n_left, observed, int(seed))
-                for seed in seeds
-            )
-        )
-    else:
-        exceedances = 0
-        for _ in range(n_permutations):
-            permuted = rng.permutation(pooled)
-            permuted_delta = abs(cliffs_delta(permuted[:n_left], permuted[n_left:]))
-            if permuted_delta >= observed - 1e-12:
-                exceedances += 1
-    return float((exceedances + 1) / (n_permutations + 1))
+    stopping = resolve_sequential_stopping_config(stopping_cfg or {}, default_max=n_permutations)
+    rng = np.random.default_rng(random_state)
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)
+
+    exceedance_flags = run_curtailed_permutation_draws(
+        lambda seed: 1.0 if _permuted_cliffs_delta_exceeds(pooled, n_left, observed, seed) else 0.0,
+        [(int(seed),) for seed in seeds],
+        observed=0.5,
+        config=stopping,
+        n_jobs=n_jobs,
+    )
+    exceedances = int(sum(exceedance_flags))
+    return float((exceedances + 1) / (len(exceedance_flags) + 1))
 
 
 def _permutation_partial_spearman_p_value(
@@ -289,7 +296,13 @@ def _permutation_partial_spearman_p_value(
     n_permutations: int,
     random_state: int,
     n_jobs: int = 1,
+    stopping_cfg: dict | None = None,
 ) -> float:
+    """Draws stop early once the Monte Carlo p-value's CI clears alpha.
+
+    Besag & Clifford (1991) curtailment; see
+    `src.statistics.sequential_permutation`.
+    """
     columns = [feature, endpoint, *covariates]
     complete = frame[columns].dropna()
     if len(complete) < 3 or n_permutations <= 0:
@@ -302,28 +315,24 @@ def _permutation_partial_spearman_p_value(
         return np.nan
     observed = abs(float(np.corrcoef(feature_residual, endpoint_residual)[0, 1]))
 
-    rng = np.random.default_rng(random_state)
     n_jobs = 1 if n_jobs == 0 else n_jobs
-    if n_jobs != 1:
-        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
-        exceedances = sum(
-            Parallel(n_jobs=n_jobs)(
-                delayed(_permuted_partial_spearman_exceeds)(
-                    feature_residual,
-                    endpoint_residual,
-                    observed,
-                    int(seed),
-                )
-                for seed in seeds
-            )
-        )
-    else:
-        exceedances = 0
-        for _ in range(n_permutations):
-            permuted = abs(float(np.corrcoef(feature_residual, rng.permutation(endpoint_residual))[0, 1]))
-            if np.isfinite(permuted) and permuted >= observed - 1e-12:
-                exceedances += 1
-    return float((exceedances + 1) / (n_permutations + 1))
+    stopping = resolve_sequential_stopping_config(stopping_cfg or {}, default_max=n_permutations)
+    rng = np.random.default_rng(random_state)
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)
+
+    exceedance_flags = run_curtailed_permutation_draws(
+        lambda seed: (
+            1.0
+            if _permuted_partial_spearman_exceeds(feature_residual, endpoint_residual, observed, seed)
+            else 0.0
+        ),
+        [(int(seed),) for seed in seeds],
+        observed=0.5,
+        config=stopping,
+        n_jobs=n_jobs,
+    )
+    exceedances = int(sum(exceedance_flags))
+    return float((exceedances + 1) / (len(exceedance_flags) + 1))
 
 
 def _bootstrap_two_group_statistic(
@@ -380,6 +389,7 @@ def run_anchor_test(
 ) -> pd.DataFrame:
     cfg = _cfg(cfg)
     panel = panel_cfg(cfg)
+    validate_sequential_stopping_config(panel, section="analysis.preregistered_panel")
     primary = panel.get("primary_hypothesis", {})
     feature = str(primary.get("feature", "oxidative_index"))
     endpoint = str(primary.get("endpoint", "delta_moca"))
@@ -419,6 +429,7 @@ def run_anchor_test(
         n_permutations=n_permutations,
         random_state=random_state,
         n_jobs=n_jobs,
+        stopping_cfg=panel,
     )
     row.update(
         {
@@ -455,6 +466,7 @@ def run_panel_contrasts(
 ) -> pd.DataFrame:
     cfg = _cfg(cfg)
     panel = panel_cfg(cfg)
+    validate_sequential_stopping_config(panel, section="analysis.preregistered_panel")
     features = _panel_features(frame, panel)
     n_bootstrap, n_permutations, random_state, n_jobs = _resampling_settings(panel)
     min_n = int(panel.get("min_subjects_per_group", 5))
@@ -506,6 +518,7 @@ def run_panel_contrasts(
                             n_permutations=n_permutations,
                             random_state=random_state + feature_index,
                             n_jobs=n_jobs,
+                            stopping_cfg=panel,
                         ),
                         "mean_group_a": float(np.mean(left)),
                         "mean_group_b": float(np.mean(right)),

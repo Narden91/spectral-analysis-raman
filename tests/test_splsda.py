@@ -5,8 +5,9 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.model_selection import StratifiedKFold
 
-from src.analysis.splsda import run_splsda_classifier
+from src.analysis.splsda import _permutation_test, run_splsda_classifier
 
 
 @pytest.fixture
@@ -170,3 +171,53 @@ def test_splsda_skips_when_disabled(tmp_path):
     cfg = {"analysis": {"splsda": {"enabled": False}}}
     outputs = run_splsda_classifier(output_dir=tmp_path, cfg=cfg)
     assert outputs == {}
+
+
+def test_splsda_permutation_test_stops_early_on_unambiguous_null():
+    rng = np.random.default_rng(21)
+    X = rng.normal(size=(24, 4))
+    y = np.array([0] * 12 + [1] * 12)
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+
+    # Balanced-accuracy 0.5 is chance level for a balanced binary target, so a
+    # weak/noise classifier's permutation null should resolve as clearly not
+    # significant well before the 2000-draw ceiling.
+    p_value, n_used = _permutation_test(
+        X,
+        y,
+        cv,
+        None,
+        [1, 2],
+        [0.1, 1.0],
+        2,
+        0.5,
+        2000,
+        42,
+        n_jobs=1,
+        splsda_cfg={"permutation_min": 40, "permutation_check_interval": 20},
+    )
+    assert n_used < 2000
+    assert 0.0 <= p_value <= 1.0
+
+
+def test_splsda_permutation_test_returns_full_budget_when_never_resolved():
+    rng = np.random.default_rng(22)
+    X = rng.normal(size=(24, 4))
+    y = np.array([0] * 12 + [1] * 12)
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+
+    _p_value, n_used = _permutation_test(
+        X,
+        y,
+        cv,
+        None,
+        [1, 2],
+        [0.1, 1.0],
+        2,
+        0.5,
+        10,
+        42,
+        n_jobs=1,
+        splsda_cfg={"permutation_min": 10, "permutation_check_interval": 10, "permutation_confidence": 0.999999},
+    )
+    assert n_used == 10

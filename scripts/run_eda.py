@@ -372,7 +372,7 @@ def _main() -> None:
         biological_outputs: dict[str, Path] = {}
         if _should_run_biological_pca(ranges, args.skip_biological_pca):
             print_status("Starting Biological PCA")
-            biological_outputs = run_biological_pca(max_subjects=args.max_subjects)
+            biological_outputs = run_biological_pca(max_subjects=args.max_subjects, data_source=data_source)
             biological_ran = True
             print_status("Finished Biological PCA")
             if analysis_mode == "disease_only":

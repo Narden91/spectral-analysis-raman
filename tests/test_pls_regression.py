@@ -173,3 +173,50 @@ def test_pls_permutation_serial_parallel_equivalence() -> None:
     serial = _permutation_test(**kwargs, n_jobs=1)
     parallel = _permutation_test(**kwargs, n_jobs=2)
     assert serial == parallel
+
+
+def test_pls_permutation_stops_early_on_unambiguous_null() -> None:
+    rng = np.random.default_rng(11)
+    # Pure noise target: no linear relationship to X, so permuted-vs-real R2
+    # should be indistinguishable and resolve as clearly not significant.
+    X = rng.normal(size=(20, 4))
+    y = rng.normal(size=20)
+    cv = KFold(n_splits=4, shuffle=True, random_state=42)
+
+    p_value, _mean, _std, n_used = _permutation_test(
+        X=X,
+        y=y,
+        cv_strategy=cv,
+        groups=None,
+        component_grid=[1, 2],
+        tune_inside_cv=True,
+        observed_r2=0.0,
+        n_permutations=2000,
+        random_state=42,
+        n_jobs=1,
+        pls_cfg={"permutation_min": 40, "permutation_check_interval": 20},
+    )
+    assert n_used < 2000
+    assert 0.0 <= p_value <= 1.0
+
+
+def test_pls_permutation_returns_full_budget_when_never_resolved() -> None:
+    rng = np.random.default_rng(12)
+    X = rng.normal(size=(20, 4))
+    y = X[:, 0] * 3.0 + rng.normal(scale=0.1, size=20)
+    cv = KFold(n_splits=4, shuffle=True, random_state=42)
+
+    _p_value, _mean, _std, n_used = _permutation_test(
+        X=X,
+        y=y,
+        cv_strategy=cv,
+        groups=None,
+        component_grid=[1, 2],
+        tune_inside_cv=True,
+        observed_r2=0.9,
+        n_permutations=15,
+        random_state=42,
+        n_jobs=1,
+        pls_cfg={"permutation_min": 15, "permutation_check_interval": 15, "permutation_confidence": 0.999999},
+    )
+    assert n_used == 15

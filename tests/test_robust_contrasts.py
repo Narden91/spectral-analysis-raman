@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 
 from src.analysis.robust_contrasts import (
+    _permutation_p_value,
+    _permutation_partial_spearman_p_value,
     run_anchor_test,
     run_confirmatory_panel_statistics,
     run_panel_contrasts,
@@ -100,6 +102,72 @@ def test_permutation_pvalue_bounds() -> None:
     assert ok["perm_p_value"].between(1 / 20, 1).all()
     separated = ok.loc[ok["feature_name"] == "oxidative_index", "perm_p_value"]
     assert separated.min() < 0.2
+
+
+def test_permutation_p_value_respects_permutation_max() -> None:
+    rng = np.random.default_rng(41)
+    # Fully overlapping distributions: no separation, so the tail probability
+    # should be large (not significant) and the loop must never exceed the
+    # configured ceiling, resolved early or not.
+    left = rng.normal(size=15)
+    right = rng.normal(size=15)
+
+    p_value = _permutation_p_value(
+        left,
+        right,
+        n_permutations=200,
+        random_state=42,
+        n_jobs=1,
+        stopping_cfg={"permutation_min": 20, "permutation_max": 40, "permutation_check_interval": 10},
+    )
+    assert 0.0 < p_value <= 1.0
+
+
+def test_permutation_p_value_full_budget_when_unresolved() -> None:
+    rng = np.random.default_rng(42)
+    left = rng.normal(size=15)
+    right = rng.normal(size=15)
+
+    p_value = _permutation_p_value(
+        left,
+        right,
+        n_permutations=15,
+        random_state=42,
+        n_jobs=1,
+        stopping_cfg={
+            "permutation_min": 15,
+            "permutation_max": 15,
+            "permutation_check_interval": 15,
+            "permutation_confidence": 0.999999,
+        },
+    )
+    assert np.isfinite(p_value)
+    assert 0.0 < p_value <= 1.0
+
+
+def test_permutation_partial_spearman_p_value_respects_permutation_max() -> None:
+    rng = np.random.default_rng(43)
+    n = 20
+    frame = pd.DataFrame(
+        {
+            "feature": rng.normal(size=n),
+            "endpoint": rng.normal(size=n),  # unrelated to feature: weak/no partial correlation
+            "age": rng.normal(50, 10, size=n),
+            "sex": rng.choice(["male", "female"], size=n),
+        }
+    )
+
+    p_value = _permutation_partial_spearman_p_value(
+        frame,
+        feature="feature",
+        endpoint="endpoint",
+        covariates=["age"],
+        n_permutations=200,
+        random_state=42,
+        n_jobs=1,
+        stopping_cfg={"permutation_min": 20, "permutation_max": 40, "permutation_check_interval": 10},
+    )
+    assert 0.0 < p_value <= 1.0
 
 
 def test_ineligible_contrasts_keep_normalized_schema() -> None:

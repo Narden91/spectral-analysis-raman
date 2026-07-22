@@ -5,6 +5,8 @@ from typing import Any
 
 import pandas as pd
 
+from src.statistics.sequential_permutation import validate_sequential_stopping_config
+
 logger = logging.getLogger(__name__)
 
 EDA_ANALYSIS_MODES = ("disease_vs_control", "disease_only")
@@ -211,6 +213,8 @@ def validate_control_vs_disease_ml_config(cfg: dict[str, Any]) -> None:
         value = ml_cfg.get(field)
         if not value:
             raise ValueError(f"analysis.control_vs_disease_ml.{field} must be a non-empty list")
+
+    validate_sequential_stopping_config(ml_cfg, section="analysis.control_vs_disease_ml")
 
 
 def filter_index_for_eda_mode(df_index: pd.DataFrame, mode: str) -> pd.DataFrame:

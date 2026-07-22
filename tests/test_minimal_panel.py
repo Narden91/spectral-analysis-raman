@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.analysis.minimal_panel import run_minimal_panel
+from src.analysis.minimal_panel import _permutation_test_binary, _permutation_test_continuous, run_minimal_panel
 
 
 def _feature_matrix() -> pd.DataFrame:
@@ -224,3 +224,59 @@ def test_run_minimal_panel_disabled_returns_empty(tmp_path: Path) -> None:
         cfg={"analysis": {"minimal_panel": {"enabled": False}}},
     )
     assert outputs == {}
+
+
+def _panel_permutation_inputs(rng: np.random.Generator, n: int = 24, n_features: int = 4) -> tuple[np.ndarray, list[str]]:
+    X = rng.normal(size=(n, n_features))
+    feature_names = [f"feat_{i}" for i in range(n_features)]
+    return X, feature_names
+
+
+def test_permutation_test_continuous_respects_permutation_max() -> None:
+    """Each draw here refits a nested-CV panel selection, which is expensive;
+    the stopping rule must never exceed the configured ceiling regardless of
+    whether the null happens to resolve early on this small sample.
+    """
+    rng = np.random.default_rng(31)
+    X, feature_names = _panel_permutation_inputs(rng)
+    y = rng.normal(size=X.shape[0])  # pure noise target: R2 null centers near 0
+
+    p_value, _mean, _std, n_used = _permutation_test_continuous(
+        X,
+        y,
+        feature_names,
+        n_outer_splits=3,
+        n_inner_splits=2,
+        n_permutations=30,
+        random_state=42,
+        observed_r2=0.0,
+        n_jobs=1,
+        max_features=3,
+        min_features=1,
+        panel_cfg={"permutation_min": 10, "permutation_check_interval": 10},
+    )
+    assert n_used <= 30
+    assert 0.0 <= p_value <= 1.0
+
+
+def test_permutation_test_binary_respects_permutation_max() -> None:
+    rng = np.random.default_rng(32)
+    X, feature_names = _panel_permutation_inputs(rng)
+    y = np.array([0] * 12 + [1] * 12)
+
+    p_value, _mean, _std, n_used = _permutation_test_binary(
+        X,
+        y,
+        feature_names,
+        n_outer_splits=3,
+        n_inner_splits=2,
+        n_permutations=30,
+        random_state=42,
+        observed_balanced_accuracy=0.5,
+        n_jobs=1,
+        max_features=3,
+        min_features=1,
+        panel_cfg={"permutation_min": 10, "permutation_check_interval": 10},
+    )
+    assert n_used <= 30
+    assert 0.0 <= p_value <= 1.0

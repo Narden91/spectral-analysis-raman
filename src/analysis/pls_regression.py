@@ -27,6 +27,11 @@ from src.analysis.phase_status import (
     STATUS_OK,
     PhaseStatus,
 )
+from src.statistics.sequential_permutation import (
+    resolve_sequential_stopping_config,
+    should_stop,
+    validate_sequential_stopping_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,33 +144,51 @@ def _permutation_test(
     n_permutations: int,
     random_state: int,
     n_jobs: int = 1,
-) -> tuple[float, float, float]:
-    """Evaluate the entire nested-CV PLS procedure against permuted outcomes."""
+    pls_cfg: dict | None = None,
+) -> tuple[float, float, float, int]:
+    """Evaluate the entire nested-CV PLS procedure against permuted outcomes.
+
+    Draws stop early once the Monte Carlo p-value's Clopper-Pearson interval
+    clears `permutation_alpha` at `permutation_confidence` (Besag & Clifford
+    1991 curtailment; see `src.statistics.sequential_permutation`).
+    `n_permutations` is the ceiling on draws, not necessarily the count
+    actually run — returns the draws actually used as the fourth element.
+    """
     n_jobs = 1 if n_jobs == 0 else n_jobs
+    stopping = resolve_sequential_stopping_config(pls_cfg or {}, default_max=n_permutations)
     rng = np.random.default_rng(random_state)
-    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
-    if n_jobs != 1:
-        null_r2 = Parallel(n_jobs=n_jobs)(
-            delayed(_permuted_pls_r2)(
-                X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, int(seed)
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)
+
+    null_r2: list[float] = []
+    successes = 0
+    offset = 0
+    while offset < len(seeds) and not should_stop(successes=successes, draws=len(null_r2), config=stopping):
+        chunk = seeds[offset : offset + stopping.check_interval]
+        offset += stopping.check_interval
+        if n_jobs != 1 and len(chunk) > 1:
+            chunk_r2 = Parallel(n_jobs=n_jobs)(
+                delayed(_permuted_pls_r2)(
+                    X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, int(seed)
+                )
+                for seed in chunk
             )
-            for seed in seeds
-        )
-    else:
-        null_r2 = [
-            _permuted_pls_r2(
-                X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, int(seed)
-            )
-            for seed in seeds
-        ]
+        else:
+            chunk_r2 = [
+                _permuted_pls_r2(
+                    X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, int(seed)
+                )
+                for seed in chunk
+            ]
+        null_r2.extend(chunk_r2)
+        successes += sum(1 for value in chunk_r2 if np.isfinite(value) and value >= observed_r2)
 
     null_r2_arr = np.array(null_r2)
     finite_null = null_r2_arr[np.isfinite(null_r2_arr)]
     if len(finite_null) == 0:
-        return np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, len(null_r2)
 
     p_value = float((1 + np.sum(finite_null >= observed_r2)) / (len(finite_null) + 1))
-    return p_value, float(np.mean(finite_null)), float(np.std(finite_null))
+    return p_value, float(np.mean(finite_null)), float(np.std(finite_null)), len(null_r2)
 
 
 def _permuted_pls_r2(
@@ -230,6 +253,7 @@ def run_pls_regression(
     pls_cfg = _pls_cfg(cfg)
     if not bool(pls_cfg.get("enabled", True)):
         return {}
+    validate_sequential_stopping_config(pls_cfg, section="analysis.pls_regression")
 
     disease_only, feature_meta = load_disease_feature_frame(feature_matrix_path=feature_matrix_path)
     all_feature_columns = feature_columns(disease_only)
@@ -347,7 +371,7 @@ def run_pls_regression(
         ss_tot = np.sum((y - np.mean(y)) ** 2)
         observed_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
-        p_value, null_mean, null_std = _permutation_test(
+        p_value, null_mean, null_std, n_permutations_used = _permutation_test(
             X,
             y,
             cv_strategy,
@@ -358,6 +382,7 @@ def run_pls_regression(
             n_permutations,
             random_state,
             n_jobs=n_jobs,
+            pls_cfg=pls_cfg,
         )
 
         perf_rows.append({
@@ -378,7 +403,7 @@ def run_pls_regression(
             "null_distribution_mean": null_mean,
             "null_distribution_std": null_std,
             "permutation_p_value": p_value,
-            "n_permutations": n_permutations,
+            "n_permutations": n_permutations_used,
         })
 
     perf_df = pd.DataFrame(

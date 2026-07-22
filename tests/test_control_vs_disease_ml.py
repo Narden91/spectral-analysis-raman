@@ -19,12 +19,14 @@ from src.analysis.control_vs_disease_ml import (
     _classification_metrics,
     _cohort_summary,
     _fit_tuned_model,
+    _fixed_plan_balanced_accuracy,
     _labels,
     _load_cohort,
     _locked_joint_stratified_split_plan,
     _outer_fold_feature_importance,
     _permute_labels,
     _permuted_score,
+    _repeat_zero_balanced_accuracy,
     _representation_matrix,
     _run_repeated_nested_cv,
     _sex_only_baseline,
@@ -439,6 +441,34 @@ def test_repeated_nested_cv_is_deterministic(base_ml_cfg: dict) -> None:
     pd.testing.assert_frame_equal(oof_a, oof_b)
 
 
+def test_repeat_zero_balanced_accuracy_matches_fixed_plan_refit(base_ml_cfg: dict) -> None:
+    """The permutation observed score must equal a fresh refit of the same locked plan.
+
+    Confirms reading repeat 0 off the already-computed nested-CV `oof` frame is a pure
+    performance win, not a behavior change: same fold split, same random_state, so the
+    predictions (and therefore balanced accuracy) must be bit-identical to recomputing.
+    """
+    frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=1.0, random_state=21)
+    X, _names = _representation_matrix(frame, "whole", base_ml_cfg["whole_spectra"])
+    y = _labels(frame)
+    ml_cfg = base_ml_cfg["analysis"]["control_vs_disease_ml"]
+    outer_split_plan = _locked_joint_stratified_split_plan(
+        y,
+        np.zeros_like(y),
+        n_outer_splits=ml_cfg["n_outer_splits"],
+        n_outer_repeats=ml_cfg["n_outer_repeats"],
+        random_state=42,
+    )
+
+    oof = _run_repeated_nested_cv("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, outer_split_plan=outer_split_plan)
+    reused_score = _repeat_zero_balanced_accuracy(oof)
+    refit_score = _fixed_plan_balanced_accuracy(
+        "l1_logistic", X, y, ml_cfg=ml_cfg, outer_cv=outer_split_plan[0]
+    )
+
+    assert reused_score == pytest.approx(refit_score)
+
+
 def test_random_forest_outer_fold_parallelism_matches_serial(base_ml_cfg: dict) -> None:
     frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=1.0, random_state=31)
     X, _names = _representation_matrix(frame, "whole", base_ml_cfg["whole_spectra"])
@@ -586,6 +616,65 @@ def test_permutation_null_centers_near_chance_on_pure_noise(base_ml_cfg: dict) -
     # complete false positive (p < 0.05 on pure noise) should be rare given
     # the null and observed are drawn from the same no-signal process.
     assert p_value > 0.05
+
+
+def test_permutation_test_stops_early_on_clearly_unresolved_null(base_ml_cfg: dict) -> None:
+    """Pure-noise data with a generous permutation_max must stop well short of
+    it: the null and the observed statistic are drawn from the same
+    no-signal process, so the tail probability resolves as clearly not
+    significant long before the budget is exhausted.
+    """
+    frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=0.0, random_state=5)
+    X, _names = _representation_matrix(frame, "whole", base_ml_cfg["whole_spectra"])
+    y = _labels(frame)
+    ml_cfg = _small_permutation_cfg(base_ml_cfg)
+    ml_cfg["n_permutations"] = 2000
+    ml_cfg["permutation_min"] = 50
+    ml_cfg["permutation_check_interval"] = 25
+
+    observed = _single_split_balanced_accuracy("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
+    p_value, null_dist = run_permutation_test(
+        "l1_logistic",
+        X,
+        y,
+        observed_balanced_accuracy=observed,
+        strata=None,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=42,
+    )
+    assert len(null_dist) < 2000
+    assert 0.0 < p_value <= 1.0
+
+
+def test_permutation_test_runs_full_budget_when_never_resolved(base_ml_cfg: dict) -> None:
+    """A permutation_max small enough that resolution never has a chance to
+    fire between check_interval boundaries must still complete the full
+    configured budget deterministically (never overshoots, never crashes on
+    the final unresolved boundary).
+    """
+    frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=1.0, random_state=6)
+    X, _names = _representation_matrix(frame, "whole", base_ml_cfg["whole_spectra"])
+    y = _labels(frame)
+    ml_cfg = _small_permutation_cfg(base_ml_cfg)
+    ml_cfg["n_permutations"] = 40
+    ml_cfg["permutation_min"] = 40
+    ml_cfg["permutation_check_interval"] = 40
+    ml_cfg["permutation_confidence"] = 0.999999
+
+    observed = _single_split_balanced_accuracy("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
+    p_value, null_dist = run_permutation_test(
+        "l1_logistic",
+        X,
+        y,
+        observed_balanced_accuracy=observed,
+        strata=None,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=42,
+    )
+    assert len(null_dist) == 40
+    assert 0.0 < p_value <= 1.0
 
 
 def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> None:
@@ -743,6 +832,58 @@ def test_permutation_resume_reuses_seeded_checkpoint(
     )
     assert resumed_p == first_p
     np.testing.assert_array_equal(resumed_null, first_null)
+
+
+def test_permutation_resume_from_already_resolved_checkpoint_draws_nothing_new(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, base_ml_cfg: dict
+) -> None:
+    """A checkpoint left over from a prior early-stopped run must not trigger
+    fresh draws on resume when the stopping condition is already satisfied.
+    """
+    ml_cfg = _small_permutation_cfg(base_ml_cfg)
+    ml_cfg["n_permutations"] = 2000
+    ml_cfg["permutation_min"] = 50
+    ml_cfg["permutation_check_interval"] = 25
+    X = np.zeros((12, 2))
+    y = np.array([0] * 6 + [1] * 6)
+    checkpoint = tmp_path / "permutation.parquet"
+
+    # Every null draw scores far below the observed statistic: unambiguously
+    # not significant, so the stopping rule should already be satisfied by
+    # permutation_min draws once resumed.
+    monkeypatch.setattr("src.analysis.control_vs_disease_ml._permuted_score", lambda *_args: 0.1)
+    run_permutation_test(
+        "l1_logistic",
+        X,
+        y,
+        observed_balanced_accuracy=0.9,
+        strata=None,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=9,
+        checkpoint_path=checkpoint,
+    )
+    checkpointed = pd.read_parquet(checkpoint)
+    assert len(checkpointed) < 2000  # confirms the first run actually stopped early
+
+    monkeypatch.setattr(
+        "src.analysis.control_vs_disease_ml._permuted_score",
+        lambda *_args: pytest.fail("resume from an already-resolved checkpoint must not draw further"),
+    )
+    resumed_p, resumed_null = run_permutation_test(
+        "l1_logistic",
+        X,
+        y,
+        observed_balanced_accuracy=0.9,
+        strata=None,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=9,
+        checkpoint_path=checkpoint,
+        resume=True,
+    )
+    assert len(resumed_null) == len(checkpointed)
+    assert resumed_p == pytest.approx(1.0 / (len(checkpointed) + 1))
 
 
 # ---------------------------------------------------------------------------
@@ -949,6 +1090,29 @@ def test_validate_config_skips_when_disabled(base_ml_cfg: dict) -> None:
     base_ml_cfg["analysis"]["control_vs_disease_ml"]["enabled"] = False
     base_ml_cfg["analysis"]["control_vs_disease_ml"]["primary_model"] = "not_a_model"
     validate_control_vs_disease_ml_config(base_ml_cfg)  # must not raise
+
+
+def test_validate_config_accepts_stopping_keys_omitted(base_ml_cfg: dict) -> None:
+    validate_control_vs_disease_ml_config(base_ml_cfg)  # no permutation_min/max present
+
+
+def test_validate_config_rejects_non_positive_permutation_min(base_ml_cfg: dict) -> None:
+    base_ml_cfg["analysis"]["control_vs_disease_ml"]["permutation_min"] = 0
+    with pytest.raises(ValueError, match="permutation_min"):
+        validate_control_vs_disease_ml_config(base_ml_cfg)
+
+
+def test_validate_config_rejects_permutation_min_above_max(base_ml_cfg: dict) -> None:
+    base_ml_cfg["analysis"]["control_vs_disease_ml"]["permutation_min"] = 500
+    base_ml_cfg["analysis"]["control_vs_disease_ml"]["permutation_max"] = 100
+    with pytest.raises(ValueError, match="permutation_min"):
+        validate_control_vs_disease_ml_config(base_ml_cfg)
+
+
+def test_validate_config_rejects_confidence_out_of_range(base_ml_cfg: dict) -> None:
+    base_ml_cfg["analysis"]["control_vs_disease_ml"]["permutation_confidence"] = 1.5
+    with pytest.raises(ValueError, match="permutation_confidence"):
+        validate_control_vs_disease_ml_config(base_ml_cfg)
 
 
 # ---------------------------------------------------------------------------

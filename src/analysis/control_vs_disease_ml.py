@@ -70,6 +70,10 @@ from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic
 from src.analysis.statistics import fdr_correction
 from src.data_preparation import resolve_data_source, write_analysis_provenance
 from src.data_preparation.manifest import config_hash
+from src.statistics.sequential_permutation import (
+    resolve_sequential_stopping_config,
+    should_stop,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -927,6 +931,17 @@ def _fixed_plan_balanced_accuracy(
     return float(balanced_accuracy_score(y, y_pred))
 
 
+def _repeat_zero_balanced_accuracy(oof_predictions: pd.DataFrame) -> float:
+    """Read the permutation observed score off repeat 0 of the already-fitted nested-CV pass.
+
+    `_run_repeated_nested_cv`'s repeat 0 uses `random_state=_random_state(ml_cfg)` on the
+    same locked `outer_split_plan[0]` fold split that `_fixed_plan_balanced_accuracy` would
+    otherwise refit from scratch — identical seed, identical folds, identical predictions.
+    """
+    repeat_zero = oof_predictions.loc[oof_predictions["repeat"] == 0]
+    return float(balanced_accuracy_score(repeat_zero["y_true"], repeat_zero["y_pred"]))
+
+
 # ---------------------------------------------------------------------------
 # Permutation tests
 # ---------------------------------------------------------------------------
@@ -995,6 +1010,38 @@ def _stream_parallel(
         on_result(seed, result)
 
 
+def _stream_parallel_chunked(
+    n_jobs: int,
+    func: Callable[..., Any],
+    calls: Sequence[tuple[int, tuple[Any, ...]]],
+    on_result: Callable[[int, Any], None],
+    *,
+    chunk_size: int,
+    should_continue: Callable[[], bool],
+) -> None:
+    """Run `calls` in fixed-size batches, checking `should_continue` between batches.
+
+    A single `Parallel(return_as="generator_unordered")` cannot be interrupted
+    cleanly mid-stream: breaking out of the generator early leaves in-flight
+    futures whose callbacks fire after the executor has been torn down,
+    raising `ShutdownExecutorError` on every cancelled task. Submitting in
+    bounded chunks and only starting the next chunk after a stopping check
+    avoids that — no futures are ever cancelled, each chunk always completes.
+    """
+    offset = 0
+    while offset < len(calls) and should_continue():
+        chunk = calls[offset : offset + chunk_size]
+        offset += chunk_size
+        if n_jobs == 1 or len(chunk) <= 1:
+            for seed, args in chunk:
+                on_result(seed, func(*args))
+            continue
+        parallel = Parallel(n_jobs=n_jobs, return_as="list")
+        results = parallel(delayed(_run_seeded_call)(seed, func, args) for seed, args in chunk)
+        for seed, result in results:
+            on_result(seed, result)
+
+
 def run_permutation_test(
     model_name: str,
     X: np.ndarray,
@@ -1013,14 +1060,24 @@ def run_permutation_test(
 ) -> tuple[float, np.ndarray]:
     """Full-pipeline label-permutation test. Returns (p_value, null_distribution).
 
-    p = (1 + #{null >= observed}) / (n_permutations + 1). `strata` is None for
-    the unrestricted null, or an array of per-subject sex labels for the
+    p = (1 + #{null >= observed}) / (n_drawn + 1). `strata` is None for the
+    unrestricted null, or an array of per-subject sex labels for the
     sex-stratified null (§0.1): permuting within sex strata preserves the
     real sex-class association, so a model that only reads sex will score no
     better under this null than under the unpermuted data.
+
+    Draws stop early once the Monte Carlo p-value's Clopper-Pearson interval
+    clears `permutation_alpha` at `permutation_confidence` (Besag & Clifford
+    1991 curtailment) — see `src.statistics.sequential_permutation`. Seeds
+    are still pre-generated up to `permutation_max` (defaults to the legacy
+    `n_permutations` value) so a resumed or fully-ambiguous run always has a
+    deterministic seed to draw next; only the number of seeds actually
+    *evaluated* is reduced. `permutation_min` draws always run first,
+    preserving Monte Carlo p-value validity (the observed statistic must
+    always be counted alongside a real, pre-committed sample of the null).
     """
-    n_permutations = _n_permutations(ml_cfg)
-    seeds = _resampling_seeds(random_state, n_permutations)
+    stopping = resolve_sequential_stopping_config(ml_cfg, default_max=_n_permutations(ml_cfg))
+    seeds = _resampling_seeds(random_state, stopping.permutation_max)
     existing = _load_checkpoint_rows(checkpoint_path, resume=resume)
     score_by_seed = {
         int(row.seed): float(row.null_balanced_accuracy)
@@ -1033,7 +1090,7 @@ def run_permutation_test(
         if int(seed) not in score_by_seed
     ]
     if progress is not None and progress_task_id is not None:
-        progress.update(progress_task_id, completed=len(score_by_seed), total=n_permutations)
+        progress.update(progress_task_id, completed=len(score_by_seed), total=stopping.permutation_max)
 
     def on_result(seed: int, score: float) -> None:
         score_by_seed[seed] = float(score)
@@ -1046,8 +1103,21 @@ def run_permutation_test(
         if progress is not None and progress_task_id is not None:
             progress.advance(progress_task_id)
 
+    def should_continue() -> bool:
+        finite = [score for score in score_by_seed.values() if np.isfinite(score)]
+        drawn = len(finite)
+        successes = sum(1 for score in finite if score >= observed_balanced_accuracy)
+        return not should_stop(successes, drawn, stopping)
+
     try:
-        _stream_parallel(n_jobs, _permuted_score, pending, on_result)
+        _stream_parallel_chunked(
+            n_jobs,
+            _permuted_score,
+            pending,
+            on_result,
+            chunk_size=stopping.check_interval,
+            should_continue=should_continue,
+        )
     finally:
         if checkpoint_path is not None:
             write_parquet_atomic(
@@ -1056,7 +1126,7 @@ def run_permutation_test(
                 index=False,
             )
 
-    null_arr = np.asarray([score_by_seed[int(seed)] for seed in seeds], dtype=float)
+    null_arr = np.asarray([score_by_seed[int(seed)] for seed in seeds if int(seed) in score_by_seed], dtype=float)
     finite_null = null_arr[np.isfinite(null_arr)]
     if len(finite_null) == 0:
         return np.nan, null_arr
@@ -1803,9 +1873,7 @@ def run_control_vs_disease_ml_pipeline(
                         )
                         checkpoints.mark_stage_complete(model_name, representation, "observed")
 
-                permutation_observed_score = _fixed_plan_balanced_accuracy(
-                    model_name, X_valid, y_valid, ml_cfg=ml_cfg, outer_cv=outer_split_plan[0]
-                )
+                permutation_observed_score = _repeat_zero_balanced_accuracy(oof)
                 logger.info(
                     "Permutation observed score %s (%s): %.4f on locked 5-fold plan",
                     model_name,

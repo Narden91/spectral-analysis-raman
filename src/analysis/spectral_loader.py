@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from src.data_preparation.loaders import load_area_summaries, load_spectra, load_whole_area_store
+from src.data_preparation.store import DataSource
 from src.io.file_crawler import disambiguate_subject_ids
 
 
@@ -48,9 +49,11 @@ def load_subject_spectra(
     df_index: pd.DataFrame,
     subject_id: str,
     spectral_range: str = "1300",
+    *,
+    data_source: DataSource | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return retained pixel spectra for one subject from the active store."""
-    payload = load_spectra(None, spectral_range)
+    payload = load_spectra(data_source, spectral_range)
     mask = payload["subject_ids"].astype(str) == str(subject_id)
     return np.asarray(payload["wavenumbers"], dtype=float), np.asarray(payload["spectra"][mask], dtype=float)
 
@@ -69,16 +72,18 @@ def build_group_matrix(
     is_control: bool | None = None,
     spectral_range: str = "1300",
     max_subjects: int | None = None,
+    *,
+    data_source: DataSource | None = None,
     **_: object,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Build one median spectrum per subject; areas are never independent rows."""
     frame = _normalized_index(df_index)
     subjects = _select_subject_ids(frame, gender, is_control, spectral_range, max_subjects)
     if spectral_range == "both":
-        payload = load_whole_area_store()
+        payload = load_whole_area_store(data_source)
         matrix, ids = _subject_matrix(payload, subjects, "values")
         return _axis(payload["feature_names"]), matrix, ids
-    payload = load_area_summaries(None, spectral_range)
+    payload = load_area_summaries(data_source, spectral_range)
     matrix, ids = _subject_matrix(payload, subjects, "area_summary")
     return _axis(payload["feature_names"]), matrix, ids
 
@@ -87,11 +92,13 @@ def build_whole_spectra_group_matrices(
     df_index: pd.DataFrame,
     group_filters: dict[str, dict[str, object]],
     max_subjects: int | None = None,
+    *,
+    data_source: DataSource | None = None,
     **_: object,
 ) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, list[str]]]:
     """Build all whole-spectrum groups from the same paired-pixel store."""
     frame = _normalized_index(df_index)
-    payload = load_whole_area_store()
+    payload = load_whole_area_store(data_source)
     axis = _axis(payload["feature_names"])
     matrices: dict[str, np.ndarray] = {}
     ids: dict[str, list[str]] = {}

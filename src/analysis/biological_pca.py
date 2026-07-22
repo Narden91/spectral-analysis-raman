@@ -32,7 +32,7 @@ from src.data_preparation.loaders import (
     load_clinical_subjects,
     load_file_index,
 )
-from src.data_preparation.store import get_active_data_source, resolve_data_source
+from src.data_preparation.store import DataSource, get_active_data_source, resolve_data_source
 from src.visualization.eda_plots import plot_scree
 from src.visualization.theme import GROUP_COLORS, GROUP_LABELS
 
@@ -176,11 +176,16 @@ def validate_biological_pca_config(cfg: dict) -> None:
                 raise ValueError(f"Band '{band_name}' used by {model_name} has no biochemical class")
 
 
-def build_subject_inputs(max_subjects: int | None = None, cfg: dict | None = None) -> SubjectInputs:
+def build_subject_inputs(
+    max_subjects: int | None = None,
+    cfg: dict | None = None,
+    *,
+    data_source: DataSource | None = None,
+) -> SubjectInputs:
     """Load the already-preprocessed store and aggregate one median per subject."""
     cfg = config if cfg is None else cfg
     validate_biological_pca_config(cfg)
-    return _build_subject_inputs_from_materialized_store(max_subjects=max_subjects, cfg=cfg)
+    return _build_subject_inputs_from_materialized_store(max_subjects=max_subjects, cfg=cfg, data_source=data_source)
 
 
 def _eligible_subject_control_statuses(
@@ -212,11 +217,14 @@ def _eligible_subject_control_statuses(
 
 
 def _build_subject_inputs_from_materialized_store(
-    max_subjects: int | None = None, cfg: dict | None = None
+    max_subjects: int | None = None,
+    cfg: dict | None = None,
+    *,
+    data_source: DataSource | None = None,
 ) -> SubjectInputs:
     cfg = config if cfg is None else cfg
-    df_index = load_file_index()
-    clinical = load_clinical_subjects()
+    df_index = load_file_index(data_source)
+    clinical = load_clinical_subjects(data_source)
     mode = resolve_eda_analysis_mode(cfg)
     cohort_statuses, excluded_subjects = _eligible_subject_control_statuses(df_index, mode)
     subjects = select_subjects(cohort_statuses, max_subjects=max_subjects)
@@ -224,14 +232,14 @@ def _build_subject_inputs_from_materialized_store(
     clinical = clinical[clinical["subject_id"].astype(str).isin(subjects)].copy()
 
     payloads = {
-        "1300": load_area_summaries(None, "1300"),
-        "2850": load_area_summaries(None, "2850"),
+        "1300": load_area_summaries(data_source, "1300"),
+        "2850": load_area_summaries(data_source, "2850"),
     }
     axes = {
         block: np.asarray([float(name) for name in payloads[block]["feature_names"].astype(str)], dtype=float)
         for block in BLOCKS
     }
-    source = get_active_data_source() or resolve_data_source(cfg)
+    source = data_source or get_active_data_source() or resolve_data_source(cfg)
     if source.source_name != "preprocessed":
         raise RuntimeError("Biological PCA requires the canonical preprocessed store")
     qc = pd.read_parquet(
@@ -1584,6 +1592,7 @@ def run_biological_pca(
     output_dir: str | Path | None = None,
     max_subjects: int | None = None,
     cfg: dict | None = None,
+    data_source: DataSource | None = None,
 ) -> dict[str, Path]:
     cfg = config if cfg is None else cfg
     if output_dir is not None:
@@ -1592,8 +1601,8 @@ def run_biological_pca(
             out = resolve_project_path(out)
         assert out is not None
 
-    inputs = build_subject_inputs(max_subjects=max_subjects, cfg=cfg)
-    written_paths = write_subject_feature_exports(inputs, cfg=cfg)
+    inputs = build_subject_inputs(max_subjects=max_subjects, cfg=cfg, data_source=data_source)
+    written_paths = write_subject_feature_exports(inputs, cfg=cfg, data_source=data_source)
     results = fit_biological_pca_models(inputs, cfg=cfg)
     features = build_subject_biochemical_features(results)
     validate_outputs(inputs, results, features, cfg=cfg)

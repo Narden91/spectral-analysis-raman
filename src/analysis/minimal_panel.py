@@ -31,6 +31,11 @@ from src.analysis.clinical_feature_associations import (
 from src.analysis.io_utils import write_csv_atomic
 from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, STATUS_NOT_TESTED_GATE, PhaseStatus
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
+from src.statistics.sequential_permutation import (
+    resolve_sequential_stopping_config,
+    run_curtailed_permutation_draws,
+    validate_sequential_stopping_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -566,26 +571,30 @@ def _permutation_test_continuous(
     n_jobs: int,
     max_features: int,
     min_features: int,
-) -> tuple[float, float, float]:
+    panel_cfg: dict | None = None,
+) -> tuple[float, float, float, int]:
+    """Draws stop early once the Monte Carlo p-value's CI clears alpha.
+
+    Besag & Clifford (1991) curtailment; see
+    `src.statistics.sequential_permutation`. Returns the draws actually used
+    as the fourth element alongside the usual (p_value, null_mean, null_std).
+    """
+    stopping = resolve_sequential_stopping_config(panel_cfg or {}, default_max=n_permutations)
     rng = np.random.default_rng(random_state)
-    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
-    calls = [
-        (
-            _permuted_continuous_r2,
-            (
-                X, y, feature_names, n_outer_splits, n_inner_splits, int(seed), random_state,
-                max_features, min_features,
-            ),
-        )
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)
+    seed_args = [
+        (X, y, feature_names, n_outer_splits, n_inner_splits, int(seed), random_state, max_features, min_features)
         for seed in seeds
     ]
-    null_r2 = _parallel_values(n_jobs, calls)
+    null_r2 = run_curtailed_permutation_draws(
+        _permuted_continuous_r2, seed_args, observed=observed_r2, config=stopping, n_jobs=n_jobs
+    )
     null_arr = np.array(null_r2)
     finite = null_arr[np.isfinite(null_arr)]
     if len(finite) == 0:
-        return np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, len(null_r2)
     p_value = float((1 + np.sum(finite >= observed_r2)) / (len(finite) + 1))
-    return p_value, float(np.mean(finite)), float(np.std(finite))
+    return p_value, float(np.mean(finite)), float(np.std(finite)), len(null_r2)
 
 
 def _permutation_test_binary(
@@ -602,26 +611,37 @@ def _permutation_test_binary(
     c_values: list[float] | None = None,
     max_features: int = 10,
     min_features: int = 5,
-) -> tuple[float, float, float]:
+    panel_cfg: dict | None = None,
+) -> tuple[float, float, float, int]:
+    """Draws stop early once the Monte Carlo p-value's CI clears alpha.
+
+    Besag & Clifford (1991) curtailment; see
+    `src.statistics.sequential_permutation`. Returns the draws actually used
+    as the fourth element alongside the usual (p_value, null_mean, null_std).
+    """
+    stopping = resolve_sequential_stopping_config(panel_cfg or {}, default_max=n_permutations)
     rng = np.random.default_rng(random_state)
-    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
-    calls = [
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)
+    seed_args = [
         (
-            _permuted_binary_balanced_accuracy,
-            (
-                X, y, feature_names, n_outer_splits, n_inner_splits, int(seed), random_state,
-                c_values, max_features, min_features,
-            ),
+            X, y, feature_names, n_outer_splits, n_inner_splits, int(seed), random_state,
+            c_values, max_features, min_features,
         )
         for seed in seeds
     ]
-    null_scores = _parallel_values(n_jobs, calls)
+    null_scores = run_curtailed_permutation_draws(
+        _permuted_binary_balanced_accuracy,
+        seed_args,
+        observed=observed_balanced_accuracy,
+        config=stopping,
+        n_jobs=n_jobs,
+    )
     null_arr = np.array(null_scores)
     finite = null_arr[np.isfinite(null_arr)]
     if len(finite) == 0:
-        return np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, len(null_scores)
     p_value = float((1 + np.sum(finite >= observed_balanced_accuracy)) / (len(finite) + 1))
-    return p_value, float(np.mean(finite)), float(np.std(finite))
+    return p_value, float(np.mean(finite)), float(np.std(finite)), len(null_scores)
 
 
 def _bootstrap_stability_summary(
@@ -770,6 +790,7 @@ def run_minimal_panel(
     panel_cfg = _panel_cfg(cfg)
     if not bool(panel_cfg.get("enabled", True)):
         return {}
+    validate_sequential_stopping_config(panel_cfg, section="analysis.minimal_panel")
 
     feature_source = str(panel_cfg.get("feature_source", "candidate_regions"))
     is_preregistered_source = feature_source == "preregistered_panel"
@@ -878,7 +899,7 @@ def run_minimal_panel(
             max_features=max_features,
             min_features=min_features,
         )
-        p_value, _, _ = _permutation_test_continuous(
+        p_value, _, _, n_permutations_used = _permutation_test_continuous(
             X,
             y_arr,
             feature_names,
@@ -890,6 +911,7 @@ def run_minimal_panel(
             n_jobs=n_jobs,
             max_features=max_features,
             min_features=min_features,
+            panel_cfg=panel_cfg,
         )
         stability_df = _bootstrap_stability_summary(
             X,
@@ -927,7 +949,7 @@ def run_minimal_panel(
             "value": perf["r2"],
             "n_subjects": int(valid.sum()),
             "permutation_p_value": p_value,
-            "n_permutations": n_permutations,
+            "n_permutations": n_permutations_used,
             "cv_strategy": cv_info["cv_strategy"],
             "compute_backend": "sklearn_cpu",
             "gpu_status": gpu_status,
@@ -1002,7 +1024,7 @@ def run_minimal_panel(
             max_features=max_features,
             min_features=min_features,
         )
-        p_value, _, _ = _permutation_test_binary(
+        p_value, _, _, n_permutations_used = _permutation_test_binary(
             X,
             y_arr,
             pool_feature_names,
@@ -1014,6 +1036,7 @@ def run_minimal_panel(
             n_jobs=n_jobs,
             max_features=max_features,
             min_features=min_features,
+            panel_cfg=panel_cfg,
         )
         stability_df = _bootstrap_stability_summary(
             X,
@@ -1051,7 +1074,7 @@ def run_minimal_panel(
             "value": perf["balanced_accuracy"],
             "n_subjects": int(valid.sum()),
             "permutation_p_value": p_value,
-            "n_permutations": n_permutations,
+            "n_permutations": n_permutations_used,
             "cv_strategy": cv_info["cv_strategy"],
             "compute_backend": "sklearn_cpu",
             "gpu_status": gpu_status,

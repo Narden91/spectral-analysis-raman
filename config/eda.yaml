@@ -136,7 +136,11 @@ analysis:
     n_cv_splits: 5       # used when n >= 15; LOO when n < 15
     min_subjects: 10
     vip_threshold: 1.0
-    n_permutations: 1000
+    n_permutations: 1000  # ceiling; adaptive stopping (below) usually draws fewer
+    permutation_min: 200        # int: never stop before this many draws (MC p-value validity floor)
+    permutation_check_interval: 100  # int: check the stopping condition every N draws
+    permutation_confidence: 0.99     # float: Clopper-Pearson CI level for the stop decision
+    permutation_alpha: 0.05          # float: significance threshold the CI must clear to stop
     permutation_family_alpha: 0.05  # Holm correction across configured continuous endpoints
     n_jobs: -1
     random_state: 42
@@ -156,7 +160,11 @@ analysis:
     n_inner_splits: 3
     min_subjects_per_group: 10
     min_subjects_continuous: 20
-    n_permutations: 500
+    n_permutations: 500  # ceiling; adaptive stopping (below) usually draws fewer
+    permutation_min: 200
+    permutation_check_interval: 100
+    permutation_confidence: 0.99
+    permutation_alpha: 0.05
     n_jobs: -1
     random_state: 42
     emit_oplsda: false
@@ -184,7 +192,11 @@ analysis:
     min_features: 5
     n_outer_splits: 5
     n_inner_splits: 3
-    n_permutations: 1000
+    n_permutations: 1000  # ceiling; adaptive stopping (below) usually draws fewer
+    permutation_min: 200
+    permutation_check_interval: 100
+    permutation_confidence: 0.99
+    permutation_alpha: 0.05
     n_bootstrap: 200
     n_jobs: -1
     detect_gpu: true
@@ -230,7 +242,11 @@ analysis:
     n_outer_splits: 5
     n_outer_repeats: 10
     n_inner_splits: 4
-    n_permutations: 1000
+    n_permutations: 1000  # ceiling; adaptive stopping (below) usually draws fewer
+    permutation_min: 200        # int: never stop before this many draws (MC p-value validity floor)
+    permutation_check_interval: 100  # int: check the stopping condition every N draws (locked-plan folds)
+    permutation_confidence: 0.99     # float: Clopper-Pearson CI level for the stop decision
+    permutation_alpha: 0.05          # float: significance threshold the CI must clear to stop
     n_bootstrap: 1000
     importance_permutation_repeats: 5  # RF held-out outer-fold permutation importance
     threshold_metric: "balanced_accuracy"
@@ -300,7 +316,11 @@ analysis:
     registration_url: null
     analysis_plan_hash: null
     fdr_alpha: 0.05
-    n_permutations: 1000
+    n_permutations: 1000  # ceiling; adaptive stopping (below) usually draws fewer — applies to robust_contrasts.py
+    permutation_min: 200
+    permutation_check_interval: 100
+    permutation_confidence: 0.99
+    permutation_alpha: 0.05
     n_bootstrap: 2000
     n_jobs: -1
     random_state: 42

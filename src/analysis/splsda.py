@@ -21,6 +21,11 @@ from src.analysis.clinical_feature_associations import (
 )
 from src.analysis.phase_status import STATUS_NOT_TESTED_GATE, PhaseStatus
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
+from src.statistics.sequential_permutation import (
+    resolve_sequential_stopping_config,
+    should_stop,
+    validate_sequential_stopping_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,43 +141,61 @@ def _permutation_test(
     n_permutations: int,
     random_state: int,
     n_jobs: int = 1,
-) -> float:
-    n_jobs = 1 if n_jobs == 0 else n_jobs
-    rng = np.random.default_rng(random_state)
-    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
-    if n_jobs != 1:
-        null_scores = Parallel(n_jobs=n_jobs)(
-            delayed(_permuted_splsda_score)(
-                X,
-                y,
-                cv_strategy,
-                groups,
-                component_grid,
-                c_range,
-                n_inner_splits,
-                random_state,
-                int(seed),
-            )
-            for seed in seeds
-        )
-    else:
-        null_scores = [
-            _permuted_splsda_score(
-                X,
-                y,
-                cv_strategy,
-                groups,
-                component_grid,
-                c_range,
-                n_inner_splits,
-                random_state,
-                int(seed),
-            )
-            for seed in seeds
-        ]
+    splsda_cfg: dict | None = None,
+) -> tuple[float, int]:
+    """Draws stop early once the Monte Carlo p-value's CI clears alpha.
 
-    null_scores = np.array(null_scores)
-    return float((1 + np.sum(null_scores >= observed_bal_acc)) / (len(null_scores) + 1))
+    Besag & Clifford (1991) curtailment; see
+    `src.statistics.sequential_permutation`. `n_permutations` is the ceiling
+    on draws, not necessarily the count actually run — returns the draws
+    actually used alongside the p-value.
+    """
+    n_jobs = 1 if n_jobs == 0 else n_jobs
+    stopping = resolve_sequential_stopping_config(splsda_cfg or {}, default_max=n_permutations)
+    rng = np.random.default_rng(random_state)
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)
+
+    null_scores: list[float] = []
+    successes = 0
+    offset = 0
+    while offset < len(seeds) and not should_stop(successes=successes, draws=len(null_scores), config=stopping):
+        chunk = seeds[offset : offset + stopping.check_interval]
+        offset += stopping.check_interval
+        if n_jobs != 1 and len(chunk) > 1:
+            chunk_scores = Parallel(n_jobs=n_jobs)(
+                delayed(_permuted_splsda_score)(
+                    X,
+                    y,
+                    cv_strategy,
+                    groups,
+                    component_grid,
+                    c_range,
+                    n_inner_splits,
+                    random_state,
+                    int(seed),
+                )
+                for seed in chunk
+            )
+        else:
+            chunk_scores = [
+                _permuted_splsda_score(
+                    X,
+                    y,
+                    cv_strategy,
+                    groups,
+                    component_grid,
+                    c_range,
+                    n_inner_splits,
+                    random_state,
+                    int(seed),
+                )
+                for seed in chunk
+            ]
+        null_scores.extend(chunk_scores)
+        successes += sum(1 for value in chunk_scores if value >= observed_bal_acc)
+
+    p_value = float((1 + successes) / (len(null_scores) + 1)) if null_scores else float("nan")
+    return p_value, len(null_scores)
 
 
 def _permuted_splsda_score(
@@ -260,6 +283,7 @@ def run_splsda_classifier(
 
     if not bool(splsda_cfg.get("enabled", True)):
         return {}
+    validate_sequential_stopping_config(splsda_cfg, section="analysis.splsda")
 
     target_dir = Path(output_dir) if output_dir is not None else get_classification_phase_dir("splsda")
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -493,7 +517,7 @@ def run_splsda_classifier(
                 "sign_stability": float(sign_stability[i]),
             })
 
-        p_value = _permutation_test(
+        p_value, n_permutations_used = _permutation_test(
             X,
             y,
             cv_strategy,
@@ -505,6 +529,7 @@ def run_splsda_classifier(
             n_permutations,
             random_state,
             n_jobs=n_jobs,
+            splsda_cfg=splsda_cfg,
         )
 
         perf_rows.append({
@@ -526,7 +551,7 @@ def run_splsda_classifier(
             "observed_balanced_accuracy": bal_acc,
             "observed_roc_auc": roc_auc,
             "permutation_p_value": p_value,
-            "n_permutations": n_permutations,
+            "n_permutations": n_permutations_used,
             "inference_role": "conditional_exploratory",
             "status": "ok",
         })

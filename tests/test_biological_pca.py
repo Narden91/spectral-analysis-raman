@@ -307,7 +307,7 @@ def test_subject_feature_matrices_preserve_block_identity(monkeypatch) -> None:
             "lesion_location_group": ["left", "right", "posterior", "left"],
         }
     )
-    monkeypatch.setattr(subject_features, "load_clinical_subjects", lambda: clinical)
+    monkeypatch.setattr(subject_features, "load_clinical_subjects", lambda *args, **kwargs: clinical)
     monkeypatch.setattr(
         subject_features,
         "build_clinical_endpoints",
@@ -332,7 +332,7 @@ def test_subject_feature_export_writes_required_outputs(monkeypatch, tmp_path: P
         }
     )
     endpoints = pd.DataFrame({"subject_id": ["S00", "S01", "S02", "S03"]})
-    monkeypatch.setattr(subject_features, "load_clinical_subjects", lambda: clinical)
+    monkeypatch.setattr(subject_features, "load_clinical_subjects", lambda *args, **kwargs: clinical)
     monkeypatch.setattr(
         subject_features,
         "build_clinical_endpoints",
@@ -376,13 +376,15 @@ def test_default_output_uses_only_canonical_dirs(monkeypatch, tmp_path) -> None:
     results = fit_biological_pca_models(inputs, cfg=cfg)
     features = build_subject_biochemical_features(results)
 
-    monkeypatch.setattr(biological_pca, "build_subject_inputs", lambda max_subjects=None, cfg=None: inputs)
+    monkeypatch.setattr(
+        biological_pca, "build_subject_inputs", lambda max_subjects=None, cfg=None, **kwargs: inputs
+    )
     monkeypatch.setattr(biological_pca, "fit_biological_pca_models", lambda inputs, cfg=None: results)
     monkeypatch.setattr(biological_pca, "build_subject_biochemical_features", lambda results: features)
     monkeypatch.setattr(
         biological_pca,
         "write_subject_feature_exports",
-        lambda inputs, output_dir=None, cfg=None: {
+        lambda inputs, output_dir=None, cfg=None, **kwargs: {
             "subject_feature_matrix_1300": expected_root / "04_cross_region_summary" / "01_subject_features" / "subject_feature_matrix_1300.parquet",
             "subject_feature_matrix_2850": expected_root / "04_cross_region_summary" / "01_subject_features" / "subject_feature_matrix_2850.parquet",
             "subject_feature_matrix_whole": expected_root / "04_cross_region_summary" / "01_subject_features" / "subject_feature_matrix_whole.parquet",

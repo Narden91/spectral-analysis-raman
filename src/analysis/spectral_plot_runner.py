@@ -19,7 +19,7 @@ from src import config, get_output_root, load_config, whole_spectra_split_index
 from src.analysis.spectral_loader import build_group_matrix, build_whole_spectra_group_matrices
 from src.constants import CANONICAL_REGION_CHANNELS
 from src.data_preparation.loaders import load_clinical_subjects, load_file_index
-from src.data_preparation.store import get_active_data_source, resolve_data_source
+from src.data_preparation.store import DataSource, get_active_data_source, resolve_data_source
 from src.metadata.clinical import merge_index_with_clinical
 from src.visualization.spectral_summary_plots import (
     COHORT_COLORS,
@@ -133,9 +133,9 @@ def _data_output_dir(plot_base: Path) -> Path:
     return plot_base.parent / DEFAULT_DATA_OUTPUT_ROOT.name
 
 
-def _load_index() -> pd.DataFrame:
-    df_index = load_file_index()
-    clinical = load_clinical_subjects()
+def _load_index(data_source: DataSource | None = None) -> pd.DataFrame:
+    df_index = load_file_index(data_source)
+    clinical = load_clinical_subjects(data_source)
     merged = merge_index_with_clinical(df_index, clinical)
     if "gender" in merged.columns:
         merged["gender"] = merged["gender"].astype(str).str.strip().str.lower()
@@ -148,6 +148,7 @@ def _build_single_range_groups(
     df_index: pd.DataFrame,
     region: str,
     max_subjects: int | None,
+    data_source: DataSource | None = None,
 ) -> tuple[np.ndarray, dict[tuple[str, str], np.ndarray], dict[tuple[str, str], list[str]]]:
     group_matrices: dict[tuple[str, str], np.ndarray] = {}
     group_ids: dict[tuple[str, str], list[str]] = {}
@@ -160,6 +161,7 @@ def _build_single_range_groups(
             is_control=filters["is_control"],
             spectral_range=region,
             max_subjects=max_subjects,
+            data_source=data_source,
         )
         group_ids[cohort] = subject_ids
         if matrix.size == 0:
@@ -194,11 +196,13 @@ def _whole_group_filters() -> dict[str, dict[str, object]]:
 def _build_whole_groups(
     df_index: pd.DataFrame,
     max_subjects: int | None,
+    data_source: DataSource | None = None,
 ) -> tuple[np.ndarray, dict[tuple[str, str], np.ndarray], dict[tuple[str, str], list[str]]]:
     wave, matrices_raw, ids_raw = build_whole_spectra_group_matrices(
         df_index,
         _whole_group_filters(),
         max_subjects=max_subjects,
+        data_source=data_source,
         persist_cache=False,
         persist_artifacts=False,
     )
@@ -314,8 +318,8 @@ def _summarize_qc_artifact(meta_row: pd.Series, metrics_path: Path, flags_path: 
     }
 
 
-def _load_qc_subject_summary(df_index: pd.DataFrame) -> pd.DataFrame:
-    source = get_active_data_source() or resolve_data_source()
+def _load_qc_subject_summary(df_index: pd.DataFrame, data_source: DataSource | None = None) -> pd.DataFrame:
+    source = data_source or get_active_data_source() or resolve_data_source()
     if source.source_name == "preprocessed":
         qc = pd.read_parquet(source.source_path / "qc.parquet")
         required = {"subject_id", "spectral_range", *QC_METRICS}
@@ -882,6 +886,7 @@ def run_spectral_plots(
     max_subjects: int | None = None,
     generate_plots: bool = True,
     export_data: bool = True,
+    data_source: DataSource | None = None,
 ) -> dict[str, Path]:
     plot_cfg = _plot_cfg()
     base_out = _base_output_dir(outdir)
@@ -891,11 +896,11 @@ def run_spectral_plots(
     data_qc_root = data_base / "qc"
     data_plot_root = data_base / "spectral_plots"
 
-    df_index = _load_index()
+    df_index = _load_index(data_source)
     requested_regions = [str(region) for region in plot_cfg.get("regions", ["1300", "2850"])]
     single_range_data: dict[str, dict[str, object]] = {}
     for region in requested_regions:
-        wave, groups, group_ids = _build_single_range_groups(df_index, region, max_subjects)
+        wave, groups, group_ids = _build_single_range_groups(df_index, region, max_subjects, data_source)
         single_range_data[region] = {
             "wavenumbers": wave,
             "groups": groups,
@@ -906,9 +911,13 @@ def run_spectral_plots(
     whole_groups: dict[tuple[str, str], np.ndarray] = {}
     whole_ids: dict[tuple[str, str], list[str]] = {}
     if bool(plot_cfg.get("global", True)) or bool(plot_cfg.get("qc", {}).get("enabled", True)):
-        whole_wave, whole_groups, whole_ids = _build_whole_groups(df_index, max_subjects)
+        whole_wave, whole_groups, whole_ids = _build_whole_groups(df_index, max_subjects, data_source)
 
-    qc_subject_df = _load_qc_subject_summary(df_index) if bool(plot_cfg.get("qc", {}).get("enabled", True)) else pd.DataFrame()
+    qc_subject_df = (
+        _load_qc_subject_summary(df_index, data_source)
+        if bool(plot_cfg.get("qc", {}).get("enabled", True))
+        else pd.DataFrame()
+    )
     whole_range_data = {"wavenumbers": whole_wave, "groups": whole_groups, "ids": whole_ids}
 
     if generate_plots:

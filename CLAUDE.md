@@ -72,6 +72,18 @@ QC metrics → dead-pixel screen → cosmic detection/suppression → edge trim
   feature-matrix identity. Report only
   outer-fold feature-importance summaries; forest importances use held-out-fold
   permutation scoring.
+- Permutation tests with one null distribution compared against one observed
+  statistic per call (`control_vs_disease_ml`, `pls_regression`, `splsda`,
+  `minimal_panel`, `robust_contrasts`) use adaptive early stopping via
+  `src.statistics.sequential_permutation`: Clopper-Pearson curtailment (Besag
+  & Clifford 1991) on the Monte Carlo p-value, never stopping before
+  `permutation_min` draws or before the configured `permutation_check_interval`
+  boundary, and never exceeding `permutation_max`
+  (`n_permutations` if unset). Always report the actual draws used, not the
+  configured ceiling. This does not apply to `src.statistics.cluster_permutation`'s
+  shared family-wise max-statistic null (compared against many simultaneous
+  cluster p-values per spectral block) — that case is not curtailed and keeps
+  its fixed `n_permutations` draw count.
 - The curated 21 Raman windows are centrally registered in
   `src.analysis.raman_bands`. Keep configuration, analysis, and aggregate plot
   styling aligned with that registry. Assignments are biochemical context, not

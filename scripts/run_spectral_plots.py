@@ -42,6 +42,7 @@ def main() -> None:
         max_subjects=args.max_subjects,
         generate_plots=args.plots,
         export_data=args.export_data,
+        data_source=data_source,
     )
     write_analysis_provenance(
         outputs["base_output_dir"],

@@ -12,7 +12,7 @@ from src import config, get_cross_region_phase_dir
 from src.analysis.eda_mode import resolve_eda_analysis_mode
 from src.clinical.endpoints import build_clinical_endpoints
 from src.data_preparation.loaders import load_clinical_subjects
-from src.data_preparation.store import get_active_data_source
+from src.data_preparation.store import DataSource, get_active_data_source
 
 if TYPE_CHECKING:
     from src.analysis.biological_pca import SubjectInputs
@@ -59,8 +59,8 @@ def _runtime_endpoint_table(cfg: dict) -> pd.DataFrame:
         return pd.DataFrame(columns=["subject_id", *RUNTIME_ENDPOINT_COLUMNS])
 
 
-def _clinical_table(cfg: dict) -> pd.DataFrame:
-    clinical = load_clinical_subjects().copy()
+def _clinical_table(cfg: dict, data_source: DataSource | None = None) -> pd.DataFrame:
+    clinical = load_clinical_subjects(data_source).copy()
     if clinical.empty:
         return pd.DataFrame(columns=["subject_id"])
     clinical["subject_id"] = clinical["subject_id"].astype(str)
@@ -93,7 +93,9 @@ def _region_qc_wide(subject_region_counts: pd.DataFrame) -> pd.DataFrame:
     return wide.reset_index()
 
 
-def _subject_source_provenance(inputs: "SubjectInputs", cfg: dict) -> pd.DataFrame:
+def _subject_source_provenance(
+    inputs: "SubjectInputs", cfg: dict, data_source: DataSource | None = None
+) -> pd.DataFrame:
     base = inputs.subject_spectra[["subject_id", "n_measurements", "n_areas", "n_total_pixels", "n_retained_pixels"]].copy()
     base["subject_id"] = base["subject_id"].astype(str)
     if "condition" in inputs.subject_spectra.columns:
@@ -125,7 +127,7 @@ def _subject_source_provenance(inputs: "SubjectInputs", cfg: dict) -> pd.DataFra
     ]
     area_wide = area_wide.reset_index()
 
-    source = get_active_data_source()
+    source = data_source or get_active_data_source()
     source_name = source.source_name if source is not None else "preprocessed"
     base["analysis_mode"] = resolve_eda_analysis_mode(cfg)
     base["feature_aggregation"] = str(cfg.get("biological_pca", {}).get("aggregation", "median"))
@@ -199,13 +201,14 @@ def build_subject_feature_matrices(
     inputs: "SubjectInputs",
     *,
     cfg: dict | None = None,
+    data_source: DataSource | None = None,
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
     cfg = config if cfg is None else cfg
     subject_spectra = inputs.subject_spectra.copy()
     subject_spectra["subject_id"] = subject_spectra["subject_id"].astype(str)
 
-    clinical = _clinical_table(cfg)
-    provenance = _subject_source_provenance(inputs, cfg)
+    clinical = _clinical_table(cfg, data_source)
+    provenance = _subject_source_provenance(inputs, cfg, data_source)
     base = (
         subject_spectra.drop(columns=["condition", "gender", "group"], errors="ignore")
         .merge(clinical, on="subject_id", how="left")
@@ -253,12 +256,13 @@ def write_subject_feature_exports(
     *,
     output_dir: str | Path | None = None,
     cfg: dict | None = None,
+    data_source: DataSource | None = None,
 ) -> dict[str, Path]:
     cfg = config if cfg is None else cfg
     target_dir = get_cross_region_phase_dir("subject_features") if output_dir is None else Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    matrices, provenance = build_subject_feature_matrices(inputs, cfg=cfg)
+    matrices, provenance = build_subject_feature_matrices(inputs, cfg=cfg, data_source=data_source)
     paths = {
         "1300": target_dir / "subject_feature_matrix_1300.parquet",
         "2850": target_dir / "subject_feature_matrix_2850.parquet",
