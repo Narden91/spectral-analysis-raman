@@ -48,7 +48,12 @@ from src.analysis.eda_mode import (
 from src.analysis.io_utils import write_text_atomic
 from src.analysis.run_eda import run_eda
 from src.clinical.endpoints import build_and_write_clinical_endpoints
-from src.data_preparation import data_source_summary, resolve_data_source, write_analysis_provenance
+from src.data_preparation import (
+    data_source_summary,
+    reject_parsed_source_override,
+    resolve_data_source,
+    write_analysis_provenance,
+)
 from src.terminal_output import print_kv_table, print_status
 
 logger = logging.getLogger(__name__)
@@ -215,6 +220,18 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _reject_skip_preprocess(args: argparse.Namespace) -> None:
+    """--skip-preprocess has no valid production meaning: nothing in the EDA
+    path branches on it, so it silently ran the normal preprocessed pipeline
+    while implying raw spectra were used. Reject it everywhere rather than
+    let it lie about what ran."""
+    if args.skip_preprocess:
+        raise ValueError(
+            "--skip-preprocess is not supported: EDA always analyzes the preprocessed store; "
+            "there is no raw-spectra analysis path. Remove the flag."
+        )
+
+
 def _validate_publication_run(args: argparse.Namespace, ranges: list[str]) -> None:
     """Reject non-reproducible shortcuts before any publication-run artifact is written."""
     if not args.publication_run:
@@ -222,8 +239,6 @@ def _validate_publication_run(args: argparse.Namespace, ranges: list[str]) -> No
     violations: list[str] = []
     if args.max_subjects is not None:
         violations.append("--max-subjects is not allowed")
-    if args.skip_preprocess:
-        violations.append("--skip-preprocess is not allowed")
     if ranges != ["1300", "2850", "both"]:
         violations.append("the full fused range set (1300, 2850, both) is required")
     status = subprocess.run(
@@ -297,6 +312,8 @@ def _main() -> None:
     if analysis_mode == "disease_vs_control":
         validate_control_vs_disease_ml_config(config)
     ranges = _requested_ranges(args.range)
+    _reject_skip_preprocess(args)
+    reject_parsed_source_override(args.source, entry_point="EDA")
     if args.resume_ml and (
         analysis_mode != "disease_vs_control" or not _should_run_biological_pca(ranges, args.skip_biological_pca)
     ):

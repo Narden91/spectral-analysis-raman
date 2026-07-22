@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,8 @@ from src import resolve_project_path
 from src.data_preparation.manifest import config_hash, iso_utc_now
 from src.data_preparation.materialize import build_parsed_store, build_preprocessed_store
 from src.data_preparation.validation import validate_store
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,20 @@ def _validated_source(source_name: str, cfg: dict, *, was_built: bool) -> DataSo
     )
 
 
+def reject_parsed_source_override(source_override: str | None, *, entry_point: str) -> None:
+    """Reject '--source parsed' at a CLI boundary, before any output is created.
+
+    'parsed' retains per-measurement native axes and raw pixel intensities;
+    EDA/plots/Biological PCA/ML must consume the frozen-grid preprocessed
+    store, not raw spectra.
+    """
+    if str(source_override or "").strip() == "parsed":
+        raise ValueError(
+            f"--source parsed is not supported for {entry_point}: analysis requires the preprocessed "
+            "store. Use src.data_preparation.dataset.open_ingested_dataset() for raw-view work instead."
+        )
+
+
 def resolve_data_source(
     cfg: dict | None = None,
     *,
@@ -70,9 +88,22 @@ def resolve_data_source(
 
     if source_name == "raw_text":
         raise ValueError("raw_text is ingestion-only; build the parsed store before analysis")
+    if source_override is not None and source_name == "preprocessed":
+        warnings.warn(
+            "Passing --source/source_override explicitly is deprecated; preprocessed is now the only "
+            "supported analysis source and the override will be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     source_path = _store_dir(source_name, config)
     if force:
+        from src.data_preparation.loaders import clear_loader_caches
+
+        # Clear before rebuilding: cached memmaps hold open file handles, and
+        # atomic store replacement (os.replace) fails on Windows while a
+        # handle from the *previous* store contents is still live.
+        clear_loader_caches()
         if source_name == "parsed":
             build_parsed_store(config, force=True)
         elif source_name == "preprocessed":

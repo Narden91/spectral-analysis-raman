@@ -13,6 +13,28 @@ from src.data_preparation.store import DataSource, get_active_data_source, resol
 
 SPECTRAL_RANGES = ("1300", "2850")
 
+# Per-process cache of derived reads, keyed by data-source identity so a
+# rebuilt store (new manifest_hash) never serves stale entries. Cache scope is
+# limited to table DataFrames, memmap handles, and small derived summaries
+# (n_area x n_chan); never densified pixel-level matrices, which are the
+# actual memory cost and must stay uncached.
+_TABLE_CACHE: dict[tuple[str, str, str], pd.DataFrame] = {}
+_ARRAY_CACHE: dict[tuple[str, str, str, str], tuple[np.ndarray, np.ndarray]] = {}
+_SUMMARY_CACHE: dict[tuple[str, str, str], dict[str, np.ndarray]] = {}
+_WHOLE_AREA_CACHE: dict[tuple[str, str], dict[str, np.ndarray]] = {}
+
+
+def _source_key(source: DataSource) -> tuple[str, str]:
+    return (str(source.source_path), str(source.manifest_hash))
+
+
+def clear_loader_caches() -> None:
+    """Drop all cached tables/arrays/summaries. Tests and store rebuilds only."""
+    _TABLE_CACHE.clear()
+    _ARRAY_CACHE.clear()
+    _SUMMARY_CACHE.clear()
+    _WHOLE_AREA_CACHE.clear()
+
 
 def _source(data_source: DataSource | None = None) -> DataSource:
     return data_source or get_active_data_source() or resolve_data_source()
@@ -27,19 +49,25 @@ def _parsed_path(source: DataSource) -> Path:
     return Path(source_manifest["source"]["path"])
 
 
+def _cached_table(source: DataSource, filename: str) -> pd.DataFrame:
+    key = (*_source_key(source), filename)
+    cached = _TABLE_CACHE.get(key)
+    if cached is None:
+        cached = pd.read_parquet(source.source_path / filename)
+        _TABLE_CACHE[key] = cached
+    return cached
+
+
 def load_file_index(data_source: DataSource | None = None) -> pd.DataFrame:
-    source = _source(data_source)
-    return pd.read_parquet(source.source_path / "measurements.parquet")
+    return _cached_table(_source(data_source), "measurements.parquet")
 
 
 def load_clinical_subjects(data_source: DataSource | None = None) -> pd.DataFrame:
-    source = _source(data_source)
-    return pd.read_parquet(source.source_path / "subjects.parquet")
+    return _cached_table(_source(data_source), "subjects.parquet")
 
 
 def load_area_metadata(data_source: DataSource | None = None) -> pd.DataFrame:
-    source = _source(data_source)
-    return pd.read_parquet(source.source_path / "areas.parquet")
+    return _cached_table(_source(data_source), "areas.parquet")
 
 
 def _pixel_rows(source: DataSource, spectral_range: str, *, retained_only: bool) -> pd.DataFrame:
@@ -72,9 +100,14 @@ def _load_array(source: DataSource, spectral_range: str, basis: str) -> tuple[np
             "Parsed spectra retain measurement-specific native axes. "
             "Use load_parsed_measurement_spectra() or the canonical preprocessed store."
         )
-    spectra = np.load(source.source_path / _spectra_filename(source, code, basis), mmap_mode="r")
-    axis = np.load(source.source_path / f"wavenumbers_{code}.npy", mmap_mode="r")
-    return spectra, axis
+    key = (*_source_key(source), code, basis)
+    cached = _ARRAY_CACHE.get(key)
+    if cached is None:
+        spectra = np.load(source.source_path / _spectra_filename(source, code, basis), mmap_mode="r")
+        axis = np.load(source.source_path / f"wavenumbers_{code}.npy", mmap_mode="r")
+        cached = (spectra, axis)
+        _ARRAY_CACHE[key] = cached
+    return cached
 
 
 def load_parsed_measurement_spectra(
@@ -159,6 +192,11 @@ def _summary_payload(
 def load_area_summaries(data_source: DataSource | None, spectral_range: str) -> dict[str, np.ndarray]:
     source = _source(data_source)
     code = str(spectral_range)
+    key = (*_source_key(source), code)
+    cached = _SUMMARY_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     rows = _pixel_rows(source, code, retained_only=source.source_name == "preprocessed")
     measurements = load_file_index(source).set_index("measurement_id")
     spectra, axis = _load_array(source, code, basis="normalized")
@@ -168,6 +206,7 @@ def load_area_summaries(data_source: DataSource | None, spectral_range: str) -> 
         payload["area_summary_bc"] = _summarize_rows(
             rows, baseline_corrected, _row_column(source, "pre_normalization")
         )[1]
+    _SUMMARY_CACHE[key] = payload
     return payload
 
 
@@ -212,9 +251,16 @@ def _whole_area_features(axes: dict[str, np.ndarray]) -> np.ndarray:
 
 def load_whole_area_store(data_source: DataSource | None = None) -> dict[str, np.ndarray]:
     source = _source(data_source)
+    key = _source_key(source)
+    cached = _WHOLE_AREA_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     if source.source_name != "preprocessed":
         left, right = load_area_summaries(source, "1300"), load_area_summaries(source, "2850")
-        return _concatenate_area_summaries(left, right)
+        result = _concatenate_area_summaries(left, right)
+        _WHOLE_AREA_CACHE[key] = result
+        return result
 
     measurements = load_file_index(source).copy()
     measurements["pair_key"] = _pair_key(measurements)
@@ -252,13 +298,15 @@ def load_whole_area_store(data_source: DataSource | None = None) -> dict[str, np
         measurement_ids.append(f"{left_id}|{right_id}")
         subject_ids.append(str(left["subject_id"]))
     features = _whole_area_features(axes)
-    return {
+    result = {
         "values": np.vstack(values) if values else np.empty((0, len(features))),
         "area_ids": np.asarray(area_ids, dtype=str),
         "measurement_ids": np.asarray(measurement_ids, dtype=str),
         "subject_ids": np.asarray(subject_ids, dtype=str),
         "feature_names": features,
     }
+    _WHOLE_AREA_CACHE[key] = result
+    return result
 
 
 def _concatenate_area_summaries(left: dict[str, np.ndarray], right: dict[str, np.ndarray]) -> dict[str, np.ndarray]:

@@ -20,7 +20,12 @@ _cli_util.apply_config_override("config/plots.yaml", ROOT)
 
 from src import config, setup_logging
 from src.analysis.spectral_plot_runner import _parse_args, run_spectral_plots
-from src.data_preparation import data_source_summary, resolve_data_source, write_analysis_provenance
+from src.data_preparation import (
+    data_source_summary,
+    reject_parsed_source_override,
+    resolve_data_source,
+    write_analysis_provenance,
+)
 from src.terminal_output import print_kv_table
 
 logger = logging.getLogger(__name__)
@@ -29,6 +34,7 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     setup_logging()
     args = _parse_args()
+    reject_parsed_source_override(args.source, entry_point="spectral plots")
     data_source = resolve_data_source(config, source_override=args.source)
     print_kv_table("Active Data Source", data_source_summary(data_source))
     outputs = run_spectral_plots(

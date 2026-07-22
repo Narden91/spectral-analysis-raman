@@ -257,22 +257,23 @@ def _process_measurements(
     cfg: dict,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[dict[str, np.ndarray], pd.DataFrame, pd.DataFrame]:
-    raw = {code: np.load(parsed_dir / f"raw_spectra_{code}.npy", mmap_mode="r") for code in RANGES}
-    native_axes = {code: np.load(parsed_dir / f"native_wavenumbers_{code}.npy", mmap_mode="r") for code in RANGES}
-    pixels = pd.read_parquet(parsed_dir / "pixels.parquet")
-    pixel_groups = {key: group.sort_values("pixel_index") for key, group in pixels.groupby("measurement_id", sort=False)}
+    from src.data_preparation.dataset import IngestedRamanDataset
+    from src.data_preparation.store import DataSource
+
+    ingested = IngestedRamanDataset(
+        DataSource(source_name="parsed", source_path=parsed_dir, manifest=None, manifest_hash=None, was_built=False)
+    )
+    rows_by_id = measurements.set_index("measurement_id", drop=False)
     processed: list[_ProcessedMeasurement] = []
 
-    for position, (_, row) in enumerate(measurements.iterrows(), start=1):
-        code = str(row["spectral_range"])
-        start, stop = int(row["raw_start"]), int(row["raw_stop"])
-        native_axis = np.asarray(native_axes[code][int(row["native_axis_row"])], dtype=float)
-        coordinates = pixel_groups[str(row["measurement_id"])][["x", "y"]].to_numpy(dtype=float)
+    for position, view in enumerate(ingested.iter_measurements(), start=1):
+        code = view.spectral_range
+        row = rows_by_id.loc[view.measurement_id]
         result = run_preprocessing(
-            raw[code][start:stop],
-            native_axis,
+            view.raw_spectra,
+            view.native_wavenumbers,
             region=_range_key(code),
-            pixel_coords=coordinates,
+            pixel_coords=view.coordinates,
             screen_dead=True,
             suppress_cosmic=None,
             correct_bl=True,

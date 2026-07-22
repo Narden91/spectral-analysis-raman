@@ -10,8 +10,15 @@ import pytest
 
 import src
 from src.analysis.spectral_loader import build_group_matrix
+from src.data_preparation import loaders as loaders_module
 from src.data_preparation import validation as validation_module
-from src.data_preparation.loaders import load_area_summaries, load_file_index, load_spectra, load_whole_area_store
+from src.data_preparation.loaders import (
+    clear_loader_caches,
+    load_area_summaries,
+    load_file_index,
+    load_spectra,
+    load_whole_area_store,
+)
 from src.data_preparation.materialize import (
     MaterializedStore,
     _append_reason,
@@ -275,6 +282,70 @@ def test_parsed_store_ignores_preprocessing_only_changes(configured_store_paths:
     changed = deepcopy(src.config)
     changed["preprocessing"]["quality_filter"]["spectral_quality"]["snr_threshold"] += 0.5
     assert validate_store(store.path, "parsed", changed).is_valid
+
+
+def test_load_area_summaries_hits_cache_on_repeated_calls(
+    configured_store_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_preprocessed_store(src.config, force=True)
+    source = resolve_data_source(src.config, source_override="preprocessed")
+    clear_loader_caches()
+
+    calls = {"count": 0}
+    original = pd.read_parquet
+
+    def counting_read_parquet(*args: object, **kwargs: object) -> pd.DataFrame:
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(loaders_module.pd, "read_parquet", counting_read_parquet)
+
+    first = load_area_summaries(source, "1300")
+    calls_after_first = calls["count"]
+    second = load_area_summaries(source, "1300")
+
+    assert calls["count"] == calls_after_first, "second call must not re-read parquet"
+    assert np.array_equal(first["area_summary"], second["area_summary"])
+    assert first["area_summary"] is second["area_summary"]
+
+
+def test_load_whole_area_store_hits_cache_on_repeated_calls(
+    configured_store_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_preprocessed_store(src.config, force=True)
+    source = resolve_data_source(src.config, source_override="preprocessed")
+    clear_loader_caches()
+
+    calls = {"count": 0}
+    original = np.nanmedian
+
+    def counting_nanmedian(*args: object, **kwargs: object) -> np.ndarray:
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(loaders_module.np, "nanmedian", counting_nanmedian)
+
+    first = load_whole_area_store(source)
+    calls_after_first = calls["count"]
+    second = load_whole_area_store(source)
+
+    assert calls["count"] == calls_after_first, "second call must not recompute medians"
+    assert first["values"] is second["values"]
+
+
+def test_forced_rebuild_invalidates_loader_cache(configured_store_paths: dict[str, Path]) -> None:
+    build_preprocessed_store(src.config, force=True)
+    source_before = resolve_data_source(src.config, source_override="preprocessed", force=True)
+    summary_before = load_area_summaries(source_before, "1300")
+
+    source_after = resolve_data_source(src.config, source_override="preprocessed", force=True)
+    summary_after = load_area_summaries(source_after, "1300")
+
+    assert source_before.manifest_hash != source_after.manifest_hash
+    assert summary_before["area_summary"] is not summary_after["area_summary"]
+    assert np.array_equal(summary_before["area_summary"], summary_after["area_summary"])
 
 
 def test_write_analysis_provenance_records_analysis_mode(tmp_path: Path) -> None:
