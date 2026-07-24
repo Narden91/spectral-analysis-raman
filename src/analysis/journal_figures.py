@@ -1,12 +1,13 @@
 """Phase U: assembled journal figure set for Spectrochimica Acta A.
 
-Assembles 5 publication-quality figures from Tier-1 and Tier-2 outputs:
+Assembles 6 publication-quality figures from Tier-1 and Tier-2 outputs:
 
   fig1 — Cohort overview + named-index rainclouds by contrast
   fig2 — Effect-size forest + robustness ranking (anchor highlighted)
   fig3 — Difference spectrum + signed-effect map (block-separated)
   fig4 — NMF component spectra + spectral entropy vs ΔMoCA
   fig5 — Feature coupling heatmap + ratio–ratio regimes
+  fig6 — ΔMoCA whole-spectrum association landscape + PLS null check
 
 All figures are written to ``06_spectral_interpretability/figures/``.
 Captions use region-overlapping language; no diagnostic or causal claims.
@@ -25,7 +26,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src import get_confirmatory_panel_dir, get_spectral_interpretability_dir
+from src import (
+    get_classification_phase_dir,
+    get_confirmatory_panel_dir,
+    get_cross_region_phase_dir,
+    get_spectral_interpretability_dir,
+)
 from src import resolve_cfg as _cfg
 from src.analysis.feature_coupling import REGIME_PALETTE, coupling_df_to_matrix
 from src.analysis.io_utils import load_csv_or_empty
@@ -423,6 +429,164 @@ def _fig5_coupling_regimes(coupling_path: Path, regimes_path: Path, output_path:
 
 
 # ---------------------------------------------------------------------------
+# Figure 6 — ΔMoCA whole-spectrum association landscape + PLS null check
+# ---------------------------------------------------------------------------
+
+_BLOCK_LABELS = {"1300": "Fingerprint", "2850": "CH-stretch"}
+_FDR_SIGNIFICANT_ALPHA = 0.05
+_TARGET_LABELS = {
+    "moca_baseline": "MoCA\nbaseline",
+    "moca_3m": "MoCA\n3 months",
+    "delta_moca": "ΔMoCA",
+}
+
+
+def _plot_moca_landscape_block(ax: plt.Axes, sub: pd.DataFrame, *, show_legend_labels: bool) -> tuple[float, float]:
+    sub = sub.sort_values("wavenumber")
+    wn = sub["wavenumber"].to_numpy(dtype=float)
+    rho = sub["rho"].to_numpy(dtype=float)
+    fdr_q = pd.to_numeric(sub.get("fdr_q", pd.Series(np.nan, index=sub.index)), errors="coerce").to_numpy(dtype=float)
+
+    is_significant = np.isfinite(fdr_q) & (fdr_q < _FDR_SIGNIFICANT_ALPHA)
+    ax.scatter(
+        wn[~is_significant], rho[~is_significant],
+        color="#AAAAAA", s=8, alpha=0.6, linewidths=0,
+        label="FDR q ≥ 0.05" if show_legend_labels else None,
+    )
+    if is_significant.any():
+        ax.scatter(
+            wn[is_significant], rho[is_significant],
+            color="#D55E00", s=14, alpha=0.9, linewidths=0,
+            label="FDR q < 0.05" if show_legend_labels else None,
+        )
+    return (float(wn.min()), float(wn.max())) if wn.size else (np.nan, np.nan)
+
+
+def _fig6_moca_landscape_panel(ax: plt.Axes, associations: pd.DataFrame) -> bool:
+    required = {"analysis_name", "spectral_block", "wavenumber", "rho"}
+    if associations.empty or not required.issubset(associations.columns):
+        return False
+    delta = associations.loc[associations["analysis_name"].eq("delta_moca_association")].copy()
+    if delta.empty:
+        return False
+    delta["fdr_q"] = pd.to_numeric(delta.get("fdr_q"), errors="coerce")
+
+    blocks = sorted(delta["spectral_block"].astype(str).unique(), key=lambda b: (b != "1300", b))
+    n_significant = int((delta["fdr_q"] < _FDR_SIGNIFICANT_ALPHA).sum())
+    n_total = int(len(delta))
+    min_fdr_q = delta["fdr_q"].min()
+    min_cluster_p = pd.to_numeric(delta.get("cluster_p_value"), errors="coerce").min()
+
+    block_ranges: list[tuple[float, float]] = []
+    for block_index, block in enumerate(blocks):
+        sub = delta.loc[delta["spectral_block"].astype(str) == block]
+        wn_min, wn_max = _plot_moca_landscape_block(ax, sub, show_legend_labels=block_index == 0)
+        if np.isfinite(wn_min):
+            block_ranges.append((wn_min, wn_max))
+        if block_index < len(blocks) - 1 and np.isfinite(wn_max):
+            ax.axvline(wn_max, color="#DDDDDD", linewidth=0.8, linestyle=":")
+
+    ax.axhline(0.0, color="black", linewidth=0.7)
+    ax.set_xlabel("Raman shift (cm⁻¹)")
+    ax.set_ylabel("Spearman ρ (feature vs. ΔMoCA)")
+
+    # Place block-name labels just inside the top of the data range (data
+    # coordinates) rather than above the axes, so they never collide with
+    # the panel title.
+    rho_max = float(delta["rho"].max())
+    rho_min = float(delta["rho"].min())
+    label_y = rho_max + 0.06 * (rho_max - rho_min if rho_max > rho_min else 1.0)
+    for block, (wn_min, wn_max) in zip(blocks, block_ranges):
+        ax.text(
+            0.5 * (wn_min + wn_max), label_y, _BLOCK_LABELS.get(block, block),
+            ha="center", va="bottom", fontsize=8, color="#555555",
+        )
+    ax.set_ylim(top=label_y + 0.08 * (rho_max - rho_min if rho_max > rho_min else 1.0))
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        by_label = dict(zip(labels, handles))
+        ax.legend(by_label.values(), by_label.keys(), fontsize=7, loc="upper right")
+
+    annotation = (
+        f"{n_significant} / {n_total} wavenumbers FDR-significant"
+        f"\nmin FDR q = {min_fdr_q:.2g}"
+        + (f", min cluster p = {min_cluster_p:.2g}" if np.isfinite(min_cluster_p) else "")
+    )
+    ax.text(
+        0.02, 0.04, annotation, transform=ax.transAxes, fontsize=8,
+        va="bottom", ha="left",
+        bbox=dict(boxstyle="round", facecolor="white", edgecolor="#CCCCCC", alpha=0.9),
+    )
+    ax.set_title("Whole-spectrum ΔMoCA association scan (exploratory, uncorrected + FDR)", fontsize=10)
+    return True
+
+
+def _fig6_pls_null_panel(ax: plt.Axes, performance: pd.DataFrame) -> bool:
+    required = {"target", "r2", "permutation_p_value_holm", "model_supported"}
+    if performance.empty or not required.issubset(performance.columns):
+        return False
+
+    perf = performance.loc[performance["target"].isin(_TARGET_LABELS)].copy()
+    if perf.empty:
+        return False
+    perf["target"] = pd.Categorical(perf["target"], categories=list(_TARGET_LABELS), ordered=True)
+    perf = perf.sort_values("target")
+
+    y_pos = np.arange(len(perf))
+    r2 = pd.to_numeric(perf["r2"], errors="coerce").to_numpy(dtype=float)
+    supported = perf["model_supported"].astype(bool).to_numpy()
+    colors = np.where(supported, "#D55E00", "#0072B2")
+
+    ax.scatter(r2, y_pos, color=colors, s=60, zorder=3)
+    ax.axvline(0.0, color="black", linewidth=0.8, linestyle="--")
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels([_TARGET_LABELS[t] for t in perf["target"]], fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlabel("Cross-validated R² (observed)")
+    ax.set_title("PLS1 regression vs. permutation null\n(R² ≤ 0 = no explanatory power beyond the mean)", fontsize=10)
+
+    for y, row in zip(y_pos, perf.itertuples()):
+        p_holm = getattr(row, "permutation_p_value_holm", np.nan)
+        p_label = f"Holm p={p_holm:.2g}" if np.isfinite(p_holm) else "Holm p=n/a"
+        ax.annotate(
+            p_label, (row.r2, y), xytext=(8, 0), textcoords="offset points",
+            fontsize=8, va="center",
+        )
+    return True
+
+
+def _fig6_moca_association_landscape(
+    associations_path: Path,
+    pls_performance_path: Path,
+    output_path: Path,
+) -> bool:
+    associations = load_csv_or_empty(associations_path)
+    performance = load_csv_or_empty(pls_performance_path)
+
+    fig, (ax_landscape, ax_pls) = plt.subplots(
+        1, 2, figsize=(12, 4.5), gridspec_kw={"width_ratios": [2.2, 1]}, constrained_layout=True,
+    )
+    has_landscape = _fig6_moca_landscape_panel(ax_landscape, associations)
+    has_pls = _fig6_pls_null_panel(ax_pls, performance)
+
+    if not has_landscape and not has_pls:
+        plt.close(fig)
+        return False
+    if not has_landscape:
+        ax_landscape.set_visible(False)
+    if not has_pls:
+        ax_pls.set_visible(False)
+
+    fig.suptitle(
+        "ΔMoCA association landscape: exploratory whole-spectrum scan (Holm/FDR-corrected) "
+        "and PLS1 permutation check — no wavenumber or model exceeds the correction/null threshold",
+        fontsize=9,
+    )
+    _save_and_close(fig, output_path)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Orchestrating runner
 # ---------------------------------------------------------------------------
 
@@ -451,7 +615,7 @@ def run_journal_figures(
     panel_matrix_path: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, object]:
-    """Phase U orchestrator: assemble 5 journal figures from prior phase outputs."""
+    """Phase U orchestrator: assemble 6 journal figures from prior phase outputs."""
     cfg = _cfg(cfg)
     phase_cfg = cfg.get("analysis", {}).get("journal_figures", {})
     if not bool(phase_cfg.get("enabled", True)):
@@ -486,6 +650,10 @@ def run_journal_figures(
          _fig5_coupling_regimes,
          get_spectral_interpretability_dir("coupling") / "feature_coupling_matrix.csv",
          get_spectral_interpretability_dir("coupling") / "ratio_ratio_regimes.csv"),
+        ("fig6", figures_dir / "fig6_moca_association_landscape.png",
+         _fig6_moca_association_landscape,
+         get_cross_region_phase_dir("longitudinal_moca") / "delta_moca_associations.csv",
+         get_classification_phase_dir("pls_regression") / "pls_regression_performance.csv"),
     ]
 
     outputs: dict[str, object] = {}

@@ -19,7 +19,6 @@ def _cfg() -> dict:
                 "random_state": 42,
                 "candidate_region_min_width_cm": 1.0,
                 "candidate_region_merge_gap_cm": 5.0,
-                "top_scatterplot_regions": 2,
             }
         }
     }
@@ -102,5 +101,25 @@ def test_run_longitudinal_moca_writes_expected_outputs(tmp_path: Path) -> None:
         {"delta_moca_association", "decline_group_comparison"}
     )
     assert "selection_basis" in candidates.columns
-    scatter_files = list((tmp_path / "longitudinal_moca" / "delta_moca_scatterplots").glob("*.png"))
-    assert scatter_files
+    assert not (tmp_path / "longitudinal_moca" / "delta_moca_scatterplots").exists()
+
+
+def test_run_longitudinal_moca_removes_stale_scatterplot_directory(tmp_path: Path) -> None:
+    """A prior run may have left delta_moca_scatterplots/ behind (retired
+    output). A rerun must clean it up rather than leaving stale per-region
+    plots that no longer correspond to any current analysis output."""
+    matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
+    _feature_matrix().to_parquet(matrix_path, index=False)
+
+    output_dir = tmp_path / "longitudinal_moca"
+    stale_dir = output_dir / "delta_moca_scatterplots"
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "01_stale_region.png").write_bytes(b"stale")
+
+    run_longitudinal_moca(
+        feature_matrix_path=matrix_path,
+        output_dir=output_dir,
+        cfg=_cfg(),
+    )
+
+    assert not stale_dir.exists()

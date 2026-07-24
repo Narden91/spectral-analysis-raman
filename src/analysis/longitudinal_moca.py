@@ -5,13 +5,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 from src import get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
@@ -27,17 +22,6 @@ logger = logging.getLogger(__name__)
 
 DELTA_TARGET = "delta_moca"
 DECLINE_GROUPS = ("decline", "stable_or_improved")
-PLOT_TARGETS = ("moca_baseline", "moca_3m", "delta_moca")
-PLOT_LABELS = {
-    "moca_baseline": "MoCA baseline",
-    "moca_3m": "MoCA 3 months",
-    "delta_moca": "Delta MoCA",
-}
-GROUP_COLORS = {
-    "decline": "#E76F51",
-    "stable_or_improved": "#2A9D8F",
-}
-
 
 
 def _longitudinal_cfg(cfg: dict) -> dict:
@@ -85,66 +69,6 @@ def _rank_candidate_regions(candidate_regions: pd.DataFrame) -> pd.DataFrame:
     return ranked.drop(columns=["_cluster_sort", "_fdr_sort"])
 
 
-def _region_feature_names(feature_meta: pd.DataFrame, region: pd.Series) -> list[str]:
-    block = str(region["spectral_block"])
-    start = float(region["start_cm-1"])
-    end = float(region["end_cm-1"])
-    mask = (
-        feature_meta["spectral_block"].astype(str).eq(block)
-        & feature_meta["wavenumber"].between(start, end, inclusive="both")
-    )
-    return feature_meta.loc[mask, "feature_name"].tolist()
-
-
-def _plot_region_scatter_panels(
-    disease_only: pd.DataFrame,
-    feature_meta: pd.DataFrame,
-    region: pd.Series,
-    path: Path,
-) -> None:
-    feature_names = _region_feature_names(feature_meta, region)
-    if not feature_names:
-        return
-
-    region_intensity = disease_only[feature_names].mean(axis=1)
-    point_colors = disease_only["delta_moca_group"].astype("string").map(GROUP_COLORS).fillna("#264653")
-
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.2), constrained_layout=True)
-    for axis, target in zip(axes, PLOT_TARGETS):
-        values = pd.to_numeric(disease_only[target], errors="coerce")
-        valid = values.notna() & region_intensity.notna()
-        x = values.loc[valid].to_numpy(dtype=float)
-        y = region_intensity.loc[valid].to_numpy(dtype=float)
-        colors = point_colors.loc[valid].tolist()
-
-        axis.scatter(x, y, c=colors, s=36, edgecolors="white", linewidths=0.6, alpha=0.9)
-        if len(x) >= 3 and np.unique(x).size > 1:
-            slope, intercept = np.polyfit(x, y, deg=1)
-            x_line = np.linspace(float(x.min()), float(x.max()), 100)
-            axis.plot(x_line, slope * x_line + intercept, color="#4B5563", linewidth=1.0)
-            rho, p_value = stats.spearmanr(x, y)
-            subtitle = f"rho={rho:.2f}, p={p_value:.3g}, n={len(x)}"
-        else:
-            subtitle = f"n={len(x)}"
-
-        axis.set_title(f"{PLOT_LABELS[target]}\n{subtitle}", fontsize=10)
-        axis.set_xlabel(PLOT_LABELS[target], fontsize=9)
-        axis.grid(True, axis="y", linestyle="--", alpha=0.25)
-        axis.spines["top"].set_visible(False)
-        axis.spines["right"].set_visible(False)
-
-    axes[0].set_ylabel("Region mean intensity", fontsize=9)
-    start = float(region["start_cm-1"])
-    end = float(region["end_cm-1"])
-    analysis_name = str(region["analysis_name"]).replace("_", " ")
-    fig.suptitle(
-        f"{region['candidate_region_id']} | {region['spectral_block']} | {start:.0f}-{end:.0f} cm-1 | {analysis_name}",
-        fontsize=11,
-    )
-    fig.savefig(path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-
 def run_longitudinal_moca(
     *,
     feature_matrix_path: str | Path | None = None,
@@ -163,10 +87,11 @@ def run_longitudinal_moca(
         else get_cross_region_phase_dir("longitudinal_moca")
     )
     target_dir.mkdir(parents=True, exist_ok=True)
-    scatter_dir = target_dir / "delta_moca_scatterplots"
-    scatter_dir.mkdir(parents=True, exist_ok=True)
-    for stale_plot in scatter_dir.glob("*.png"):
-        stale_plot.unlink()
+    stale_scatter_dir = target_dir / "delta_moca_scatterplots"
+    if stale_scatter_dir.exists():
+        for stale_plot in stale_scatter_dir.glob("*.png"):
+            stale_plot.unlink()
+        stale_scatter_dir.rmdir()
     logger.info(
         "Longitudinal Delta MoCA: %d disease subjects, %d whole-spectrum features",
         len(disease_only),
@@ -292,16 +217,6 @@ def run_longitudinal_moca(
         )
         candidate_regions = _rank_candidate_regions(candidate_regions)
 
-    top_region_count = int(longitudinal_cfg.get("top_scatterplot_regions", 5))
-    for region_index, (_, region) in enumerate(candidate_regions.head(top_region_count).iterrows(), start=1):
-        filename = (
-            f"{region_index:02d}_"
-            f"{region['analysis_name']}_"
-            f"{region['spectral_block']}_"
-            f"{region['candidate_region_id']}.png"
-        )
-        _plot_region_scatter_panels(disease_only, feature_meta, region, scatter_dir / filename)
-
     combined_results = pd.concat(
         [
             delta_associations.assign(
@@ -332,5 +247,4 @@ def run_longitudinal_moca(
     return {
         "delta_moca_associations": association_path,
         "delta_moca_candidate_regions": candidate_path,
-        "delta_moca_scatterplots": scatter_dir,
     }

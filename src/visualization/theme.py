@@ -107,6 +107,10 @@ def set_gallery_theme():
             "savefig.dpi": 300,
             "savefig.bbox": "tight",
             "savefig.pad_inches": 0.1,
+            # Embed TrueType fonts so vector PDFs satisfy journal submission
+            # checks rather than shipping Type 3 outlines.
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
             # Font properties (use system sans-serif like Arial, Helvetica, or DejaVu)
             "font.family": "sans-serif",
             "font.size": 11,

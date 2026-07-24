@@ -104,6 +104,57 @@ def test_append_null_distribution_rows_records_deterministic_metadata() -> None:
     assert {row["permutation_cv_splits"] for row in rows} == {5}
 
 
+def test_append_null_distribution_rows_accepts_early_stopped_null() -> None:
+    """Adaptive stopping can resolve the null in fewer draws than the
+    configured ceiling (n_permutations). This must be accepted, not raise —
+    the seeds recorded must be the first N of the same deterministic
+    sequence a full, un-curtailed run would have used.
+    """
+    rows: list[dict[str, object]] = []
+
+    _append_null_distribution_rows(
+        rows,
+        model_name="pls_da",
+        representation="whole",
+        null_type="unrestricted",
+        random_state=123,
+        null_scores=np.array([0.4, 0.5]),
+        n_permutations=1000,
+        n_splits=5,
+    )
+
+    full_run_rows: list[dict[str, object]] = []
+    _append_null_distribution_rows(
+        full_run_rows,
+        model_name="pls_da",
+        representation="whole",
+        null_type="unrestricted",
+        random_state=123,
+        null_scores=np.array([0.4, 0.5]),
+        n_permutations=2,
+        n_splits=5,
+    )
+
+    assert [row["seed"] for row in rows] == [row["seed"] for row in full_run_rows]
+    assert [row["null_balanced_accuracy"] for row in rows] == [0.4, 0.5]
+
+
+def test_append_null_distribution_rows_rejects_more_scores_than_ceiling() -> None:
+    rows: list[dict[str, object]] = []
+
+    with pytest.raises(RuntimeError, match="exceeds configured ceiling"):
+        _append_null_distribution_rows(
+            rows,
+            model_name="pls_da",
+            representation="whole",
+            null_type="unrestricted",
+            random_state=123,
+            null_scores=np.array([0.4, 0.5, 0.6]),
+            n_permutations=2,
+            n_splits=5,
+        )
+
+
 def _make_feature_matrix(
     n_control: int = 20,
     n_disease: int = 25,

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.analysis.disease_subgroups import run_disease_subgroups
+from src.analysis.disease_subgroups import _select_gap_k, run_disease_subgroups
 
 
 def _cfg() -> dict:
@@ -13,7 +13,6 @@ def _cfg() -> dict:
             "disease_subgroups": {
                 "enabled": True,
                 "min_subjects": 8,
-                "min_clusters": 2,
                 "max_clusters": 3,
                 "n_bootstrap": 6,
                 "random_state": 42,
@@ -125,3 +124,78 @@ def test_run_disease_subgroups_skips_writes_when_insufficient_subjects(tmp_path:
     assert outputs["_status"]["status"] == "insufficient_n"
     assert not out_dir.exists() or not any(out_dir.glob("*.csv"))
     assert not out_dir.exists() or not any(out_dir.glob("figures/*.png"))
+
+
+def test_run_disease_subgroups_cleans_stale_figures_on_k1_fallback(tmp_path: Path) -> None:
+    """If a prior run wrote per-subgroup mean-spectra figures (k>1) and a later
+    rerun resolves to k=1 (no supported structure), the stale figures from the
+    old k must not survive -- they'd otherwise show subgroups that were never
+    actually derived under the corrected result."""
+    matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
+    integrated_path = tmp_path / "integrated_candidate_regions.csv"
+
+    # Flat/no-signal feature matrix: all subjects identical -> zero variance
+    # columns get dropped by _prepare_feature_matrix, forcing the
+    # insufficient-features early-return. Use tiny random noise instead so the
+    # matrix has usable variance but no real cluster structure, so the gap
+    # statistic falls back to k=1 rather than exercising the early-return path.
+    rows: list[dict[str, object]] = []
+    for index in range(16):
+        rows.append(
+            {
+                "subject_id": f"D{index:02d}",
+                "condition": "Disease",
+                "is_control": False,
+                "1300__1240.0": 5.0 + 0.001 * (index % 2),
+                "1300__1245.0": 5.0 + 0.001 * ((index + 1) % 2),
+                "2850__2840.0": 5.0 + 0.001 * (index % 3),
+            }
+        )
+    pd.DataFrame(rows).to_parquet(matrix_path, index=False)
+    _integrated_candidates().to_csv(integrated_path, index=False)
+
+    out_dir = tmp_path / "12_disease_subgroups"
+    figures_dir = out_dir / "figures"
+    figures_dir.mkdir(parents=True)
+    stale_1300 = figures_dir / "subgroup_mean_spectra_1300.png"
+    stale_2850 = figures_dir / "subgroup_mean_spectra_2850.png"
+    stale_1300.write_bytes(b"stale")
+    stale_2850.write_bytes(b"stale")
+
+    outputs = run_disease_subgroups(
+        feature_matrix_path=matrix_path,
+        integrated_candidates_path=integrated_path,
+        output_dir=out_dir,
+        cfg=_cfg(),
+    )
+
+    assert outputs["_status"]["reason"] == "gap statistic selected k=1; no disease subgroups were emitted"
+    assert not stale_1300.exists()
+    assert not stale_2850.exists()
+
+
+def test_select_gap_k_falls_back_to_one_when_gap_never_turns_over() -> None:
+    """A monotonically rising gap (no interior k satisfies the one-SE rule)
+    must resolve to k=1, not to the search ceiling. Reporting the ceiling here
+    would misrepresent an unresolved search as a supported subgroup count."""
+    gap = pd.DataFrame(
+        {
+            "n_clusters": [1, 2, 3, 4],
+            "gap": [0.959, 1.334, 1.539, 1.758],
+            "reference_log_dispersion_se": [0.021, 0.025, 0.021, 0.022],
+        }
+    )
+    assert _select_gap_k(gap) == 1
+
+
+def test_select_gap_k_returns_interior_k_when_gap_turns_over() -> None:
+    """Sanity check: a gap that plateaus/turns over at an interior k is still
+    selected correctly (fall-through fix must not break the normal case)."""
+    gap = pd.DataFrame(
+        {
+            "n_clusters": [1, 2, 3, 4],
+            "gap": [0.5, 2.0, 2.05, 2.06],
+            "reference_log_dispersion_se": [0.02, 0.02, 0.5, 0.02],
+        }
+    )
+    assert _select_gap_k(gap) == 2

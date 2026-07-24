@@ -116,8 +116,15 @@ def _base_output_dir(explicit: str | None) -> Path:
 
 
 def _save_fig(fig: matplotlib.figure.Figure, path: Path) -> None:
+    """Write a figure as vector PDF, whatever suffix the caller supplied.
+
+    Call sites name their targets with a ``.png`` suffix; the suffix is
+    rewritten here so every spectral and QC plot is emitted as a single
+    publication-ready vector file instead of a raster one.
+    """
+    path = path.with_suffix(".pdf")
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=300, bbox_inches="tight")
+    fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
     logger.info("Saved plot: %s", path)
 

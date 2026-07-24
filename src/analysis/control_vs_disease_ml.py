@@ -1646,13 +1646,22 @@ def _append_null_distribution_rows(
     n_permutations: int,
     n_splits: int,
 ) -> None:
-    """Append deterministic permutation rows while validating a completed null."""
+    """Append deterministic permutation rows for a null that may have stopped early.
+
+    `n_permutations` is the configured ceiling, not necessarily the draw
+    count: adaptive stopping (`src.statistics.sequential_permutation`) can
+    resolve the Monte Carlo p-value in fewer draws. Seeds are generated
+    deterministically from `random_state`, so the first `null_scores.size`
+    seeds of that sequence are exactly the ones actually drawn.
+    """
     if null_scores.size == 0:
         return
-    if null_scores.size != n_permutations:
+    if null_scores.size > n_permutations:
         raise RuntimeError(
-            f"{null_type} permutation test returned {null_scores.size} scores; expected {n_permutations}"
+            f"{null_type} permutation test returned {null_scores.size} scores; "
+            f"exceeds configured ceiling {n_permutations}"
         )
+    seeds = _resampling_seeds(random_state, n_permutations)[: null_scores.size]
     rows.extend(
         {
             "model": model_name,
@@ -1663,7 +1672,7 @@ def _append_null_distribution_rows(
             "permutation_cv_repeats": 1,
             "null_balanced_accuracy": float(score),
         }
-        for seed, score in zip(_resampling_seeds(random_state, n_permutations), null_scores, strict=True)
+        for seed, score in zip(seeds, null_scores, strict=True)
     )
 
 

@@ -15,6 +15,7 @@ import src.analysis.journal_figures as journal_figures
 from src.analysis.journal_figures import (
     _fig2_effect_forest,
     _fig4_nmf_entropy,
+    _fig6_moca_association_landscape,
     _plot_nmf_components,
     run_journal_figures,
 )
@@ -99,6 +100,45 @@ def test_fig2_skips_when_no_valid_contrast(tmp_path: Path):
     pd.DataFrame().to_csv(ranking_path, index=False)
 
     assert _fig2_effect_forest(contrasts_path, ranking_path, "oxidative_index", output_path) is False
+
+
+def test_fig6_moca_association_landscape_writes_both_panels(tmp_path: Path):
+    associations_path = tmp_path / "delta_moca_associations.csv"
+    performance_path = tmp_path / "pls_regression_performance.csv"
+    output_path = tmp_path / "fig6.png"
+
+    wn_1300 = np.linspace(800.0, 1700.0, 20)
+    wn_2850 = np.linspace(2500.0, 3100.0, 10)
+    rows = []
+    for wn in wn_1300:
+        rows.append({"analysis_name": "delta_moca_association", "spectral_block": "1300",
+                     "wavenumber": wn, "rho": 0.1, "fdr_q": 0.95, "cluster_p_value": 0.4})
+    for wn in wn_2850:
+        rows.append({"analysis_name": "delta_moca_association", "spectral_block": "2850",
+                     "wavenumber": wn, "rho": -0.05, "fdr_q": 0.97, "cluster_p_value": 0.6})
+    pd.DataFrame(rows).to_csv(associations_path, index=False)
+
+    pd.DataFrame(
+        {
+            "target": ["moca_baseline", "moca_3m", "delta_moca"],
+            "r2": [-0.33, -0.07, -0.40],
+            "permutation_p_value_holm": [1.0, 0.64, 1.0],
+            "model_supported": [False, False, False],
+        }
+    ).to_csv(performance_path, index=False)
+
+    assert _fig6_moca_association_landscape(associations_path, performance_path, output_path) is True
+    assert output_path.exists()
+
+
+def test_fig6_moca_association_landscape_skips_when_no_data(tmp_path: Path):
+    associations_path = tmp_path / "delta_moca_associations.csv"
+    performance_path = tmp_path / "pls_regression_performance.csv"
+    output_path = tmp_path / "fig6.png"
+    pd.DataFrame().to_csv(associations_path, index=False)
+    pd.DataFrame().to_csv(performance_path, index=False)
+
+    assert _fig6_moca_association_landscape(associations_path, performance_path, output_path) is False
 
 
 def test_journal_figure_phase_reports_partial_output(monkeypatch, tmp_path: Path):

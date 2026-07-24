@@ -203,13 +203,20 @@ def _gap_statistic(
 
 
 def _select_gap_k(gap: pd.DataFrame) -> int:
-    """Use the Tibshirani one-standard-error rule, allowing the null k=1 model."""
+    """Use the Tibshirani one-standard-error rule, allowing the null k=1 model.
+
+    If the gap keeps rising through the last tested k (no interior k satisfies
+    the one-SE rule), the search ceiling is not an optimum -- it just means the
+    scan ran out of room. Reporting that ceiling as "the" cluster count would
+    misrepresent an unresolved search as a finding, so fall back to k=1 (no
+    supported subgroup structure) instead of `max_clusters`.
+    """
     ordered = gap.sort_values("n_clusters").reset_index(drop=True)
     for index in range(len(ordered) - 1):
         current, following = ordered.iloc[index], ordered.iloc[index + 1]
         if float(current["gap"]) >= float(following["gap"]) - float(following["reference_log_dispersion_se"]):
             return int(current["n_clusters"])
-    return int(ordered.iloc[-1]["n_clusters"])
+    return 1
 
 
 def _bootstrap_ari(
@@ -328,6 +335,9 @@ def run_disease_subgroups(
             "subgroup_mean_spectra.csv",
         ):
             (target_dir / stale_name).unlink(missing_ok=True)
+        figures_dir = target_dir / "figures"
+        for stale_figure in figures_dir.glob("subgroup_mean_spectra_*.png"):
+            stale_figure.unlink(missing_ok=True)
         logger.info("Gap statistic did not support disease subgroups; retaining only the audit table")
         return {
             "disease_subgroup_gap_statistic": gap_path,
