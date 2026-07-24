@@ -394,6 +394,10 @@ biological_pca:
   loading_region_quantile: 0.9
   loading_region_min_width_cm: 8.0
   loading_region_merge_gap_cm: 6.0
+  measurement_count_sensitivity:
+    enabled: true
+    n_draws: 500
+    random_state: 42
   figures:
     emit_convex_hull: false
   models:

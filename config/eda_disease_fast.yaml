@@ -7,6 +7,10 @@
 # ---------------------------------------------------------------------------
 _extends: eda_disease_only.yaml
 
+biological_pca:
+  measurement_count_sensitivity:
+    n_draws: 20
+
 analysis:
   disease_stratification:
     n_permutations: 64

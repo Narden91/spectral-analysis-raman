@@ -432,3 +432,110 @@ def test_comparison_summary_and_consistency_include_pc3() -> None:
     results = fit_biological_pca_models(_inputs(), cfg=cfg)
     comparison = biological_pca._build_pca_comparison_summary(results)
     assert set(comparison["PC"]) == {"PC1", "PC2", "PC3"}
+
+
+def _inputs_with_measurement_rows(n_subjects: int = 8, rng_seed: int = 0) -> SubjectInputs:
+    """Like _inputs(), but with per-measurement rows: half the subjects have
+    the cohort-minimum 3 measurements (control-like), half have 6
+    (disease-like), mirroring the real 3-vs-6 acquisition imbalance.
+    """
+    inputs = _inputs(n_subjects=n_subjects)
+    rng = np.random.default_rng(rng_seed)
+    measurement_rows: dict[str, dict[str, np.ndarray]] = {}
+    for i, subject_id in enumerate(inputs.subjects):
+        n_meas = 3 if i % 2 == 0 else 6
+        measurement_rows[subject_id] = {
+            block: inputs.matrices[block][i][None, :] + rng.normal(scale=0.01, size=(n_meas, inputs.matrices[block].shape[1]))
+            for block in ("1300", "2850")
+        }
+    return SubjectInputs(
+        subject_spectra=inputs.subject_spectra,
+        subject_region_counts=inputs.subject_region_counts,
+        input_provenance=inputs.input_provenance,
+        axes=inputs.axes,
+        matrices=inputs.matrices,
+        subjects=inputs.subjects,
+        measurement_rows=measurement_rows,
+    )
+
+
+def test_target_measurement_count_is_cohort_minimum() -> None:
+    inputs = _inputs_with_measurement_rows()
+    assert biological_pca._target_measurement_count(inputs) == 3
+
+
+def test_resampled_subject_matrix_keeps_matched_subjects_unchanged() -> None:
+    inputs = _inputs_with_measurement_rows()
+    target_n = biological_pca._target_measurement_count(inputs)
+    rng = np.random.default_rng(1)
+    resampled = biological_pca._resampled_subject_matrix(inputs, "1300", target_n, rng)
+    for i, subject_id in enumerate(inputs.subjects):
+        if inputs.measurement_rows[subject_id]["1300"].shape[0] <= target_n:
+            expected = np.nanmedian(inputs.measurement_rows[subject_id]["1300"], axis=0)
+            assert np.allclose(resampled[i], expected)
+
+
+def test_run_measurement_count_sensitivity_reports_all_models_and_pcs() -> None:
+    cfg = _cfg()
+    cfg["biological_pca"]["measurement_count_sensitivity"] = {
+        "enabled": True,
+        "n_draws": 5,
+        "random_state": 0,
+    }
+    inputs = _inputs_with_measurement_rows()
+    results = fit_biological_pca_models(inputs, cfg=cfg)
+    draws = biological_pca.run_measurement_count_sensitivity(inputs, results, cfg=cfg)
+    assert not draws.empty
+    assert draws.attrs["target_measurement_count"] == 3
+    assert draws.attrs["n_draws"] == 5
+    assert set(draws["model"]) == {"PCA_1330", "PCA_2850", "PCA_whole"}
+    assert set(draws["PC"]) == {"PC1", "PC2", "PC3"}
+    assert draws.groupby("model")["draw"].nunique().eq(5).all()
+
+    summary = biological_pca.summarize_measurement_count_sensitivity(draws)
+    assert set(summary.columns) >= {
+        "model", "PC", "n_draws", "canonical_explained_variance_ratio",
+        "mean_explained_variance_ratio", "ci_lower_2.5pct", "ci_upper_97.5pct",
+    }
+    assert (summary["n_draws"] == 5).all()
+
+
+def test_run_measurement_count_sensitivity_disabled_returns_empty() -> None:
+    cfg = _cfg()
+    cfg["biological_pca"]["measurement_count_sensitivity"] = {"enabled": False}
+    inputs = _inputs_with_measurement_rows()
+    results = fit_biological_pca_models(inputs, cfg=cfg)
+    draws = biological_pca.run_measurement_count_sensitivity(inputs, results, cfg=cfg)
+    assert draws.empty
+
+
+def test_run_measurement_count_sensitivity_skips_without_measurement_rows() -> None:
+    cfg = _cfg()
+    cfg["biological_pca"]["measurement_count_sensitivity"] = {"enabled": True, "n_draws": 5}
+    inputs = _inputs()
+    results = fit_biological_pca_models(inputs, cfg=cfg)
+    draws = biological_pca.run_measurement_count_sensitivity(inputs, results, cfg=cfg)
+    assert draws.empty
+
+
+def test_run_measurement_count_sensitivity_no_variation_returns_empty() -> None:
+    cfg = _cfg()
+    cfg["biological_pca"]["measurement_count_sensitivity"] = {"enabled": True, "n_draws": 5}
+    inputs = _inputs_with_measurement_rows()
+    # Force every subject to already be at the target count -> nothing to resample.
+    uniform_rows = {
+        sid: {block: rows[block][:3] for block in ("1300", "2850")}
+        for sid, rows in inputs.measurement_rows.items()
+    }
+    inputs = SubjectInputs(
+        subject_spectra=inputs.subject_spectra,
+        subject_region_counts=inputs.subject_region_counts,
+        input_provenance=inputs.input_provenance,
+        axes=inputs.axes,
+        matrices=inputs.matrices,
+        subjects=inputs.subjects,
+        measurement_rows=uniform_rows,
+    )
+    results = fit_biological_pca_models(inputs, cfg=cfg)
+    draws = biological_pca.run_measurement_count_sensitivity(inputs, results, cfg=cfg)
+    assert draws.empty

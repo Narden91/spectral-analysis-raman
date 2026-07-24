@@ -73,6 +73,11 @@ class SubjectInputs:
     matrices: dict[str, np.ndarray]
     subjects: list[str]
     excluded_subjects: list[dict[str, str]] = field(default_factory=list)  # [{subject_id, reason}]
+    # Per-subject, per-block measurement-level (area) rows prior to the median
+    # aggregation collapsing them to one row per subject. Used only by the
+    # measurement-count-matched downsampling sensitivity analysis below; the
+    # primary PCA fit never reads this field.
+    measurement_rows: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -260,6 +265,7 @@ def _build_subject_inputs_from_materialized_store(
     matrices: dict[str, list[np.ndarray]] = {"1300": [], "2850": []}
     region_rows: list[dict[str, object]] = []
     subject_rows: list[dict[str, object]] = []
+    measurement_rows: dict[str, dict[str, np.ndarray]] = {}
 
     missing_spectral_subjects: list[dict[str, str]] = []
     for subject_id in subjects:
@@ -301,6 +307,7 @@ def _build_subject_inputs_from_materialized_store(
             block_matrix = np.asarray(payloads[block]["area_summary"][mask], dtype=float)
             median = np.nanmedian(block_matrix, axis=0)
             matrices[block].append(median)
+            measurement_rows.setdefault(str(subject_id), {})[block] = block_matrix
             block_counts = measurement_counts.loc[
                 (measurement_counts["subject_id"] == str(subject_id))
                 & (measurement_counts["spectral_range"] == block)
@@ -376,6 +383,7 @@ def _build_subject_inputs_from_materialized_store(
         axes=axes,
         matrices=matrix_arrays,
         subjects=included_subjects,
+        measurement_rows=measurement_rows,
         excluded_subjects=excluded_subjects,
     )
 
@@ -916,6 +924,220 @@ def fit_biological_pca_models(inputs: SubjectInputs, cfg: dict | None = None) ->
     return results
 
 
+def _measurement_count_sensitivity_cfg(cfg: dict) -> dict:
+    sens_cfg = _biological_cfg(cfg).get("measurement_count_sensitivity", {})
+    if not isinstance(sens_cfg, dict):
+        raise ValueError("biological_pca.measurement_count_sensitivity must be a mapping")
+    return sens_cfg
+
+
+def _target_measurement_count(inputs: SubjectInputs) -> int:
+    """Return the measurement count every subject is downsampled to.
+
+    This is the minimum per-subject, per-block measurement count actually
+    present in the cohort (data-derived, not a hardcoded assumption): subjects
+    at or below it are already "matched" and keep their full median every
+    draw, subjects above it are subsampled down to it.
+    """
+    counts = [
+        int(rows.shape[0])
+        for block_rows in inputs.measurement_rows.values()
+        for rows in block_rows.values()
+        if rows.shape[0] > 0
+    ]
+    if not counts:
+        raise ValueError("No measurement rows available for measurement-count sensitivity analysis")
+    return min(counts)
+
+
+def _resampled_subject_matrix(
+    inputs: SubjectInputs, block: str, target_n: int, rng: np.random.Generator
+) -> np.ndarray:
+    """One subject-median matrix for `block`, each subject's median taken over
+    a fresh `target_n`-of-N draw of its measurements (without replacement).
+
+    Subjects with exactly `target_n` measurements always use the same rows,
+    so they contribute identical medians on every draw; only subjects with
+    more than `target_n` measurements vary draw-to-draw.
+    """
+    rows = []
+    for subject_id in inputs.subjects:
+        block_rows = inputs.measurement_rows[subject_id][block]
+        n_available = block_rows.shape[0]
+        if n_available <= target_n:
+            selected = block_rows
+        else:
+            idx = rng.choice(n_available, size=target_n, replace=False)
+            selected = block_rows[idx]
+        rows.append(np.nanmedian(selected, axis=0))
+    return np.vstack(rows)
+
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    denom = np.linalg.norm(a) * np.linalg.norm(b)
+    if denom == 0:
+        return float("nan")
+    return float(np.dot(a, b) / denom)
+
+
+def run_measurement_count_sensitivity(
+    inputs: SubjectInputs,
+    results: list[ModelResult],
+    cfg: dict | None = None,
+) -> pd.DataFrame:
+    """Measurement-count-matched downsampling sensitivity analysis.
+
+    Controls contribute a fixed 3 measurements per spectral block; most
+    disease subjects contribute 6. Two-stage median aggregation gives each
+    measurement equal weight within a subject, but the precision of a
+    3-measurement median and a 6-measurement median can still differ. This
+    repeatedly downsamples every subject's measurements to the cohort-minimum
+    count before the per-subject median, refits the same three Biological PCA
+    models used for the canonical (full-data) result, and reports how much
+    PC1-PC3 explained variance and the PC1 loading direction move relative to
+    the canonical fit. It reuses the already-preprocessed, already-aggregated
+    per-measurement arrays; it does not re-run preprocessing or touch the
+    stored data.
+    """
+    cfg = config if cfg is None else cfg
+    sens_cfg = _measurement_count_sensitivity_cfg(cfg)
+    if not bool(sens_cfg.get("enabled", True)):
+        return pd.DataFrame()
+
+    n_draws = int(sens_cfg.get("n_draws", 500))
+    if n_draws <= 0:
+        raise ValueError("biological_pca.measurement_count_sensitivity.n_draws must be positive")
+    random_state = int(sens_cfg.get("random_state", 42))
+
+    if not inputs.measurement_rows:
+        logger.info(
+            "Measurement-count sensitivity analysis skipped: SubjectInputs carries no "
+            "per-measurement rows (not produced by this build_subject_inputs call)."
+        )
+        return pd.DataFrame()
+    missing_rows = [sid for sid in inputs.subjects if sid not in inputs.measurement_rows]
+    if missing_rows:
+        raise ValueError(
+            f"Measurement-count sensitivity analysis is missing per-measurement rows for "
+            f"{len(missing_rows)} subject(s): {missing_rows[:10]}"
+        )
+
+    target_n = _target_measurement_count(inputs)
+    bp_cfg = _biological_cfg(cfg)
+    n_components = int(bp_cfg.get("n_components", 5))
+    canonical = {result.name: result for result in results}
+
+    n_varying = sum(
+        1
+        for subject_id in inputs.subjects
+        for block in BLOCKS
+        if inputs.measurement_rows[subject_id][block].shape[0] > target_n
+    )
+    if n_varying == 0:
+        logger.info(
+            "Measurement-count sensitivity analysis: every subject already has "
+            "<= %d measurements per block; downsampling has no effect and is skipped.",
+            target_n,
+        )
+        return pd.DataFrame()
+
+    rng = np.random.default_rng(random_state)
+    rows: list[dict[str, object]] = []
+    canonical_pc1_loading: dict[str, np.ndarray] = {}
+    for model_name in REQUIRED_MODELS:
+        loadings = canonical[model_name].loadings
+        if "PC1_loading" in loadings.columns:
+            canonical_pc1_loading[model_name] = loadings["PC1_loading"].to_numpy(dtype=float)
+
+    for draw in range(n_draws):
+        draw_matrices = {
+            block: _resampled_subject_matrix(inputs, block, target_n, rng) for block in BLOCKS
+        }
+        for model_name in REQUIRED_MODELS:
+            model_cfg = bp_cfg["models"][model_name]
+            if model_name == "PCA_whole":
+                axis_1300 = inputs.axes["1300"]
+                matrix = np.hstack([draw_matrices["1300"], draw_matrices["2850"]])
+                split_index = axis_1300.size
+                pca_result = joint_pca_mfa(matrix, split_index, n_components)
+            else:
+                block = str(model_cfg["spectral_blocks"][0])
+                window = model_cfg.get("window")
+                block_axis = inputs.axes[block]
+                block_matrix = draw_matrices[block]
+                if str(window).lower() != "full":
+                    lower, upper = float(window[0]), float(window[1])
+                    mask = (block_axis >= lower) & (block_axis <= upper)
+                    block_matrix = block_matrix[:, mask]
+                pca_result = run_pca(
+                    block_matrix,
+                    n_components=n_components,
+                    scale=bool(bp_cfg.get("scale", False)),
+                    log_summary=False,
+                    warn_on_high_pc1=False,
+                )
+
+            ratios = pca_result["explained_variance_ratio"]
+            pc1_loading = canonical_pc1_loading.get(model_name)
+            cosine = (
+                _cosine_similarity(pca_result["loadings"][0], pc1_loading)
+                if pc1_loading is not None
+                else float("nan")
+            )
+            for pc_idx, ratio in enumerate(ratios):
+                rows.append(
+                    {
+                        "draw": draw,
+                        "model": model_name,
+                        "PC": f"PC{pc_idx + 1}",
+                        "explained_variance_ratio": float(ratio),
+                        "canonical_explained_variance_ratio": _explained_variance_pct(
+                            canonical[model_name], f"PC{pc_idx + 1}"
+                        ) / 100.0,
+                        "pc1_loading_cosine_similarity": cosine if pc_idx == 0 else float("nan"),
+                    }
+                )
+
+    draws_df = pd.DataFrame(rows)
+    draws_df.attrs["target_measurement_count"] = target_n
+    draws_df.attrs["n_draws"] = n_draws
+    draws_df.attrs["random_state"] = random_state
+    return draws_df
+
+
+def summarize_measurement_count_sensitivity(draws_df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse per-draw rows into one summary row per (model, PC)."""
+    if draws_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "model", "PC", "n_draws", "canonical_explained_variance_ratio",
+                "mean_explained_variance_ratio", "std_explained_variance_ratio",
+                "ci_lower_2.5pct", "ci_upper_97.5pct",
+                "mean_pc1_loading_cosine_similarity",
+            ]
+        )
+    summary_rows: list[dict[str, object]] = []
+    for (model_name, pc), group in draws_df.groupby(["model", "PC"], sort=False):
+        ratios = group["explained_variance_ratio"].to_numpy(dtype=float)
+        cosine = group["pc1_loading_cosine_similarity"].dropna().to_numpy(dtype=float)
+        summary_rows.append(
+            {
+                "model": model_name,
+                "PC": pc,
+                "n_draws": int(len(group)),
+                "canonical_explained_variance_ratio": float(group["canonical_explained_variance_ratio"].iloc[0]),
+                "mean_explained_variance_ratio": float(np.mean(ratios)),
+                "std_explained_variance_ratio": float(np.std(ratios, ddof=1)) if len(ratios) > 1 else 0.0,
+                "ci_lower_2.5pct": float(np.percentile(ratios, 2.5)),
+                "ci_upper_97.5pct": float(np.percentile(ratios, 97.5)),
+                "mean_pc1_loading_cosine_similarity": (
+                    float(np.mean(cosine)) if cosine.size else float("nan")
+                ),
+            }
+        )
+    return pd.DataFrame(summary_rows)
+
+
 def validate_unique_subject_rows(df: pd.DataFrame, table_name: str) -> None:
     if "subject_id" not in df.columns:
         raise ValueError(f"{table_name} is missing subject_id")
@@ -1428,11 +1650,46 @@ def _write_model_readme(output_dir: Path) -> None:
     (output_dir / "README.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+def _write_measurement_count_sensitivity_markdown(summary_df: pd.DataFrame, target_n: int, n_draws: int, output_dir: Path) -> None:
+    lines = [
+        "# Measurement-Count-Matched Downsampling Sensitivity Analysis",
+        "",
+        f"Every subject's per-block measurements were downsampled to {target_n} "
+        f"(the cohort-minimum count) before the per-subject median, across {n_draws} "
+        "seeded draws. Subjects already at or below this count are unchanged on every "
+        "draw; only subjects with more measurements vary.",
+        "",
+        "| Model | PC | Canonical variance | Mean resampled variance | 95% range | Mean PC1 loading cosine similarity |",
+        "|---|---|---|---|---|---|",
+    ]
+    for _, row in summary_df.iterrows():
+        cosine = row["mean_pc1_loading_cosine_similarity"]
+        cosine_str = f"{cosine:.3f}" if np.isfinite(cosine) else "n/a"
+        lines.append(
+            f"| {row['model']} | {row['PC']} | {row['canonical_explained_variance_ratio'] * 100:.1f}% | "
+            f"{row['mean_explained_variance_ratio'] * 100:.1f}% | "
+            f"[{row['ci_lower_2.5pct'] * 100:.1f}%, {row['ci_upper_97.5pct'] * 100:.1f}%] | {cosine_str} |"
+        )
+    lines.extend(
+        [
+            "",
+            "This is a sensitivity analysis, not a replication: it re-fits the same "
+            "canonical models on downsampled measurements from the same subjects. "
+            "Close agreement between canonical and resampled variance indicates the "
+            "reported pattern is not an artifact of controls contributing fewer "
+            "measurements than disease subjects; it does not by itself validate the "
+            "biological interpretation of any component.",
+        ]
+    )
+    (output_dir / "measurement_count_sensitivity.md").write_text("\n".join(lines), encoding="utf-8")
+
+
 def _write_outputs(
     inputs: SubjectInputs,
     results: list[ModelResult],
     features: pd.DataFrame,
     cfg: dict,
+    measurement_sensitivity_draws: pd.DataFrame | None = None,
 ) -> dict[str, Path]:
     cross_region_dir = get_cross_region_summary_dir()
     subject_features_dir = get_cross_region_phase_dir("subject_features")
@@ -1581,6 +1838,20 @@ def _write_outputs(
     comparison.to_csv(summary_dir / "pca_comparison_summary.csv", index=False)
     region_consistency.to_csv(summary_dir / "region_consistency_summary.csv", index=False)
     _write_biological_pca_summary_markdown(comparison, summary_dir)
+
+    if measurement_sensitivity_draws is not None and not measurement_sensitivity_draws.empty:
+        sensitivity_summary = summarize_measurement_count_sensitivity(measurement_sensitivity_draws)
+        measurement_sensitivity_draws.drop(columns=[], errors="ignore").to_csv(
+            summary_dir / "measurement_count_sensitivity_draws.csv", index=False
+        )
+        sensitivity_summary.to_csv(summary_dir / "measurement_count_sensitivity_summary.csv", index=False)
+        _write_measurement_count_sensitivity_markdown(
+            sensitivity_summary,
+            target_n=int(measurement_sensitivity_draws.attrs.get("target_measurement_count", 0)),
+            n_draws=int(measurement_sensitivity_draws.attrs.get("n_draws", 0)),
+            output_dir=summary_dir,
+        )
+
     written_paths["cross_region_summary"] = cross_region_dir
     written_paths["subject_features_dir"] = subject_features_dir
     written_paths["biological_pca_summary_dir"] = summary_dir
@@ -1606,7 +1877,8 @@ def run_biological_pca(
     results = fit_biological_pca_models(inputs, cfg=cfg)
     features = build_subject_biochemical_features(results)
     validate_outputs(inputs, results, features, cfg=cfg)
-    written_paths.update(_write_outputs(inputs, results, features, cfg))
+    sensitivity_draws = run_measurement_count_sensitivity(inputs, results, cfg=cfg)
+    written_paths.update(_write_outputs(inputs, results, features, cfg, sensitivity_draws))
     logger.info("Biological PCA outputs written to %s", get_cross_region_summary_dir().parent)
     return written_paths
 
