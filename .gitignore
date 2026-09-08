@@ -29,7 +29,7 @@ catboost_info/
 .github/
 .claude/
 .cursor/
-paper/
+# paper/
 notebook/
 doc/Analysis_*
 legacy_results/
@@ -60,6 +60,10 @@ CLAUDE.md
 *.bcf
 *.acn
 *.acr
+*.pdf
+*.spl
+*.csv
+plan*
 
 # Manuscript LaTeX artifacts
 manuscript/*.aux

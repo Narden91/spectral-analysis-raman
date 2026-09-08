@@ -1,0 +1,4 @@
+Subject-wise aggregation prevents pixel-level pseudoreplication.
+Lipid-associated regions explain most normalized spectral variance.
+Case-control separation is modest, confounded, and externally unvalidated.
+No corrected association or held-out prediction of MoCA was supported.
