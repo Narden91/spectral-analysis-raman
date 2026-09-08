@@ -15,7 +15,12 @@ diagnostic reported alongside the confound checks already in the manuscript.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import matplotlib
 
@@ -29,7 +34,8 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-ROOT = Path(__file__).resolve().parent.parent
+from src.visualization.theme import FIGURE_WIDTH_IN, set_manuscript_theme
+
 SUBJECT_SPECTRA = (
     ROOT
     / "Results_control_vs_disease"
@@ -94,27 +100,10 @@ def full_fit_direction(X: np.ndarray, y: np.ndarray, n_comp: int) -> np.ndarray:
     return coef / np.linalg.norm(coef)
 
 
-def configure_style() -> None:
-    plt.rcParams.update(
-        {
-            "font.family": "DejaVu Sans",
-            "font.size": 8.5,
-            "axes.labelsize": 9,
-            "axes.titlesize": 9,
-            "legend.fontsize": 8,
-            "xtick.labelsize": 8,
-            "ytick.labelsize": 8,
-            "axes.linewidth": 0.8,
-            "pdf.fonttype": 42,
-            "ps.fonttype": 42,
-        }
-    )
-
-
 def main() -> None:
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
     FIGURE_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    configure_style()
+    set_manuscript_theme()
 
     frame = pd.read_csv(SUBJECT_SPECTRA)
     X, _ = spectral_matrix(frame)
@@ -168,7 +157,9 @@ def main() -> None:
         FIGURE_DATA_DIR / "sex_disease_confound_geometry.csv", index=False
     )
 
-    fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.1), constrained_layout=True)
+    fig, axes = plt.subplots(
+        1, 2, figsize=(FIGURE_WIDTH_IN, 3.1), constrained_layout=True
+    )
 
     ax = axes[0]
     labels = ["Disease\n(whole spectrum)", "Sex\n(whole spectrum)"]
@@ -177,26 +168,25 @@ def main() -> None:
     ax.bar(labels, values, color=colors, width=0.55)
     ax.axhline(0.5, color=NEUTRAL, linestyle="--", linewidth=0.9)
     ax.set_ylim(0.4, 1.0)
-    ax.set_ylabel("Out-of-fold ROC-AUC (5-fold CV)")
-    ax.set_title("Separate discriminant targets", loc="left", fontweight="bold", fontsize=8.5)
+    ax.set_ylabel("Out-of-fold ROC-AUC")
+    ax.set_title("A", loc="left", fontweight="bold")
     ax.spines[["top", "right"]].set_visible(False)
     for index, value in enumerate(values):
         ax.annotate(f"{value:.3f}", (index, value), textcoords="offset points",
-                    xytext=(0, 4), ha="center", fontsize=7.5)
+                    xytext=(0, 4), ha="center", fontsize=8)
 
     ax = axes[1]
     ax.scatter(sex_projection[y_disease == 0], disease_projection[y_disease == 0],
                s=16, color=CONTROL, alpha=0.75, label="Control")
     ax.scatter(sex_projection[y_disease == 1], disease_projection[y_disease == 1],
                s=16, color=DISEASE, alpha=0.75, label="Ischemic stroke")
-    ax.set_xlabel("Projection onto sex-discriminant direction")
-    ax.set_ylabel("Projection onto disease-discriminant direction")
+    ax.set_xlabel("Sex-discriminant projection")
+    ax.set_ylabel("Disease-discriminant projection")
     ax.set_title(
-        f"Direction overlap (cosine = {cosine_similarity:.2f})",
-        loc="left", fontweight="bold", fontsize=8.5,
+        f"B  cosine = {cosine_similarity:.2f}", loc="left", fontweight="bold"
     )
     ax.spines[["top", "right"]].set_visible(False)
-    ax.legend(frameon=False, loc="best", fontsize=7)
+    ax.legend(frameon=False, loc="best", fontsize=7.5)
 
     for stem in ("sex_disease_confound_geometry",):
         fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")

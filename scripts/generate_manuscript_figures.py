@@ -21,7 +21,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Patch
 from scipy import stats
 from sklearn.metrics import roc_curve
 
@@ -31,9 +31,24 @@ from src.analysis.journal_figures import (
     _fig4_nmf_entropy,
     _fig6_moca_association_landscape,
 )
+from src import load_config
 from src.analysis.io_utils import load_csv_or_empty
 from src.reporting.candidate_region_report import _classify_candidate
-from src.visualization.eda_plots import plot_scree
+from src.analysis.raman_bands import RAMAN_BANDS
+from src.visualization.spectral_summary_plots import (
+    BAND_CATEGORY_COLORS,
+    BAND_CATEGORY_LABELS,
+    _add_raman_band_spans,
+    _annotate_peaks,
+    _set_spectrum_limits,
+    _upper_envelope,
+)
+from src.visualization.theme import (
+    FIGURE_WIDTH_IN,
+    MANUSCRIPT_WIDTH_IN,
+    panel_width_in,
+    set_manuscript_theme,
+)
 FIGURE_DIR = ROOT / "manuscript" / "paper" / "figures"
 FIGURE_DATA_DIR = ROOT / "manuscript" / "paper" / "figure_data"
 SUBJECT_SPECTRA = (
@@ -162,13 +177,13 @@ MOCA_ENDPOINT_LABELS = {
 
 BAND_LABELS = {
     "cytosine_786": "Cytosine (786)",
-    "o_p_o_821": "O--P--O (821)",
+    "o_p_o_821": "O–P–O (821)",
     "tyrosine_851": "Tyrosine (851)",
-    "c_o_c_sugar_925": "C--O--C, sugar (925)",
+    "c_o_c_sugar_925": "C–O–C, sugar (925)",
     "beta_sheet_980": r"$\beta$-sheet (980)",
-    "c_o_c_n_1060": "C--O/C--N (1060)",
-    "lipid_cc_1089": "Lipid C--C (1089)",
-    "po2_cn_1112": r"PO$_2^-$ / C--N (1112)",
+    "c_o_c_n_1060": "C–O/C–N (1060)",
+    "lipid_cc_1089": "Lipid C–C (1089)",
+    "po2_cn_1112": r"PO$_2^-$ / C–N (1112)",
     "carotenoid_1156": "Carotenoid (1156)",
     "amide_iii_1258": "Amide III (1258)",
     "ch2_twist_1301": r"CH$_2$ twist (1301)",
@@ -207,24 +222,6 @@ BAND_WINDOWS = {
     "ch2_asym_stretch_2890": (2870, 2910),
     "ch3_asym_stretch_2937": (2925, 2945),
 }
-
-
-def configure_style() -> None:
-    """Apply a compact, journal-friendly Matplotlib style."""
-    plt.rcParams.update(
-        {
-            "font.family": "DejaVu Sans",
-            "font.size": 8.5,
-            "axes.labelsize": 9,
-            "axes.titlesize": 9,
-            "legend.fontsize": 8,
-            "xtick.labelsize": 8,
-            "ytick.labelsize": 8,
-            "axes.linewidth": 0.8,
-            "pdf.fonttype": 42,
-            "ps.fonttype": 42,
-        }
-    )
 
 
 def bootstrap_mean_interval(
@@ -309,6 +306,151 @@ def make_subject_spectra_figure(rng: np.random.Generator) -> None:
     plt.close(fig)
 
 
+def _manuscript_plot_cfg() -> dict:
+    """Band windows and peak-detection settings from the frozen plot profile.
+
+    Read from ``config/plots.yaml`` rather than restated here, so the curated
+    21-window registry stays the single source for the figure, the analysis,
+    and the band table.
+    """
+    profile = load_config("config/plots.yaml")
+    return {
+        "bands": {
+            name: tuple(bounds)
+            for name, bounds in profile["whole_spectra"]["bands"].items()
+        },
+        "peak_detection": profile["plotting"]["peak_detection"],
+        "raman_band_style": profile["plotting"]["raman_band_style"],
+    }
+
+
+def _shared_display_scale(traces: list[np.ndarray]) -> list[np.ndarray]:
+    """Standardize a block's traces against one shared mean and SD.
+
+    The fingerprint block is SNV-normalized and the C--H block is area-
+    normalized, so the two blocks are not on a common intensity scale and the
+    display axis has to be standardized per block. Standardizing each group
+    separately, as the pipeline's own global plot does, would also rescale the
+    control-versus-stroke offset that the figure exists to show; pooling the
+    statistics across groups puts the blocks on a comparable scale while
+    leaving the between-group difference untouched.
+    """
+    stacked = np.concatenate([np.asarray(trace, dtype=float) for trace in traces])
+    finite = stacked[np.isfinite(stacked)]
+    if finite.size == 0:
+        return traces
+    mean = float(finite.mean())
+    sd = float(finite.std())
+    if sd < 1e-12:
+        return [np.asarray(trace, dtype=float) - mean for trace in traces]
+    return [(np.asarray(trace, dtype=float) - mean) / sd for trace in traces]
+
+
+def make_global_spectra_figure() -> None:
+    """Participant-level group-mean spectra, one panel per spectral block.
+
+    Replaces the manually copied wide-format plot from ``Output_plot``. The
+    blocks are stacked rather than concatenated on a shared axis so each gets
+    the full manuscript column width; the concatenation gap the pipeline plot
+    draws is meaningless anyway, because the two blocks carry different
+    normalizations and must not be read across.
+
+    Per reviewer request the traces are not filled to zero and the intensity
+    axis carries no tick labels: the fill is anchored at zero, so its edge
+    draws a baseline that invites reading standardized values as absolute
+    intensities.
+    """
+    frame = pd.read_csv(SUBJECT_SPECTRA)
+    plot_cfg = _manuscript_plot_cfg()
+    conditions = (
+        ("control", CONTROL, "Control"),
+        ("disease", DISEASE, "Ischemic stroke"),
+    )
+    blocks = (
+        ("1300__", "A  Fingerprint"),
+        ("2850__", "B  C–H stretch"),
+    )
+
+    fig, axes = plt.subplots(
+        2, 1, figsize=(FIGURE_WIDTH_IN, 5.0), constrained_layout=True
+    )
+    trace_handles: list = []
+    trace_labels: list[str] = []
+
+    for ax, (prefix, title) in zip(axes, blocks, strict=True):
+        columns, wavenumbers = spectral_columns(frame, prefix)
+        means = [
+            frame.loc[frame["condition"] == condition, columns]
+            .to_numpy(dtype=float)
+            .mean(axis=0)
+            for condition, _, _ in conditions
+        ]
+        counts = [
+            int(frame["condition"].eq(condition).sum())
+            for condition, _, _ in conditions
+        ]
+        display = _shared_display_scale(means)
+
+        for trace, (_, color, label), count in zip(
+            display, conditions, counts, strict=True
+        ):
+            (line,) = ax.plot(wavenumbers, trace, color=color, linewidth=1.3)
+            if ax is axes[0]:
+                trace_handles.append(line)
+                trace_labels.append(f"{label} ($n={count}$)")
+
+        _set_spectrum_limits(ax, [wavenumbers], display, top_pad=0.85)
+        _add_raman_band_spans(ax, wavenumbers, plot_cfg)
+        _annotate_peaks(
+            ax,
+            wavenumbers,
+            _upper_envelope(display),
+            wavenumbers,
+            plot_cfg["peak_detection"],
+            bands=plot_cfg["bands"],
+            fontsize=8.0,
+            rotation=90.0,
+        )
+        # _add_raman_band_spans attaches a per-axes legend listing only the
+        # categories present in that block; replaced below by one figure-level
+        # legend covering both.
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()
+
+        ax.set_title(title, loc="left", fontweight="bold")
+        ax.set_xlabel(r"Raman shift (cm$^{-1}$)")
+        ax.set_ylabel("Normalized intensity (a.u.)")
+        ax.set_yticks([])
+        ax.grid(axis="x", color="#E5E7EB", linewidth=0.6)
+        ax.set_axisbelow(True)
+        ax.spines[["top", "right", "left"]].set_visible(False)
+        ax.tick_params(axis="x", direction="out", length=3)
+
+    categories = list(
+        dict.fromkeys(band.category for band in RAMAN_BANDS.values())
+    )
+    fig.legend(
+        trace_handles
+        + [
+            Patch(facecolor=BAND_CATEGORY_COLORS[category], alpha=0.8)
+            for category in categories
+        ],
+        trace_labels + [BAND_CATEGORY_LABELS[category] for category in categories],
+        # "outside" placement is the only one constrained_layout reserves space
+        # for; a negative bbox anchor drops the legend onto panel B's x-label.
+        loc="outside lower center",
+        ncol=3,
+        frameon=False,
+        handlelength=1.8,
+        columnspacing=1.6,
+    )
+
+    for stem in ("global",):
+        fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
+        fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
+    plt.close(fig)
+
+
 def bootstrap_rank_biserial(
     disease: np.ndarray, control: np.ndarray, rng: np.random.Generator
 ) -> tuple[float, float]:
@@ -382,7 +524,9 @@ def make_band_effect_figure(rng: np.random.Generator) -> None:
     y = np.arange(result.shape[0])
     effects = result["rank_biserial"].to_numpy()
     colors = np.where(effects >= 0, DISEASE, CONTROL)
-    fig, ax = plt.subplots(figsize=(6.8, 7.4), constrained_layout=True)
+    fig, ax = plt.subplots(
+        figsize=(FIGURE_WIDTH_IN, 6.6), constrained_layout=True
+    )
     for index, row in result.iterrows():
         effect = float(row["rank_biserial"])
         ax.errorbar(
@@ -431,7 +575,9 @@ def make_band_effect_figure_landscape(result: pd.DataFrame) -> None:
     x = np.arange(result.shape[0])
     effects = result["rank_biserial"].to_numpy()
     colors = np.where(effects >= 0, DISEASE, CONTROL)
-    fig, ax = plt.subplots(figsize=(9.5, 4.2), constrained_layout=True)
+    fig, ax = plt.subplots(
+        figsize=(MANUSCRIPT_WIDTH_IN, 5.4), constrained_layout=True
+    )
     for index, row in result.iterrows():
         effect = float(row["rank_biserial"])
         ax.errorbar(
@@ -472,18 +618,101 @@ PC_COLORS = {"PC1": "#264653", "PC2": "#2A9D8F", "PC3": "#E76F51"}
 BLOCK_TAGS = {"1300": "FP", "2850": "CH"}
 
 
-def make_biopca_loading_regions_figure() -> None:
-    """Redraw the whole-spectrum loading-region contribution chart.
+# Figure 2 is assembled in LaTeX from two separate PDFs so each panel can be
+# authored at the exact width its \includegraphics requests. Both are saved at
+# BIOPCA_PANEL_HEIGHT_IN with bbox_inches=None, so neither is rescaled on the
+# page and the two panels share a type size and a baseline.
+# A + gap + B = 0.42 + 0.02 + 0.46 = 0.90 of the text block, matching the
+# minipage widths in the manuscript's Figure 2 float.
+BIOPCA_PANEL_HEIGHT_IN = 3.0
+BIOPCA_SCREE_FRACTION = 0.42
+BIOPCA_LOADING_FRACTION = 0.46
 
-    Sources the already-materialized ``region_contributions.csv`` from the
-    production Biological PCA run; no PCA refitting or region re-detection is
-    performed. Only the label formatting and orientation are changed relative
-    to the pipeline's own figure, to remove the duplicated block-prefix text
-    and shorten the y-axis labels.
+
+def _save_exact(fig, stem: str) -> None:
+    """Write a panel at exactly its figure size, with no tight-bbox crop.
+
+    ``savefig(bbox_inches=None)`` falls back to the rcParam, which this project
+    sets to "tight"; the crop has to be disabled through the rcParam itself so
+    the PDF media box equals the requested width and LaTeX places it at scale
+    1.0.
+    """
+    with matplotlib.rc_context({"savefig.bbox": None}):
+        fig.savefig(FIGURE_DIR / f"{stem}.pdf")
+        fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600)
+    plt.close(fig)
+
+
+def make_biopca_scree_figure() -> None:
+    """Figure 2A: explained variance of the whole-spectrum joint PCA.
+
+    Reads the archived ``explained_variance.csv``; no PCA refitting. A single
+    percentage axis replaces the twin axis of the pipeline's ``plot_scree``:
+    both series are percentages, and a twin axis is unreadable in a panel this
+    narrow.
+    """
+    variance = pd.read_csv(BIOPCA_WHOLE_EXPLAINED_VARIANCE).sort_values("PC")
+    ratios = variance["explained_variance_ratio"].to_numpy(dtype=float) * 100.0
+
+    fig, ax = plt.subplots(
+        figsize=(panel_width_in(BIOPCA_SCREE_FRACTION), BIOPCA_PANEL_HEIGHT_IN),
+        constrained_layout=True,
+    )
+    components = np.arange(1, ratios.size + 1)
+    ax.bar(components, ratios, color="#457B9D", width=0.68, label="Individual")
+    ax.plot(
+        components,
+        np.cumsum(ratios),
+        "o-",
+        color="#CC3311",
+        linewidth=1.6,
+        markersize=4.5,
+        label="Cumulative",
+    )
+    for component, ratio in zip(components, ratios, strict=True):
+        # Inside the bar for PC1/PC2: the cumulative marker sits on the PC1 bar
+        # top, so an outside label would collide with it.
+        ax.annotate(
+            f"{ratio:.1f}",
+            (component, ratio),
+            textcoords="offset points",
+            xytext=(0, -4) if ratio > 12 else (0, 4),
+            ha="center",
+            va="top" if ratio > 12 else "bottom",
+            fontsize=8,
+            color="white" if ratio > 12 else NEUTRAL,
+        )
+    ax.set_xticks(components, [f"PC{index}" for index in components])
+    ax.set_ylim(0, 108)
+    ax.set_xlabel("Component")
+    ax.set_ylabel("Explained variance (%)")
+    ax.set_title("A", loc="left", fontweight="bold")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", color="#D9D9D9", linewidth=0.6)
+    ax.set_axisbelow(True)
+    ax.legend(
+        frameon=False,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.0),
+        fontsize=7.5,
+        handlelength=1.4,
+        borderpad=0.1,
+        labelspacing=0.25,
+    )
+    _save_exact(fig, "biopca_scree")
+
+
+def make_biopca_loading_figure() -> None:
+    """Figure 2B: loading-derived intervals of the whole-spectrum joint PCA.
+
+    Reads the archived ``region_contributions.csv``; no PCA refitting or region
+    re-detection. Every detected interval belongs to exactly one component, so
+    the chart draws one bar per interval coloured by component rather than a
+    PC-grouped matrix whose rows would each be two-thirds empty.
     """
     contributions = pd.read_csv(BIOPCA_WHOLE_REGION_CONTRIBUTIONS)
-    contributions["block_tag"] = contributions["spectral_block"].astype(str).map(
-        BLOCK_TAGS
+    contributions["block_tag"] = (
+        contributions["spectral_block"].astype(str).map(BLOCK_TAGS)
     )
     bounds = contributions["region_label"].str.extract(
         r"(?P<low>[\d.]+)\D+(?P<high>[\d.]+)\s*cm"
@@ -496,80 +725,40 @@ def make_biopca_loading_regions_figure() -> None:
         + "–"
         + bounds["high"].astype(float).round(0).astype(int).astype(str)
     )
-
-    pcs = ["PC1", "PC2", "PC3"]
-    pivot = contributions.pivot_table(
-        index="compact_label",
-        columns="PC",
-        values="relative_absolute_contribution",
-        aggfunc="sum",
-    ).reindex(columns=pcs, fill_value=0.0)
-    order = pivot.sum(axis=1).sort_values(ascending=True).index
-    pivot = pivot.loc[order]
-
-    y = np.arange(pivot.shape[0])
-    height = 0.24
-    offsets = np.linspace(-height, height, len(pcs))
+    if contributions["compact_label"].duplicated().any():
+        raise ValueError("Loading-region labels are not unique across components")
+    regions = contributions.sort_values("relative_absolute_contribution")
 
     fig, ax = plt.subplots(
-        figsize=(6.8, max(3.6, 0.34 * pivot.shape[0])), constrained_layout=True
+        figsize=(panel_width_in(BIOPCA_LOADING_FRACTION), BIOPCA_PANEL_HEIGHT_IN),
+        constrained_layout=True,
     )
-    for pc, offset in zip(pcs, offsets, strict=True):
-        ax.barh(
-            y + offset,
-            pivot[pc].to_numpy(),
-            height=height * 0.95,
-            color=PC_COLORS[pc],
-            label=pc,
-        )
-    ax.set_yticks(y, pivot.index)
-    ax.set_xlabel("Relative absolute contribution")
-    ax.set_title(
-        "PC1–PC3 loading-derived regions, whole-spectrum model",
-        loc="left",
-        fontweight="bold",
+    y = np.arange(regions.shape[0])
+    ax.barh(
+        y,
+        regions["relative_absolute_contribution"].to_numpy(dtype=float),
+        height=0.74,
+        color=[PC_COLORS[pc] for pc in regions["PC"]],
     )
+    ax.set_yticks(y, regions["compact_label"])
+    ax.tick_params(axis="y", length=0, labelsize=7, pad=1.5)
+    ax.set_ylim(-0.7, regions.shape[0] - 0.3)
+    ax.set_xlim(0, None)
+    ax.set_xlabel("Relative contribution")
+    ax.set_title("B", loc="left", fontweight="bold")
     ax.spines[["top", "right", "left"]].set_visible(False)
-    ax.tick_params(axis="y", length=0)
     ax.grid(axis="x", color="#D9D9D9", linewidth=0.6)
+    ax.set_axisbelow(True)
     ax.legend(
-        title="Component",
+        handles=[Patch(facecolor=PC_COLORS[pc], label=pc) for pc in ("PC1", "PC2", "PC3")],
         frameon=False,
         loc="lower right",
         fontsize=7.5,
-        title_fontsize=7.5,
+        handlelength=1.2,
+        borderpad=0.1,
+        labelspacing=0.25,
     )
-
-    fig.text(
-        0.01,
-        -0.02,
-        "FP = fingerprint block (734–1788 cm$^{-1}$); "
-        "CH = C–H stretch block (2451–3197 cm$^{-1}$).",
-        fontsize=6.8,
-        color=NEUTRAL,
-        ha="left",
-    )
-
-    for stem in ("biopca_loading_regions_pc1_pc3",):
-        fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
-        fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
-    plt.close(fig)
-
-
-def make_biopca_scree_figure() -> None:
-    """Redraw the whole-spectrum biological-PCA scree plot as a vector PDF.
-
-    Sources the already-materialized ``explained_variance.csv``; no PCA
-    refitting. Reuses the production ``plot_scree`` renderer so the visual
-    design matches the pipeline's own figure exactly.
-    """
-    variance = pd.read_csv(BIOPCA_WHOLE_EXPLAINED_VARIANCE).sort_values("PC")
-    ratios = variance["explained_variance_ratio"].to_numpy(dtype=float)
-    fig, _ = plot_scree(ratios, title="Whole-spectrum biological PCA")
-    for stem in ("biopca_scree_plot",):
-        fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
-        fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
-    plt.close(fig)
+    _save_exact(fig, "biopca_loading_regions")
 
 
 def make_clinical_correlation_heatmap_figure() -> None:
@@ -644,7 +833,9 @@ def make_candidate_region_overview_figure() -> None:
 def make_difference_spectrum_figure() -> None:
     """Redraw the severity extreme-group difference spectrum as a vector PDF."""
     _fig3_difference_spectrum(
-        DIFFERENCE_SPECTRUM, FIGURE_DIR / "difference_spectrum_severity_extreme.pdf"
+        DIFFERENCE_SPECTRUM,
+        FIGURE_DIR / "difference_spectrum_severity_extreme.pdf",
+        figsize=(FIGURE_WIDTH_IN, 4.6),
     )
 
 
@@ -659,10 +850,21 @@ def make_panel_effect_sizes_figure() -> None:
     ok = contrasts.loc[contrasts.get("status", "") == "ok"].copy()
     if ok.empty or "cliffs_delta" not in ok.columns:
         return
-    ok["label"] = ok["contrast_name"].astype(str) + " | " + ok["feature_name"].astype(str)
+    features = ok["feature_name"].astype(str).str.replace("_", " ", regex=False)
+    # Every row shares one contrast, so prefixing each label with it repeats
+    # the same string ten times and squeezes out the feature names.
+    contrasts_present = ok["contrast_name"].astype(str).nunique()
+    ok["label"] = (
+        features
+        if contrasts_present == 1
+        else ok["contrast_name"].astype(str) + " | " + features
+    )
     ok = ok.sort_values("cliffs_delta")
 
-    fig, ax = plt.subplots(figsize=(8, max(3.5, 0.32 * len(ok))))
+    fig, ax = plt.subplots(
+        figsize=(FIGURE_WIDTH_IN, max(3.2, 0.30 * len(ok))),
+        constrained_layout=True,
+    )
     y = np.arange(len(ok))
     xerr = np.vstack(
         [
@@ -675,8 +877,7 @@ def make_panel_effect_sizes_figure() -> None:
     ax.set_yticks(y)
     ax.set_yticklabels(ok["label"])
     ax.set_xlabel("Cliff's delta (group A - group B)")
-    ax.set_title("Fixed post hoc panel effect sizes")
-    fig.tight_layout()
+    ax.set_title("Fixed post hoc panel effect sizes", loc="left", fontweight="bold")
 
     for stem in ("panel_effect_sizes",):
         fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
@@ -719,7 +920,9 @@ def make_clinical_null_figure() -> None:
     if candidates.empty or correlations.empty:
         return
 
-    fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.6), constrained_layout=True)
+    fig, axes = plt.subplots(
+        2, 2, figsize=(MANUSCRIPT_WIDTH_IN, 5.4), constrained_layout=True
+    )
 
     # (a) candidate-region screen: every region is classified "unstable".
     ax = axes[0, 0]
@@ -740,11 +943,8 @@ def make_clinical_null_figure() -> None:
         )
     ax.set_xlabel(r"Raman shift (cm$^{-1}$)")
     ax.set_ylabel(r"Max $|$effect$|$")
-    ax.set_title(
-        f"a  Candidate regions ({len(candidates)}, all unstable)",
-        loc="left", fontweight="bold", fontsize=8.5,
-    )
-    ax.legend(frameon=False, fontsize=7)
+    ax.set_title("a  Candidate regions", loc="left", fontweight="bold", fontsize=9)
+    ax.legend(frameon=False, fontsize=7.5)
     ax.spines[["top", "right"]].set_visible(False)
 
     # (b) channel-wise correlation surface, fingerprint block only.
@@ -776,12 +976,12 @@ def make_clinical_null_figure() -> None:
     }
     ax.set_yticks(np.arange(len(surface)) + 0.5)
     ax.set_yticklabels(
-        [endpoint_display.get(name, name) for name in surface.index], fontsize=6.5
+        [endpoint_display.get(name, name) for name in surface.index], fontsize=7.5
     )
     ax.set_xlabel(r"Raman shift (cm$^{-1}$)")
     ax.set_title(
         "b  Channel-wise $\\rho$ (uncorrected)",
-        loc="left", fontweight="bold", fontsize=8.5,
+        loc="left", fontweight="bold", fontsize=9,
     )
     fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02, label=r"Spearman $\rho$")
 
@@ -813,13 +1013,16 @@ def make_clinical_null_figure() -> None:
     ax.axhline(0, color=NEUTRAL, linestyle="--", linewidth=0.9)
     ax.set_xticks(range(len(endpoints)))
     ax.set_xticklabels(
-        [MOCA_ENDPOINT_LABELS[endpoint] for endpoint in endpoints], fontsize=7.5
+        [MOCA_ENDPOINT_LABELS[endpoint] for endpoint in endpoints],
+        fontsize=8,
+        rotation=18,
+        ha="right",
     )
     ax.set_ylabel("Cross-validated $R^2$")
     ax.set_title(
-        "c  MoCA prediction vs. null", loc="left", fontweight="bold", fontsize=8.5
+        "c  MoCA prediction vs. null", loc="left", fontweight="bold", fontsize=9
     )
-    ax.legend(frameon=False, fontsize=7, loc="lower left")
+    ax.legend(frameon=False, fontsize=7.5, loc="lower left")
     ax.spines[["top", "right"]].set_visible(False)
 
     # (d) unsupervised descriptor distribution, fingerprint block.
@@ -831,7 +1034,7 @@ def make_clinical_null_figure() -> None:
     ax.set_xlabel("Spectral entropy (fingerprint)")
     ax.set_ylabel("Participants")
     ax.set_title(
-        "d  Unsupervised descriptor", loc="left", fontweight="bold", fontsize=8.5
+        "d  Unsupervised descriptor", loc="left", fontweight="bold", fontsize=9
     )
     ax.spines[["top", "right"]].set_visible(False)
 
@@ -1073,7 +1276,7 @@ def make_cvd_classifier_figure() -> None:
     comparison = comparison[comparison["representation"] == "whole"].set_index("model")
 
     fig, (ax_roc, ax_null) = plt.subplots(
-        1, 2, figsize=(7.2, 3.15), constrained_layout=True
+        1, 2, figsize=(MANUSCRIPT_WIDTH_IN, 3.0), constrained_layout=True
     )
 
     mean_fpr = np.linspace(0, 1, 200)
@@ -1100,10 +1303,7 @@ def make_cvd_classifier_figure() -> None:
             mean_tpr,
             color=color,
             linewidth=1.4,
-            label=(
-                f"{CVD_MODEL_LABELS[model]}\nAUC {auc_mean:.3f} "
-                f"({auc_low:.3f}–{auc_high:.3f})"
-            ),
+            label=CVD_MODEL_LABELS[model],
         )
         if model == "pls_da":
             se_tpr = tprs.std(axis=0, ddof=1) / np.sqrt(tprs.shape[0])
@@ -1122,13 +1322,9 @@ def make_cvd_classifier_figure() -> None:
     ax_roc.set_ylabel("True positive rate")
     ax_roc.set_xlim(-0.02, 1.02)
     ax_roc.set_ylim(-0.02, 1.02)
-    ax_roc.set_title(
-        "Whole-spectrum classifiers (repeated nested CV)", loc="left",
-        fontweight="bold", fontsize=8.5,
-    )
     ax_roc.spines[["top", "right"]].set_visible(False)
     ax_roc.tick_params(direction="out", length=3)
-    ax_roc.legend(frameon=False, loc="lower right", fontsize=6.3, labelspacing=0.6)
+    ax_roc.legend(frameon=False, loc="lower right", fontsize=7.5, labelspacing=0.4)
 
     null = pd.read_csv(ML_PERMUTATION_NULL)
     primary_null = null[
@@ -1147,13 +1343,9 @@ def make_cvd_classifier_figure() -> None:
     )
     ax_null.set_xlabel("Balanced accuracy\n(sex-stratified permuted labels)")
     ax_null.set_ylabel("Permutation draws")
-    ax_null.set_title(
-        f"PLS-DA null distribution ($n={primary_null.size}$, $p={p_value:.3f}$)",
-        loc="left", fontweight="bold", fontsize=8.5,
-    )
     ax_null.spines[["top", "right"]].set_visible(False)
     ax_null.tick_params(direction="out", length=3)
-    ax_null.legend(frameon=False, loc="upper left", fontsize=7)
+    ax_null.legend(frameon=False, loc="upper left", fontsize=7.5)
 
     for stem in ("ml_classification_performance",):
         fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
@@ -1223,12 +1415,13 @@ def make_moca_prediction_figure() -> None:
 def main() -> None:
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
     FIGURE_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    configure_style()
+    set_manuscript_theme()
     rng = np.random.default_rng(SEED)
     make_subject_spectra_figure(rng)
+    make_global_spectra_figure()
     make_band_effect_figure(rng)
-    make_biopca_loading_regions_figure()
     make_biopca_scree_figure()
+    make_biopca_loading_figure()
     make_clinical_correlation_heatmap_figure()
     make_candidate_region_overview_figure()
     make_difference_spectrum_figure()

@@ -222,7 +222,10 @@ def _plot_block_panel(axes_row: tuple, sub: pd.DataFrame, block: str, contrast: 
     ax0.plot(wn, mean_b, color="#E69F00", linewidth=1.2, label=label_b)
     ax0.fill_between(wn, mean_a, mean_b, where=(mean_a > mean_b), alpha=0.2, color="#0072B2")
     ax0.fill_between(wn, mean_a, mean_b, where=(mean_a <= mean_b), alpha=0.2, color="#E69F00")
-    ax0.set_title(f"{'Fingerprint' if block == '1300' else 'CH-stretch'} — {contrast}")
+    # ``block`` round-trips from the archived CSV as int64, so comparing it
+    # against the string "1300" silently labelled both panels "CH-stretch".
+    # The contrast is already named in the figure title.
+    ax0.set_title(_BLOCK_LABELS.get(str(block), str(block)))
     ax0.legend(fontsize=7)
     ax0.set_ylabel("Norm. intensity (a.u.)")
 
@@ -235,7 +238,11 @@ def _plot_block_panel(axes_row: tuple, sub: pd.DataFrame, block: str, contrast: 
     ax1.set_ylabel("sign(Δ)×|Cohen's d|")
 
 
-def _fig3_difference_spectrum(difference_spectrum_path: Path, output_path: Path) -> bool:
+def _fig3_difference_spectrum(
+    difference_spectrum_path: Path,
+    output_path: Path,
+    figsize: tuple[float, float] | None = None,
+) -> bool:
     diff = load_csv_or_empty(difference_spectrum_path)
     if diff.empty or "wavenumber" not in diff.columns or "block" not in diff.columns:
         return False
@@ -243,7 +250,12 @@ def _fig3_difference_spectrum(difference_spectrum_path: Path, output_path: Path)
     blocks = sorted(diff["block"].unique().tolist())
     contrast = diff["contrast_name"].iloc[0] if "contrast_name" in diff.columns else "unknown"
 
-    fig, axes = plt.subplots(2, len(blocks), figsize=(5.5 * len(blocks), 5), squeeze=False)
+    fig, axes = plt.subplots(
+        2,
+        len(blocks),
+        figsize=figsize or (5.5 * len(blocks), 5),
+        squeeze=False,
+    )
     plotted_any = False
     for col_idx, block in enumerate(blocks):
         sub = diff[diff["block"] == block]
@@ -258,7 +270,7 @@ def _fig3_difference_spectrum(difference_spectrum_path: Path, output_path: Path)
         plt.close(fig)
         return False
 
-    fig.suptitle(f"Difference spectrum: {contrast}", fontsize=9)
+    fig.suptitle(f"Difference spectrum: {contrast.replace('_', ' ')}", fontsize=9)
     fig.tight_layout()
     _save_and_close(fig, output_path)
     return True

@@ -374,8 +374,15 @@ def _annotate_peaks(
     peak_cfg: dict,
     *,
     bands: Mapping[str, Iterable[float]] | None = None,
+    fontsize: float = 7.5,
+    rotation: float = 0.0,
 ) -> None:
-    """Annotate positive, curated Raman-band peaks with vertical leader lines."""
+    """Annotate positive, curated Raman-band peaks with vertical leader lines.
+
+    ``rotation`` is for narrow axes: horizontal labels of neighbouring bands
+    overlap once the axis is only a text column wide, and rotating them is the
+    only placement that stays legible without dropping bands.
+    """
     peak_idx = _peak_indices(y, peak_cfg)
     if peak_idx.size == 0 or not bands:
         return
@@ -404,14 +411,27 @@ def _annotate_peaks(
             continue
         peak_x = float(x[idx])
         peak_y = float(y[idx])
-        label_y = max(peak_y + 0.06 * y_span, y_bottom + label_levels[order % len(label_levels)] * y_span)
+        if rotation:
+            # Rotated labels occupy a narrow column, so they cannot collide with
+            # their neighbours and do not need the staggered levels that keep
+            # horizontal labels apart; parking them just above each peak avoids
+            # long leader lines crossing the trace.
+            label_y = peak_y + 0.04 * y_span
+        else:
+            label_y = max(peak_y + 0.06 * y_span, y_bottom + label_levels[order % len(label_levels)] * y_span)
         ax.annotate(
             label,
             xy=(peak_x, peak_y),
             xytext=(peak_x, min(label_y, cap)),
-            ha="center",
-            va="bottom",
-            fontsize=7.5,
+            # With rotation_mode="anchor" the alignment is applied in the
+            # text's own rotated frame, so a rotated label needs ha="left"
+            # (start of the text, which points down after a 90 deg turn) and
+            # va="center" to run upward from the peak instead of straddling it.
+            ha="left" if rotation else "center",
+            va="center" if rotation else "bottom",
+            rotation=rotation,
+            rotation_mode="anchor",
+            fontsize=fontsize,
             color="#111827",
             annotation_clip=True,
             arrowprops={"arrowstyle": "-", "color": "#111827", "linewidth": 0.65, "shrinkA": 0, "shrinkB": 2},
