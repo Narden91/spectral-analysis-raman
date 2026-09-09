@@ -199,6 +199,30 @@ BAND_LABELS = {
     "ch3_asym_stretch_2937": r"CH$_3$ asymmetric stretch (2937)",
 }
 
+BAND_SHORT_LABELS = {
+    "cytosine_786": "Cyt 786",
+    "o_p_o_821": "O–P–O 821",
+    "tyrosine_851": "Tyr 851",
+    "c_o_c_sugar_925": "C–O–C 925",
+    "beta_sheet_980": r"$\beta$-sheet 980",
+    "c_o_c_n_1060": "C–O/C–N 1060",
+    "lipid_cc_1089": "Lip C–C 1089",
+    "po2_cn_1112": r"PO$_2^-$ 1112",
+    "carotenoid_1156": "Carot 1156",
+    "amide_iii_1258": "Am III 1258",
+    "ch2_twist_1301": r"CH$_2$ tw 1301",
+    "ch2_ch3_scissor_1440": r"CH$_2$/CH$_3$ sc 1440",
+    "ch2_ch3_bend_1465": r"CH$_2$/CH$_3$ bd 1465",
+    "carotenoid_1525": "Carot 1525",
+    "tryptophan_1555": "Trp 1555",
+    "amide_i_1657": "Am I 1657",
+    "lipid_carbonyl_1721": "Lip C=O 1721",
+    "lipid_ester_1744": "Lip ester 1744",
+    "ch2_sym_stretch_2853": r"CH$_2$ sym 2853",
+    "ch2_asym_stretch_2890": r"CH$_2$ asym 2890",
+    "ch3_asym_stretch_2937": r"CH$_3$ asym 2937",
+}
+
 BAND_WINDOWS = {
     "cytosine_786": (773, 796),
     "o_p_o_821": (812, 832),
@@ -306,20 +330,26 @@ def make_subject_spectra_figure(rng: np.random.Generator) -> None:
     plt.close(fig)
 
 
-def _manuscript_plot_cfg() -> dict:
+def _manuscript_plot_cfg(max_peaks: int | None = None) -> dict:
     """Band windows and peak-detection settings from the frozen plot profile.
 
     Read from ``config/plots.yaml`` rather than restated here, so the curated
     21-window registry stays the single source for the figure, the analysis,
-    and the band table.
+    and the band table. ``max_peaks`` narrows the label set for the manuscript
+    only: rotated labels are as tall as they are long, so every extra one costs
+    vertical space that the printed figure does not have. The full 21-window
+    panel is Figure 3 and Table 3; this figure only orients the reader.
     """
     profile = load_config("config/plots.yaml")
+    peak_detection = dict(profile["plotting"]["peak_detection"])
+    if max_peaks is not None:
+        peak_detection["max_peaks"] = max_peaks
     return {
         "bands": {
             name: tuple(bounds)
             for name, bounds in profile["whole_spectra"]["bands"].items()
         },
-        "peak_detection": profile["plotting"]["peak_detection"],
+        "peak_detection": peak_detection,
         "raman_band_style": profile["plotting"]["raman_band_style"],
     }
 
@@ -346,38 +376,71 @@ def _shared_display_scale(traces: list[np.ndarray]) -> list[np.ndarray]:
     return [(np.asarray(trace, dtype=float) - mean) / sd for trace in traces]
 
 
-def make_global_spectra_figure() -> None:
-    """Participant-level group-mean spectra, one panel per spectral block.
+# Figure 1 is assembled in LaTeX from one PDF per spectral block. The blocks
+# carry different normalizations and must not be read across, so they are never
+# drawn on a shared axis; keeping them as separate files also lets each be
+# placed at the exact width its \includegraphics requests, at scale 1.0.
+GLOBAL_PANEL_HEIGHT_IN = 2.1
+GLOBAL_MAX_PEAK_LABELS = 6
+GLOBAL_PEAK_LABEL_PT = 6.8
+GLOBAL_BLOCKS = (
+    ("1300__", "global_fingerprint"),
+    ("2850__", "global_ch_stretch"),
+)
 
-    Replaces the manually copied wide-format plot from ``Output_plot``. The
-    blocks are stacked rather than concatenated on a shared axis so each gets
-    the full manuscript column width; the concatenation gap the pipeline plot
-    draws is meaningless anyway, because the two blocks carry different
-    normalizations and must not be read across.
+
+def _fit_annotations(fig, ax, pad_px: float = 4.0, passes: int = 4) -> None:
+    """Raise the upper y-limit until no peak label passes the top spine.
+
+    The rotated labels are laid out in display space, so the headroom they need
+    depends on the rendered text height and cannot be fixed as a data-space
+    padding. Measuring what actually overflows and growing the limit keeps the
+    labels intact whichever bands the peak finder selects.
+    """
+    for _ in range(passes):
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        axes_top = ax.get_window_extent(renderer).y1
+        overflow = max(
+            (text.get_window_extent(renderer).y1 - axes_top for text in ax.texts),
+            default=0.0,
+        )
+        if overflow <= 0.0:
+            return
+        bottom, top = ax.get_ylim()
+        height_px = ax.get_window_extent(renderer).height
+        ax.set_ylim(bottom, top + (top - bottom) * (overflow + pad_px) / height_px)
+
+
+def make_global_spectra_figures() -> None:
+    r"""Participant-level group-mean spectra, one standalone PDF per block.
 
     Per reviewer request the traces are not filled to zero and the intensity
     axis carries no tick labels: the fill is anchored at zero, so its edge
     draws a baseline that invites reading standardized values as absolute
-    intensities.
+    intensities. Peak labels are clipped to the axes so a tall band cannot push
+    its label out of the panel.
+
+    The shared legend rides on the lower (C--H) panel, which is the one placed
+    last in the assembled float. Neither panel carries a letter or a block
+    name: the assembling float supplies both through ``\subcaption``, so the
+    labels stay in the document's type and stay referenceable.
     """
     frame = pd.read_csv(SUBJECT_SPECTRA)
-    plot_cfg = _manuscript_plot_cfg()
+    plot_cfg = _manuscript_plot_cfg(max_peaks=GLOBAL_MAX_PEAK_LABELS)
     conditions = (
         ("control", CONTROL, "Control"),
         ("disease", DISEASE, "Ischemic stroke"),
     )
-    blocks = (
-        ("1300__", "A  Fingerprint"),
-        ("2850__", "B  C–H stretch"),
-    )
+    categories = list(dict.fromkeys(band.category for band in RAMAN_BANDS.values()))
 
-    fig, axes = plt.subplots(
-        2, 1, figsize=(FIGURE_WIDTH_IN, 5.0), constrained_layout=True
-    )
-    trace_handles: list = []
-    trace_labels: list[str] = []
+    for prefix, stem in GLOBAL_BLOCKS:
+        carries_legend = stem == GLOBAL_BLOCKS[-1][1]
+        height = GLOBAL_PANEL_HEIGHT_IN + (0.75 if carries_legend else 0.0)
+        fig, ax = plt.subplots(
+            figsize=(FIGURE_WIDTH_IN, height), constrained_layout=True
+        )
 
-    for ax, (prefix, title) in zip(axes, blocks, strict=True):
         columns, wavenumbers = spectral_columns(frame, prefix)
         means = [
             frame.loc[frame["condition"] == condition, columns]
@@ -391,15 +454,16 @@ def make_global_spectra_figure() -> None:
         ]
         display = _shared_display_scale(means)
 
+        trace_handles: list = []
+        trace_labels: list[str] = []
         for trace, (_, color, label), count in zip(
             display, conditions, counts, strict=True
         ):
             (line,) = ax.plot(wavenumbers, trace, color=color, linewidth=1.3)
-            if ax is axes[0]:
-                trace_handles.append(line)
-                trace_labels.append(f"{label} ($n={count}$)")
+            trace_handles.append(line)
+            trace_labels.append(f"{label} ($n={count}$)")
 
-        _set_spectrum_limits(ax, [wavenumbers], display, top_pad=0.85)
+        _set_spectrum_limits(ax, [wavenumbers], display, top_pad=0.9)
         _add_raman_band_spans(ax, wavenumbers, plot_cfg)
         _annotate_peaks(
             ax,
@@ -408,47 +472,49 @@ def make_global_spectra_figure() -> None:
             wavenumbers,
             plot_cfg["peak_detection"],
             bands=plot_cfg["bands"],
-            fontsize=8.0,
+            fontsize=GLOBAL_PEAK_LABEL_PT,
             rotation=90.0,
+            clip_text=True,
         )
-        # _add_raman_band_spans attaches a per-axes legend listing only the
-        # categories present in that block; replaced below by one figure-level
-        # legend covering both.
+        # _add_raman_band_spans attaches a per-axes legend listing only this
+        # block's categories; the assembled figure carries one legend instead.
         if ax.get_legend() is not None:
             ax.get_legend().remove()
 
-        ax.set_title(title, loc="left", fontweight="bold")
         ax.set_xlabel(r"Raman shift (cm$^{-1}$)")
-        ax.set_ylabel("Normalized intensity (a.u.)")
+        # "(a.u.)" is redundant here: the caption states the axis is
+        # standardized per block and carries no units, and the shorter
+        # string fits the panel height without overrunning the canvas.
+        ax.set_ylabel("Normalized intensity")
         ax.set_yticks([])
         ax.grid(axis="x", color="#E5E7EB", linewidth=0.6)
         ax.set_axisbelow(True)
         ax.spines[["top", "right", "left"]].set_visible(False)
         ax.tick_params(axis="x", direction="out", length=3)
 
-    categories = list(
-        dict.fromkeys(band.category for band in RAMAN_BANDS.values())
-    )
-    fig.legend(
-        trace_handles
-        + [
-            Patch(facecolor=BAND_CATEGORY_COLORS[category], alpha=0.8)
-            for category in categories
-        ],
-        trace_labels + [BAND_CATEGORY_LABELS[category] for category in categories],
-        # "outside" placement is the only one constrained_layout reserves space
-        # for; a negative bbox anchor drops the legend onto panel B's x-label.
-        loc="outside lower center",
-        ncol=3,
-        frameon=False,
-        handlelength=1.8,
-        columnspacing=1.6,
-    )
+        if carries_legend:
+            fig.legend(
+                trace_handles
+                + [
+                    Patch(facecolor=BAND_CATEGORY_COLORS[category], alpha=0.8)
+                    for category in categories
+                ],
+                trace_labels
+                + [BAND_CATEGORY_LABELS[category] for category in categories],
+                # "outside" is the only placement constrained_layout reserves
+                # space for; a negative bbox anchor lands on the x-label.
+                loc="outside lower center",
+                ncol=3,
+                frameon=False,
+                handlelength=1.8,
+                columnspacing=1.6,
+            )
 
-    for stem in ("global",):
-        fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
-        fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
-    plt.close(fig)
+        # Runs last: constrained_layout shrinks the axes when the legend is
+        # added, so fitting before that would leave the labels overflowing
+        # again.
+        _fit_annotations(fig, ax)
+        _save_exact(fig, stem)
 
 
 def bootstrap_rank_biserial(
@@ -576,7 +642,7 @@ def make_band_effect_figure_landscape(result: pd.DataFrame) -> None:
     effects = result["rank_biserial"].to_numpy()
     colors = np.where(effects >= 0, DISEASE, CONTROL)
     fig, ax = plt.subplots(
-        figsize=(MANUSCRIPT_WIDTH_IN, 5.4), constrained_layout=True
+        figsize=(MANUSCRIPT_WIDTH_IN, 3.3), constrained_layout=True
     )
     for index, row in result.iterrows():
         effect = float(row["rank_biserial"])
@@ -597,13 +663,20 @@ def make_band_effect_figure_landscape(result: pd.DataFrame) -> None:
             capsize=2.0,
         )
     ax.axhline(0, color=NEUTRAL, linestyle="--", linewidth=0.9)
-    ax.set_xticks(x, result["label"], rotation=55, ha="right")
+    # Full assignments live in Table 3; rotated ticks are as tall as they
+    # are long, so abbreviating them is what buys the height reduction.
+    ax.set_xticks(
+        x,
+        [BAND_SHORT_LABELS[band] for band in result["band"]],
+        rotation=45,
+        ha="right",
+        fontsize=7,
+    )
     ax.set_xlim(-0.7, result.shape[0] - 0.3)
     ax.set_ylim(-0.7, 0.7)
-    ax.set_ylabel(
-        "Rank-biserial correlation\n"
-        r"$\leftarrow$ lower in stroke     higher in stroke $\rightarrow$"
-    )
+    # The two-line arrow label is taller than this shorter panel allows;
+    # the direction is given in the caption instead.
+    ax.set_ylabel("Rank-biserial correlation")
     ax.spines[["top", "right", "bottom"]].set_visible(False)
     ax.tick_params(axis="x", length=0)
     ax.grid(axis="y", color="#D9D9D9", linewidth=0.6)
@@ -686,7 +759,6 @@ def make_biopca_scree_figure() -> None:
     ax.set_ylim(0, 108)
     ax.set_xlabel("Component")
     ax.set_ylabel("Explained variance (%)")
-    ax.set_title("A", loc="left", fontweight="bold")
     ax.spines[["top", "right"]].set_visible(False)
     ax.grid(axis="y", color="#D9D9D9", linewidth=0.6)
     ax.set_axisbelow(True)
@@ -745,7 +817,6 @@ def make_biopca_loading_figure() -> None:
     ax.set_ylim(-0.7, regions.shape[0] - 0.3)
     ax.set_xlim(0, None)
     ax.set_xlabel("Relative contribution")
-    ax.set_title("B", loc="left", fontweight="bold")
     ax.spines[["top", "right", "left"]].set_visible(False)
     ax.grid(axis="x", color="#D9D9D9", linewidth=0.6)
     ax.set_axisbelow(True)
@@ -901,16 +972,56 @@ def make_moca_landscape_figure() -> None:
     )
 
 
-def make_clinical_null_figure() -> None:
-    """Combine the four within-stroke null results into one figure.
+# Figure 5 is assembled in LaTeX from one PDF per panel, at 0.48 + 0.02 +
+# 0.48 of the text block per row. No panel carries a letter: the float
+# supplies them through \subcaption, so they match the document font and
+# stay referenceable.
+CLINICAL_PANEL_FRACTION = 0.48
+CLINICAL_PANEL_HEIGHT_IN = 2.0
 
-    Panels a--d redraw, at reduced size, the candidate-region screen, the
-    channel-wise correlation surface, the PLS-regression permutation
-    comparison, and the unsupervised NMF/entropy check.  They are merged
-    because each panel supports the same negative conclusion; showing them as
-    four separate figures gave a null result more visual weight than the
-    positive case--control result.  Every value is read from the same archived
-    table used by the corresponding standalone figure.
+CLINICAL_ENDPOINT_LABELS = {
+    "moca_baseline": "MoCA base",
+    "moca_3m": "MoCA 3-mo",
+    "delta_moca": r"$\Delta$MoCA",
+    "rbans_total": "RBANS",
+    "aspects_score": "ASPECTS",
+    "age": "Age",
+}
+
+
+def _clinical_panel_axes():
+    """One axes sized for a quarter of the assembled Figure 5 float."""
+    return plt.subplots(
+        figsize=(
+            panel_width_in(CLINICAL_PANEL_FRACTION),
+            CLINICAL_PANEL_HEIGHT_IN,
+        ),
+        constrained_layout=True,
+    )
+
+
+def _clear_band_for_legend(ax, side: str, fraction: float) -> None:
+    """Extend one y-limit so a legend has empty axes space to sit in.
+
+    A legend placed over a scatter or a violin hides data, and a transparent
+    one reads as if the markers belong to the plot; growing the axis first
+    keeps it opaque and clear of everything drawn.
+    """
+    bottom, top = ax.get_ylim()
+    span = top - bottom
+    if side == "top":
+        ax.set_ylim(bottom, top + fraction * span)
+    else:
+        ax.set_ylim(bottom - fraction * span, top)
+
+
+def make_clinical_null_figures() -> None:
+    """The four within-stroke null panels, one standalone PDF each.
+
+    Each panel supports the same negative conclusion, which is why they are
+    assembled into a single float rather than published separately; every value
+    is read from the same archived table used by the corresponding standalone
+    analysis output, and nothing is recomputed here.
     """
     candidates = load_csv_or_empty(INTEGRATED_CANDIDATE_REGIONS)
     correlations = load_csv_or_empty(CLINICAL_CORRELATION_MATRIX)
@@ -920,12 +1031,8 @@ def make_clinical_null_figure() -> None:
     if candidates.empty or correlations.empty:
         return
 
-    fig, axes = plt.subplots(
-        2, 2, figsize=(MANUSCRIPT_WIDTH_IN, 5.4), constrained_layout=True
-    )
-
-    # (a) candidate-region screen: every region is classified "unstable".
-    ax = axes[0, 0]
+    # Candidate-region screen: every region is classified "unstable".
+    fig, ax = _clinical_panel_axes()
     candidates = candidates.assign(
         report_class=candidates.apply(_classify_candidate, axis=1)
     )
@@ -934,7 +1041,7 @@ def make_clinical_null_figure() -> None:
         ax.scatter(
             block_df["start_cm-1"].to_numpy(dtype=float),
             block_df["max_abs_effect"].to_numpy(dtype=float),
-            s=14,
+            s=12,
             marker=marker,
             color="#F4A261",
             edgecolors="white",
@@ -943,16 +1050,23 @@ def make_clinical_null_figure() -> None:
         )
     ax.set_xlabel(r"Raman shift (cm$^{-1}$)")
     ax.set_ylabel(r"Max $|$effect$|$")
-    ax.set_title("a  Candidate regions", loc="left", fontweight="bold", fontsize=9)
-    ax.legend(frameon=False, fontsize=7.5)
     ax.spines[["top", "right"]].set_visible(False)
-
-    # (b) channel-wise correlation surface, fingerprint block only.
-    ax = axes[0, 1]
-    fingerprint = correlations.loc[correlations["spectral_block"] == 1300]
-    surface = fingerprint.pivot_table(
-        index="target", columns="wavenumber", values="rho"
+    _clear_band_for_legend(ax, "top", 0.30)
+    ax.legend(
+        loc="upper left",
+        fontsize=7,
+        frameon=True,
+        framealpha=1.0,
+        edgecolor="none",
+        borderpad=0.3,
+        handletextpad=0.4,
     )
+    _save_exact(fig, "clinical_null_candidates")
+
+    # Channel-wise correlation surface, fingerprint block only.
+    fig, ax = _clinical_panel_axes()
+    fingerprint = correlations.loc[correlations["spectral_block"] == 1300]
+    surface = fingerprint.pivot_table(index="target", columns="wavenumber", values="rho")
     image = ax.imshow(
         surface.to_numpy(),
         aspect="auto",
@@ -966,27 +1080,19 @@ def make_clinical_null_figure() -> None:
             len(surface),
         ),
     )
-    endpoint_display = {
-        "moca_baseline": "Baseline MoCA",
-        "moca_3m": "3-month MoCA",
-        "delta_moca": r"$\Delta$MoCA",
-        "rbans_total": "RBANS",
-        "aspects_score": "ASPECTS",
-        "age": "Age",
-    }
     ax.set_yticks(np.arange(len(surface)) + 0.5)
     ax.set_yticklabels(
-        [endpoint_display.get(name, name) for name in surface.index], fontsize=7.5
+        [CLINICAL_ENDPOINT_LABELS.get(name, name) for name in surface.index],
+        fontsize=7,
     )
     ax.set_xlabel(r"Raman shift (cm$^{-1}$)")
-    ax.set_title(
-        "b  Channel-wise $\\rho$ (uncorrected)",
-        loc="left", fontweight="bold", fontsize=9,
+    fig.colorbar(
+        image, ax=ax, fraction=0.046, pad=0.02, label=r"Spearman $\rho$"
     )
-    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02, label=r"Spearman $\rho$")
+    _save_exact(fig, "clinical_null_channelwise")
 
-    # (c) observed CV R^2 against each endpoint's own permutation null.
-    ax = axes[1, 0]
+    # Observed CV R^2 against each endpoint's own permutation null.
+    fig, ax = _clinical_panel_axes()
     rng = np.random.default_rng(SEED)
     endpoints = list(MOCA_ENDPOINT_LABELS)
     for position, endpoint in enumerate(endpoints):
@@ -995,9 +1101,7 @@ def make_clinical_null_figure() -> None:
             permutation.loc[endpoint, "null_distribution_std"],
             size=2000,
         )
-        violin = ax.violinplot(
-            draws, positions=[position], widths=0.7, showextrema=False
-        )
+        violin = ax.violinplot(draws, positions=[position], widths=0.7, showextrema=False)
         for body in violin["bodies"]:
             body.set_facecolor("#B0B0B0")
             body.set_alpha(0.55)
@@ -1006,42 +1110,37 @@ def make_clinical_null_figure() -> None:
             [position],
             [performance.loc[endpoint, "r2"]],
             color=DISEASE,
-            s=32,
+            s=26,
             zorder=5,
             label="Observed" if position == 0 else None,
         )
     ax.axhline(0, color=NEUTRAL, linestyle="--", linewidth=0.9)
     ax.set_xticks(range(len(endpoints)))
     ax.set_xticklabels(
-        [MOCA_ENDPOINT_LABELS[endpoint] for endpoint in endpoints],
-        fontsize=8,
-        rotation=18,
-        ha="right",
+        [CLINICAL_ENDPOINT_LABELS[endpoint] for endpoint in endpoints], fontsize=7
     )
     ax.set_ylabel("Cross-validated $R^2$")
-    ax.set_title(
-        "c  MoCA prediction vs. null", loc="left", fontweight="bold", fontsize=9
-    )
-    ax.legend(frameon=False, fontsize=7.5, loc="lower left")
     ax.spines[["top", "right"]].set_visible(False)
+    _clear_band_for_legend(ax, "bottom", 0.24)
+    ax.legend(
+        loc="lower left",
+        fontsize=7,
+        frameon=True,
+        framealpha=1.0,
+        edgecolor="none",
+        borderpad=0.3,
+        handletextpad=0.4,
+    )
+    _save_exact(fig, "clinical_null_moca")
 
-    # (d) unsupervised descriptor distribution, fingerprint block.
-    ax = axes[1, 1]
-    values = entropy.loc[
-        entropy["spectral_block"] == 1300, "spectral_entropy"
-    ].dropna()
+    # Unsupervised descriptor distribution, fingerprint block.
+    fig, ax = _clinical_panel_axes()
+    values = entropy.loc[entropy["spectral_block"] == 1300, "spectral_entropy"].dropna()
     ax.hist(values, bins=22, color="#4D4D4D", alpha=0.75, edgecolor="white")
     ax.set_xlabel("Spectral entropy (fingerprint)")
     ax.set_ylabel("Participants")
-    ax.set_title(
-        "d  Unsupervised descriptor", loc="left", fontweight="bold", fontsize=9
-    )
     ax.spines[["top", "right"]].set_visible(False)
-
-    for stem in ("clinical_null_overview",):
-        fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
-        fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
-    plt.close(fig)
+    _save_exact(fig, "clinical_null_entropy")
 
 
 def make_graphical_abstract() -> None:
@@ -1418,7 +1517,7 @@ def main() -> None:
     set_manuscript_theme()
     rng = np.random.default_rng(SEED)
     make_subject_spectra_figure(rng)
-    make_global_spectra_figure()
+    make_global_spectra_figures()
     make_band_effect_figure(rng)
     make_biopca_scree_figure()
     make_biopca_loading_figure()
@@ -1430,7 +1529,7 @@ def main() -> None:
     make_moca_landscape_figure()
     make_cvd_classifier_figure()
     make_moca_prediction_figure()
-    make_clinical_null_figure()
+    make_clinical_null_figures()
     make_graphical_abstract()
 
 

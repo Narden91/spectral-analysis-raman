@@ -6,6 +6,12 @@
 % compounds) that otherwise overhang the 390pt text block.
 \emergencystretch=2em
 
+% Panel labels are typeset by LaTeX rather than baked into the figure files,
+% so they match the document font and stay referenceable.
+\renewcommand\thesubfigure{\Alph{subfigure}}
+\captionsetup[subfigure]{labelformat=simple, labelsep=space, labelfont=bf,
+                         justification=centering, skip=2pt}
+
 \journal{Spectrochimica Acta Part A: Molecular and Biomolecular Spectroscopy}
 
 \begin{document}
@@ -215,8 +221,20 @@ Following preprocessing and spectral aggregation, participant-level Raman profil
 
 \begin{figure}[htbp] 
 \centering 
-\includegraphics[width=0.8\textwidth]{figures/global.pdf}
-\caption{Participant-level mean Raman profiles of circulating EV-enriched fractions (control, $n=50$; ischemic stroke, $n=97$). \textbf{A}, fingerprint block; \textbf{B}, C--H stretching block. Each line is the group mean of one median spectrum per participant, following the two-stage aggregation described in \cref{subsec:preprocessing} rather than an average over all measured spectra. Shaded vertical bands mark the curated Raman windows of \cref{tab:raman_bands}, colored by biochemical category; annotated maxima are peak-detection labels rather than fitted band positions. The two blocks were normalized by different procedures, so each is standardized separately for display and the intensity axis is left unlabelled: values are relative within a block and cannot be compared between blocks.}
+\begin{subfigure}{0.8\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/global_fingerprint.pdf}
+\subcaption{Fingerprint block}
+\label{fig:spectra_fingerprint}
+\end{subfigure}
+
+\begin{subfigure}{0.8\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/global_ch_stretch.pdf}
+\subcaption{C--H stretching block}
+\label{fig:spectra_ch}
+\end{subfigure}
+\caption{Participant-level mean Raman profiles of circulating EV-enriched fractions (control, $n=50$; ischemic stroke, $n=97$). Each line is the group mean of one median spectrum per participant, following the two-stage aggregation described in \cref{subsec:preprocessing} rather than an average over all measured spectra. Shaded vertical bands mark the curated Raman windows of \cref{tab:raman_bands}, colored by biochemical category; annotated maxima are peak-detection labels rather than fitted band positions. The two blocks were normalized by different procedures, so each is standardized separately for display and the intensity axis is left unlabelled: values are relative within a block and cannot be compared between blocks.}
 \label{fig:subject_spectra} 
 \end{figure}
 
@@ -233,25 +251,29 @@ Peak positions were largely unchanged between cohorts, whereas relative band int
 \subsection{Principal sources of spectral variation}
 \label{subsec:biopca_results}
 
-To identify the spectral regions that contribute most strongly to inter-participant variability, PCA was applied to participant-level spectra. PCA revealed that a small number of components captured most participant-level spectral variation. In the fingerprint region, PC1 and PC2 accounted for 75.8\% and 11.1\% of the variance, respectively, whereas in the C--H region, the corresponding values were 67.1\% and 29.6\%. Following MFA block weighting, the first two joint components accounted for 62.5\% and 25.4\% of the variance (\cref{fig:biopca}A).
+To identify the spectral regions that contribute most strongly to inter-participant variability, PCA was applied to participant-level spectra. PCA revealed that a small number of components captured most participant-level spectral variation. In the fingerprint region, PC1 and PC2 accounted for 75.8\% and 11.1\% of the variance, respectively, whereas in the C--H region, the corresponding values were 67.1\% and 29.6\%. Following MFA block weighting, the first two joint components accounted for 62.5\% and 25.4\% of the variance (\cref{fig:biopca_scree}).
 
 PCA of the stroke cohort alone produced a similar loading structure, with PC1 accounting for 63.5\% of variance in the fingerprint region, 75.7\% in the C--H region, and 54.1\% after MFA fusion. This consistency suggests that the dominant spectral variance observed in the full cohort is largely preserved within the stroke subgroup.
 
-The highest-loading regions corresponded primarily to broad CH$_2$/CH$_3$ deformation and stretching bands and to a carbonyl-associated region (\cref{fig:biopca}B), indicating that lipid-associated spectral variation was a dominant source of inter-participant variability.
+The highest-loading regions corresponded primarily to broad CH$_2$/CH$_3$ deformation and stretching bands and to a carbonyl-associated region (\cref{fig:biopca_loadings}), indicating that lipid-associated spectral variation was a dominant source of inter-participant variability.
 
 
 \begin{figure}[htbp] 
 \centering 
-\begin{minipage}[t]{0.42\textwidth}%
+\begin{subfigure}[t]{0.42\textwidth}
 \centering
-\includegraphics[width=\linewidth]{figures/biopca_scree.pdf}%
-\end{minipage}%
+\includegraphics[width=\linewidth]{figures/biopca_scree.pdf}
+\subcaption{Explained variance}
+\label{fig:biopca_scree}
+\end{subfigure}%
 \hspace{0.02\textwidth}%
-\begin{minipage}[t]{0.46\textwidth}%
+\begin{subfigure}[t]{0.46\textwidth}
 \centering
-\includegraphics[width=\linewidth]{figures/biopca_loading_regions.pdf}%
-\end{minipage}
-\caption{Whole-spectrum, MFA-weighted participant-level joint PCA ($n=147$). \textbf{A}, explained normalized spectral variance per component, with the cumulative total. \textbf{B}, high-magnitude loading intervals for the first three components: one bar per interval, giving its relative absolute integrated loading, colored by the component it belongs to and ordered by contribution. FP, fingerprint block (734--1788~\si{\per\centi\metre}); CH, C--H stretch block (2451--3197~\si{\per\centi\metre}). Labels are interval boundaries in \si{\per\centi\metre}.}
+\includegraphics[width=\linewidth]{figures/biopca_loading_regions.pdf}
+\subcaption{Loading-derived intervals}
+\label{fig:biopca_loadings}
+\end{subfigure}
+\caption{Whole-spectrum, MFA-weighted participant-level joint PCA ($n=147$). \subref{fig:biopca_scree} gives the explained normalized spectral variance per component with the cumulative total; \subref{fig:biopca_loadings} gives the high-magnitude loading intervals for the first three components, one bar per interval, giving its relative absolute integrated loading, colored by the component it belongs to and ordered by contribution. FP, fingerprint block (734--1788~\si{\per\centi\metre}); CH, C--H stretch block (2451--3197~\si{\per\centi\metre}). Labels are interval boundaries in \si{\per\centi\metre}.}
 \label{fig:biopca} 
 \end{figure}
 
@@ -268,9 +290,9 @@ The observed pattern was not consistent with a uniform increase or decrease in l
 Stroke-control separation therefore reflects compositional differences spread over multiple overlapping Raman domains rather than a change in a single molecular component. Because the 21 spectral features were derived from broad, chemically overlapping bands and shoulders observed directly in the participant-level spectra, they represent correlated aspects of the same underlying spectral structure rather than independent biological markers.
 
 
-\begin{figure}[ht]
-\centering \includegraphics[width=0.8\textwidth]{figures/case_control_band_effects_landscape.pdf}
-\caption{Differences between stroke and control cohorts across the 21 Raman bands and shoulder features identified in the participant-level spectra. Points represent rank-biserial effect sizes, and bars indicate participant-level 95\% confidence intervals. Positive values indicate higher relative intensities in the stroke cohort. Band assignments are tentative.}
+\begin{figure}[htbp]
+\centering \includegraphics[width=\textwidth]{figures/case_control_band_effects_landscape.pdf}
+\caption{Differences between stroke and control cohorts across the 21 Raman bands and shoulder features identified in the participant-level spectra. Points represent rank-biserial effect sizes, and bars indicate participant-level 95\% confidence intervals. Positive values indicate higher relative intensities in the stroke cohort, negative values lower. Axis labels abbreviate the assignments and peak positions of \cref{tab:raman_bands}; band assignments are tentative.}
 \label{fig:band_effects}
 \end{figure}
 
@@ -283,9 +305,9 @@ Whole-spectrum and window-based classifiers showed broadly similar performance i
 Permutation testing indicated that the observed discrimination exceeded that expected by chance (Table~S2; \cref{fig:cvd_classifier_performance}). Whole-spectrum and 21-window models produced comparable results, suggesting that the information supporting case-control separation is distributed across the broader spectral profile rather than confined to a small number of isolated Raman bands.
 
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
-\includegraphics[width=0.8\textwidth]{figures/ml_classification_performance.pdf}
+\includegraphics[width=\textwidth]{figures/ml_classification_performance.pdf}
 \caption{Case-control classification evidence for the whole-spectrum representation ($n=147$). Left: repeat-averaged ROC curves. Right: sex-stratified permutation null for the primary PLS-DA model, with the observed statistic marked.}
 \label{fig:cvd_classifier_performance}
 \end{figure}
@@ -301,20 +323,48 @@ Sex distribution differed substantially between cohorts and therefore represente
 
 To determine whether the observed Raman signatures carried clinically relevant information, we investigated associations between participant-level spectra and measures of cognitive performance, stroke severity, and age. Across the fingerprint and C--H stretching regions, no spectral feature showed a statistically significant association with any clinical endpoint after correction for multiple comparisons. No spectral region was supported simultaneously by the channel-wise and cluster-based analyses.
 
-Visual inspection of the channel-wise correlation maps revealed diffuse, low-magnitude associations distributed across the spectrum rather than coherent endpoint-specific Raman signatures (\cref{fig:clinical_null}a,b). Although age showed the most structured spectral pattern, it also failed to survive multiplicity correction. Raman spectroscopy thus detected biochemical differences between the stroke and control cohorts but identified no spectral feature robustly associated with a clinical outcome measure within the stroke cohort.
+Visual inspection of the channel-wise correlation maps revealed diffuse, low-magnitude associations distributed across the spectrum rather than coherent endpoint-specific Raman signatures (\cref{fig:clinical_candidates,fig:clinical_channelwise}). Although age showed the most structured spectral pattern, it also failed to survive multiplicity correction. Raman spectroscopy thus detected biochemical differences between the stroke and control cohorts but identified no spectral feature robustly associated with a clinical outcome measure within the stroke cohort.
 
 
-\begin{figure}[ht]
+\begin{figure}[htbp]
 \centering
-\includegraphics[width=\textwidth]{figures/clinical_null_overview.pdf}
-\caption{Convergent null evidence for within-stroke clinical association and prediction. (a) Maximum absolute uncorrected effect size per candidate region. (b) Uncorrected channel-wise Spearman $\rho$, fingerprint block. (c) Observed cross-validated $R^2$ against each endpoint's permutation null. (d) Per-participant spectral-entropy distribution.}
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/clinical_null_candidates.pdf}
+\subcaption{Candidate regions}
+\label{fig:clinical_candidates}
+\end{subfigure}%
+\hspace{0.02\textwidth}%
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/clinical_null_channelwise.pdf}
+\subcaption{Channel-wise correlation}
+\label{fig:clinical_channelwise}
+\end{subfigure}
+
+\vspace{0.8em}
+
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/clinical_null_moca.pdf}
+\subcaption{MoCA prediction versus null}
+\label{fig:clinical_moca}
+\end{subfigure}%
+\hspace{0.02\textwidth}%
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/clinical_null_entropy.pdf}
+\subcaption{Spectral entropy}
+\label{fig:clinical_entropy}
+\end{subfigure}
+\caption{Convergent null evidence for within-stroke clinical association and prediction. \subref{fig:clinical_candidates} maximum absolute uncorrected effect size per candidate region; \subref{fig:clinical_channelwise} uncorrected channel-wise Spearman $\rho$, fingerprint block; \subref{fig:clinical_moca} observed cross-validated $R^2$ against each endpoint's permutation null; \subref{fig:clinical_entropy} per-participant spectral-entropy distribution, fingerprint block.}
 \label{fig:clinical_null}
 \end{figure}
 
 
 For completeness, a descriptive comparison of participant-level spectra from participants at the mild and severe extremes of the stroke-severity distribution is presented in Section~S7.1 of the SI; however, no statistically supported severity-associated spectral pattern was identified.
 
-\Cref{fig:clinical_null}c compares the observed cross-validated $R^2$ values with their corresponding permutation null distributions. For all three MoCA endpoints, the observed values fell within the range expected under the null model, consistent with the non-significant permutation tests reported in Table~S3. The negative $R^2$ values should therefore be interpreted as a lack of predictive signal rather than evidence of an adverse or systematic modelling effect. Raman profiles of EV-enriched fractions did not support prediction of cognitive outcome in this cohort.
+\Cref{fig:clinical_moca} compares the observed cross-validated $R^2$ values with their corresponding permutation null distributions. For all three MoCA endpoints, the observed values fell within the range expected under the null model, consistent with the non-significant permutation tests reported in Table~S3. The negative $R^2$ values should therefore be interpreted as a lack of predictive signal rather than evidence of an adverse or systematic modelling effect. Raman profiles of EV-enriched fractions did not support prediction of cognitive outcome in this cohort.
 
 The absence of robust within-cohort associations contrasts with the reproducible case-control differences described above. This suggests that Raman spectroscopy is sensitive to biochemical differences between groups but, in its present form and within the limitations of the available cohort, does not provide a clinically useful prediction of cognitive outcome. Together with the case-control results, these findings indicate that the observed Raman differences primarily reflect broad biochemical variation between cohorts rather than spectral signatures directly linked to stroke severity or cognitive recovery. Further studies using larger cohorts and complementary molecular techniques may help determine whether the spectral differences identified in this work contain clinically relevant information beyond that detectable in the present dataset.
 

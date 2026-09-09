@@ -376,12 +376,18 @@ def _annotate_peaks(
     bands: Mapping[str, Iterable[float]] | None = None,
     fontsize: float = 7.5,
     rotation: float = 0.0,
+    clip_text: bool = False,
 ) -> None:
     """Annotate positive, curated Raman-band peaks with vertical leader lines.
 
     ``rotation`` is for narrow axes: horizontal labels of neighbouring bands
     overlap once the axis is only a text column wide, and rotating them is the
     only placement that stays legible without dropping bands.
+
+    ``clip_text`` confines the label and its leader to the axes rectangle.
+    ``annotation_clip`` only tests the anchor point, so a tall peak can still
+    push its label past the top spine and into a neighbouring panel; this cuts
+    it at the frame instead.
     """
     peak_idx = _peak_indices(y, peak_cfg)
     if peak_idx.size == 0 or not bands:
@@ -436,6 +442,7 @@ def _annotate_peaks(
             annotation_clip=True,
             arrowprops={"arrowstyle": "-", "color": "#111827", "linewidth": 0.65, "shrinkA": 0, "shrinkB": 2},
             zorder=4,
+            clip_on=clip_text,
         )
         annotated_bands.add(band_name)
     setattr(ax, "_raman_annotated_bands", annotated_bands)
