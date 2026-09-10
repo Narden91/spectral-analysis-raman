@@ -34,7 +34,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from src.visualization.theme import FIGURE_WIDTH_IN, set_manuscript_theme
+from src.visualization.theme import panel_width_in, set_manuscript_theme
 
 SUBJECT_SPECTRA = (
     ROOT
@@ -52,6 +52,20 @@ COMPONENT_GRID = (1, 2, 3, 4, 5)
 CONTROL = "#0072B2"
 DISEASE = "#D55E00"
 NEUTRAL = "#4D4D4D"
+
+
+# The SI float assembles the two panels side by side at 0.48 of the text block,
+# so each is authored at the width its \includegraphics requests.
+PANEL_FRACTION = 0.48
+PANEL_HEIGHT_IN = 2.5
+
+
+def _panel_axes():
+    """One axes sized for half of the assembled confound-geometry float."""
+    return plt.subplots(
+        figsize=(panel_width_in(PANEL_FRACTION), PANEL_HEIGHT_IN),
+        constrained_layout=True,
+    )
 
 
 def spectral_matrix(frame: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
@@ -157,11 +171,10 @@ def main() -> None:
         FIGURE_DATA_DIR / "sex_disease_confound_geometry.csv", index=False
     )
 
-    fig, axes = plt.subplots(
-        1, 2, figsize=(FIGURE_WIDTH_IN, 3.1), constrained_layout=True
-    )
-
-    ax = axes[0]
+    # One standalone PDF per panel: the SI float assembles them with
+    # \subcaption, so the panel letters are typeset by LaTeX rather than
+    # baked into the figure, and stay referenceable.
+    fig_auc, ax = _panel_axes()
     labels = ["Disease\n(whole spectrum)", "Sex\n(whole spectrum)"]
     values = [auc_disease, auc_sex]
     colors = [DISEASE, CONTROL]
@@ -169,29 +182,29 @@ def main() -> None:
     ax.axhline(0.5, color=NEUTRAL, linestyle="--", linewidth=0.9)
     ax.set_ylim(0.4, 1.0)
     ax.set_ylabel("Out-of-fold ROC-AUC")
-    ax.set_title("A", loc="left", fontweight="bold")
     ax.spines[["top", "right"]].set_visible(False)
     for index, value in enumerate(values):
         ax.annotate(f"{value:.3f}", (index, value), textcoords="offset points",
                     xytext=(0, 4), ha="center", fontsize=8)
 
-    ax = axes[1]
+    fig_projection, ax = _panel_axes()
     ax.scatter(sex_projection[y_disease == 0], disease_projection[y_disease == 0],
                s=16, color=CONTROL, alpha=0.75, label="Control")
     ax.scatter(sex_projection[y_disease == 1], disease_projection[y_disease == 1],
                s=16, color=DISEASE, alpha=0.75, label="Ischemic stroke")
     ax.set_xlabel("Sex-discriminant projection")
     ax.set_ylabel("Disease-discriminant projection")
-    ax.set_title(
-        f"B  cosine = {cosine_similarity:.2f}", loc="left", fontweight="bold"
-    )
+    ax.set_title(f"cosine = {cosine_similarity:.2f}", loc="left")
     ax.spines[["top", "right"]].set_visible(False)
     ax.legend(frameon=False, loc="best", fontsize=7.5)
 
-    for stem in ("sex_disease_confound_geometry",):
+    for fig, stem in (
+        (fig_auc, "sex_disease_confound_auc"),
+        (fig_projection, "sex_disease_confound_projections"),
+    ):
         fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
         fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
-    plt.close(fig)
+        plt.close(fig)
 
     print(summary.to_string(index=False))
 

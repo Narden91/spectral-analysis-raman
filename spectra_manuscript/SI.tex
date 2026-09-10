@@ -6,6 +6,13 @@
 % compounds) that otherwise overhang the 390pt text block.
 \emergencystretch=2em
 
+% Panel labels are typeset by LaTeX rather than baked into the figure files,
+% so they match the document font and stay referenceable. Kept identical to
+% the main text so both documents label panels the same way.
+\renewcommand\thesubfigure{\Alph{subfigure}}
+\captionsetup[subfigure]{labelformat=simple, labelsep=space, labelfont=bf,
+                         justification=centering, skip=2pt}
+
 \journal{Spectrochimica Acta Part A: Molecular and Biomolecular Spectroscopy}
 
 \begin{document}
@@ -128,11 +135,23 @@ The female-only PLS-DA analysis (45 stroke, 40 control) achieved a balanced accu
 A complementary diagnostic directly assesses the spectral space to determine whether the direction separating stroke from control aligns with the direction separating male from female participants. \Cref{fig:confound_geometry} compares a whole-spectrum PLS discriminant fitted to sex with the primary disease discriminant, using the same 147 participants and a single 5-fold cross-validation split. This method serves as a single-split geometric diagnostic, which is reported in addition to, but not as a replacement for, the primary confound checks. The sex discriminant alone achieved an out-of-fold ROC-AUC of 0.569, which is lower than the disease discriminant's 0.700 on the same split. The cosine similarity between the two standardized discriminant directions was 0.40, indicating correlation without collinearity. After removing the component of the disease projection that was linearly explained by the sex direction, the disease-discriminant ROC-AUC decreased to 0.688, a reduction of 0.012 from 0.700. These results suggest that the whole-spectrum disease signal is not simply a re-encoding of sex. However, the observed partial overlap is consistent with, but does not exclude, some shared variance between the two. This diagnostic does not fully resolve the confounding issue, as it cannot distinguish a biologically shared axis from a residual imbalance in unmeasured covariates correlated with both sex and disease status. Nonetheless, it refines the sex-collapse concern identified in the female-only refit, shifting it from a qualitative observation to a quantified upper bound on shared spectral direction.
 
 
-\begin{figure}[htbp] 
-\centering 
-\includegraphics[width=0.8\textwidth]{figures/sex_disease_confound_geometry.pdf}
-\caption{Geometric relationship between the disease- and sex-discriminant directions in the whole-spectrum PLS latent space ($n=147$; single 5-fold split). \textbf{A}, out-of-fold ROC-AUC for the disease and sex discriminants. \textbf{B}, per-participant projections onto the two discriminant directions.}
-\label{fig:confound_geometry} 
+\begin{figure}[htbp]
+\centering
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/sex_disease_confound_auc.pdf}
+\subcaption{Discriminant ROC-AUC}
+\label{fig:confound_auc}
+\end{subfigure}%
+\hspace{0.02\textwidth}%
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/sex_disease_confound_projections.pdf}
+\subcaption{Participant projections}
+\label{fig:confound_projections}
+\end{subfigure}
+\caption{Geometric relationship between the disease- and sex-discriminant directions in the whole-spectrum PLS latent space ($n=147$; single 5-fold split). \subref{fig:confound_auc} out-of-fold ROC-AUC for the disease and sex discriminants. \subref{fig:confound_projections} per-participant projections onto the two discriminant directions.}
+\label{fig:confound_geometry}
 \end{figure}
 
 In addition to the strong group-sex association and the lack of available control age data, these checks indicate persistent residual confounding. Differences in recruitment source, vascular risk factors, medication use, sampling time, and analytical batch may also exist between groups and were not addressed by the current study design. Another plausible confounding factor is the acute-phase systemic state: stroke participants were sampled during acute cerebrovascular injury, inflammation, and hospitalization, while controls were likely sampled outside of any acute event. This systemic difference, rather than a stroke-specific or brain-derived EV signature, could itself produce a broad lipid- and protein-associated spectral shift and could not be distinguished from disease status in the present design. The findings therefore reflect within-cohort group separation, not evidence for diagnosis, causation, or clinical utility.
@@ -144,11 +163,39 @@ In addition to the strong group-sex association and the lack of available contro
 \subsection{Descriptive severity-based spectral comparisons}
 As an additional descriptive analysis, \cref{fig:difference_spectrum} presents a comparison of mean spectra between participants at the severe and mild extremes of the stroke-severity distribution, along with the signed effect size ($\mathrm{sign}(\Delta)\times|\text{Cohen's }d|$) for each channel. The mean traces overlap closely, and the effect-size trace alternates in sign across both spectral blocks without any sustained, unidirectional deviation. The largest local effect sizes are comparable in magnitude to those at adjacent channels with the opposite sign. This pattern suggests sampling variability around a null severity effect rather than indicating a consistent severity-associated spectral shift. No threshold or correction was applied to this contrast, as it is intended solely for descriptive context rather than as a formal statistical test.
 
-\begin{figure}[ht] 
-\centering 
-\includegraphics[width=0.8\textwidth]{figures/difference_spectrum_severity_extreme.pdf}
-\caption{Extreme-group descriptive contrast between severe and mild ischemic stroke participants (fingerprint block, left; C--H stretch block, right). Top: group mean normalized spectra. Bottom: signed effect size ($\mathrm{sign}(\Delta)\times|\text{Cohen's }d|$) per channel, uncorrected. Descriptive context, not a significance-tested finding.}
-\label{fig:difference_spectrum} 
+\begin{figure}[ht]
+\centering
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/difference_spectrum_fingerprint_mean.pdf}
+\subcaption{Fingerprint, group means}
+\label{fig:difference_fp_mean}
+\end{subfigure}%
+\hspace{0.02\textwidth}%
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/difference_spectrum_ch_stretch_mean.pdf}
+\subcaption{C--H stretch, group means}
+\label{fig:difference_ch_mean}
+\end{subfigure}
+
+\vspace{0.8em}
+
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/difference_spectrum_fingerprint_effect.pdf}
+\subcaption{Fingerprint, effect size}
+\label{fig:difference_fp_effect}
+\end{subfigure}%
+\hspace{0.02\textwidth}%
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/difference_spectrum_ch_stretch_effect.pdf}
+\subcaption{C--H stretch, effect size}
+\label{fig:difference_ch_effect}
+\end{subfigure}
+\caption{Extreme-group descriptive contrast between severe and mild ischemic stroke participants. \subref{fig:difference_fp_mean} and \subref{fig:difference_ch_mean} give the group mean normalized spectra for the fingerprint and C--H stretch blocks; \subref{fig:difference_fp_effect} and \subref{fig:difference_ch_effect} give the signed effect size ($\mathrm{sign}(\Delta)\times|\text{Cohen's }d|$) per channel, uncorrected. Descriptive context, not a significance-tested finding.}
+\label{fig:difference_spectrum}
 \end{figure}
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Container, Mapping
 from typing import Iterable
 
 import matplotlib.pyplot as plt
@@ -71,12 +71,15 @@ BAND_DISPLAY_LABELS = {
     "ch3_asym_stretch_2937": r"CH$_3$ asym. stretch",
 }
 
+# Drawn as axvspans at raman_band_style.alpha (0.25), so the printed span is
+# far lighter than the swatch itself: these sit a step darker than a
+# legend-only palette would, to stay visible once that alpha is applied.
 BAND_CATEGORY_COLORS = {
-    "nucleic_acids": "#B9DEF6",
-    "proteins": "#BFE4C4",
-    "lipids": "#F6D6AE",
-    "carotenoids": "#FFF2AD",
-    "mixed": "#D9D9D9",
+    "nucleic_acids": "#8FC5EC",
+    "proteins": "#96CE9E",
+    "lipids": "#F0BE83",
+    "carotenoids": "#F7E381",
+    "mixed": "#BFBFBF",
 }
 BAND_CATEGORY_LABELS = {
     "nucleic_acids": "Nucleic acids",
@@ -377,12 +380,20 @@ def _annotate_peaks(
     fontsize: float = 7.5,
     rotation: float = 0.0,
     clip_text: bool = False,
+    horizontal_bands: Container[str] | None = None,
 ) -> None:
     """Annotate positive, curated Raman-band peaks with vertical leader lines.
 
     ``rotation`` is for narrow axes: horizontal labels of neighbouring bands
     overlap once the axis is only a text column wide, and rotating them is the
     only placement that stays legible without dropping bands.
+
+    ``horizontal_bands`` exempts named bands from that rotation. A rotated
+    label is as tall as the label is long, so the tallest peak's label sets the
+    headroom the whole panel is scaled to fit; drawing that one label
+    horizontally with an arrow to its peak costs a single line of height
+    instead, and leaves the traces taller. Use it only for bands whose
+    neighbours are far enough away that a full-width label cannot collide.
 
     ``clip_text`` confines the label and its leader to the axes rectangle.
     ``annotation_clip`` only tests the anchor point, so a tall peak can still
@@ -417,30 +428,50 @@ def _annotate_peaks(
             continue
         peak_x = float(x[idx])
         peak_y = float(y[idx])
-        if rotation:
+        upright = bool(horizontal_bands) and band_name in horizontal_bands
+        if upright:
+            # These are the tallest peaks, so the label always clears the trace
+            # and the cap is not applied: clamping it would drop the label onto
+            # the peak and reverse the arrow it is meant to hang from.
+            label_y = peak_y + 0.08 * y_span
+        elif rotation:
             # Rotated labels occupy a narrow column, so they cannot collide with
             # their neighbours and do not need the staggered levels that keep
             # horizontal labels apart; parking them just above each peak avoids
             # long leader lines crossing the trace.
-            label_y = peak_y + 0.04 * y_span
+            label_y = min(peak_y + 0.04 * y_span, cap)
         else:
-            label_y = max(peak_y + 0.06 * y_span, y_bottom + label_levels[order % len(label_levels)] * y_span)
+            label_y = min(
+                max(peak_y + 0.06 * y_span, y_bottom + label_levels[order % len(label_levels)] * y_span),
+                cap,
+            )
+        label_rotation = 0.0 if upright else rotation
         ax.annotate(
             label,
             xy=(peak_x, peak_y),
-            xytext=(peak_x, min(label_y, cap)),
+            xytext=(peak_x, label_y),
             # With rotation_mode="anchor" the alignment is applied in the
             # text's own rotated frame, so a rotated label needs ha="left"
             # (start of the text, which points down after a 90 deg turn) and
             # va="center" to run upward from the peak instead of straddling it.
-            ha="left" if rotation else "center",
-            va="center" if rotation else "bottom",
-            rotation=rotation,
+            ha="left" if label_rotation else "center",
+            va="center" if label_rotation else "bottom",
+            rotation=label_rotation,
             rotation_mode="anchor",
             fontsize=fontsize,
             color="#111827",
             annotation_clip=True,
-            arrowprops={"arrowstyle": "-", "color": "#111827", "linewidth": 0.65, "shrinkA": 0, "shrinkB": 2},
+            # An upright label sits away from its peak, so it needs a head to
+            # say which peak it belongs to; the rotated ones start at the peak
+            # and only need a leader.
+            arrowprops={
+                "arrowstyle": "-|>" if upright else "-",
+                "color": "#111827",
+                "linewidth": 0.65,
+                "shrinkA": 1 if upright else 0,
+                "shrinkB": 2,
+                **({"mutation_scale": 6.0} if upright else {}),
+            },
             zorder=4,
             clip_on=clip_text,
         )

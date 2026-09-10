@@ -27,9 +27,9 @@ from sklearn.metrics import roc_curve
 
 from src.analysis.clinical_correlation_matrix import _plot_correlation_heatmap
 from src.analysis.journal_figures import (
-    _fig3_difference_spectrum,
     _fig4_nmf_entropy,
     _fig6_moca_association_landscape,
+    _plot_block_panel,
 )
 from src import load_config
 from src.analysis.io_utils import load_csv_or_empty
@@ -383,6 +383,13 @@ def _shared_display_scale(traces: list[np.ndarray]) -> list[np.ndarray]:
 GLOBAL_PANEL_HEIGHT_IN = 2.1
 GLOBAL_MAX_PEAK_LABELS = 6
 GLOBAL_PEAK_LABEL_PT = 6.8
+# A rotated label is as tall as the label is long, so every one of them adds
+# headroom that the traces then have to share. Labels are drawn upright with an
+# arrow to their peak instead, which costs a single line each. The exception is
+# the 925 band: it sits between the 851 and 1060 peaks, close enough that an
+# upright label would run into both of their labels, so it stays rotated in its
+# own narrow column.
+GLOBAL_ROTATED_PEAK_LABELS = frozenset({"c_o_c_sugar_925"})
 GLOBAL_BLOCKS = (
     ("1300__", "global_fingerprint"),
     ("2850__", "global_ch_stretch"),
@@ -463,8 +470,18 @@ def make_global_spectra_figures() -> None:
             trace_handles.append(line)
             trace_labels.append(f"{label} ($n={count}$)")
 
-        _set_spectrum_limits(ax, [wavenumbers], display, top_pad=0.9)
+        # Only the one rotated label needs real headroom now, and
+        # _fit_annotations grows the axis to whatever the labels actually
+        # measure; reserving more up front just pushes the traces down.
+        _set_spectrum_limits(ax, [wavenumbers], display, top_pad=0.18)
         _add_raman_band_spans(ax, wavenumbers, plot_cfg)
+        # _add_raman_band_spans attaches a per-axes legend listing only this
+        # block's categories; the assembled figure carries one legend instead.
+        # Removed before annotating, not after: _annotate_peaks lowers its
+        # label ceiling to clear a legend, and on a tight axis that ceiling
+        # would drag a label down onto the trace.
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()
         _annotate_peaks(
             ax,
             wavenumbers,
@@ -475,11 +492,8 @@ def make_global_spectra_figures() -> None:
             fontsize=GLOBAL_PEAK_LABEL_PT,
             rotation=90.0,
             clip_text=True,
+            horizontal_bands=frozenset(plot_cfg["bands"]) - GLOBAL_ROTATED_PEAK_LABELS,
         )
-        # _add_raman_band_spans attaches a per-axes legend listing only this
-        # block's categories; the assembled figure carries one legend instead.
-        if ax.get_legend() is not None:
-            ax.get_legend().remove()
 
         ax.set_xlabel(r"Raman shift (cm$^{-1}$)")
         # "(a.u.)" is redundant here: the caption states the axis is
@@ -901,12 +915,70 @@ def make_candidate_region_overview_figure() -> None:
     plt.close(fig)
 
 
+# The SI float assembles the severity contrast from one PDF per panel, two per
+# row at 0.48 of the text block, so LaTeX supplies the panel letters.
+DIFFERENCE_PANEL_FRACTION = 0.48
+DIFFERENCE_PANEL_HEIGHT_IN = 1.9
+DIFFERENCE_BLOCK_STEMS = {
+    "1300": "difference_spectrum_fingerprint",
+    "2850": "difference_spectrum_ch_stretch",
+}
+
+
 def make_difference_spectrum_figure() -> None:
-    """Redraw the severity extreme-group difference spectrum as a vector PDF."""
-    _fig3_difference_spectrum(
-        DIFFERENCE_SPECTRUM,
-        FIGURE_DIR / "difference_spectrum_severity_extreme.pdf",
-        figsize=(FIGURE_WIDTH_IN, 4.6),
+    """The severity extreme-group contrast, one standalone PDF per panel.
+
+    Panel content comes from the production ``_plot_block_panel`` so the SI
+    panels stay identical to the pipeline figure; it writes into a (mean,
+    effect) axes pair, and the pair here simply lives in two figures instead
+    of two rows of one.
+    """
+    diff = load_csv_or_empty(DIFFERENCE_SPECTRUM)
+    if diff.empty or "wavenumber" not in diff.columns or "block" not in diff.columns:
+        return
+    contrast = (
+        diff["contrast_name"].iloc[0] if "contrast_name" in diff.columns else "unknown"
+    )
+
+    for block in sorted(diff["block"].unique().tolist()):
+        stem = DIFFERENCE_BLOCK_STEMS.get(str(block))
+        if stem is None:
+            continue
+        sub = diff[diff["block"] == block]
+        if "contrast_name" in sub.columns:
+            sub = sub[sub["contrast_name"] == contrast]
+        if sub.empty:
+            continue
+
+        fig_mean, ax_mean = _difference_panel_axes()
+        fig_effect, ax_effect = _difference_panel_axes()
+        _plot_block_panel((ax_mean, ax_effect), sub, block, contrast)
+        # _plot_block_panel labels the shared x axis on the effect axes only,
+        # which leaves the mean panel unlabelled once the two are separate
+        # floats; the block title moves to the subcaption for the same reason.
+        ax_mean.set_xlabel("Raman shift (cm⁻¹)")
+        ax_mean.set_title("")
+        # The two blocks are normalized by different procedures, so a printed
+        # intensity number is not comparable across the pair and is not read
+        # off these traces anyway; the axis keeps its "a.u." label and drops
+        # the scale. The effect-size panels keep their ticks: Cohen's d is
+        # read as a magnitude.
+        ax_mean.set_yticks([])
+        for ax in (ax_mean, ax_effect):
+            ax.spines[["top", "right"]].set_visible(False)
+
+        _save_exact(fig_mean, f"{stem}_mean")
+        _save_exact(fig_effect, f"{stem}_effect")
+
+
+def _difference_panel_axes():
+    """One axes sized for a quarter of the assembled SI severity float."""
+    return plt.subplots(
+        figsize=(
+            panel_width_in(DIFFERENCE_PANEL_FRACTION),
+            DIFFERENCE_PANEL_HEIGHT_IN,
+        ),
+        constrained_layout=True,
     )
 
 
@@ -979,6 +1051,27 @@ def make_moca_landscape_figure() -> None:
 CLINICAL_PANEL_FRACTION = 0.48
 CLINICAL_PANEL_HEIGHT_IN = 2.0
 
+# The channel-wise surface is a 6 x 1055 image. At the shared panel height its
+# data axes prints square, which wastes the wavenumber axis it is read along;
+# authoring it shorter, with a slimmer colorbar, gives the image a wide aspect
+# while the printed width stays the one \includegraphics requests.
+CLINICAL_HEATMAP_HEIGHT_IN = 1.6
+
+# Four panels share one float, so Figure 5 sets type 20% below the
+# set_manuscript_theme() body sizes to keep the assembled float legible.
+CLINICAL_FONT_SCALE = 0.8
+CLINICAL_RC = {
+    "font.size": 7.2,
+    "axes.labelsize": 7.6,
+    "axes.titlesize": 8.0,
+    "legend.fontsize": 6.8,
+    "legend.title_fontsize": 6.8,
+    "xtick.labelsize": 6.8,
+    "ytick.labelsize": 6.8,
+}
+# Panel-local overrides that predate the scale factor, carried down with it.
+CLINICAL_SMALL_FS = 7.0 * CLINICAL_FONT_SCALE
+
 CLINICAL_ENDPOINT_LABELS = {
     "moca_baseline": "MoCA base",
     "moca_3m": "MoCA 3-mo",
@@ -989,13 +1082,10 @@ CLINICAL_ENDPOINT_LABELS = {
 }
 
 
-def _clinical_panel_axes():
+def _clinical_panel_axes(height: float = CLINICAL_PANEL_HEIGHT_IN):
     """One axes sized for a quarter of the assembled Figure 5 float."""
     return plt.subplots(
-        figsize=(
-            panel_width_in(CLINICAL_PANEL_FRACTION),
-            CLINICAL_PANEL_HEIGHT_IN,
-        ),
+        figsize=(panel_width_in(CLINICAL_PANEL_FRACTION), height),
         constrained_layout=True,
     )
 
@@ -1016,6 +1106,12 @@ def _clear_band_for_legend(ax, side: str, fraction: float) -> None:
 
 
 def make_clinical_null_figures() -> None:
+    """The four within-stroke null panels, drawn at the Figure 5 type scale."""
+    with matplotlib.rc_context(CLINICAL_RC):
+        _draw_clinical_null_panels()
+
+
+def _draw_clinical_null_panels() -> None:
     """The four within-stroke null panels, one standalone PDF each.
 
     Each panel supports the same negative conclusion, which is why they are
@@ -1054,7 +1150,7 @@ def make_clinical_null_figures() -> None:
     _clear_band_for_legend(ax, "top", 0.30)
     ax.legend(
         loc="upper left",
-        fontsize=7,
+        fontsize=CLINICAL_SMALL_FS,
         frameon=True,
         framealpha=1.0,
         edgecolor="none",
@@ -1064,7 +1160,7 @@ def make_clinical_null_figures() -> None:
     _save_exact(fig, "clinical_null_candidates")
 
     # Channel-wise correlation surface, fingerprint block only.
-    fig, ax = _clinical_panel_axes()
+    fig, ax = _clinical_panel_axes(height=CLINICAL_HEATMAP_HEIGHT_IN)
     fingerprint = correlations.loc[correlations["spectral_block"] == 1300]
     surface = fingerprint.pivot_table(index="target", columns="wavenumber", values="rho")
     image = ax.imshow(
@@ -1080,15 +1176,32 @@ def make_clinical_null_figures() -> None:
             len(surface),
         ),
     )
-    ax.set_yticks(np.arange(len(surface)) + 0.5)
+    # imshow draws the first matrix row at the top of the extent box, so the
+    # ticks have to descend from the top for a label to name the row above it.
+    # Ascending ticks paired the first endpoint with the bottom row, which
+    # reversed the whole axis against the data it labelled.
+    ax.set_yticks(len(surface) - np.arange(len(surface)) - 0.5)
     ax.set_yticklabels(
         [CLINICAL_ENDPOINT_LABELS.get(name, name) for name in surface.index],
-        fontsize=7,
+        fontsize=CLINICAL_SMALL_FS,
     )
     ax.set_xlabel(r"Raman shift (cm$^{-1}$)")
-    fig.colorbar(
-        image, ax=ax, fraction=0.046, pad=0.02, label=r"Spearman $\rho$"
+    # The key rides on top rather than beside the image: a vertical colorbar
+    # and its label take a sixth of the panel width away from the surface,
+    # which is read along the wavenumber axis and wants every inch of it.
+    bar = fig.colorbar(
+        image,
+        ax=ax,
+        orientation="horizontal",
+        location="top",
+        fraction=0.055,
+        pad=0.04,
+        aspect=45,
     )
+    bar.set_ticks([-0.4, 0.0, 0.4])
+    bar.set_label(r"Spearman $\rho$", fontsize=CLINICAL_SMALL_FS, labelpad=2)
+    bar.ax.tick_params(labelsize=CLINICAL_SMALL_FS, length=2, pad=1.0)
+    bar.outline.set_linewidth(0.4)
     _save_exact(fig, "clinical_null_channelwise")
 
     # Observed CV R^2 against each endpoint's own permutation null.
@@ -1117,14 +1230,15 @@ def make_clinical_null_figures() -> None:
     ax.axhline(0, color=NEUTRAL, linestyle="--", linewidth=0.9)
     ax.set_xticks(range(len(endpoints)))
     ax.set_xticklabels(
-        [CLINICAL_ENDPOINT_LABELS[endpoint] for endpoint in endpoints], fontsize=7
+        [CLINICAL_ENDPOINT_LABELS[endpoint] for endpoint in endpoints],
+        fontsize=CLINICAL_SMALL_FS,
     )
     ax.set_ylabel("Cross-validated $R^2$")
     ax.spines[["top", "right"]].set_visible(False)
     _clear_band_for_legend(ax, "bottom", 0.24)
     ax.legend(
         loc="lower left",
-        fontsize=7,
+        fontsize=CLINICAL_SMALL_FS,
         frameon=True,
         framealpha=1.0,
         edgecolor="none",
@@ -1364,6 +1478,21 @@ def make_graphical_abstract() -> None:
     plt.close(fig)
 
 
+# Figure 4 is assembled in LaTeX from one PDF per panel, at 0.48 + 0.02 + 0.48
+# of the text block. Each panel is authored at the width its \includegraphics
+# requests, so neither is rescaled and the two keep a common type size.
+CVD_PANEL_FRACTION = 0.48
+CVD_PANEL_HEIGHT_IN = 2.4
+
+
+def _cvd_panel_axes():
+    """One axes sized for half of the assembled Figure 4 float."""
+    return plt.subplots(
+        figsize=(panel_width_in(CVD_PANEL_FRACTION), CVD_PANEL_HEIGHT_IN),
+        constrained_layout=True,
+    )
+
+
 def make_cvd_classifier_figure() -> None:
     """ROC curves (whole-spectrum models) and the primary permutation null.
 
@@ -1374,9 +1503,10 @@ def make_cvd_classifier_figure() -> None:
     comparison = pd.read_csv(ML_MODEL_COMPARISON)
     comparison = comparison[comparison["representation"] == "whole"].set_index("model")
 
-    fig, (ax_roc, ax_null) = plt.subplots(
-        1, 2, figsize=(MANUSCRIPT_WIDTH_IN, 3.0), constrained_layout=True
-    )
+    # One standalone PDF per panel: the float assembles them with \subcaption,
+    # so the panel letters are typeset by LaTeX and stay referenceable.
+    fig_roc, ax_roc = _cvd_panel_axes()
+    fig_null, ax_null = _cvd_panel_axes()
 
     mean_fpr = np.linspace(0, 1, 200)
     for model in ("pls_da", "random_forest", "l1_logistic"):
@@ -1433,23 +1563,36 @@ def make_cvd_classifier_figure() -> None:
     ]["null_balanced_accuracy"].to_numpy()
     observed = float(comparison.loc["pls_da", "balanced_accuracy_mean"])
     p_value = 0.005
-    ax_null.hist(
+    counts, _, _ = ax_null.hist(
         primary_null, bins=22, color="#B0B0B0", edgecolor="white", linewidth=0.4
     )
-    ax_null.axvline(
-        observed, color=CVD_MODEL_COLORS["pls_da"], linewidth=1.6,
-        label=f"Observed ({observed:.3f})",
-    )
+    ax_null.axvline(observed, color=CVD_MODEL_COLORS["pls_da"], linewidth=1.6)
     ax_null.set_xlabel("Balanced accuracy\n(sex-stratified permuted labels)")
     ax_null.set_ylabel("Permutation draws")
     ax_null.spines[["top", "right"]].set_visible(False)
     ax_null.tick_params(direction="out", length=3)
-    ax_null.legend(frameon=False, loc="upper left", fontsize=7.5)
+    # Labelled at the line rather than through a legend: a legend box in a
+    # corner of a 2.6 in panel sits on the null bars, and it separates the
+    # observed value from the line it names. The p-value belongs here too --
+    # it is what the panel is evidence for, and it was only in the caption.
+    ax_null.set_ylim(0, float(counts.max()) * 1.2)
+    # The observed line lands past the null's right tail; without a margin it
+    # is drawn on the frame and reads as a clipped axis rather than a value.
+    ax_null.set_xlim(right=observed + 0.02)
+    ax_null.annotate(
+        f"Observed {observed:.3f}\n$p$ = {p_value:.3f}",
+        xy=(observed, ax_null.get_ylim()[1] * 0.97),
+        xytext=(-4, 0),
+        textcoords="offset points",
+        ha="right",
+        va="top",
+        fontsize=7.5,
+        color=CVD_MODEL_COLORS["pls_da"],
+        linespacing=1.3,
+    )
 
-    for stem in ("ml_classification_performance",):
-        fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
-        fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
-    plt.close(fig)
+    _save_exact(fig_roc, "ml_classification_roc")
+    _save_exact(fig_null, "ml_classification_permutation_null")
 
 
 def make_moca_prediction_figure() -> None:

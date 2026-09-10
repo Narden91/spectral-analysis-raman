@@ -307,8 +307,20 @@ Permutation testing indicated that the observed discrimination exceeded that exp
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=\textwidth]{figures/ml_classification_performance.pdf}
-\caption{Case-control classification evidence for the whole-spectrum representation ($n=147$). Left: repeat-averaged ROC curves. Right: sex-stratified permutation null for the primary PLS-DA model, with the observed statistic marked.}
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/ml_classification_roc.pdf}
+\subcaption{ROC curves}
+\label{fig:cvd_roc}
+\end{subfigure}%
+\hspace{0.02\textwidth}%
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/ml_classification_permutation_null.pdf}
+\subcaption{Permutation null}
+\label{fig:cvd_permutation_null}
+\end{subfigure}
+\caption{Case-control classification evidence for the whole-spectrum representation ($n=147$). \subref{fig:cvd_roc} repeat-averaged ROC curves for the three whole-spectrum classifiers; \subref{fig:cvd_permutation_null} sex-stratified permutation null for the primary PLS-DA model, with the observed statistic marked.}
 \label{fig:cvd_classifier_performance}
 \end{figure}
 
