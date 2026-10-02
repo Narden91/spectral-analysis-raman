@@ -28,8 +28,9 @@ import logging
 import time
 import warnings
 from collections.abc import Callable, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -513,7 +514,7 @@ def _fit_pls_da(
 
     if folds is not None:
         scaled_folds = _scaled_inner_folds(X_train, folds)
-        max_valid_comp = min(X_train.shape[0] - 2, X_train.shape[1])
+        max_valid_comp = min(min(len(tr_idx) for tr_idx, _ in folds), X_train.shape[1])
         valid_grid = [c for c in component_grid if 1 <= c <= max_valid_comp] or [1]
         for n_comp in valid_grid:
             oof_scores = np.zeros(len(y_train), dtype=float)
@@ -1076,6 +1077,8 @@ def run_permutation_test(
     preserving Monte Carlo p-value validity (the observed statistic must
     always be counted alongside a real, pre-committed sample of the null).
     """
+    if not np.isfinite(observed_balanced_accuracy):
+        raise ValueError("Observed permutation statistic must be finite")
     stopping = resolve_sequential_stopping_config(ml_cfg, default_max=_n_permutations(ml_cfg))
     seeds = _resampling_seeds(random_state, stopping.permutation_max)
     existing = _load_checkpoint_rows(checkpoint_path, resume=resume)
@@ -1084,6 +1087,8 @@ def run_permutation_test(
         for row in existing.itertuples(index=False)
         if hasattr(row, "seed") and hasattr(row, "null_balanced_accuracy")
     }
+    if not all(np.isfinite(score) for score in score_by_seed.values()):
+        raise ValueError("Permutation checkpoint contains a non-finite score")
     pending = [
         (int(seed), (model_name, X, y, strata, ml_cfg, int(seed), outer_split_plan))
         for seed in seeds
@@ -1093,6 +1098,8 @@ def run_permutation_test(
         progress.update(progress_task_id, completed=len(score_by_seed), total=stopping.permutation_max)
 
     def on_result(seed: int, score: float) -> None:
+        if not np.isfinite(score):
+            raise ValueError(f"Permutation score must be finite (seed={seed})")
         score_by_seed[seed] = float(score)
         if checkpoint_path is not None and len(score_by_seed) % _CHECKPOINT_FLUSH_EVERY == 0:
             write_parquet_atomic(
@@ -1104,9 +1111,8 @@ def run_permutation_test(
             progress.advance(progress_task_id)
 
     def should_continue() -> bool:
-        finite = [score for score in score_by_seed.values() if np.isfinite(score)]
-        drawn = len(finite)
-        successes = sum(1 for score in finite if score >= observed_balanced_accuracy)
+        drawn = len(score_by_seed)
+        successes = sum(1 for score in score_by_seed.values() if score >= observed_balanced_accuracy)
         return not should_stop(successes, drawn, stopping)
 
     try:
@@ -1127,10 +1133,9 @@ def run_permutation_test(
             )
 
     null_arr = np.asarray([score_by_seed[int(seed)] for seed in seeds if int(seed) in score_by_seed], dtype=float)
-    finite_null = null_arr[np.isfinite(null_arr)]
-    if len(finite_null) == 0:
+    if len(null_arr) == 0:
         return np.nan, null_arr
-    p_value = float((1 + np.sum(finite_null >= observed_balanced_accuracy)) / (len(finite_null) + 1))
+    p_value = float((1 + np.sum(null_arr >= observed_balanced_accuracy)) / (len(null_arr) + 1))
     return p_value, null_arr
 
 
@@ -1676,6 +1681,205 @@ def _append_null_distribution_rows(
     )
 
 
+def _run_observed_model_phase(
+    *,
+    model_name: str,
+    representation: str,
+    X_valid: np.ndarray,
+    y_valid: np.ndarray,
+    feature_names: list[str],
+    ml_cfg: dict[str, Any],
+    n_jobs: int,
+    outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]],
+    checkpoints: _CheckpointStore,
+    model_dir: Path,
+    outputs: dict[str, Path],
+    phase: Callable[..., AbstractContextManager[None]],
+    progress: Progress,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    cv_path = model_dir / f"{model_name}_{representation}_cv_predictions.csv"
+    importance_folds_path = model_dir / f"{model_name}_{representation}_feature_importance_outer_folds.csv"
+    importance_path = model_dir / f"{model_name}_{representation}_feature_importance.csv"
+    observed_complete = checkpoints.stage_complete(model_name, representation, "observed") or (
+        checkpoints.legacy_compatible
+        and _legacy_observed_outputs_are_compatible(
+            model_dir,
+            model_name,
+            representation,
+            n_subjects=len(y_valid),
+            n_outer_repeats=len(outer_split_plan),
+        )
+    )
+    with phase(f"{model_name}_{representation}", f"{model_name} ({representation}) nested CV"):
+        if (
+            observed_complete
+            and cv_path.exists()
+            and importance_folds_path.exists()
+            and importance_path.exists()
+        ):
+            oof = pd.read_csv(cv_path)
+            metrics = _aggregate_repeat_metrics(oof)
+            logger.info("Reused compatible observed ML outputs for %s (%s)", model_name, representation)
+        else:
+            with _progress_task(
+                progress,
+                f"{model_name} ({representation}) nested folds",
+                sum(len(splits) for splits in outer_split_plan),
+            ) as fold_task:
+                oof = _run_repeated_nested_cv(
+                    model_name,
+                    X_valid,
+                    y_valid,
+                    ml_cfg=ml_cfg,
+                    n_jobs=n_jobs,
+                    outer_split_plan=outer_split_plan,
+                    fold_callback=lambda: progress.advance(fold_task),
+                )
+            outputs[f"{model_name}_{representation}_cv_predictions"] = write_csv_atomic(
+                oof, cv_path, index=False
+            )
+            metrics = _aggregate_repeat_metrics(oof)
+            with _progress_task(
+                progress,
+                f"{model_name} ({representation}) importance folds",
+                sum(len(splits) for splits in outer_split_plan),
+            ) as importance_task:
+                importance_folds, importance_df = _outer_fold_feature_importance(
+                    model_name,
+                    X_valid,
+                    y_valid,
+                    feature_names,
+                    ml_cfg=ml_cfg,
+                    n_jobs=n_jobs,
+                    outer_split_plan=outer_split_plan,
+                    fold_callback=lambda: progress.advance(importance_task),
+                )
+            outputs[f"{model_name}_{representation}_feature_importance_folds"] = write_csv_atomic(
+                importance_folds, importance_folds_path, index=False
+            )
+            outputs[f"{model_name}_{representation}_feature_importance"] = write_csv_atomic(
+                importance_df, importance_path, index=False
+            )
+            checkpoints.mark_stage_complete(model_name, representation, "observed")
+    return oof, metrics
+
+
+def _run_model_permutation_phase(
+    *,
+    model_name: str,
+    representation: str,
+    X_valid: np.ndarray,
+    y_valid: np.ndarray,
+    strata: np.ndarray | None,
+    permutation_observed_score: float,
+    ml_cfg: dict[str, Any],
+    n_jobs: int,
+    random_state: int,
+    outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]],
+    checkpoints: _CheckpointStore,
+    resume: bool,
+    null_distribution_rows: list[dict[str, object]],
+    phase: Callable[..., AbstractContextManager[None]],
+    progress: Progress,
+) -> tuple[float, float]:
+    with _progress_task(
+        progress,
+        f"{model_name} ({representation}) unrestricted permutations",
+        _n_permutations(ml_cfg),
+    ) as unrestricted_task:
+        with phase(f"{model_name}_{representation}_permutation", f"{model_name} ({representation}) permutation test (unrestricted)"):
+            p_unrestricted, null_unrestricted = run_permutation_test(
+                model_name,
+                X_valid,
+                y_valid,
+                observed_balanced_accuracy=permutation_observed_score,
+                strata=None,
+                ml_cfg=ml_cfg,
+                n_jobs=n_jobs,
+                random_state=random_state,
+                outer_split_plan=outer_split_plan,
+                checkpoint_path=checkpoints.resampling_path(
+                    "permutation", model_name, representation, "unrestricted"
+                ),
+                resume=resume,
+                progress=progress,
+                progress_task_id=unrestricted_task,
+            )
+
+    p_sex_stratified, null_sex_stratified = np.nan, np.array([])
+    if strata is not None:
+        with _progress_task(
+            progress,
+            f"{model_name} ({representation}) sex-stratified permutations",
+            _n_permutations(ml_cfg),
+        ) as sex_task:
+            with phase(f"{model_name}_{representation}_permutation_sex", f"{model_name} ({representation}) permutation test (sex-stratified)"):
+                p_sex_stratified, null_sex_stratified = run_permutation_test(
+                    model_name,
+                    X_valid,
+                    y_valid,
+                    observed_balanced_accuracy=permutation_observed_score,
+                    strata=strata,
+                    ml_cfg=ml_cfg,
+                    n_jobs=n_jobs,
+                    random_state=random_state + 1,
+                    outer_split_plan=outer_split_plan,
+                    checkpoint_path=checkpoints.resampling_path(
+                        "permutation", model_name, representation, "sex_stratified"
+                    ),
+                    resume=resume,
+                    progress=progress,
+                    progress_task_id=sex_task,
+                )
+
+    for null_scores, null_type, null_seed in (
+        (null_unrestricted, "unrestricted", random_state),
+        (null_sex_stratified, "sex_stratified", random_state + 1),
+    ):
+        _append_null_distribution_rows(
+            null_distribution_rows,
+            model_name=model_name,
+            representation=representation,
+            null_type=null_type,
+            random_state=null_seed,
+            null_scores=null_scores,
+            n_permutations=_n_permutations(ml_cfg),
+            n_splits=len(outer_split_plan[0]),
+        )
+    return p_unrestricted, p_sex_stratified
+
+
+def _write_model_comparison(
+    comparison_rows: list[dict[str, object]],
+    model_dir: Path,
+) -> Path:
+    comparison_df = pd.DataFrame(comparison_rows)
+    primary_mask = comparison_df["is_primary_model"].astype(bool)
+    family_p = comparison_df["permutation_p_value_sex_stratified"].to_numpy(dtype=float)
+    if not np.isfinite(family_p).all():
+        raise RuntimeError(
+            "Sex-stratified permutation inference failed; refusing to substitute an unrestricted null"
+        )
+    fdr_q, fdr_significant = fdr_correction(family_p, alpha=0.05)
+    comparison_df["permutation_p_fdr_q"] = fdr_q
+    comparison_df["permutation_fdr_significant"] = fdr_significant
+    comparison_df.insert(0, "positive_class", POSITIVE_CLASS_LABEL)
+    path = write_csv_atomic(
+        comparison_df, model_dir / "model_comparison.csv", index=False
+    )
+    if primary_mask.any():
+        primary_summary_columns = [
+            "model",
+            "representation",
+            "balanced_accuracy_mean",
+            "permutation_p_value_sex_stratified",
+        ]
+        logger.info(
+            "Primary result: %s", comparison_df.loc[primary_mask, primary_summary_columns].to_dict("records")
+        )
+    return path
+
+
 def run_control_vs_disease_ml_pipeline(
     *,
     feature_matrix_path: str | Path | None = None,
@@ -1728,40 +1932,23 @@ def run_control_vs_disease_ml_pipeline(
     )
     overall_task = progress.add_task("Control-vs-disease ML", total=phase_count)
 
+    phase = partial(
+        _phase_timer, phase_timings, metadata_dir=metadata_dir,
+        progress=progress, task_id=overall_task,
+    )
     with progress:
-        with _phase_timer(
-            phase_timings,
-            "load_cohort",
-            "Load cohort and labels",
-            metadata_dir=metadata_dir,
-            progress=progress,
-            task_id=overall_task,
-        ):
+        with phase("load_cohort", "Load cohort and labels"):
             frame = _load_cohort(feature_matrix_path)
             y = _labels(frame)
 
-        with _phase_timer(
-            phase_timings,
-            "cohort_summary",
-            "Cohort summary",
-            metadata_dir=metadata_dir,
-            progress=progress,
-            task_id=overall_task,
-        ):
+        with phase("cohort_summary", "Cohort summary"):
             cohort_df = _cohort_summary(frame)
             outputs["cohort_summary"] = write_csv_atomic(cohort_df, cohort_dir / "cohort_summary.csv", index=False)
 
         stratify_by = ml_cfg.get("stratify_permutation_by")
         sex_column = _sex_column(frame)
         for representation in representations:
-            with _phase_timer(
-                phase_timings,
-                f"features_{representation}",
-                f"Build {representation} feature matrix",
-                metadata_dir=metadata_dir,
-                progress=progress,
-                task_id=overall_task,
-            ):
+            with phase(f"features_{representation}", f"Build {representation} feature matrix"):
                 X, feature_names = _representation_matrix(frame, representation, cfg_in)
                 valid_rows = np.isfinite(X).all(axis=1)
                 if not valid_rows.all():
@@ -1798,89 +1985,18 @@ def run_control_vs_disease_ml_pipeline(
             progress.console.print(f"[cyan]ML workload:[/] {workload_message}")
             sex_only = _sex_only_baseline(frame, y, valid_rows)
 
-            with _phase_timer(
-                phase_timings,
-                f"band_screen_{representation}",
-                f"Univariate band screen ({representation})",
-                metadata_dir=metadata_dir,
-                progress=progress,
-                task_id=overall_task,
-            ):
+            with phase(f"band_screen_{representation}", f"Univariate band screen ({representation})"):
                 if representation == "band_panel":
                     band_screen_frames.append(run_univariate_band_screen(frame, y, valid_rows, cfg_in))
 
             for model_name in _MODEL_NAMES:
-                cv_path = model_dir / f"{model_name}_{representation}_cv_predictions.csv"
-                importance_folds_path = model_dir / f"{model_name}_{representation}_feature_importance_outer_folds.csv"
-                importance_path = model_dir / f"{model_name}_{representation}_feature_importance.csv"
-                observed_complete = checkpoints.stage_complete(model_name, representation, "observed") or (
-                    checkpoints.legacy_compatible
-                    and _legacy_observed_outputs_are_compatible(
-                        model_dir,
-                        model_name,
-                        representation,
-                        n_subjects=len(y_valid),
-                        n_outer_repeats=len(outer_split_plan),
-                    )
+                oof, metrics = _run_observed_model_phase(
+                    model_name=model_name, representation=representation,
+                    X_valid=X_valid, y_valid=y_valid, feature_names=feature_names,
+                    ml_cfg=ml_cfg, n_jobs=n_jobs, outer_split_plan=outer_split_plan,
+                    checkpoints=checkpoints, model_dir=model_dir, outputs=outputs,
+                    phase=phase, progress=progress,
                 )
-                with _phase_timer(
-                    phase_timings,
-                    f"{model_name}_{representation}",
-                    f"{model_name} ({representation}) nested CV",
-                    metadata_dir=metadata_dir,
-                    progress=progress,
-                    task_id=overall_task,
-                ):
-                    if (
-                        observed_complete
-                        and cv_path.exists()
-                        and importance_folds_path.exists()
-                        and importance_path.exists()
-                    ):
-                        oof = pd.read_csv(cv_path)
-                        metrics = _aggregate_repeat_metrics(oof)
-                        logger.info("Reused compatible observed ML outputs for %s (%s)", model_name, representation)
-                    else:
-                        with _progress_task(
-                            progress,
-                            f"{model_name} ({representation}) nested folds",
-                            sum(len(splits) for splits in outer_split_plan),
-                        ) as fold_task:
-                            oof = _run_repeated_nested_cv(
-                                model_name,
-                                X_valid,
-                                y_valid,
-                                ml_cfg=ml_cfg,
-                                n_jobs=n_jobs,
-                                outer_split_plan=outer_split_plan,
-                                fold_callback=lambda: progress.advance(fold_task),
-                            )
-                        outputs[f"{model_name}_{representation}_cv_predictions"] = write_csv_atomic(
-                            oof, cv_path, index=False
-                        )
-                        metrics = _aggregate_repeat_metrics(oof)
-                        with _progress_task(
-                            progress,
-                            f"{model_name} ({representation}) importance folds",
-                            sum(len(splits) for splits in outer_split_plan),
-                        ) as importance_task:
-                            importance_folds, importance_df = _outer_fold_feature_importance(
-                                model_name,
-                                X_valid,
-                                y_valid,
-                                feature_names,
-                                ml_cfg=ml_cfg,
-                                n_jobs=n_jobs,
-                                outer_split_plan=outer_split_plan,
-                                fold_callback=lambda: progress.advance(importance_task),
-                            )
-                        outputs[f"{model_name}_{representation}_feature_importance_folds"] = write_csv_atomic(
-                            importance_folds, importance_folds_path, index=False
-                        )
-                        outputs[f"{model_name}_{representation}_feature_importance"] = write_csv_atomic(
-                            importance_df, importance_path, index=False
-                        )
-                        checkpoints.mark_stage_complete(model_name, representation, "observed")
 
                 permutation_observed_score = _repeat_zero_balanced_accuracy(oof)
                 logger.info(
@@ -1890,98 +2006,21 @@ def run_control_vs_disease_ml_pipeline(
                     permutation_observed_score,
                 )
 
-                with _progress_task(
-                    progress,
-                    f"{model_name} ({representation}) unrestricted permutations",
-                    _n_permutations(ml_cfg),
-                ) as unrestricted_task:
-                    with _phase_timer(
-                        phase_timings,
-                        f"{model_name}_{representation}_permutation",
-                        f"{model_name} ({representation}) permutation test (unrestricted)",
-                        metadata_dir=metadata_dir,
-                        progress=progress,
-                        task_id=overall_task,
-                    ):
-                        p_unrestricted, null_unrestricted = run_permutation_test(
-                            model_name,
-                            X_valid,
-                            y_valid,
-                            observed_balanced_accuracy=permutation_observed_score,
-                            strata=None,
-                            ml_cfg=ml_cfg,
-                            n_jobs=n_jobs,
-                            random_state=random_state,
-                            outer_split_plan=outer_split_plan,
-                            checkpoint_path=checkpoints.resampling_path(
-                                "permutation", model_name, representation, "unrestricted"
-                            ),
-                            resume=resume,
-                            progress=progress,
-                            progress_task_id=unrestricted_task,
-                        )
-
-                p_sex_stratified, null_sex_stratified = np.nan, np.array([])
-                if strata is not None:
-                    with _progress_task(
-                        progress,
-                        f"{model_name} ({representation}) sex-stratified permutations",
-                        _n_permutations(ml_cfg),
-                    ) as sex_task:
-                        with _phase_timer(
-                            phase_timings,
-                            f"{model_name}_{representation}_permutation_sex",
-                            f"{model_name} ({representation}) permutation test (sex-stratified)",
-                            metadata_dir=metadata_dir,
-                            progress=progress,
-                            task_id=overall_task,
-                        ):
-                            p_sex_stratified, null_sex_stratified = run_permutation_test(
-                                model_name,
-                                X_valid,
-                                y_valid,
-                                observed_balanced_accuracy=permutation_observed_score,
-                                strata=strata,
-                                ml_cfg=ml_cfg,
-                                n_jobs=n_jobs,
-                                random_state=random_state + 1,
-                                outer_split_plan=outer_split_plan,
-                                checkpoint_path=checkpoints.resampling_path(
-                                    "permutation", model_name, representation, "sex_stratified"
-                                ),
-                                resume=resume,
-                                progress=progress,
-                                progress_task_id=sex_task,
-                            )
-
-                for null_scores, null_type, null_seed in (
-                    (null_unrestricted, "unrestricted", random_state),
-                    (null_sex_stratified, "sex_stratified", random_state + 1),
-                ):
-                    _append_null_distribution_rows(
-                        null_distribution_rows,
-                        model_name=model_name,
-                        representation=representation,
-                        null_type=null_type,
-                        random_state=null_seed,
-                        null_scores=null_scores,
-                        n_permutations=_n_permutations(ml_cfg),
-                        n_splits=len(outer_split_plan[0]),
-                    )
+                p_unrestricted, p_sex_stratified = _run_model_permutation_phase(
+                    model_name=model_name, representation=representation,
+                    X_valid=X_valid, y_valid=y_valid, strata=strata,
+                    permutation_observed_score=permutation_observed_score,
+                    ml_cfg=ml_cfg, n_jobs=n_jobs, random_state=random_state,
+                    outer_split_plan=outer_split_plan, checkpoints=checkpoints, resume=resume,
+                    null_distribution_rows=null_distribution_rows, phase=phase, progress=progress,
+                )
 
                 with _progress_task(
                     progress,
                     f"{model_name} ({representation}) bootstrap draws",
                     int(ml_cfg.get("n_bootstrap", 1000)),
                 ) as bootstrap_task:
-                    with _phase_timer(
-                        phase_timings,
-                        f"{model_name}_{representation}_bootstrap",
-                        f"{model_name} ({representation}) bootstrap CI",
-                        metadata_dir=metadata_dir,
-                        progress=progress,
-                        task_id=overall_task,
-                    ):
+                    with phase(f"{model_name}_{representation}_bootstrap", f"{model_name} ({representation}) bootstrap CI"):
                         bootstrap_ci = run_bootstrap_ci(
                             model_name,
                             X_valid,
@@ -2015,14 +2054,7 @@ def run_control_vs_disease_ml_pipeline(
                     }
                 )
 
-                with _phase_timer(
-                    phase_timings,
-                    f"{model_name}_{representation}_sex_refit",
-                    f"{model_name} ({representation}) female-only sensitivity refit",
-                    metadata_dir=metadata_dir,
-                    progress=progress,
-                    task_id=overall_task,
-                ):
+                with phase(f"{model_name}_{representation}_sex_refit", f"{model_name} ({representation}) female-only sensitivity refit"):
                     female_refit = _sex_stratified_refit(
                         model_name, frame, X_valid, y_valid, valid_rows, ml_cfg=ml_cfg, n_jobs=n_jobs
                     )
@@ -2030,97 +2062,32 @@ def run_control_vs_disease_ml_pipeline(
                     {"model": model_name, "representation": representation, **female_refit, **sex_only}
                 )
 
-        with _phase_timer(
-            phase_timings,
-            "model_comparison",
-            "Write model comparison table",
-            metadata_dir=metadata_dir,
-            progress=progress,
-            task_id=overall_task,
-        ):
-            comparison_df = pd.DataFrame(comparison_rows)
-            primary_mask = comparison_df["is_primary_model"].astype(bool)
-            family_p = comparison_df["permutation_p_value_sex_stratified"].to_numpy(dtype=float)
-            if not np.isfinite(family_p).all():
-                raise RuntimeError(
-                    "Sex-stratified permutation inference failed; refusing to substitute an unrestricted null"
-                )
-            fdr_q, fdr_significant = fdr_correction(family_p, alpha=0.05)
-            comparison_df["permutation_p_fdr_q"] = fdr_q
-            comparison_df["permutation_fdr_significant"] = fdr_significant
-            comparison_df.insert(0, "positive_class", POSITIVE_CLASS_LABEL)
-            outputs["model_comparison"] = write_csv_atomic(
-                comparison_df, model_dir / "model_comparison.csv", index=False
-            )
-            if primary_mask.any():
-                primary_summary_columns = [
-                    "model",
-                    "representation",
-                    "balanced_accuracy_mean",
-                    "permutation_p_value_sex_stratified",
-                ]
-                logger.info(
-                    "Primary result: %s", comparison_df.loc[primary_mask, primary_summary_columns].to_dict("records")
-                )
+        with phase("model_comparison", "Write model comparison table"):
+            outputs["model_comparison"] = _write_model_comparison(comparison_rows, model_dir)
 
-        with _phase_timer(
-            phase_timings,
-            "confounder_analysis",
-            "Write confounder analysis table",
-            metadata_dir=metadata_dir,
-            progress=progress,
-            task_id=overall_task,
-        ):
+        with phase("confounder_analysis", "Write confounder analysis table"):
             outputs["confounder_analysis"] = write_csv_atomic(
                 pd.DataFrame(confounder_rows), confounder_dir / "confounder_analysis.csv", index=False
             )
 
-        with _phase_timer(
-            phase_timings,
-            "null_distributions",
-            "Write permutation null distributions",
-            metadata_dir=metadata_dir,
-            progress=progress,
-            task_id=overall_task,
-        ):
+        with phase("null_distributions", "Write permutation null distributions"):
             outputs["permutation_null_distributions"] = write_csv_atomic(
                 pd.DataFrame(null_distribution_rows),
                 permutation_dir / "permutation_null_distributions.csv",
                 index=False,
             )
 
-        with _phase_timer(
-            phase_timings,
-            "univariate_band_screen",
-            "Write univariate band screen",
-            metadata_dir=metadata_dir,
-            progress=progress,
-            task_id=overall_task,
-        ):
+        with phase("univariate_band_screen", "Write univariate band screen"):
             band_screen_df = pd.concat(band_screen_frames, ignore_index=True) if band_screen_frames else pd.DataFrame()
             outputs["univariate_band_screen"] = write_csv_atomic(
                 band_screen_df, band_screen_dir / "univariate_band_screen.csv", index=False
             )
 
-        with _phase_timer(
-            phase_timings,
-            "report_and_figures",
-            "Write figures and narrative report",
-            metadata_dir=metadata_dir,
-            progress=progress,
-            task_id=overall_task,
-        ):
+        with phase("report_and_figures", "Write figures and narrative report"):
             outputs.update(run_control_vs_disease_ml_report(target_dir, cfg_in))
 
         if output_dir is not None:
-            with _phase_timer(
-                phase_timings,
-                "provenance",
-                "Write provenance artifacts",
-                metadata_dir=metadata_dir,
-                progress=progress,
-                task_id=overall_task,
-            ):
+            with phase("provenance", "Write provenance artifacts"):
                 write_analysis_provenance(
                     target_dir / "00_run_metadata",
                     resolve_data_source(cfg_in),

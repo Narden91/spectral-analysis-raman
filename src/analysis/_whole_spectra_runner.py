@@ -71,50 +71,15 @@ def _partition_whole_spectra_bands(
     return fingerprint_bands, ch_bands
 
 
-def _run_whole_spectra_eda(
-    df_index: pd.DataFrame,
+
+def _run_global_structure_phase(
     groups: dict[str, np.ndarray],
+    all_spectra: np.ndarray,
+    all_labels: np.ndarray,
+    all_sids: list[str],
     wavenumbers: np.ndarray,
-    group_ids: dict[str, list[str]],
     range_title: str,
-) -> dict:
-    analysis_mode = resolve_eda_analysis_mode(config)
-    all_spectra = np.vstack(list(groups.values()))
-    all_labels = np.concatenate([np.full(v.shape[0], k) for k, v in groups.items()])
-    all_sids = []
-    for key in groups:
-        all_sids.extend(group_ids.get(key, [f"{key}_{i}" for i in range(groups[key].shape[0])]))
-
-    split_index = whole_spectra_split_index(wavenumbers)
-    pca_result = None
-    mfa_result = None
-    relational_bands: dict[str, tuple[float, float]] = {}
-    fingerprint_bands: dict[str, tuple[float, float]] = {}
-    ch_bands: dict[str, tuple[float, float]] = {}
-    band_intensity_df = pd.DataFrame()
-    ratio_df = pd.DataFrame()
-    ratio_test_df = pd.DataFrame()
-    cross_region_correlations: dict[str, pd.DataFrame] = {}
-    regional_variance_df = pd.DataFrame()
-
-    if split_index is not None:
-        relational_bands = load_band_definitions(config)
-        if relational_bands:
-            fingerprint_bands, ch_bands = _partition_whole_spectra_bands(
-                relational_bands,
-                wavenumbers,
-                split_index,
-            )
-            band_intensity_df = compute_band_intensities(
-                all_spectra,
-                wavenumbers,
-                relational_bands,
-            )
-    else:
-        logger.warning(
-            "Skipping split-dependent whole-spectrum relational analyses: split index could not be inferred"
-        )
-
+) -> tuple[dict, int]:
     _log_phase("PHASE 1: Whole-spectrum global structure")
 
     structure_dir = get_whole_spectra_phase_dir("global_structure")
@@ -180,7 +145,18 @@ def _run_whole_spectra_eda(
         loading_plot="scree_plot.png",
         wavenumbers=wavenumbers,
     )
+    return pca_result, structure_components
 
+
+def _run_multiblock_phase(
+    all_spectra: np.ndarray,
+    all_labels: np.ndarray,
+    all_sids: list[str],
+    split_index: int | None,
+    structure_components: int,
+    range_title: str,
+) -> dict | None:
+    mfa_result = None
     if split_index is not None:
         emit_mfa = bool(
             config.get("analysis", {}).get("whole_spectra", {}).get("emit_mfa", False)
@@ -225,7 +201,17 @@ def _run_whole_spectra_eda(
             )
         else:
             logger.debug("MFA output disabled by analysis.whole_spectra.emit_mfa")
+    return mfa_result
 
+
+def _run_global_drivers_phase(
+    band_intensity_df: pd.DataFrame,
+    all_labels: np.ndarray,
+    all_sids: list[str],
+    analysis_mode: str,
+    range_title: str,
+) -> pd.DataFrame:
+    ratio_test_df = pd.DataFrame()
     _log_phase("PHASE 2: Whole-spectrum global drivers")
 
     drivers_dir = get_whole_spectra_phase_dir("global_drivers")
@@ -299,7 +285,23 @@ def _run_whole_spectra_eda(
                     analysis_mode,
                 )
                 ratio_test_df = pd.DataFrame()
+    return ratio_test_df
 
+
+def _run_variance_context_phase(
+    df_index: pd.DataFrame,
+    groups: dict[str, np.ndarray],
+    all_spectra: np.ndarray,
+    all_labels: np.ndarray,
+    all_sids: list[str],
+    band_intensity_df: pd.DataFrame,
+    fingerprint_bands: dict[str, tuple[float, float]],
+    ch_bands: dict[str, tuple[float, float]],
+    split_index: int | None,
+    range_title: str,
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], pd.DataFrame]:
+    cross_region_correlations: dict[str, pd.DataFrame] = {}
+    regional_variance_df = pd.DataFrame()
     _log_phase("PHASE 3: Whole-spectrum variance context")
 
     variance_dir = get_whole_spectra_phase_dir("variance_context")
@@ -378,6 +380,60 @@ def _run_whole_spectra_eda(
             title=f"Regional SNV Residual Variance ({range_title})",
         )
         _save_fig(fig, "regional_snv_residual_variance.png", variance_dir)
+    return variance_df, cross_region_correlations, regional_variance_df
+
+
+def _run_whole_spectra_eda(
+    df_index: pd.DataFrame,
+    groups: dict[str, np.ndarray],
+    wavenumbers: np.ndarray,
+    group_ids: dict[str, list[str]],
+    range_title: str,
+) -> dict:
+    analysis_mode = resolve_eda_analysis_mode(config)
+    all_spectra = np.vstack(list(groups.values()))
+    all_labels = np.concatenate([np.full(v.shape[0], k) for k, v in groups.items()])
+    all_sids = []
+    for key in groups:
+        all_sids.extend(group_ids.get(key, [f"{key}_{i}" for i in range(groups[key].shape[0])]))
+
+    split_index = whole_spectra_split_index(wavenumbers)
+    relational_bands: dict[str, tuple[float, float]] = {}
+    fingerprint_bands: dict[str, tuple[float, float]] = {}
+    ch_bands: dict[str, tuple[float, float]] = {}
+    band_intensity_df = pd.DataFrame()
+
+    if split_index is not None:
+        relational_bands = load_band_definitions(config)
+        if relational_bands:
+            fingerprint_bands, ch_bands = _partition_whole_spectra_bands(
+                relational_bands,
+                wavenumbers,
+                split_index,
+            )
+            band_intensity_df = compute_band_intensities(
+                all_spectra,
+                wavenumbers,
+                relational_bands,
+            )
+    else:
+        logger.warning(
+            "Skipping split-dependent whole-spectrum relational analyses: split index could not be inferred"
+        )
+
+    pca_result, structure_components = _run_global_structure_phase(
+        groups, all_spectra, all_labels, all_sids, wavenumbers, range_title,
+    )
+    mfa_result = _run_multiblock_phase(
+        all_spectra, all_labels, all_sids, split_index, structure_components, range_title,
+    )
+    ratio_test_df = _run_global_drivers_phase(
+        band_intensity_df, all_labels, all_sids, analysis_mode, range_title,
+    )
+    variance_df, cross_region_correlations, regional_variance_df = _run_variance_context_phase(
+        df_index, groups, all_spectra, all_labels, all_sids, band_intensity_df,
+        fingerprint_bands, ch_bands, split_index, range_title,
+    )
     return {
         "groups": groups,
         "wavenumbers": wavenumbers,

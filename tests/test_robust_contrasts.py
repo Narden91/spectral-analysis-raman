@@ -4,10 +4,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.analysis.robust_contrasts import (
     _permutation_p_value,
     _permutation_partial_spearman_p_value,
+    _permuted_partial_spearman_exceeds,
     run_anchor_test,
     run_confirmatory_panel_statistics,
     run_panel_contrasts,
@@ -168,6 +170,12 @@ def test_permutation_partial_spearman_p_value_respects_permutation_max() -> None
         stopping_cfg={"permutation_min": 20, "permutation_max": 40, "permutation_check_interval": 10},
     )
     assert 0.0 < p_value <= 1.0
+
+
+def test_partial_spearman_permutation_rejects_undefined_correlation() -> None:
+    with np.errstate(invalid="ignore", divide="ignore"):
+        with pytest.raises(ValueError, match="Permutation score must be finite"):
+            _permuted_partial_spearman_exceeds(np.ones(4), np.arange(4.0), 0.5, 42)
 
 
 def test_ineligible_contrasts_keep_normalized_schema() -> None:

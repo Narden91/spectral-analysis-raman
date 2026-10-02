@@ -15,6 +15,8 @@ diagnostic reported alongside the confound checks already in the manuscript.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
+# Direct execution needs project imports after path and plotting-backend setup.
 import sys
 from pathlib import Path
 

@@ -13,7 +13,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from src import get_biological_pca_canonical_dir, get_classification_phase_dir, get_cross_region_phase_dir
@@ -21,6 +20,7 @@ from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import load_subject_feature_matrix
 from src.analysis.io_utils import load_csv_or_empty
 from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, PhaseStatus
+from src.statistics.multiple_testing import holm_adjust_series
 
 logger = logging.getLogger(__name__)
 
@@ -61,21 +61,6 @@ _DEFAULT_COLUMNS = [
 
 def _integrated_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg.get("analysis", {}).get("integrated_candidates", {})
-
-
-def _holm_adjust(values: pd.Series) -> pd.Series:
-    numeric = pd.to_numeric(values, errors="coerce")
-    result = pd.Series(np.nan, index=values.index, dtype=float)
-    valid = numeric.dropna()
-    if valid.empty:
-        return result
-    order = np.argsort(valid.to_numpy(dtype=float))
-    ordered_values = valid.to_numpy(dtype=float)[order]
-    adjusted_ordered = np.maximum.accumulate(ordered_values * (len(valid) - np.arange(len(valid))))
-    adjusted = np.empty(len(valid), dtype=float)
-    adjusted[order] = np.minimum(adjusted_ordered, 1.0)
-    result.loc[valid.index] = adjusted
-    return result
 
 
 def _load_table_if_exists(path: str | Path | None) -> pd.DataFrame | None:
@@ -460,7 +445,7 @@ def run_integrated_candidates(
     )
     candidates["raw_p"] = pd.to_numeric(candidates.get("min_cluster_p_value"), errors="coerce")
     candidates["within_scan_p"] = pd.to_numeric(candidates.get("min_cluster_p_value"), errors="coerce")
-    candidates["family_adjusted_p"] = _holm_adjust(candidates["within_scan_p"])
+    candidates["family_adjusted_p"] = holm_adjust_series(candidates["within_scan_p"])
     candidates["covariate_persisted"] = _annotate_covariate_persistence(
         candidates,
         covariate_models,

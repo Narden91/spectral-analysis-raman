@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 import time
-from contextlib import contextmanager
+from collections.abc import Callable
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +41,7 @@ from src.analysis.spectral_regions import run_candidate_region_detector
 from src.analysis.spectral_shape import run_spectral_shape
 from src.analysis.splsda import run_splsda_classifier
 from src.reporting.candidate_region_report import run_candidate_region_report, run_panel_report_section
+from src.statistics.multiple_testing import holm_adjust
 
 logger = logging.getLogger(__name__)
 
@@ -117,18 +120,6 @@ def _write_phase_status_manifest(outputs: dict[str, dict[str, object]]) -> Path 
     return path
 
 
-def _holm_adjust(p_values: np.ndarray) -> np.ndarray:
-    """Return Holm family-wise adjusted p-values in input order."""
-    n = len(p_values)
-    if n == 0:
-        return np.array([], dtype=float)
-    order = np.argsort(p_values)
-    adjusted_sorted = np.maximum.accumulate(p_values[order] * (n - np.arange(n)))
-    adjusted = np.empty(n, dtype=float)
-    adjusted[order] = np.minimum(adjusted_sorted, 1.0)
-    return adjusted
-
-
 def _collect_cross_phase_multiplicity(
     outputs: dict[str, dict[str, Path]],
 ) -> pd.DataFrame | None:
@@ -180,7 +171,7 @@ def _collect_cross_phase_multiplicity(
     finite_mask = summary["cluster_p_value"].notna() & np.isfinite(summary["cluster_p_value"])
     q = np.full(len(summary), np.nan)
     if finite_mask.any():
-        q[finite_mask] = _holm_adjust(summary.loc[finite_mask, "cluster_p_value"].to_numpy(dtype=float))
+        q[finite_mask] = holm_adjust(summary.loc[finite_mask, "cluster_p_value"].to_numpy(dtype=float))
     summary["family_id"] = "exploratory_whole_spectrum_clusters"
     summary["raw_p"] = summary["cluster_p_value"]
     summary["within_scan_p"] = summary["cluster_p_value"]
@@ -201,256 +192,271 @@ def _cfg_for_preregistered_minimal_panel(cfg: dict) -> dict:
     return panel_cfg
 
 
-def run_disease_only_cross_region_pipeline(
+def _run_clinical_and_candidate_phases(
     *,
     feature_matrix_path: str | Path | None,
-    cfg: dict | None = None,
-) -> dict[str, dict[str, Path]]:
-    """Run disease-only cross-region phases that depend on Biological PCA exports."""
-    cfg = config if cfg is None else cfg
-    outputs: dict[str, dict[str, Path]] = {}
-    phase_timings: list[dict[str, object]] = []
+    cfg: dict,
+    outputs: dict[str, dict[str, object]],
+    phase: Callable[[str, str], AbstractContextManager[None]],
+) -> tuple[dict[str, Path], dict[str, Path]]:
+    clinical_outputs: dict[str, Path] = {}
+    if _phase_enabled(cfg, "clinical_correlation_matrix"):
+        with phase("clinical_correlation_matrix", "Clinical correlation matrix"):
+            clinical_outputs = run_clinical_correlation_matrix(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
+            outputs["clinical_correlation_matrix"] = clinical_outputs
 
-    _progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[bold blue]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TimeElapsedColumn(),
-        transient=False,
-    )
-    # 22 = total possible phase blocks in this pipeline
-    _task = _progress.add_task("Disease-only cross-region phases", total=22)
+    longitudinal_outputs: dict[str, Path] = {}
+    if _phase_enabled(cfg, "longitudinal_moca"):
+        with phase("longitudinal_moca", "Longitudinal Delta MoCA"):
+            longitudinal_outputs = run_longitudinal_moca(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
+            outputs["longitudinal_moca"] = longitudinal_outputs
 
-    with _progress:
-        clinical_outputs: dict[str, Path] = {}
-        if _phase_enabled(cfg, "clinical_correlation_matrix"):
-            with _phase_timer(phase_timings, "clinical_correlation_matrix", "Clinical correlation matrix", _progress, _task):
-                clinical_outputs = run_clinical_correlation_matrix(
-                    feature_matrix_path=feature_matrix_path,
-                    cfg=cfg,
-                )
-                outputs["clinical_correlation_matrix"] = clinical_outputs
+    stratification_outputs: dict[str, Path] = {}
+    if _phase_enabled(cfg, "disease_stratification"):
+        with phase("disease_stratification", "Disease stratification"):
+            stratification_outputs = run_disease_stratification(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
+            outputs["disease_stratification"] = stratification_outputs
 
-        longitudinal_outputs: dict[str, Path] = {}
-        if _phase_enabled(cfg, "longitudinal_moca"):
-            with _phase_timer(phase_timings, "longitudinal_moca", "Longitudinal Delta MoCA", _progress, _task):
-                longitudinal_outputs = run_longitudinal_moca(
-                    feature_matrix_path=feature_matrix_path,
-                    cfg=cfg,
-                )
-                outputs["longitudinal_moca"] = longitudinal_outputs
+    candidate_outputs: dict[str, Path] = {}
+    if _phase_enabled(cfg, "candidate_regions"):
+        with phase("candidate_regions", "Candidate-region detector"):
+            candidate_outputs = run_candidate_region_detector(
+                clinical_outputs=clinical_outputs,
+                longitudinal_outputs=longitudinal_outputs,
+                stratification_outputs=stratification_outputs,
+                cfg=cfg,
+            )
+            outputs["candidate_regions"] = candidate_outputs
 
-        stratification_outputs: dict[str, Path] = {}
-        if _phase_enabled(cfg, "disease_stratification"):
-            with _phase_timer(phase_timings, "disease_stratification", "Disease stratification", _progress, _task):
-                stratification_outputs = run_disease_stratification(
-                    feature_matrix_path=feature_matrix_path,
-                    cfg=cfg,
-                )
-                outputs["disease_stratification"] = stratification_outputs
+    if _phase_enabled(cfg, "covariate_models"):
+        with phase("covariate_models", "Covariate-adjusted region models"):
+            outputs["covariate_models"] = run_covariate_region_models(
+                feature_matrix_path=feature_matrix_path,
+                candidate_regions_path=candidate_outputs.get("candidate_regions_cluster_corrected"),
+                cfg=cfg,
+            )
 
-        candidate_outputs: dict[str, Path] = {}
-        if _phase_enabled(cfg, "candidate_regions"):
-            with _phase_timer(phase_timings, "candidate_regions", "Candidate-region detector", _progress, _task):
-                candidate_outputs = run_candidate_region_detector(
-                    clinical_outputs=clinical_outputs,
-                    longitudinal_outputs=longitudinal_outputs,
-                    stratification_outputs=stratification_outputs,
-                    cfg=cfg,
-                )
-                outputs["candidate_regions"] = candidate_outputs
+    pls_outputs: dict[str, Path] = {}
+    if _phase_enabled(cfg, "pls_regression"):
+        with phase("pls_regression", "PLS1 regression"):
+            pls_outputs = run_pls_regression(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
+            outputs["pls_regression"] = pls_outputs
 
-        if _phase_enabled(cfg, "covariate_models"):
-            with _phase_timer(phase_timings, "covariate_models", "Covariate-adjusted region models", _progress, _task):
-                outputs["covariate_models"] = run_covariate_region_models(
-                    feature_matrix_path=feature_matrix_path,
-                    candidate_regions_path=candidate_outputs.get("candidate_regions_cluster_corrected"),
-                    cfg=cfg,
-                )
+    splsda_outputs: dict[str, Path] = {}
+    if _phase_enabled(cfg, "splsda"):
+        with phase("splsda", "PLS-L1DA exploratory classifier"):
+            splsda_outputs = run_splsda_classifier(
+                feature_matrix_path=feature_matrix_path,
+                pls_outputs=pls_outputs,
+                cfg=cfg,
+            )
+            outputs["splsda"] = splsda_outputs
 
-        pls_outputs: dict[str, Path] = {}
-        if _phase_enabled(cfg, "pls_regression"):
-            with _phase_timer(phase_timings, "pls_regression", "PLS1 regression", _progress, _task):
-                pls_outputs = run_pls_regression(
-                    feature_matrix_path=feature_matrix_path,
-                    cfg=cfg,
-                )
-                outputs["pls_regression"] = pls_outputs
+    if _phase_enabled(cfg, "biochemical_ratios"):
+        with phase("biochemical_ratios", "Biochemical ratio analysis"):
+            outputs["biochemical_ratios"] = run_biochemical_ratios(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
+    return pls_outputs, splsda_outputs
 
-        splsda_outputs: dict[str, Path] = {}
-        if _phase_enabled(cfg, "splsda"):
-            with _phase_timer(phase_timings, "splsda", "PLS-L1DA exploratory classifier", _progress, _task):
-                splsda_outputs = run_splsda_classifier(
-                    feature_matrix_path=feature_matrix_path,
-                    pls_outputs=pls_outputs,
-                    cfg=cfg,
-                )
-                outputs["splsda"] = splsda_outputs
 
-        if _phase_enabled(cfg, "biochemical_ratios"):
-            with _phase_timer(phase_timings, "biochemical_ratios", "Biochemical ratio analysis", _progress, _task):
-                outputs["biochemical_ratios"] = run_biochemical_ratios(
-                    feature_matrix_path=feature_matrix_path,
-                    cfg=cfg,
-                )
+def _run_fixed_panel_phases(
+    *,
+    feature_matrix_path: str | Path | None,
+    cfg: dict,
+    outputs: dict[str, dict[str, object]],
+    phase: Callable[[str, str], AbstractContextManager[None]],
+) -> dict[str, Path]:
+    preregistered_outputs: dict[str, Path] = {}
+    if _phase_enabled(cfg, "preregistered_panel"):
+        with phase("preregistered_panel", "Fixed post hoc Raman panel"):
+            preregistered_outputs = run_preregistered_panel(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
+            outputs["preregistered_panel"] = preregistered_outputs
 
-        preregistered_outputs: dict[str, Path] = {}
-        if _phase_enabled(cfg, "preregistered_panel"):
-            with _phase_timer(phase_timings, "preregistered_panel", "Fixed post hoc Raman panel", _progress, _task):
-                preregistered_outputs = run_preregistered_panel(
-                    feature_matrix_path=feature_matrix_path,
-                    cfg=cfg,
-                )
-                outputs["preregistered_panel"] = preregistered_outputs
+        with phase("confirmatory_panel", "Exploratory fixed-panel statistics"):
+            outputs["confirmatory_panel"] = run_confirmatory_panel_statistics(
+                feature_matrix_path=feature_matrix_path,
+                panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
+                cfg=cfg,
+            )
 
-            with _phase_timer(phase_timings, "confirmatory_panel", "Exploratory fixed-panel statistics", _progress, _task):
-                outputs["confirmatory_panel"] = run_confirmatory_panel_statistics(
-                    feature_matrix_path=feature_matrix_path,
-                    panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
-                    cfg=cfg,
-                )
-
-            if _phase_enabled(cfg, "endpoint_consistency"):
-                with _phase_timer(phase_timings, "endpoint_consistency", "Endpoint consistency analysis", _progress, _task):
-                    outputs["endpoint_consistency"] = run_endpoint_consistency(
-                        associations_path=outputs["confirmatory_panel"].get("panel_continuous_associations"),
-                        cfg=cfg,
-                    )
-
-            if _phase_enabled(cfg, "robustness_ranking"):
-                with _phase_timer(phase_timings, "robustness_ranking", "Descriptive evidence flags", _progress, _task):
-                    outputs["robustness_ranking"] = run_robustness_ranking(
-                        contrasts_path=outputs["confirmatory_panel"].get("panel_contrast_tests"),
-                        consistency_path=outputs.get("endpoint_consistency", {}).get("endpoint_consistency"),
-                        cfg=cfg,
-                    )
-
-        integrated_outputs: dict[str, Path] = {}
-        if _phase_enabled(cfg, "integrated_candidates"):
-            with _phase_timer(phase_timings, "integrated_candidates", "Integrated candidate evidence table", _progress, _task):
-                integrated_outputs = run_integrated_candidates(
-                    feature_matrix_path=feature_matrix_path,
-                    pls_feature_effects_path=pls_outputs.get("pls_feature_effects"),
-                    pls_performance_path=pls_outputs.get("pls_regression_performance"),
-                    splsda_bands_path=splsda_outputs.get("pls_l1da_selected_bands", ""),
-                    cfg=cfg,
-                )
-                outputs["integrated_candidates"] = integrated_outputs
-
-        if _phase_enabled(cfg, "disease_subgroups"):
-            with _phase_timer(phase_timings, "disease_subgroups", "Disease subgroup analysis", _progress, _task):
-                outputs["disease_subgroups"] = run_disease_subgroups(
-                    feature_matrix_path=feature_matrix_path,
-                    integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
+        if _phase_enabled(cfg, "endpoint_consistency"):
+            with phase("endpoint_consistency", "Endpoint consistency analysis"):
+                outputs["endpoint_consistency"] = run_endpoint_consistency(
+                    associations_path=outputs["confirmatory_panel"].get("panel_continuous_associations"),
                     cfg=cfg,
                 )
 
-        if preregistered_outputs and _phase_enabled(cfg, "panel_cluster_summary"):
-            with _phase_timer(phase_timings, "panel_cluster_summary", "Panel cluster summary", _progress, _task):
-                outputs["panel_cluster_summary"] = run_panel_cluster_summary(
-                    feature_matrix_path=feature_matrix_path,
-                    panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
-                    subgroup_assignments_path=outputs.get("disease_subgroups", {}).get("disease_subgroup_assignments"),
+        if _phase_enabled(cfg, "robustness_ranking"):
+            with phase("robustness_ranking", "Descriptive evidence flags"):
+                outputs["robustness_ranking"] = run_robustness_ranking(
+                    contrasts_path=outputs["confirmatory_panel"].get("panel_contrast_tests"),
+                    consistency_path=outputs.get("endpoint_consistency", {}).get("endpoint_consistency"),
                     cfg=cfg,
                 )
+    return preregistered_outputs
 
-        panel_outputs: dict[str, Path] = {}
-        if _phase_enabled(cfg, "minimal_panel"):
-            with _phase_timer(phase_timings, "minimal_panel", "Minimal candidate Raman panel", _progress, _task):
-                panel_outputs = run_minimal_panel(
-                    feature_matrix_path=feature_matrix_path,
-                    integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
-                    cfg=cfg,
-                )
-                outputs["minimal_panel"] = panel_outputs
 
-        preregistered_minimal_outputs: dict[str, Path] = {}
-        if preregistered_outputs and _phase_enabled(cfg, "panel_minimal_model"):
-            with _phase_timer(phase_timings, "panel_minimal_model", "Fixed-panel minimal model", _progress, _task):
-                preregistered_minimal_outputs = run_minimal_panel(
-                    feature_matrix_path=feature_matrix_path,
-                    panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
-                    output_dir=get_confirmatory_panel_dir(),
-                    cfg=_cfg_for_preregistered_minimal_panel(cfg),
-                )
-                outputs["panel_minimal_model"] = preregistered_minimal_outputs
+def _run_candidate_followup_phases(
+    *,
+    feature_matrix_path: str | Path | None,
+    cfg: dict,
+    outputs: dict[str, dict[str, object]],
+    phase: Callable[[str, str], AbstractContextManager[None]],
+    pls_outputs: dict[str, Path],
+    splsda_outputs: dict[str, Path],
+    preregistered_outputs: dict[str, Path],
+) -> None:
+    integrated_outputs: dict[str, Path] = {}
+    if _phase_enabled(cfg, "integrated_candidates"):
+        with phase("integrated_candidates", "Integrated candidate evidence table"):
+            integrated_outputs = run_integrated_candidates(
+                feature_matrix_path=feature_matrix_path,
+                pls_feature_effects_path=pls_outputs.get("pls_feature_effects"),
+                pls_performance_path=pls_outputs.get("pls_regression_performance"),
+                splsda_bands_path=splsda_outputs.get("pls_l1da_selected_bands", ""),
+                cfg=cfg,
+            )
+            outputs["integrated_candidates"] = integrated_outputs
 
-        panel_report_outputs: dict[str, Path] = {}
-        if preregistered_outputs and _phase_enabled(cfg, "panel_report"):
-            with _phase_timer(phase_timings, "panel_report", "Four-domain panel report", _progress, _task):
-                panel_report_outputs = run_panel_report_section(
-                    evidence_flags_path=outputs.get("robustness_ranking", {}).get("panel_evidence_flags"),
-                    anchor_result_path=outputs.get("confirmatory_panel", {}).get("primary_anchor_result"),
-                    cfg=cfg,
-                )
-                outputs["panel_report"] = panel_report_outputs
+    if _phase_enabled(cfg, "disease_subgroups"):
+        with phase("disease_subgroups", "Disease subgroup analysis"):
+            outputs["disease_subgroups"] = run_disease_subgroups(
+                feature_matrix_path=feature_matrix_path,
+                integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
+                cfg=cfg,
+            )
 
-        if _phase_enabled(cfg, "publication_report"):
-            with _phase_timer(phase_timings, "publication_report", "Publication report generator", _progress, _task):
-                outputs["publication_report"] = run_candidate_region_report(
-                    integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
-                    minimal_panel_path=panel_outputs.get("minimal_candidate_panel"),
-                    minimal_panel_status=panel_outputs.get("_status"),
-                    panel_report_section_path=panel_report_outputs.get("panel_report_section"),
-                    cfg=cfg,
-                )
+    if preregistered_outputs and _phase_enabled(cfg, "panel_cluster_summary"):
+        with phase("panel_cluster_summary", "Panel cluster summary"):
+            outputs["panel_cluster_summary"] = run_panel_cluster_summary(
+                feature_matrix_path=feature_matrix_path,
+                panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
+                subgroup_assignments_path=outputs.get("disease_subgroups", {}).get("disease_subgroup_assignments"),
+                cfg=cfg,
+            )
 
-        # -------------------------------------------------------------------
-        # Tier 2 — Structure-aware biochemical interpretability (Phases M–P)
-        # -------------------------------------------------------------------
+    panel_outputs: dict[str, Path] = {}
+    if _phase_enabled(cfg, "minimal_panel"):
+        with phase("minimal_panel", "Minimal candidate Raman panel"):
+            panel_outputs = run_minimal_panel(
+                feature_matrix_path=feature_matrix_path,
+                integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
+                cfg=cfg,
+            )
+            outputs["minimal_panel"] = panel_outputs
 
-        if _phase_enabled(cfg, "spectral_shape"):
-            with _phase_timer(phase_timings, "spectral_shape", "Spectral-shape analysis", _progress, _task):
-                outputs["spectral_shape"] = run_spectral_shape(
-                    feature_matrix_path=feature_matrix_path,
-                    cfg=cfg,
-                )
+    preregistered_minimal_outputs: dict[str, Path] = {}
+    if preregistered_outputs and _phase_enabled(cfg, "panel_minimal_model"):
+        with phase("panel_minimal_model", "Fixed-panel minimal model"):
+            preregistered_minimal_outputs = run_minimal_panel(
+                feature_matrix_path=feature_matrix_path,
+                panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
+                output_dir=get_confirmatory_panel_dir(),
+                cfg=_cfg_for_preregistered_minimal_panel(cfg),
+            )
+            outputs["panel_minimal_model"] = preregistered_minimal_outputs
 
-        if _phase_enabled(cfg, "nmf_decomposition"):
-            with _phase_timer(phase_timings, "nmf_decomposition", "NMF decomposition", _progress, _task):
-                outputs["nmf_decomposition"] = run_nmf_decomposition(
-                    feature_matrix_path=feature_matrix_path,
-                    cfg=cfg,
-                )
+    panel_report_outputs: dict[str, Path] = {}
+    if preregistered_outputs and _phase_enabled(cfg, "panel_report"):
+        with phase("panel_report", "Four-domain panel report"):
+            panel_report_outputs = run_panel_report_section(
+                evidence_flags_path=outputs.get("robustness_ranking", {}).get("panel_evidence_flags"),
+                anchor_result_path=outputs.get("confirmatory_panel", {}).get("primary_anchor_result"),
+                cfg=cfg,
+            )
+            outputs["panel_report"] = panel_report_outputs
 
-        if _phase_enabled(cfg, "spectral_descriptors"):
-            with _phase_timer(phase_timings, "spectral_descriptors", "Spectral entropy / dispersion", _progress, _task):
-                outputs["spectral_descriptors"] = run_spectral_descriptors(
-                    feature_matrix_path=feature_matrix_path,
-                    cfg=cfg,
-                )
+    if _phase_enabled(cfg, "publication_report"):
+        with phase("publication_report", "Publication report generator"):
+            outputs["publication_report"] = run_candidate_region_report(
+                integrated_candidates_path=integrated_outputs.get("integrated_candidate_regions"),
+                minimal_panel_path=panel_outputs.get("minimal_candidate_panel"),
+                minimal_panel_status=panel_outputs.get("_status"),
+                panel_report_section_path=panel_report_outputs.get("panel_report_section"),
+                cfg=cfg,
+            )
 
-        if _phase_enabled(cfg, "discriminant_spectra"):
-            with _phase_timer(phase_timings, "discriminant_spectra", "Difference-spectrum signatures", _progress, _task):
-                outputs["discriminant_spectra"] = run_discriminant_spectra(
-                    feature_matrix_path=feature_matrix_path,
-                    cfg=cfg,
-                )
 
-        if preregistered_outputs and _phase_enabled(cfg, "feature_coupling"):
-            with _phase_timer(phase_timings, "feature_coupling", "Cross-feature coupling", _progress, _task):
-                outputs["feature_coupling"] = run_feature_coupling(
-                    panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
-                    cfg=cfg,
-                )
+def _run_spectral_structure_phases(
+    *,
+    feature_matrix_path: str | Path | None,
+    cfg: dict,
+    outputs: dict[str, dict[str, object]],
+    phase: Callable[[str, str], AbstractContextManager[None]],
+    preregistered_outputs: dict[str, Path],
+) -> None:
+    if _phase_enabled(cfg, "spectral_shape"):
+        with phase("spectral_shape", "Spectral-shape analysis"):
+            outputs["spectral_shape"] = run_spectral_shape(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
 
-        if preregistered_outputs and _phase_enabled(cfg, "index_clustering", default=False):
-            with _phase_timer(phase_timings, "index_clustering", "Index-space clustering", _progress, _task):
-                outputs["index_clustering"] = run_index_clustering(
-                    panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
-                    cfg=cfg,
-                )
+    if _phase_enabled(cfg, "nmf_decomposition"):
+        with phase("nmf_decomposition", "NMF decomposition"):
+            outputs["nmf_decomposition"] = run_nmf_decomposition(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
 
-        if _phase_enabled(cfg, "journal_figures"):
-            with _phase_timer(phase_timings, "journal_figures", "Journal figure set", _progress, _task):
-                outputs["journal_figures"] = run_journal_figures(
-                    panel_matrix_path=preregistered_outputs.get("panel_feature_matrix")
-                    if preregistered_outputs else None,
-                    cfg=cfg,
-                )
+    if _phase_enabled(cfg, "spectral_descriptors"):
+        with phase("spectral_descriptors", "Spectral entropy / dispersion"):
+            outputs["spectral_descriptors"] = run_spectral_descriptors(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
 
-    # Cross-scan Holm correction complements within-scan max-cluster correction.
+    if _phase_enabled(cfg, "discriminant_spectra"):
+        with phase("discriminant_spectra", "Difference-spectrum signatures"):
+            outputs["discriminant_spectra"] = run_discriminant_spectra(
+                feature_matrix_path=feature_matrix_path,
+                cfg=cfg,
+            )
+
+    if preregistered_outputs and _phase_enabled(cfg, "feature_coupling"):
+        with phase("feature_coupling", "Cross-feature coupling"):
+            outputs["feature_coupling"] = run_feature_coupling(
+                panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
+                cfg=cfg,
+            )
+
+    if preregistered_outputs and _phase_enabled(cfg, "index_clustering", default=False):
+        with phase("index_clustering", "Index-space clustering"):
+            outputs["index_clustering"] = run_index_clustering(
+                panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
+                cfg=cfg,
+            )
+
+    if _phase_enabled(cfg, "journal_figures"):
+        with phase("journal_figures", "Journal figure set"):
+            outputs["journal_figures"] = run_journal_figures(
+                panel_matrix_path=preregistered_outputs.get("panel_feature_matrix")
+                if preregistered_outputs else None,
+                cfg=cfg,
+            )
+
+
+def _write_cross_phase_multiplicity(
+    outputs: dict[str, dict[str, object]],
+    cfg: dict,
+) -> None:
     try:
         multiplicity_df = _collect_cross_phase_multiplicity(outputs)
         if multiplicity_df is not None and not multiplicity_df.empty:
@@ -474,6 +480,51 @@ def run_disease_only_cross_region_pipeline(
             ).as_row()
         }
 
+
+def run_disease_only_cross_region_pipeline(
+    *,
+    feature_matrix_path: str | Path | None,
+    cfg: dict | None = None,
+) -> dict[str, dict[str, Path]]:
+    """Run disease-only cross-region phases that depend on Biological PCA exports."""
+    cfg = config if cfg is None else cfg
+    outputs: dict[str, dict[str, Path]] = {}
+    phase_timings: list[dict[str, object]] = []
+
+    _progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        transient=False,
+    )
+    # 22 = total possible phase blocks in this pipeline
+    _task = _progress.add_task("Disease-only cross-region phases", total=22)
+
+    phase = partial(_phase_timer, phase_timings, progress=_progress, task_id=_task)
+    with _progress:
+        pls_outputs, splsda_outputs = _run_clinical_and_candidate_phases(
+            feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
+            phase=phase,
+        )
+        preregistered_outputs = _run_fixed_panel_phases(
+            feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
+            phase=phase,
+        )
+        _run_candidate_followup_phases(
+            feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
+            phase=phase,
+            pls_outputs=pls_outputs, splsda_outputs=splsda_outputs,
+            preregistered_outputs=preregistered_outputs,
+        )
+        _run_spectral_structure_phases(
+            feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
+            phase=phase,
+            preregistered_outputs=preregistered_outputs,
+        )
+
+    _write_cross_phase_multiplicity(outputs, cfg)
     _write_phase_status_manifest(outputs)
     _write_phase_timings(phase_timings)
     return outputs

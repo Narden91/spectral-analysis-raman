@@ -149,6 +149,36 @@ def test_build_parsed_store_and_validate(configured_store_paths: dict[str, Path]
     assert not (store.path / "area_summaries_1300.npz").exists()
 
 
+def test_preprocessed_store_uses_supplied_normalization_config(configured_store_paths: dict[str, Path]) -> None:
+    original = deepcopy(src.config)
+    override = deepcopy(original)
+    for region in ("fingerprint", "ch_stretch"):
+        override["preprocessing"]["ranges"][region]["normalization"] = {"method": "none"}
+    store = build_preprocessed_store(override, force=True)
+    for code in ("1300", "2850"):
+        normalized = np.load(store.path / f"normalized_{code}.npy")
+        pre = np.load(store.path / f"pre_normalization_{code}.npy")
+        assert len(normalized) > 0
+        np.testing.assert_array_equal(normalized, pre)
+    assert validate_store(store.path, "preprocessed", override, strict=True).is_valid
+    assert src.config == original
+
+
+def test_parsed_store_uses_supplied_clinical_path(configured_store_paths: dict[str, Path]) -> None:
+    original = deepcopy(src.config)
+    override = deepcopy(original)
+    path = configured_store_paths["clinical_path"].with_name("other_clinical.csv")
+    clinical = pd.read_csv(configured_store_paths["clinical_path"])
+    clinical["age_years"] = 99
+    clinical.to_csv(path, index=False)
+    override["data"]["clinical_data_path"] = str(path)
+    store = build_parsed_store(override, force=True)
+    subjects = pd.read_parquet(store.path / "subjects.parquet")
+    assert subjects["age_years"].tolist() == [99, 99]
+    assert validate_store(store.path, "parsed", override, strict=True).is_valid
+    assert src.config == original
+
+
 def test_atomic_store_build_never_creates_staging_directories_in_data_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

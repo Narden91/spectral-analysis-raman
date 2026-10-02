@@ -379,7 +379,9 @@ def _permuted_partial_spearman_exceeds(
 ) -> bool:
     rng = np.random.default_rng(seed)
     permuted = abs(float(np.corrcoef(feature_residual, rng.permutation(endpoint_residual))[0, 1]))
-    return bool(np.isfinite(permuted) and permuted >= observed - 1e-12)
+    if not np.isfinite(permuted):
+        raise ValueError("Permutation score must be finite")
+    return bool(permuted >= observed - 1e-12)
 
 
 def run_anchor_test(

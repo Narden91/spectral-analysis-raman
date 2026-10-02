@@ -62,16 +62,16 @@ def flatten_spectra_rows(spectra: np.ndarray) -> np.ndarray:
     return arr.reshape(0, 0)
 
 
-def _pre_cfg() -> dict:
-    return config.get("preprocessing", {})
+def _pre_cfg(cfg: dict | None = None) -> dict:
+    return (config if cfg is None else cfg).get("preprocessing", {})
 
 
-def _range_cfg(region_key: str) -> dict:
-    return _pre_cfg().get("ranges", {}).get(region_key, {})
+def _range_cfg(region_key: str, cfg: dict | None = None) -> dict:
+    return _pre_cfg(cfg=cfg).get("ranges", {}).get(region_key, {})
 
 
-def _artifacts_cfg() -> dict:
-    return _pre_cfg().get("artifacts", {})
+def _artifacts_cfg(cfg: dict | None = None) -> dict:
+    return _pre_cfg(cfg=cfg).get("artifacts", {})
 
 
 def _resolve_region_key(wavenumbers: np.ndarray, region: Optional[str]) -> str:
@@ -99,10 +99,12 @@ def _resolve_region_key(wavenumbers: np.ndarray, region: Optional[str]) -> str:
     )
 
 
-def _normalization_method(method: Optional[str], mode: Optional[str], region_key: Optional[str] = None) -> str:
-    nm_cfg = _pre_cfg().get("normalization", {})
+def _normalization_method(
+    method: Optional[str], mode: Optional[str], region_key: Optional[str] = None, cfg: dict | None = None,
+) -> str:
+    nm_cfg = _pre_cfg(cfg=cfg).get("normalization", {})
     if region_key is not None:
-        range_nm_cfg = _range_cfg(region_key).get("normalization", {})
+        range_nm_cfg = _range_cfg(region_key, cfg=cfg).get("normalization", {})
         if "method" in range_nm_cfg:
             if mode == "cross":
                 return "none"
@@ -119,17 +121,17 @@ def _normalization_method(method: Optional[str], mode: Optional[str], region_key
     return str(method if method is not None else nm_cfg.get("method", "vector")).strip().lower()
 
 
-def _validate_preprocessing_config(region_key: str) -> None:
-    pre_cfg = _pre_cfg()
+def _validate_preprocessing_config(region_key: str, cfg: dict | None = None) -> None:
+    pre_cfg = _pre_cfg(cfg=cfg)
     nm_cfg = pre_cfg.get("normalization", {})
-    norm_method = _normalization_method(nm_cfg.get("method"), None, region_key)
+    norm_method = _normalization_method(nm_cfg.get("method"), None, region_key, cfg=cfg)
     allowed = {"none", "area", "snv", "vector", "minmax", "robust"}
     if norm_method not in allowed:
         raise ValueError(f"Unknown normalization method in config: {norm_method}")
     if norm_method == "snv" and bool(nm_cfg.get("vector_norm_after_snv", False)):
         raise ValueError("SNV and vector normalization cannot be stacked in one preprocessing pass")
 
-    sm_cfg = {**pre_cfg.get("smoothing", {}), **_range_cfg(region_key).get("smoothing", {})}
+    sm_cfg = {**pre_cfg.get("smoothing", {}), **_range_cfg(region_key, cfg=cfg).get("smoothing", {})}
     if bool(sm_cfg.get("enabled", False)):
         window_length = int(sm_cfg.get("window_length", 5))
         polyorder = int(sm_cfg.get("polyorder", 2))
@@ -140,7 +142,7 @@ def _validate_preprocessing_config(region_key: str) -> None:
         if polyorder >= window_length:
             raise ValueError("Smoothing polyorder must be smaller than window_length")
 
-    bl_cfg = {**pre_cfg.get("baseline", {}), **_range_cfg(region_key).get("baseline", {})}
+    bl_cfg = {**pre_cfg.get("baseline", {}), **_range_cfg(region_key, cfg=cfg).get("baseline", {})}
     bl_method = str(bl_cfg.get("method", "arpls")).strip().lower()
     allowed_bl = {"arpls", "als", "snip"}
     if bl_method not in allowed_bl:
@@ -157,8 +159,8 @@ def _validate_preprocessing_config(region_key: str) -> None:
             raise ValueError(f"Baseline max_iter must be >= 1, got {max_iter}")
 
 
-def _spectral_quality_cfg() -> dict:
-    return _pre_cfg().get("quality_filter", {}).get("spectral_quality", {})
+def _spectral_quality_cfg(cfg: dict | None = None) -> dict:
+    return _pre_cfg(cfg=cfg).get("quality_filter", {}).get("spectral_quality", {})
 
 
 def _resolve_pipeline_options(
@@ -167,14 +169,15 @@ def _resolve_pipeline_options(
     filter_quality: Optional[bool],
     smooth: Optional[bool],
     record_stages: Optional[bool],
+    cfg: dict | None = None,
 ) -> _PipelineOptions:
-    pre_cfg = _pre_cfg()
-    ranges_cfg = _range_cfg(region_key)
-    artifact_cfg = _artifacts_cfg()
+    pre_cfg = _pre_cfg(cfg=cfg)
+    ranges_cfg = _range_cfg(region_key, cfg=cfg)
+    artifact_cfg = _artifacts_cfg(cfg=cfg)
     quality_enabled = bool(
         filter_quality
         if filter_quality is not None
-        else _spectral_quality_cfg().get("enabled", True)
+        else _spectral_quality_cfg(cfg=cfg).get("enabled", True)
     )
     smooth_enabled = bool(
         smooth
@@ -228,7 +231,7 @@ def _update_qc_metrics(audit_metrics_df: pd.DataFrame, stage_metrics_df: pd.Data
             audit_metrics_df.loc[row_indices, column] = stage_metrics_df[column].to_numpy()
 
 
-def _compute_qc_metrics(spectra: np.ndarray) -> pd.DataFrame:
+def _compute_qc_metrics(spectra: np.ndarray, cfg: dict | None = None) -> pd.DataFrame:
     if spectra.size == 0:
         return pd.DataFrame(
             columns=[
@@ -317,7 +320,7 @@ def _compute_qc_metrics(spectra: np.ndarray) -> pd.DataFrame:
     signal = np.where(signal_finite, signal_window, -np.inf).max(axis=1)
     signal[~signal_finite.any(axis=1)] = np.nan
 
-    noise_channels = int(_spectral_quality_cfg().get("noise_channels", 20))
+    noise_channels = int(_spectral_quality_cfg(cfg=cfg).get("noise_channels", 20))
     noise_window = _noise_window(spectra, noise_channels)
     noise_finite = np.isfinite(noise_window)
     noise_counts = noise_finite.sum(axis=1)
@@ -371,8 +374,9 @@ def _apply_initial_qc(
     metrics_df: pd.DataFrame,
     min_spectral_std: Optional[float] = None,
     saturation_value: Optional[float] = None,
+    cfg: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
-    dp_cfg = _pre_cfg().get("dead_pixel", {})
+    dp_cfg = _pre_cfg(cfg=cfg).get("dead_pixel", {})
     min_std = float(min_spectral_std if min_spectral_std is not None else dp_cfg.get("min_spectral_std", 1.0))
     sat_val = float(saturation_value if saturation_value is not None else dp_cfg.get("saturation_value", 65000))
 
@@ -568,14 +572,14 @@ def correct_baseline(
     arpls_ratio: Optional[float] = None,
     arpls_max_iter: Optional[int] = None,
     return_baseline: bool = False,
+    cfg: dict | None = None,
 ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Baseline correction with explicit arPLS parameter support.
 
-    When ``arpls_*`` arguments are omitted they are read from the merged
-    range-specific baseline config that the caller supplies via ``bl_cfg``
-    or from the global preprocessing config.
+    Explicit arguments override settings in ``cfg``. When ``cfg`` is omitted,
+    the module-level preprocessing defaults are used.
     """
-    bl_cfg = _pre_cfg().get("baseline", {})
+    bl_cfg = _pre_cfg(cfg=cfg).get("baseline", {})
     chosen_method = str(method if method is not None else bl_cfg.get("method", "arpls")).strip().lower()
     lam_value = float(lam if lam is not None else bl_cfg.get("lam", 1000000.0))
     p_value = float(p if p is not None else bl_cfg.get("p", 0.01))
@@ -625,55 +629,6 @@ def correct_baseline(
     return corrected
 
 
-
-
-def repair_isolated_spikes_with_mask(
-    spectra: np.ndarray,
-    z_threshold: float = 8.0,
-    window: int = 5,
-    max_corrected_fraction: float = 0.02,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Repair isolated spikes and return the repaired spectra plus a mask.
-
-    Returns
-    -------
-    repaired : np.ndarray
-        Spectra after isolated-spike repair.
-    repair_mask : np.ndarray
-        Boolean mask of channels that were actually replaced.
-    """
-    if spectra.size == 0:
-        return np.asarray(spectra, dtype=float), np.zeros_like(spectra, dtype=bool)
-
-    arr = np.asarray(spectra, dtype=float).copy()
-    n_channels = arr.shape[1]
-    half_win = max(1, int(window) // 2)
-
-    diff = np.diff(arr, axis=1)
-    mad = np.median(np.abs(diff - np.median(diff, axis=1, keepdims=True)), axis=1, keepdims=True)
-    mad[mad == 0] = 1e-10
-    mod_z = 0.6745 * np.abs(diff - np.median(diff, axis=1, keepdims=True)) / mad
-    spike_diff = mod_z > z_threshold
-    candidate_mask = np.zeros_like(arr, dtype=bool)
-    candidate_mask[:, 1:] |= spike_diff
-    candidate_mask[:, :-1] |= spike_diff
-
-    repair_mask = np.zeros_like(arr, dtype=bool)
-    for row_idx in range(arr.shape[0]):
-        flagged = np.where(candidate_mask[row_idx])[0]
-        if flagged.size == 0:
-            continue
-        if flagged.size / n_channels > max_corrected_fraction:
-            continue
-        for channel in flagged:
-            lo = max(0, channel - half_win)
-            hi = min(n_channels, channel + half_win + 1)
-            neighborhood = np.delete(arr[row_idx, lo:hi], channel - lo)
-            if neighborhood.size > 0:
-                arr[row_idx, channel] = float(np.mean(neighborhood))
-                repair_mask[row_idx, channel] = True
-
-    return arr, repair_mask
 
 
 def trim_edges(
@@ -740,18 +695,22 @@ def interpolate_spectra(
     target_spacing: Optional[float] = None,
     method: Optional[str] = None,
     target_wavenumbers: Optional[np.ndarray] = None,
+    cfg: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     if spectra.size == 0 or wavenumbers.size == 0:
         return spectra, wavenumbers
-    ip_cfg = _pre_cfg().get("interpolation", {})
+    ip_cfg = _pre_cfg(cfg=cfg).get("interpolation", {})
     spacing = float(target_spacing if target_spacing is not None else ip_cfg.get("target_spacing", 1.0))
     interp_kind = str(method if method is not None else ip_cfg.get("method", "cubic")).strip().lower()
     if target_wavenumbers is None:
+        if not np.isfinite(spacing) or spacing <= 0:
+            raise ValueError("target_spacing must be finite and positive")
         wn_min = int(np.ceil(float(np.nanmin(wavenumbers))))
         wn_max = int(np.floor(float(np.nanmax(wavenumbers))))
         if wn_max <= wn_min:
             return spectra, wavenumbers
         wn_uniform = np.arange(wn_min, wn_max + spacing, spacing, dtype=float)
+        wn_uniform = wn_uniform[wn_uniform <= wn_max]
     else:
         wn_uniform = np.asarray(target_wavenumbers, dtype=float)
         if wn_uniform.ndim != 1 or wn_uniform.size < 2 or not np.all(np.diff(wn_uniform) > 0):
@@ -778,8 +737,8 @@ _DEFAULT_ANCHOR_WINDOWS: dict[str, list[tuple[float, float]]] = {
 }
 
 
-def _anchor_windows_for_region(region: Optional[str]) -> list[tuple[float, float]]:
-    qf_cfg = _pre_cfg().get("quality_filter", {}).get("spectral_quality", {})
+def _anchor_windows_for_region(region: Optional[str], cfg: dict | None = None) -> list[tuple[float, float]]:
+    qf_cfg = _pre_cfg(cfg=cfg).get("quality_filter", {}).get("spectral_quality", {})
     configured = qf_cfg.get("anchor_windows", {})
     region_key = str(region).strip().lower().replace("-", "_") if region else None
     windows = configured.get(region_key) if region_key else None
@@ -793,6 +752,7 @@ def _resolve_anchor_index(
     wavenumbers: Optional[np.ndarray],
     region: Optional[str],
     peak_window: int,
+    cfg: dict | None = None,
 ) -> int:
     """Resolve a deterministic SNR anchor channel from fixed wavenumber windows.
 
@@ -802,7 +762,7 @@ def _resolve_anchor_index(
     """
     wn = np.asarray(wavenumbers, dtype=float) if wavenumbers is not None else None
     if wn is not None and wn.size == spectra.shape[1]:
-        windows = _anchor_windows_for_region(region)
+        windows = _anchor_windows_for_region(region, cfg=cfg)
         in_window = np.zeros(wn.shape, dtype=bool)
         for lo, hi in windows:
             in_window |= (wn >= lo) & (wn <= hi)
@@ -827,10 +787,11 @@ def spectral_quality_mask(
     min_integrated_signal: Optional[float] = None,
     wavenumbers: Optional[np.ndarray] = None,
     region: Optional[str] = None,
+    cfg: dict | None = None,
 ) -> tuple[np.ndarray, dict[str, float]]:
     if spectra.size == 0:
         return np.array([], dtype=bool), {"anchor_index": -1.0, "area_threshold": 0.0}
-    qf_cfg = _spectral_quality_cfg()
+    qf_cfg = _spectral_quality_cfg(cfg=cfg)
     snr_thr = float(snr_threshold if snr_threshold is not None else qf_cfg.get("snr_threshold", 5.0))
     pwin = int(peak_window if peak_window is not None else qf_cfg.get("peak_window", 5))
     noise_n = int(noise_channels if noise_channels is not None else qf_cfg.get("noise_channels", 20))
@@ -838,7 +799,7 @@ def spectral_quality_mask(
     if configured_floor is None:
         configured_floor = qf_cfg.get("min_integrated_signal")
 
-    anchor_idx = _resolve_anchor_index(spectra, wavenumbers, region, pwin)
+    anchor_idx = _resolve_anchor_index(spectra, wavenumbers, region, pwin, cfg=cfg)
     lo = max(0, anchor_idx - pwin)
     hi = min(spectra.shape[1], anchor_idx + pwin + 1)
     signal = np.nanmax(spectra[:, lo:hi], axis=1)
@@ -866,6 +827,7 @@ def _resolve_preview_trim_slice(
     wavenumbers: np.ndarray,
     trim: Optional[int] = None,
     trim_cm: Optional[float] = None,
+    cfg: dict | None = None,
 ) -> tuple[int, int]:
     """Return a (start, stop) slice that previews the edge trim that will be applied."""
     n = wavenumbers.size
@@ -890,14 +852,14 @@ def _resolve_preview_trim_slice(
             return 0, n
         return t, n - t
 
-    edge_cfg = _pre_cfg().get("edge_trim", {})
+    edge_cfg = _pre_cfg(cfg=cfg).get("edge_trim", {})
     edge_trim_cm = edge_cfg.get("edge_trim_cm", None)
     if edge_trim_cm is not None and float(edge_trim_cm) > 0:
-        return _resolve_preview_trim_slice(wavenumbers, trim_cm=float(edge_trim_cm))
+        return _resolve_preview_trim_slice(wavenumbers, trim_cm=float(edge_trim_cm), cfg=cfg)
 
     trim_val = edge_cfg.get("trim", 0)
     if trim_val is not None and int(trim_val) > 0:
-        return _resolve_preview_trim_slice(wavenumbers, trim=int(trim_val))
+        return _resolve_preview_trim_slice(wavenumbers, trim=int(trim_val), cfg=cfg)
 
     return 0, n
 
@@ -908,6 +870,7 @@ def _spectral_quality_mask_with_edge_guard(
     region: Optional[str] = None,
     trim: Optional[int] = None,
     trim_cm: Optional[float] = None,
+    cfg: dict | None = None,
 ) -> tuple[np.ndarray, dict[str, float]]:
     """Compute the spectral-quality mask using a trim-aware preview.
 
@@ -916,18 +879,18 @@ def _spectral_quality_mask_with_edge_guard(
     so transient edge corruption cannot be the sole reason for rejecting a
     spectrum.
     """
-    qf_cfg = _spectral_quality_cfg()
+    qf_cfg = _spectral_quality_cfg(cfg=cfg)
     use_guard = bool(qf_cfg.get("use_trim_aware_preview", True))
     if not use_guard or wavenumbers.size == 0:
-        return spectral_quality_mask(spectra, wavenumbers=wavenumbers, region=region)
+        return spectral_quality_mask(spectra, wavenumbers=wavenumbers, region=region, cfg=cfg)
 
-    start, stop = _resolve_preview_trim_slice(wavenumbers, trim=trim, trim_cm=trim_cm)
+    start, stop = _resolve_preview_trim_slice(wavenumbers, trim=trim, trim_cm=trim_cm, cfg=cfg)
     if start == 0 and stop == wavenumbers.size:
-        return spectral_quality_mask(spectra, wavenumbers=wavenumbers, region=region)
+        return spectral_quality_mask(spectra, wavenumbers=wavenumbers, region=region, cfg=cfg)
 
     preview_spectra = spectra[:, start:stop]
     preview_wavenumbers = wavenumbers[start:stop]
-    mask, stats = spectral_quality_mask(preview_spectra, wavenumbers=preview_wavenumbers, region=region)
+    mask, stats = spectral_quality_mask(preview_spectra, wavenumbers=preview_wavenumbers, region=region, cfg=cfg)
     stats["edge_guard_preview_start"] = float(start)
     stats["edge_guard_preview_stop"] = float(stop)
     return mask, stats
@@ -939,8 +902,9 @@ def normalize_spectra(
     mode: Optional[str] = None,
     region: Optional[str] = None,
     wavenumbers: Optional[np.ndarray] = None,
+    cfg: dict | None = None,
 ) -> np.ndarray:
-    chosen_method = _normalization_method(method, mode, region)
+    chosen_method = _normalization_method(method, mode, region, cfg=cfg)
     if chosen_method == "none":
         return np.asarray(spectra, dtype=float)
     arr = np.asarray(spectra, dtype=float)
@@ -1040,9 +1004,10 @@ def apply_region_weights(
 def _flag_outliers(
     metrics_df: pd.DataFrame,
     flags_df: pd.DataFrame,
+    cfg: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Flag area/total-area outliers as QC warnings, not exclusions."""
-    out_cfg = _pre_cfg().get("outlier_detection", {})
+    out_cfg = _pre_cfg(cfg=cfg).get("outlier_detection", {})
     if not bool(out_cfg.get("enabled", True)) or metrics_df.empty:
         return metrics_df, flags_df
 
@@ -1090,11 +1055,12 @@ def _apply_quality_filter(
     region_key: str,
     trim: Optional[int],
     trim_cm: Optional[float],
+    cfg: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    qf_cfg = _spectral_quality_cfg()
+    qf_cfg = _spectral_quality_cfg(cfg=cfg)
     peak_window = int(qf_cfg.get("peak_window", 5))
     noise_channels = int(qf_cfg.get("noise_channels", 20))
-    anchor_index = _resolve_anchor_index(result, wavenumbers, region_key, peak_window)
+    anchor_index = _resolve_anchor_index(result, wavenumbers, region_key, peak_window, cfg=cfg)
     lower = max(0, anchor_index - peak_window)
     upper = min(result.shape[1], anchor_index + peak_window + 1)
     signal = np.nanmax(result[:, lower:upper], axis=1)
@@ -1108,6 +1074,7 @@ def _apply_quality_filter(
         region=region_key,
         trim=trim,
         trim_cm=trim_cm,
+        cfg=cfg,
     )
     kept_indices = np.where(retained_mask)[0]
     dropped = kept_indices[~quality_mask]
@@ -1130,6 +1097,7 @@ def _apply_edge_trim(
     *,
     trim: Optional[int],
     trim_cm: Optional[float],
+    cfg: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     if trim_cm is not None:
         if float(trim_cm) > 0:
@@ -1142,7 +1110,7 @@ def _apply_edge_trim(
             return trim_edges(result, wavenumbers, trim=trim_val)
         return result, wavenumbers
 
-    edge_cfg = _pre_cfg().get("edge_trim", {})
+    edge_cfg = _pre_cfg(cfg=cfg).get("edge_trim", {})
     edge_trim_cm = edge_cfg.get("edge_trim_cm", None)
     if edge_trim_cm is not None and float(edge_trim_cm) > 0:
         return trim_edges_cm(result, wavenumbers, edge_trim_cm=float(edge_trim_cm))
@@ -1161,6 +1129,7 @@ def _apply_baseline_stage(
     keep_stages: bool,
     pre_cfg: dict,
     ranges_cfg: dict,
+    cfg: dict | None = None,
 ) -> tuple[np.ndarray, pd.DataFrame]:
     bl_cfg = {**pre_cfg.get("baseline", {}), **ranges_cfg.get("baseline", {})}
     if keep_stages:
@@ -1174,6 +1143,7 @@ def _apply_baseline_stage(
         arpls_ratio=bl_cfg.get("arpls", {}).get("ratio") if "arpls" in bl_cfg else None,
         arpls_max_iter=bl_cfg.get("arpls", {}).get("max_iter") if "arpls" in bl_cfg else None,
         return_baseline=True,
+        cfg=cfg,
     )
     if len(metrics_df) == len(baselines):
         baseline_level = np.nanmean(np.abs(baselines), axis=1)
@@ -1206,28 +1176,6 @@ def _apply_baseline_stage(
     return result, metrics_df
 
 
-def _apply_spike_repair_stage(
-    result: np.ndarray,
-    metrics_df: pd.DataFrame,
-    stage_arrays: dict[str, np.ndarray],
-    *,
-    keep_stages: bool,
-    spike_cfg: dict,
-) -> tuple[np.ndarray, pd.DataFrame]:
-    result, repair_mask = repair_isolated_spikes_with_mask(
-        result,
-        z_threshold=float(spike_cfg.get("z_threshold", 8.0)),
-        window=int(spike_cfg.get("window", 5)),
-        max_corrected_fraction=float(spike_cfg.get("max_corrected_fraction", 0.02)),
-    )
-    repair_counts = repair_mask.sum(axis=1).astype(int)
-    metrics_df.loc[:, "n_spike_repaired_channels"] = repair_counts
-    metrics_df.loc[:, "spike_repair_fraction"] = repair_mask.mean(axis=1).astype(float)
-    if keep_stages:
-        stage_arrays["spike_repaired"] = result.copy()
-    return result, metrics_df
-
-
 def _build_preprocess_result(
     *,
     result: np.ndarray,
@@ -1243,6 +1191,7 @@ def _build_preprocess_result(
     norm_for: Optional[str],
     cosmic_suppress_enabled: bool,
     spike_repair_enabled: bool,
+    cfg: dict | None = None,
 ) -> PreprocessResult:
     full_metrics = initial_metrics_df.set_index("row_index").copy()
     stage_metrics = metrics_df.set_index("row_index")
@@ -1261,7 +1210,7 @@ def _build_preprocess_result(
             "n_input": int(original_count),
             "n_retained": int(retained_mask.sum()),
             "quality_stats": quality_stats,
-            "normalization_method": _normalization_method(None, norm_for, region_key),
+            "normalization_method": _normalization_method(None, norm_for, region_key, cfg=cfg),
             "cosmic_suppression_enabled": cosmic_suppress_enabled,
             "isolated_spike_repair_enabled": spike_repair_enabled,
         },
@@ -1287,22 +1236,25 @@ def run_preprocessing(
     norm_for: Optional[str] = None,
     record_stages: Optional[bool] = None,
     return_pre_normalization: bool = False,
+    cfg: dict | None = None,
 ) -> PreprocessResult:
+    """Preprocess one spectral block with supplied config or module defaults."""
     arr = flatten_spectra_rows(spectra)
     wn = np.asarray(wavenumbers, dtype=float)
     region_key = _resolve_region_key(wn, region)
-    _validate_preprocessing_config(region_key)
-    pre_cfg = _pre_cfg()
-    ranges_cfg = _range_cfg(region_key)
+    _validate_preprocessing_config(region_key, cfg=cfg)
+    pre_cfg = _pre_cfg(cfg=cfg)
+    ranges_cfg = _range_cfg(region_key, cfg=cfg)
     options = _resolve_pipeline_options(
         region_key,
         filter_quality=filter_quality,
         smooth=smooth,
         record_stages=record_stages,
+        cfg=cfg,
     )
 
     original_count = arr.shape[0]
-    metrics_df = _compute_qc_metrics(arr)
+    metrics_df = _compute_qc_metrics(arr, cfg=cfg)
     initial_metrics_df = metrics_df.copy()
     flags_df = _build_qc_flags(original_count)
     retained_mask = np.ones(original_count, dtype=bool)
@@ -1312,7 +1264,7 @@ def run_preprocessing(
 
     result = arr.copy()
     if screen_dead:
-        result, retained_mask, initial_flags = _apply_initial_qc(result, metrics_df)
+        result, retained_mask, initial_flags = _apply_initial_qc(result, metrics_df, cfg=cfg)
         flags_df.loc[:, "qc_flag"] = initial_flags["qc_flag"].to_numpy()
         flags_df.loc[:, "qc_reason"] = initial_flags["qc_reason"].to_numpy()
         for col in ("qc_warning", "qc_warning_reason", "qc_warning_metrics"):
@@ -1358,10 +1310,10 @@ def run_preprocessing(
             metrics_df.loc[:, "n_suppressed_cosmic_channels"] = 0
             metrics_df.loc[:, "fraction_corrected"] = 0.0
 
-    result, wn = _apply_edge_trim(result, wn, trim=trim, trim_cm=trim_cm)
+    result, wn = _apply_edge_trim(result, wn, trim=trim, trim_cm=trim_cm, cfg=cfg)
 
     if interpolate and result.size > 0:
-        result, wn = interpolate_spectra(result, wn, target_wavenumbers=target_wavenumbers)
+        result, wn = interpolate_spectra(result, wn, target_wavenumbers=target_wavenumbers, cfg=cfg)
 
     if correct_bl and result.size > 0:
         result, metrics_df = _apply_baseline_stage(
@@ -1371,6 +1323,7 @@ def run_preprocessing(
             keep_stages=options.keep_stages,
             pre_cfg=pre_cfg,
             ranges_cfg=ranges_cfg,
+            cfg=cfg,
         )
         _update_qc_metrics(initial_metrics_df, metrics_df)
 
@@ -1384,6 +1337,7 @@ def run_preprocessing(
             region_key=region_key,
             trim=0,
             trim_cm=0.0,
+            cfg=cfg,
         )
     else:
         quality_stats = {}
@@ -1399,14 +1353,14 @@ def run_preprocessing(
         if options.keep_stages:
             stage_arrays["smoothed"] = result.copy()
 
-    metrics_df, flags_df = _flag_outliers(metrics_df, flags_df)
+    metrics_df, flags_df = _flag_outliers(metrics_df, flags_df, cfg=cfg)
     _update_qc_metrics(initial_metrics_df, metrics_df)
 
     if return_pre_normalization:
         stage_arrays["pre_normalization"] = result.copy()
 
     if normalize and result.size > 0:
-        result = normalize_spectra(result, mode=norm_for, region=region_key, wavenumbers=wn)
+        result = normalize_spectra(result, mode=norm_for, region=region_key, wavenumbers=wn, cfg=cfg)
         if options.keep_stages:
             stage_arrays["normalized"] = result.copy()
 
@@ -1424,6 +1378,7 @@ def run_preprocessing(
         norm_for=norm_for,
         cosmic_suppress_enabled=cosmic_suppress_enabled,
         spike_repair_enabled=False,
+        cfg=cfg,
     )
 
 
@@ -1442,6 +1397,7 @@ def preprocess_spectra(
     norm_for: Optional[str] = None,
     region: Optional[str] = None,
     pixel_coords: np.ndarray | None = None,
+    cfg: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     result = run_preprocessing(
         spectra,
@@ -1459,6 +1415,7 @@ def preprocess_spectra(
         trim_cm=trim_cm,
         norm_for=norm_for,
         record_stages=False,
+        cfg=cfg,
     )
     return result.spectra, result.wavenumbers
 

@@ -284,6 +284,7 @@ def _process_measurements(
             normalize=True,
             norm_for="eda",
             return_pre_normalization=True,
+            cfg=cfg,
         )
         pre = np.asarray(result.stage_arrays.get("pre_normalization"), dtype=float)
         if pre.shape != result.spectra.shape:
@@ -464,7 +465,9 @@ def build_parsed_store(
 
     def write(staging: Path) -> MaterializedStore:
         measurements = _prepare_file_index(config)
-        subjects = load_clinical_data(data_index=measurements, write_curated=False)
+        subjects = load_clinical_data(
+            clinical_csv=_clinical_data_path(config), data_index=measurements, write_curated=False,
+        )
         measurements, pixel_counts = _write_parsed_payload(staging, measurements, progress_callback)
         measurements.to_parquet(staging / "measurements.parquet", index=False)
         subjects.to_parquet(staging / "subjects.parquet", index=False)

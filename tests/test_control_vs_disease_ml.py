@@ -403,6 +403,40 @@ def test_pls_da_threshold_uses_only_inner_fold_scores(monkeypatch: pytest.Monkey
     assert fit_a.threshold == fit_b.threshold
 
 
+@pytest.mark.parametrize("components", [[1, 10], [10]])
+def test_pls_da_bounds_components_by_smallest_inner_training_fold(components: list[int]) -> None:
+    X = np.random.default_rng(42).normal(size=(12, 20))
+    fit = _fit_tuned_model(
+        "pls_da", X, np.tile([0, 1], 6), ml_cfg={"pls_components_grid": components},
+        n_inner_splits=3, threshold_metric="balanced_accuracy", random_state=42, n_jobs=1,
+    )
+    assert fit.estimator.n_components == 1
+    assert np.isfinite(fit.predict_proba(X)).all()
+
+
+@pytest.mark.parametrize("score", [np.nan, np.inf, -np.inf])
+def test_permutation_test_rejects_undefined_scores(score: float, base_ml_cfg: dict) -> None:
+    X = np.ones((4, 2))
+    y = np.array([0, 0, 1, 1])
+    with patch("src.analysis.control_vs_disease_ml._permuted_score", return_value=score):
+        with pytest.raises(ValueError, match="Permutation score must be finite"):
+            run_permutation_test(
+                "pls_da", X, y, observed_balanced_accuracy=0.75, strata=None,
+                ml_cfg=_small_permutation_cfg(base_ml_cfg), n_jobs=1, random_state=42,
+            )
+
+
+def test_permutation_resume_rejects_undefined_checkpoint_score(tmp_path: Path, base_ml_cfg: dict) -> None:
+    path = tmp_path / "checkpoint.parquet"
+    pd.DataFrame({"seed": [42], "null_balanced_accuracy": [np.nan]}).to_parquet(path, index=False)
+    with pytest.raises(ValueError, match="Permutation checkpoint contains a non-finite score"):
+        run_permutation_test(
+            "pls_da", np.ones((4, 2)), np.array([0, 0, 1, 1]), observed_balanced_accuracy=0.75,
+            strata=None, ml_cfg=_small_permutation_cfg(base_ml_cfg), n_jobs=1, random_state=42,
+            checkpoint_path=path, resume=True,
+        )
+
+
 def test_nested_cv_scaler_never_fit_on_test_fold(monkeypatch: pytest.MonkeyPatch) -> None:
     """Instrument StandardScaler.fit to record every array it is fit on, and
     assert none of those arrays contain rows from the current outer test fold.

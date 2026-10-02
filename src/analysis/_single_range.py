@@ -1,11 +1,8 @@
-﻿"""Full Exploratory Data Analysis pipeline for Raman spectroscopy data.
+﻿"""EDA from prepared Raman spectra for one range or paired whole spectra.
 
-Supports two public workflows:
-1. Single-range EDA for `1300` or `2850`, which keeps the broad descriptive,
-   PCA, univariate, band-analysis, and variance-decomposition phases.
-2. Whole-spectrum EDA for `both`, which fuses paired 1300/2850 areas and emits
-   the reduced four-phase global structure, drivers, interaction, and variance
-   context workflow.
+Single-range EDA (`1300` or `2850`) writes group comparisons, area-level QC PCA,
+Raman-band tests, and variance summaries. Paired whole-spectrum EDA (`both`)
+runs global structure, drivers, and variance phases in `_whole_spectra_runner`.
 
 Note: Inter-subject variance can include both biological variability and
 unmeasured technical variation such as SEC fraction composition, concentration
@@ -13,6 +10,7 @@ state, column batch effects, lipoprotein contamination, and sample volume.
 """
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import matplotlib
@@ -361,18 +359,7 @@ def _run_intra_disease_correlation_phase(
         logger.warning("Intra-disease correlation phase failed: %s", exc)
 
 
-def _run_single_range_eda(
-    spectral_range: str = "1300",
-    skip_preprocess: bool = False,
-    max_subjects: int | None = None,
-):
-    """Run the full EDA pipeline."""
-
-    phase_dirs: dict[str, str]
-
-    def phase_dir(key: str) -> Path:
-        return get_eda_phase_dir(spectral_range, phase_dirs[key])
-
+def _load_eda_cohort() -> tuple[pd.DataFrame, pd.DataFrame, dict, str, dict[str, str]]:
     df_index = load_file_index()
     if df_index.empty:
         raise RuntimeError(
@@ -411,8 +398,15 @@ def _run_single_range_eda(
             "Cohort group counts:\n%s",
             cohort_summary["group_counts"].to_string(index=False),
         )
+    return df_index, clinical_df, cohort_summary, analysis_mode, phase_dirs
 
 
+def _load_eda_groups(
+    df_index: pd.DataFrame,
+    spectral_range: str,
+    analysis_mode: str,
+    max_subjects: int | None,
+) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, list[str]]]:
     _log_phase(f"PHASE 0: Loading and aggregating spectra (range={spectral_range} cm-1)")
 
     group_configs = group_configs_for_eda_mode(analysis_mode)
@@ -473,323 +467,337 @@ def _run_single_range_eda(
             "preprocessing did not discard all data."
         )
     assert wavenumbers is not None, "wavenumbers must be set when at least one group is loaded"
-    range_title = _range_title(spectral_range)
+    return wavenumbers, raw_groups, group_ids
 
-    groups = raw_groups
 
-    if spectral_range != "both":
-        _log_phase("PHASE 0.5: Preprocessing Consistency Checks (PCS)")
-        logger.info("PCS is a build-time synthetic/reference validation, not an analysis-time raw reload.")
+def _plot_group_comparisons(
+    groups: dict[str, np.ndarray],
+    wavenumbers: np.ndarray,
+    range_title: str,
+    gc_dir: Path,
+) -> None:
+    _log_phase("PHASE 1: Visualization - Group comparisons")
 
-    result_both = None
-    if spectral_range == "both":
-        from src.analysis._whole_spectra_runner import _run_whole_spectra_eda
+    if _figure_flag("emit_group_mean_spectra", default=True):
+        fig, _ = plot_group_mean_spectra(
+            wavenumbers, groups, title=f"Group Mean Spectra ({range_title})"
+        )
+        _save_fig(fig, "group_mean_spectra.png", gc_dir)
 
-        result_both = _run_whole_spectra_eda(
-            df_index,
-            groups,
-            wavenumbers,
-            group_ids,
-            range_title,
+    # Difference spectra (Disease - control) per gender
+    if _figure_flag("emit_difference_spectra", default=False):
+        for gender in ["female", "male"]:
+            g_key = f"{gender}_disease"
+            c_key = f"{gender}_control"
+            if g_key in groups and c_key in groups:
+                fig, _ = plot_difference_spectra(
+                    wavenumbers,
+                    groups[g_key],
+                    groups[c_key],
+                    label=f"{gender.capitalize()} (Disease âˆ’ Control)",
+                    title=f"Difference Spectrum - {gender.capitalize()} ({range_title})",
+                    color=GROUP_COLORS.get(g_key, "#CC3311"),
+                )
+                _save_fig(fig, f"difference_spectrum_{gender}.png", gc_dir)
+
+
+def _export_area_pca(
+    pca_result: dict,
+    pca_input: np.ndarray,
+    all_labels: np.ndarray,
+    wavenumbers: np.ndarray,
+    groups: dict[str, np.ndarray],
+    group_ids: dict[str, list[str]],
+    spectral_range: str,
+    rw_cfg: dict,
+    pca_dir: Path,
+) -> None:
+    pca_df = pd.DataFrame(
+        pca_result["scores"],
+        columns=[f"PC{i+1}" for i in range(pca_result["scores"].shape[1])],
+    )
+    pca_df["group"] = all_labels
+    all_sids = []
+    for k in groups:
+        all_sids.extend(
+            group_ids.get(k, [f"{k}_{i}" for i in range(groups[k].shape[0])])
+        )
+    pca_df["subject_id"] = all_sids
+    pca_df.to_csv(pca_dir / f"pca_scores_{spectral_range}.csv", index=False)
+
+    pca_cfg = config.get("analysis", {}).get("pca", {})
+    top_k = int(pca_cfg.get("top_k_wavenumbers", 20))
+    n_comp_export = int(pca_cfg.get("n_components_exported", 10))
+
+    loadings_matrix = pca_result["loadings"][:n_comp_export]
+    loadings_df = pd.DataFrame(
+        loadings_matrix.T,
+        index=[f"{w:.2f}" for w in wavenumbers],
+        columns=[f"PC{i + 1}" for i in range(loadings_matrix.shape[0])],
+    )
+    loadings_df.index.name = "wavenumber"
+    loadings_df.to_csv(pca_dir / f"pca_loadings_{spectral_range}.csv")
+
+    top_df = rank_wavenumbers_per_pc(loadings_matrix, wavenumbers, top_k=top_k)
+    top_df.to_csv(pca_dir / f"pca_top_wavenumbers_per_pc_{spectral_range}.csv", index=False)
+
+    # Per-component variance table (sliced to exported components)
+    variance_df = pd.DataFrame(
+        {
+            "pc": [f"PC{i + 1}" for i in range(loadings_matrix.shape[0])],
+            "explained_variance_ratio": pca_result["explained_variance_ratio"][:loadings_matrix.shape[0]],
+            "cumulative_variance": pca_result["cumulative_variance"][:loadings_matrix.shape[0]],
+        }
+    )
+    variance_df.to_csv(pca_dir / f"pca_variance_{spectral_range}.csv", index=False)
+
+    suspect_windows = rw_cfg.get("exclude_windows", []) or rw_cfg.get("downweight_windows", []) or []
+    suspect_windows = [[w[0], w[1]] for w in suspect_windows]
+    interp_df = build_pca_loading_interpretation(
+        loadings_matrix,
+        wavenumbers,
+        pca_result["explained_variance_ratio"],
+        suspect_windows=suspect_windows,
+        top_k=top_k,
+    )
+    interp_df.to_csv(pca_dir / f"pca_loading_interpretation_{spectral_range}.csv", index=False)
+    _write_pca_pc1_dominance_report(
+        pca_dir,
+        model_name=f"PCA_{spectral_range}_area_level_qc",
+        model_type="area-level QC PCA",
+        pca_result=pca_result,
+        n_items=pca_input.shape[0],
+        item_label="Areas used",
+        preprocessing_context="area-level preprocessed, normalized spectra used for exploratory/QC PCA",
+        score_plot="pca_scores_pc1_pc2.png",
+        loading_plot="pca_loadings.png",
+        wavenumbers=wavenumbers,
+    )
+
+    logger.debug(
+        "Saved PCA loadings CSV (%d wavenumbers x %d PCs)",
+        len(wavenumbers),
+        loadings_matrix.shape[0],
+    )
+
+
+def _run_area_pca(
+    groups: dict[str, np.ndarray],
+    group_ids: dict[str, list[str]],
+    wavenumbers: np.ndarray,
+    spectral_range: str,
+    range_title: str,
+    analysis_mode: str,
+    rw_cfg: dict,
+    apply_to: set[str],
+    pca_dir: Path,
+) -> dict:
+    _log_phase("PHASE 2: Exploratory/QC PCA (area-level)")
+
+    all_spectra = np.vstack(list(groups.values()))
+    all_labels = np.concatenate([np.full(v.shape[0], k) for k, v in groups.items()])
+
+    pca_input = (
+        apply_region_weights(all_spectra, wavenumbers, rw_cfg)
+        if "pca" in apply_to
+        else all_spectra
+    )
+
+    n_comps = min(
+        int(config.get("analysis", {}).get("pca_n_components", 10)),
+        pca_input.shape[0] - 1,
+    )
+
+    if analysis_mode == "disease_only":
+        from src.analysis.intra_disease import run_intra_disease_pca
+        pca_result = run_intra_disease_pca(
+            pca_input,
+            n_components=n_comps,
+            random_state=42,
+            warn_on_high_pc1=False,
+        )
+    else:
+        pca_result = run_pca(
+            pca_input,
+            n_components=n_comps,
+            scale=False,
+            warn_on_high_pc1=False,
         )
 
-    rw_cfg = config.get("analysis", {}).get("region_weighting", {})
-    apply_to = set(rw_cfg.get("apply_to", []) if rw_cfg.get("enabled", False) else [])
+    fig, _ = plot_pca_scores(
+        pca_result["scores"],
+        all_labels,
+        pca_result["explained_variance_ratio"],
+        title=f"Area-Level QC PCA Score Plot ({range_title}) — exploratory/QC only, not subject-level",
+        loadings=pca_result["loadings"],
+        wavenumbers=wavenumbers,
+    )
+    _save_fig(fig, "pca_scores_pc1_pc2.png", pca_dir)
 
-    if spectral_range != "both":
-        _log_phase("PHASE 1: Visualization - Group comparisons")
+    fig, _ = plot_pca_scores(
+        pca_result["scores"],
+        all_labels,
+        pca_result["explained_variance_ratio"],
+        pc_x=0,
+        pc_y=2,
+        title=f"Area-Level QC PCA Score Plot PC1 vs PC3 ({range_title}) — exploratory/QC only, not subject-level",
+        loadings=pca_result["loadings"],
+        wavenumbers=wavenumbers,
+    )
+    _save_fig(fig, "pca_scores_pc1_pc3.png", pca_dir)
 
-        gc_dir = phase_dir("group_comp")
+    fig, _ = plot_scree(
+        pca_result["explained_variance_ratio"],
+        title=f"Scree Plot ({range_title})",
+    )
+    _save_fig(fig, "scree_plot.png", pca_dir)
 
-        if _figure_flag("emit_group_mean_spectra", default=True):
-            fig, _ = plot_group_mean_spectra(
-                wavenumbers, groups, title=f"Group Mean Spectra ({range_title})"
+    fig, _ = plot_pca_loadings(
+        wavenumbers,
+        pca_result["loadings"],
+        pca_result["explained_variance_ratio"],
+        n_components=3,
+        title=f"PCA Loadings ({range_title})",
+    )
+    _save_fig(fig, "pca_loadings.png", pca_dir)
+    _export_area_pca(pca_result, pca_input, all_labels, wavenumbers, groups, group_ids, spectral_range, rw_cfg, pca_dir)
+    return pca_result
+
+
+def _run_raman_band_phase(
+    groups: dict[str, np.ndarray],
+    wavenumbers: np.ndarray,
+    spectral_range: str,
+    range_title: str,
+    band_dir: Path,
+) -> None:
+    _log_phase("PHASE 3: Known Raman band context")
+
+    band_dfs = []
+    band_labels = []
+    for key, spectra in groups.items():
+        bdf = extract_band_intensities(spectra, wavenumbers)
+        bdf["group"] = key
+        band_dfs.append(bdf)
+        band_labels.extend([key] * len(bdf))
+
+    if band_dfs:
+        all_bands = pd.concat(band_dfs, ignore_index=True)
+        band_cols = [c for c in all_bands.columns if c != "group"]
+        if band_cols:
+            all_bands.to_csv(
+                band_dir / f"band_intensities_{spectral_range}.csv", index=False
             )
-            _save_fig(fig, "group_mean_spectra.png", gc_dir)
 
-        # Difference spectra (Disease - control) per gender
-        if _figure_flag("emit_difference_spectra", default=False):
+            if _figure_flag("emit_band_boxplots", default=False):
+                fig, _ = plot_band_boxplots(
+                    all_bands[band_cols],
+                    np.array(band_labels),
+                    title=f"Raman Band Intensities ({range_title})",
+                )
+                _save_fig(fig, "band_boxplots.png", band_dir)
+
+            if _figure_flag("emit_band_rainclouds", default=True):
+                logger.debug("  Generating Raincloud distributions...")
+                fig_rc, _ = plot_all_bands_raincloud(
+                    all_bands[band_cols],
+                    np.array(band_labels),
+                    title=f"Raman Band Distributions (Raincloud) - {range_title}",
+                )
+                _save_fig(fig_rc, "band_rainclouds.png", band_dir)
+
+            # Per-band statistical tests: sex-stratified + pooled disease vs control
+            band_test_rows = []
             for gender in ["female", "male"]:
-                g_key = f"{gender}_disease"
-                c_key = f"{gender}_control"
+                g_key, c_key = f"{gender}_disease", f"{gender}_control"
                 if g_key in groups and c_key in groups:
-                    fig, _ = plot_difference_spectra(
-                        wavenumbers,
-                        groups[g_key],
-                        groups[c_key],
-                        label=f"{gender.capitalize()} (Disease âˆ’ Control)",
-                        title=f"Difference Spectrum - {gender.capitalize()} ({range_title})",
-                        color=GROUP_COLORS.get(g_key, "#CC3311"),
+                    test_df = compare_band_intensities_between_groups(
+                        all_bands[band_cols], np.array(band_labels), g_key, c_key,
                     )
-                    _save_fig(fig, f"difference_spectrum_{gender}.png", gc_dir)
+                    test_df.insert(0, "stratum", gender)
+                    band_test_rows.append(test_df)
 
-        _log_phase("PHASE 2: Exploratory/QC PCA (area-level)")
+            pooled_condition = np.array(
+                ["disease" if lbl.endswith("_disease") else "control" for lbl in band_labels]
+            )
+            pooled_test_df = compare_band_intensities_between_groups(
+                all_bands[band_cols], pooled_condition, "disease", "control",
+            )
+            pooled_test_df.insert(0, "stratum", "pooled")
+            band_test_rows.append(pooled_test_df)
 
+            band_tests_df = pd.concat(band_test_rows, ignore_index=True)
+            band_tests_df.to_csv(
+                band_dir / f"band_tests_{spectral_range}.csv", index=False
+            )
+
+
+def _run_variance_phase(
+    df_index: pd.DataFrame,
+    groups: dict[str, np.ndarray],
+    spectral_range: str,
+    range_title: str,
+    var_dir: Path,
+) -> None:
+    _log_phase("PHASE 4: Variance decomposition")
+
+    intra, inter_subj, inter_grp = _estimate_variance_decomposition(
+        df_index,
+        spectral_range,
+        groups,
+    )
+
+    def _fmt_pct(v: float | None) -> str:
+        return f"{v:.1f}%" if v is not None and np.isfinite(v) else "N/A"
+
+    logger.info(
+        "  Measurement noise: %s  |  Inter-subject: %s  |  Inter-group: %s",
+        _fmt_pct(intra),
+        _fmt_pct(inter_subj),
+        _fmt_pct(inter_grp),
+    )
+
+    fig, _ = plot_variance_decomposition(
+        intra,
+        inter_subj,
+        inter_grp,
+        title=f"Variance Decomposition ({range_title})",
+    )
+    _save_fig(fig, "variance_decomposition.png", var_dir)
+
+    pd.DataFrame(
+        [
+            {
+                "range": spectral_range,
+                "measurement_noise_pct": intra,
+                "inter_subject_pct": inter_subj,
+                "inter_group_pct": inter_grp,
+            }
+        ]
+    ).to_csv(var_dir / "variance_components.csv", index=False)
+
+    _log_phase("PHASE 4b: Normality assessment")
+
+    for key, spectra in groups.items():
+        norm = test_normality(spectra)
+        logger.debug(
+            "  %s: %.1f%% of wavenumbers pass normality (Shapiro-Wilk, alpha=0.05)",
+            key,
+            norm["fraction_normal"] * 100,
+        )
+
+
+def _run_region_robustness_phase(
+    groups: dict[str, np.ndarray],
+    wavenumbers: np.ndarray,
+    spectral_range: str,
+    phase_dirs: dict[str, str],
+    phase_dir: Callable[[str], Path],
+) -> None:
+    robust_cfg = config.get("analysis", {}).get("advanced", {}).get("robustness", {})
+    if robust_cfg.get("enabled", False):
         all_spectra = np.vstack(list(groups.values()))
         all_labels = np.concatenate([np.full(v.shape[0], k) for k, v in groups.items()])
-
-        pca_dir = phase_dir("pca")
-
-        pca_input = (
-            apply_region_weights(all_spectra, wavenumbers, rw_cfg)
-            if "pca" in apply_to
-            else all_spectra
-        )
-
-        n_comps = min(
-            int(config.get("analysis", {}).get("pca_n_components", 10)),
-            pca_input.shape[0] - 1,
-        )
-
-        if analysis_mode == "disease_only":
-            from src.analysis.intra_disease import run_intra_disease_pca
-            pca_result = run_intra_disease_pca(
-                pca_input,
-                n_components=n_comps,
-                random_state=42,
-                warn_on_high_pc1=False,
-            )
-        else:
-            pca_result = run_pca(
-                pca_input,
-                n_components=n_comps,
-                scale=False,
-                warn_on_high_pc1=False,
-            )
-
-        fig, _ = plot_pca_scores(
-            pca_result["scores"],
-            all_labels,
-            pca_result["explained_variance_ratio"],
-            title=f"Area-Level QC PCA Score Plot ({range_title}) — exploratory/QC only, not subject-level",
-            loadings=pca_result["loadings"],
-            wavenumbers=wavenumbers,
-        )
-        _save_fig(fig, "pca_scores_pc1_pc2.png", pca_dir)
-
-        fig, _ = plot_pca_scores(
-            pca_result["scores"],
-            all_labels,
-            pca_result["explained_variance_ratio"],
-            pc_x=0,
-            pc_y=2,
-            title=f"Area-Level QC PCA Score Plot PC1 vs PC3 ({range_title}) — exploratory/QC only, not subject-level",
-            loadings=pca_result["loadings"],
-            wavenumbers=wavenumbers,
-        )
-        _save_fig(fig, "pca_scores_pc1_pc3.png", pca_dir)
-
-        fig, _ = plot_scree(
-            pca_result["explained_variance_ratio"],
-            title=f"Scree Plot ({range_title})",
-        )
-        _save_fig(fig, "scree_plot.png", pca_dir)
-
-        fig, _ = plot_pca_loadings(
-            wavenumbers,
-            pca_result["loadings"],
-            pca_result["explained_variance_ratio"],
-            n_components=3,
-            title=f"PCA Loadings ({range_title})",
-        )
-        _save_fig(fig, "pca_loadings.png", pca_dir)
-
-        # Save PCA scores table
-        pca_df = pd.DataFrame(
-            pca_result["scores"],
-            columns=[f"PC{i+1}" for i in range(pca_result["scores"].shape[1])],
-        )
-        pca_df["group"] = all_labels
-        # Add subject IDs
-        all_sids = []
-        for k in groups:
-            all_sids.extend(
-                group_ids.get(k, [f"{k}_{i}" for i in range(groups[k].shape[0])])
-            )
-        pca_df["subject_id"] = all_sids
-        pca_df.to_csv(pca_dir / f"pca_scores_{spectral_range}.csv", index=False)
-
-        # -- PCA loadings export (Phase B) --
-        pca_cfg = config.get("analysis", {}).get("pca", {})
-        top_k = int(pca_cfg.get("top_k_wavenumbers", 20))
-        n_comp_export = int(pca_cfg.get("n_components_exported", 10))
-
-        loadings_matrix = pca_result["loadings"][:n_comp_export]
-        loadings_df = pd.DataFrame(
-            loadings_matrix.T,
-            index=[f"{w:.2f}" for w in wavenumbers],
-            columns=[f"PC{i + 1}" for i in range(loadings_matrix.shape[0])],
-        )
-        loadings_df.index.name = "wavenumber"
-        loadings_df.to_csv(pca_dir / f"pca_loadings_{spectral_range}.csv")
-
-        top_df = rank_wavenumbers_per_pc(loadings_matrix, wavenumbers, top_k=top_k)
-        top_df.to_csv(pca_dir / f"pca_top_wavenumbers_per_pc_{spectral_range}.csv", index=False)
-
-        # Per-component variance table (sliced to exported components)
-        variance_df = pd.DataFrame(
-            {
-                "pc": [f"PC{i + 1}" for i in range(loadings_matrix.shape[0])],
-                "explained_variance_ratio": pca_result["explained_variance_ratio"][:loadings_matrix.shape[0]],
-                "cumulative_variance": pca_result["cumulative_variance"][:loadings_matrix.shape[0]],
-            }
-        )
-        variance_df.to_csv(pca_dir / f"pca_variance_{spectral_range}.csv", index=False)
-
-        # Optional loading interpretation table
-        suspect_windows = rw_cfg.get("exclude_windows", []) or rw_cfg.get("downweight_windows", []) or []
-        suspect_windows = [[w[0], w[1]] for w in suspect_windows]
-        interp_df = build_pca_loading_interpretation(
-            loadings_matrix,
-            wavenumbers,
-            pca_result["explained_variance_ratio"],
-            suspect_windows=suspect_windows,
-            top_k=top_k,
-        )
-        interp_df.to_csv(pca_dir / f"pca_loading_interpretation_{spectral_range}.csv", index=False)
-        _write_pca_pc1_dominance_report(
-            pca_dir,
-            model_name=f"PCA_{spectral_range}_area_level_qc",
-            model_type="area-level QC PCA",
-            pca_result=pca_result,
-            n_items=pca_input.shape[0],
-            item_label="Areas used",
-            preprocessing_context="area-level preprocessed, normalized spectra used for exploratory/QC PCA",
-            score_plot="pca_scores_pc1_pc2.png",
-            loading_plot="pca_loadings.png",
-            wavenumbers=wavenumbers,
-        )
-
-        logger.debug(
-            "Saved PCA loadings CSV (%d wavenumbers x %d PCs)",
-            len(wavenumbers),
-            loadings_matrix.shape[0],
-        )
-
-        _log_phase("PHASE 3: Known Raman band context")
-
-        band_dfs = []
-        band_labels = []
-        for key, spectra in groups.items():
-            bdf = extract_band_intensities(spectra, wavenumbers)
-            bdf["group"] = key
-            band_dfs.append(bdf)
-            band_labels.extend([key] * len(bdf))
-
-        band_dir = phase_dir("band")
-
-        if band_dfs:
-            all_bands = pd.concat(band_dfs, ignore_index=True)
-            band_cols = [c for c in all_bands.columns if c != "group"]
-            if band_cols:
-                all_bands.to_csv(
-                    band_dir / f"band_intensities_{spectral_range}.csv", index=False
-                )
-
-                if _figure_flag("emit_band_boxplots", default=False):
-                    fig, _ = plot_band_boxplots(
-                        all_bands[band_cols],
-                        np.array(band_labels),
-                        title=f"Raman Band Intensities ({range_title})",
-                    )
-                    _save_fig(fig, "band_boxplots.png", band_dir)
-
-                if _figure_flag("emit_band_rainclouds", default=True):
-                    logger.debug("  Generating Raincloud distributions...")
-                    fig_rc, _ = plot_all_bands_raincloud(
-                        all_bands[band_cols],
-                        np.array(band_labels),
-                        title=f"Raman Band Distributions (Raincloud) - {range_title}",
-                    )
-                    _save_fig(fig_rc, "band_rainclouds.png", band_dir)
-
-                # Per-band statistical tests: sex-stratified + pooled disease vs control
-                band_test_rows = []
-                for gender in ["female", "male"]:
-                    g_key, c_key = f"{gender}_disease", f"{gender}_control"
-                    if g_key in groups and c_key in groups:
-                        test_df = compare_band_intensities_between_groups(
-                            all_bands[band_cols], np.array(band_labels), g_key, c_key,
-                        )
-                        test_df.insert(0, "stratum", gender)
-                        band_test_rows.append(test_df)
-
-                pooled_condition = np.array(
-                    ["disease" if lbl.endswith("_disease") else "control" for lbl in band_labels]
-                )
-                pooled_test_df = compare_band_intensities_between_groups(
-                    all_bands[band_cols], pooled_condition, "disease", "control",
-                )
-                pooled_test_df.insert(0, "stratum", "pooled")
-                band_test_rows.append(pooled_test_df)
-
-                band_tests_df = pd.concat(band_test_rows, ignore_index=True)
-                band_tests_df.to_csv(
-                    band_dir / f"band_tests_{spectral_range}.csv", index=False
-                )
-
-        _log_phase("PHASE 4: Variance decomposition")
-
-        intra, inter_subj, inter_grp = _estimate_variance_decomposition(
-            df_index,
-            spectral_range,
-            groups,
-        )
-
-        def _fmt_pct(v: float | None) -> str:
-            return f"{v:.1f}%" if v is not None and np.isfinite(v) else "N/A"
-
-        logger.info(
-            "  Measurement noise: %s  |  Inter-subject: %s  |  Inter-group: %s",
-            _fmt_pct(intra),
-            _fmt_pct(inter_subj),
-            _fmt_pct(inter_grp),
-        )
-
-        var_dir = phase_dir("variance")
-
-        fig, _ = plot_variance_decomposition(
-            intra,
-            inter_subj,
-            inter_grp,
-            title=f"Variance Decomposition ({range_title})",
-        )
-        _save_fig(fig, "variance_decomposition.png", var_dir)
-
-        pd.DataFrame(
-            [
-                {
-                    "range": spectral_range,
-                    "measurement_noise_pct": intra,
-                    "inter_subject_pct": inter_subj,
-                    "inter_group_pct": inter_grp,
-                }
-            ]
-        ).to_csv(var_dir / "variance_components.csv", index=False)
-
-        _log_phase("PHASE 4b: Normality assessment")
-
-        for key, spectra in groups.items():
-            norm = test_normality(spectra)
-            logger.debug(
-                "  %s: %.1f%% of wavenumbers pass normality (Shapiro-Wilk, alpha=0.05)",
-                key,
-                norm["fraction_normal"] * 100,
-            )
-
-        if analysis_mode == "disease_only":
-            _run_intra_disease_correlation_phase(
-                df_index=df_index,
-                clinical_df=clinical_df,
-                spectral_range=spectral_range,
-                range_title=range_title,
-                phase_dir=phase_dir,
-            )
-
-
-
-    robust_cfg = config.get("analysis", {}).get("advanced", {}).get("robustness", {})
-    if spectral_range != "both" and robust_cfg.get("enabled", False):
         phase_number = phase_dirs["robustness"].split("_", 1)[0]
         _log_phase(f"PHASE {phase_number}: Region-influence robustness")
         robust_dir = phase_dir("robustness")
@@ -833,9 +841,44 @@ def _run_single_range_eda(
                 raise RuntimeError("Region robustness phase failed") from exc
             logger.warning("Region robustness phase failed: %s", exc, exc_info=True)
 
-    if spectral_range == "both":
-        return result_both
 
+def _run_single_range_eda(
+    spectral_range: str = "1300",
+    skip_preprocess: bool = False,
+    max_subjects: int | None = None,
+):
+    """Run EDA from the prepared store; skip_preprocess is kept for callers."""
+    df_index, clinical_df, cohort_summary, analysis_mode, phase_dirs = _load_eda_cohort()
+
+    def phase_dir(key: str) -> Path:
+        return get_eda_phase_dir(spectral_range, phase_dirs[key])
+
+    wavenumbers, groups, group_ids = _load_eda_groups(
+        df_index, spectral_range, analysis_mode, max_subjects,
+    )
+    range_title = _range_title(spectral_range)
+    if spectral_range == "both":
+        from src.analysis._whole_spectra_runner import _run_whole_spectra_eda
+
+        return _run_whole_spectra_eda(df_index, groups, wavenumbers, group_ids, range_title)
+
+    _log_phase("PHASE 0.5: Preprocessing Consistency Checks (PCS)")
+    logger.info("PCS is a build-time synthetic/reference validation, not an analysis-time raw reload.")
+    rw_cfg = config.get("analysis", {}).get("region_weighting", {})
+    apply_to = set(rw_cfg.get("apply_to", []) if rw_cfg.get("enabled", False) else [])
+    _plot_group_comparisons(groups, wavenumbers, range_title, phase_dir("group_comp"))
+    pca_result = _run_area_pca(
+        groups, group_ids, wavenumbers, spectral_range, range_title, analysis_mode,
+        rw_cfg, apply_to, phase_dir("pca"),
+    )
+    _run_raman_band_phase(groups, wavenumbers, spectral_range, range_title, phase_dir("band"))
+    _run_variance_phase(df_index, groups, spectral_range, range_title, phase_dir("variance"))
+    if analysis_mode == "disease_only":
+        _run_intra_disease_correlation_phase(
+            df_index=df_index, clinical_df=clinical_df, spectral_range=spectral_range,
+            range_title=range_title, phase_dir=phase_dir,
+        )
+    _run_region_robustness_phase(groups, wavenumbers, spectral_range, phase_dirs, phase_dir)
     return {
         "groups": groups,
         "wavenumbers": wavenumbers,

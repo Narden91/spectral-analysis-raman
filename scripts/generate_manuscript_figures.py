@@ -7,6 +7,8 @@ participant level; pixel- and area-level observations are never resampled.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
+# Direct execution needs project imports after path and plotting-backend setup.
 import sys
 from pathlib import Path
 
@@ -25,16 +27,16 @@ from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Patch
 from scipy import stats
 from sklearn.metrics import roc_curve
 
+from src import load_config
 from src.analysis.clinical_correlation_matrix import _plot_correlation_heatmap
+from src.analysis.io_utils import load_csv_or_empty
 from src.analysis.journal_figures import (
     _fig4_nmf_entropy,
     _fig6_moca_association_landscape,
     _plot_block_panel,
 )
-from src import load_config
-from src.analysis.io_utils import load_csv_or_empty
-from src.reporting.candidate_region_report import _classify_candidate
 from src.analysis.raman_bands import RAMAN_BANDS
+from src.reporting.candidate_region_report import _classify_candidate
 from src.visualization.spectral_summary_plots import (
     BAND_CATEGORY_COLORS,
     BAND_CATEGORY_LABELS,
@@ -49,6 +51,7 @@ from src.visualization.theme import (
     panel_width_in,
     set_manuscript_theme,
 )
+
 FIGURE_DIR = ROOT / "manuscript" / "paper" / "figures"
 FIGURE_DATA_DIR = ROOT / "manuscript" / "paper" / "figure_data"
 SUBJECT_SPECTRA = (
@@ -1523,9 +1526,6 @@ def make_cvd_classifier_figure() -> None:
         tprs[:, 0] = 0.0
         mean_tpr = tprs.mean(axis=0)
         mean_tpr[-1] = 1.0
-        auc_mean = comparison.loc[model, "roc_auc_mean"]
-        auc_low = comparison.loc[model, "bootstrap_roc_auc_ci_low"]
-        auc_high = comparison.loc[model, "bootstrap_roc_auc_ci_high"]
         color = CVD_MODEL_COLORS[model]
         ax_roc.plot(
             mean_fpr,

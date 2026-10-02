@@ -1,9 +1,8 @@
 # Raman Spectroscopy Analysis Pipeline
 
-Reproducible Python workflows for extracellular-vesicle Raman spectra. The
-pipeline materializes immutable raw acquisitions, produces a QC-auditable
-analysis basis, and runs exploratory EDA, subject-level Biological PCA,
-control-vs-disease modelling, and publication-style spectral plots.
+Python workflows for extracellular-vesicle Raman spectra. The pipeline stores
+raw acquisitions, checks and preprocesses pixels, and runs EDA, subject-level
+Biological PCA, control-vs-disease modelling, and spectral plots.
 
 All scientific outputs are exploratory. They are not diagnostic, predictive,
 causal, biomarker, or clinical-utility evidence.
@@ -105,19 +104,10 @@ data/preprocessed/
 └── manifest.json
 ```
 
-The production sequence is:
-
-```text
-native raw spectra
-→ dead/saturated-pixel QC
-→ narrow positive cosmic-spike detection and conservative suppression
-→ edge trim
-→ linear interpolation to a frozen grid (no extrapolation)
-→ baseline correction
-→ quality gate
-→ optional smoothing
-→ normalization
-```
+Preprocessing screens dead and saturated pixels, handles narrow positive
+cosmic spikes, trims edges, and interpolates before baseline correction,
+quality checks, optional smoothing, and normalization. See
+[the preprocessing contract](docs/preprocessing.md) for the ordered stages.
 
 The registered analysis grids are 734–1788 cm⁻¹ (fingerprint) and
 2451–3197 cm⁻¹ (CH stretch), at 1 cm⁻¹ spacing. They were selected from native
@@ -152,10 +142,10 @@ uv run scripts/run_spectral_plots.py --no-export-data
 uv run scripts/run_spectral_plots.py --no-plots
 ```
 
-`--analysis-mode {disease_vs_control,disease_only}` overrides the mode in the
-configuration. `--source preprocessed` is the normal analysis source. Parsed
-data is for native-axis audit and cannot be treated as a globally aligned
-matrix.
+`--analysis-mode {disease_vs_control,disease_only}` overrides `analysis.mode`.
+Set `data.source: preprocessed` in the configuration for analysis. The
+`--source` override is deprecated. Parsed data keeps native acquisition axes
+and cannot be treated as a globally aligned matrix.
 
 ## Outputs
 
@@ -185,9 +175,7 @@ clinical metadata. To prepare a public supplement, create an allowlisted
 aggregate-only bundle from a completed private run:
 
 ```bash
-uv run python scripts/export_publication_bundle.py \
-  --source Results_intra_disease \
-  --output publication_bundle
+uv run python scripts/export_publication_bundle.py --source Results_intra_disease --output publication_bundle
 ```
 
 Review `publication_bundle_manifest.json` before release. The exporter refuses
@@ -227,7 +215,8 @@ uv run pytest tests/test_control_vs_disease_ml.py tests/test_control_vs_disease_
 # Full test suite before release.
 uv run pytest -q
 
-# Static import/bytecode check.
+# Lint and bytecode checks.
+uv run ruff check src scripts tests
 uv run python -m compileall -q src scripts
 ```
 
@@ -241,7 +230,8 @@ uv run python -m compileall -q src scripts
 | `scripts/run_spectral_plots.py` | Spectral plots, QC plots, and CSV export |
 | `src/data_preparation/` | Materialization, manifests, validation, and loaders |
 | `src/preprocessing/` | QC and preprocessing implementation |
-| `src/analysis/` | EDA, PCA, statistics, and exploratory modelling |
+| `src/analysis/` | EDA phase runners, PCA, and exploratory modelling |
+| `src/statistics/` | Multiple-testing corrections and permutation tests |
 | `src/visualization/` | Figures and plot styling |
 
 For contributor rules and implementation details, read [CLAUDE.md](CLAUDE.md).

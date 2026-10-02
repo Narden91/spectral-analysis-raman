@@ -65,6 +65,43 @@ def test_frozen_interpolation_rejects_any_extrapolation() -> None:
         interpolate_spectra(spectra, axis, target_wavenumbers=np.array([99.0, 100.0, 101.0]))
 
 
+@pytest.mark.parametrize("spacing", [0.3, 0.6, 1.0])
+def test_generated_interpolation_grid_stays_inside_native_axis(spacing: float) -> None:
+    axis = np.array([100.0, 101.0, 102.0])
+    spectra = 2.0 * axis[None, :] + 1.0
+    aligned, target = interpolate_spectra(spectra, axis, target_spacing=spacing, method="linear")
+    assert target[0] >= axis[0]
+    assert target[-1] <= axis[-1]
+    np.testing.assert_allclose(np.diff(target), spacing)
+    np.testing.assert_allclose(aligned, 2.0 * target[None, :] + 1.0)
+
+
+@pytest.mark.parametrize("spacing", [0.0, -1.0, np.nan, np.inf])
+def test_generated_interpolation_grid_rejects_invalid_spacing(spacing: float) -> None:
+    axis = np.array([100.0, 101.0, 102.0])
+    with pytest.raises(ValueError, match="target_spacing must be finite and positive"):
+        interpolate_spectra(axis[None, :], axis, target_spacing=spacing)
+
+
+def test_preprocessing_uses_supplied_config_without_changing_defaults() -> None:
+    original = deepcopy(src.config)
+    override = deepcopy(original)
+    override["preprocessing"]["ranges"]["fingerprint"]["normalization"] = {"method": "none"}
+    override["preprocessing"]["dead_pixel"]["min_spectral_std"] = 1e6
+    spectra = np.tile(np.linspace(1.0, 2.0, 31), (2, 1))
+    axis = np.arange(1000.0, 1031.0)
+    options = dict(
+        region="fingerprint", suppress_cosmic=False, correct_bl=False, smooth=False,
+        filter_quality=False, trim=0, cfg=override,
+    )
+    kept = run_preprocessing(spectra, axis, screen_dead=False, **options)
+    np.testing.assert_array_equal(kept.spectra, spectra)
+    assert kept.metadata["normalization_method"] == "none"
+    rejected = run_preprocessing(spectra, axis, screen_dead=True, **options)
+    assert not rejected.retained_mask.any()
+    assert src.config == original
+
+
 def test_baseline_qc_artifacts_use_consistent_trimmed_shapes(tmp_path: Path, preprocessing_config_guard: None) -> None:
     wavenumbers = np.arange(1200.0, 1212.0, dtype=float)
     spectra = np.vstack(
@@ -204,15 +241,11 @@ def test_excessive_cosmic_correction_rejects_and_keeps_qc_lineage(
 
 
 def test_post_baseline_spike_repair_is_never_applied(
-    monkeypatch: pytest.MonkeyPatch,
     preprocessing_config_guard: None,
 ) -> None:
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("post-baseline spike repair must not run")
-
-    monkeypatch.setattr("src.preprocessing.pipeline.repair_isolated_spikes_with_mask", fail_if_called)
-    run_preprocessing(
-        np.tile(np.linspace(1.0, 2.0, 31), (2, 1)),
+    spectra = np.tile(np.linspace(1.0, 2.0, 31), (2, 1))
+    result = run_preprocessing(
+        spectra,
         np.arange(1000.0, 1031.0),
         region="fingerprint",
         screen_dead=False,
@@ -223,6 +256,9 @@ def test_post_baseline_spike_repair_is_never_applied(
         normalize=False,
         trim=0,
     )
+    np.testing.assert_array_equal(result.spectra, spectra)
+    assert result.metadata["isolated_spike_repair_enabled"] is False
+    assert not result.qc_metrics["n_spike_repaired_channels"].any()
 
 
 def test_area_normalization_uses_supplied_wavenumber_axis() -> None:

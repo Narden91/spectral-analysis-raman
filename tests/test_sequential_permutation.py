@@ -150,6 +150,24 @@ def test_run_curtailed_permutation_draws_exhausts_budget_when_ambiguous() -> Non
     assert len(values) == 20
 
 
+@pytest.mark.parametrize("score", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("n_jobs", [1, 2])
+def test_run_curtailed_permutation_draws_rejects_undefined_scores(score: float, n_jobs: int) -> None:
+    config = SequentialStoppingConfig(permutation_min=2, permutation_max=2, check_interval=2)
+    with pytest.raises(ValueError, match="Permutation scores must be finite"):
+        run_curtailed_permutation_draws(
+            lambda seed: 0.0 if seed == 0 else score, [(0,), (1,)],
+            observed=1.0, config=config, n_jobs=n_jobs,
+        )
+
+
+@pytest.mark.parametrize("observed", [np.nan, np.inf, -np.inf])
+def test_run_curtailed_permutation_draws_rejects_undefined_observed_statistic(observed: float) -> None:
+    config = SequentialStoppingConfig(permutation_min=1, permutation_max=1, check_interval=1)
+    with pytest.raises(ValueError, match="Observed permutation statistic must be finite"):
+        run_curtailed_permutation_draws(lambda: 0.0, [()], observed=observed, config=config, n_jobs=1)
+
+
 def test_run_curtailed_permutation_draws_parallel_matches_serial() -> None:
     config = SequentialStoppingConfig(permutation_min=30, permutation_max=30, check_interval=30)
     seed_args = [(seed,) for seed in range(config.permutation_max)]

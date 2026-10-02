@@ -26,6 +26,7 @@ from src.analysis.phase_status import (
     STATUS_OK,
     PhaseStatus,
 )
+from src.statistics.multiple_testing import holm_adjust_series
 from src.statistics.sequential_permutation import (
     resolve_sequential_stopping_config,
     run_curtailed_permutation_draws,
@@ -37,22 +38,6 @@ logger = logging.getLogger(__name__)
 
 def _pls_cfg(cfg: dict) -> dict:
     return cfg.get("analysis", {}).get("pls_regression", {})
-
-
-def _holm_adjust(p_values: pd.Series) -> pd.Series:
-    """Return Holm-adjusted p-values while preserving missing values."""
-    numeric = pd.to_numeric(p_values, errors="coerce")
-    adjusted = pd.Series(np.nan, index=p_values.index, dtype=float)
-    valid = numeric.dropna()
-    if valid.empty:
-        return adjusted
-    order = np.argsort(valid.to_numpy(dtype=float))
-    ordered = valid.to_numpy(dtype=float)[order]
-    values = np.maximum.accumulate(ordered * (len(valid) - np.arange(len(valid))))
-    restored = np.empty(len(valid), dtype=float)
-    restored[order] = np.minimum(values, 1.0)
-    adjusted.loc[valid.index] = restored
-    return adjusted
 
 
 def _calculate_vip(model: PLSRegression) -> np.ndarray:
@@ -431,7 +416,7 @@ def run_pls_regression(
         }
 
     gate_alpha = float(pls_cfg.get("permutation_family_alpha", 0.05))
-    perf_df["permutation_p_value_holm"] = _holm_adjust(perf_df["permutation_p_value"])
+    perf_df["permutation_p_value_holm"] = holm_adjust_series(perf_df["permutation_p_value"])
     perf_df["model_supported"] = perf_df["permutation_p_value_holm"].lt(gate_alpha).fillna(False)
     perm_df = perm_df.merge(
         perf_df[["target", "permutation_p_value_holm", "model_supported"]],

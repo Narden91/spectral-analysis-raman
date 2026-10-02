@@ -134,6 +134,8 @@ def run_curtailed_permutation_draws(
     `config.check_interval`-sized batches and checking the stopping condition
     only between batches avoids that entirely.
     """
+    if not np.isfinite(observed):
+        raise ValueError("Observed permutation statistic must be finite")
     values: list[float] = []
     successes = 0
     offset = 0
@@ -144,8 +146,10 @@ def run_curtailed_permutation_draws(
             chunk_values = Parallel(n_jobs=n_jobs)(delayed(draw_fn)(*args) for args in chunk)
         else:
             chunk_values = [draw_fn(*args) for args in chunk]
+        if not np.all(np.isfinite(chunk_values)):
+            raise ValueError("Permutation scores must be finite")
         values.extend(chunk_values)
-        successes += sum(1 for value in chunk_values if np.isfinite(value) and value >= observed)
+        successes += sum(1 for value in chunk_values if value >= observed)
     return values
 
 

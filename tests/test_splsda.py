@@ -10,6 +10,15 @@ from sklearn.model_selection import StratifiedKFold
 from src.analysis.splsda import _permutation_test, run_splsda_classifier
 
 
+def test_splsda_permutation_test_rejects_all_undefined_scores() -> None:
+    with patch("src.analysis.splsda._permuted_splsda_score", return_value=np.nan):
+        with pytest.raises(ValueError, match="Permutation scores must be finite"):
+            _permutation_test(
+                np.ones((4, 2)), np.array([0, 0, 1, 1]), None, None,
+                [1], [1.0], 2, 0.75, 200, 42, n_jobs=1,
+            )
+
+
 @pytest.fixture
 def mock_splsda_cfg():
     return {
