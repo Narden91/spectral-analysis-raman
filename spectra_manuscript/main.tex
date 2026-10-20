@@ -109,7 +109,10 @@
 }
 
 \begin{abstract}
-Raman spectroscopy provides a label-free vibrational profile of extracellular-vesicle (EV)-enriched biofluid fractions. Participant-level Raman profiles were obtained from 97 participants with ischemic stroke and 50 controls. After quality control and region-specific normalization, spectra acquired at individual spatial sampling locations were aggregated into a single median spectrum per participant in the fingerprint (734--1788~\si{\per\centi\metre}) and C--H stretching (2451--3197~\si{\per\centi\metre}) regions, so that inference was carried out at the participant rather than the measurement level. The objectives were to characterize participant-level spectral variation, assess exploratory case-control separation, and examine associations with clinical outcomes within the stroke cohort. Participant-level spectra showed 21 reproducible Raman bands and shoulder features associated with lipids, proteins, nucleic acids, and carotenoids. Lipid-associated regions accounted for most of the normalized spectral variance (fingerprint PC1, 75.8\%; C--H PC1, 67.1\%), a pattern that persisted in a disease-subset sensitivity analysis. All 21 features differed between stroke and control participants after false-discovery-rate correction, with increases and decreases distributed across multiple correlated Raman domains. The primary whole-spectrum partial least-squares discriminant analysis (PLS-DA) model gave modest discrimination (balanced accuracy 0.655, 95\% CI 0.538--0.771; ROC--AUC 0.711, 95\% CI 0.550--0.823; sex-stratified permutation $p=0.005$). Within the stroke cohort, no whole-spectrum association survived correction for multiplicity, and Montreal Cognitive Assessment (MoCA) scores gave negative cross-validated $R^2$, so the spectra did not support the prediction of cognitive outcome. Participant-level Raman spectroscopy, therefore, identifies reproducible biochemical differences within compositionally complex EV-enriched fractions and identifies lipid-, protein-, nucleic acid-, and carotenoid-associated regions for molecular follow-up in larger, balanced cohorts.
+Raman spectroscopy provides a label-free vibrational profile of extracellular-vesicle (EV)-enriched biofluid fractions. Participant-level Raman profiles were obtained from 97 participants with ischemic stroke and 50 controls. After quality control and region-specific normalization, spectra acquired at individual spatial sampling locations were aggregated into a single median spectrum per participant in the fingerprint (734--1788~\si{\per\centi\metre}) and C--H stretching (2451--3197~\si{\per\centi\metre}) regions, so that inference was carried out at the participant rather than the measurement level. The objectives were to characterize participant-level spectral variation, assess exploratory case-control separation, and examine associations with clinical outcomes within the stroke cohort. Participant-level spectra showed 21 reproducible Raman bands and shoulder features associated with lipids, proteins, nucleic acids, and carotenoids.
+% Lipid-associated regions accounted for most of the normalized spectral variance (fingerprint PC1, 75.8\%; C--H PC1, 67.1\%), a pattern that persisted in a disease-subset sensitivity analysis. 
+Lipid-associated regions accounted for most of the normalized spectral variance (fingerprint PC1, 75.8\%; C--H PC1, 67.1\%), a pattern that persisted when PCA was repeated using only spectra from participants with ischemic stroke.
+All 21 features differed between stroke and control participants after false-discovery-rate correction, with increases and decreases distributed across multiple correlated Raman domains. The primary whole-spectrum partial least-squares discriminant analysis (PLS-DA) model gave modest discrimination (balanced accuracy 0.655, 95\% CI 0.538--0.771; ROC--AUC 0.711, 95\% CI 0.550--0.823; sex-stratified permutation $p=0.005$). Within the stroke cohort, no whole-spectrum association survived correction for multiplicity, and Montreal Cognitive Assessment (MoCA) scores gave negative cross-validated $R^2$, so the spectra did not support the prediction of cognitive outcome. Participant-level Raman spectroscopy, therefore, identifies reproducible biochemical differences within compositionally complex EV-enriched fractions and identifies lipid-, protein-, nucleic acid-, and carotenoid-associated regions for molecular follow-up in larger, balanced cohorts.
 \end{abstract}
 
 \begin{keyword} Raman spectroscopy \sep extracellular-vesicle-enriched fractions \sep ischemic stroke \sep participant-level inference \sep chemometrics \sep clinical prediction \end{keyword}
@@ -349,32 +352,18 @@ Peak positions were largely unchanged between cohorts, whereas relative band int
 \subsection{Principal sources of spectral variation}
 \label{subsec:biopca_results}
 
-To identify the spectral regions that contribute most strongly to inter-participant variability, PCA was applied to participant-level spectra. PCA revealed that a small number of components captured most participant-level spectral variation. In the fingerprint region, PC1 and PC2 accounted for 75.8\% and 11.1\% of the variance, respectively, whereas in the C--H region, the corresponding values were 67.1\% and 29.6\%. Following MFA block weighting, the first two joint components accounted for 62.5\% and 25.4\% of the variance (\cref{fig:biopca_scree}).
+To identify the spectral regions that contribute most strongly to inter-participant variability, PCA was applied to participant-level spectra. PCA revealed that a small number of components captured most participant-level spectral variation. In the fingerprint region, PC1 and PC2 accounted for 75.8\% and 11.1\% of the variance, respectively, whereas in the C--H region, the corresponding values were 67.1\% and 29.6\%. Following MFA block weighting, the first three joint components accounted for 62.5\%, 25.4\%, and 4.1\% of the variance (92.0\% in total; \cref{fig:biopca}).
 
 PCA of the stroke cohort alone produced a similar loading structure, with PC1 accounting for 63.5\% of variance in the fingerprint region, 75.7\% in the C--H region, and 54.1\% after MFA fusion. This consistency suggests that the dominant spectral variance observed in the full cohort is largely preserved within the stroke subgroup.
 
-The largest loadings fell on CH$_2$/CH$_3$ deformation and stretching bands and on a carbonyl-associated band (\cref{fig:biopca_loadings}). PC1 loaded with the same sign on the CH$_2$ twisting (1301~\si{\per\centi\metre}), CH$_2$/CH$_3$ deformation (1439~\si{\per\centi\metre}), C=C/amide~I (1657~\si{\per\centi\metre}), and CH$_2$ symmetric stretching (2851~\si{\per\centi\metre}) bands, so these bands varied together across participants. PC2 contrasted the broad C--H stretching region around 2946~\si{\per\centi\metre} with the 1305 and 1439~\si{\per\centi\metre} deformation bands, and the largest PC3 loading lay at the hydrogen-bonded carbonyl band (1721~\si{\per\centi\metre}). Lipid-associated spectral variation was therefore a dominant source of inter-participant variability.
+The largest loadings fell on CH$_2$/CH$_3$ deformation and stretching bands and on a carbonyl-associated band (\cref{fig:biopca}). PC1 loaded with the same sign on the CH$_2$ twisting (1301~\si{\per\centi\metre}), CH$_2$/CH$_3$ deformation (1439~\si{\per\centi\metre}), C=C/amide~I (1657~\si{\per\centi\metre}), and CH$_2$ symmetric stretching (2851~\si{\per\centi\metre}) bands, so these bands varied together across participants. PC2 contrasted the broad C--H stretching region around 2946~\si{\per\centi\metre} with the 1305 and 1439~\si{\per\centi\metre} deformation bands, and the largest PC3 loading lay at the hydrogen-bonded carbonyl band (1721~\si{\per\centi\metre}). Lipid-associated spectral variation was therefore a dominant source of inter-participant variability.
 
 
-\begin{figure}[htbp] 
-\centering 
-\begin{subfigure}[t]{0.42\textwidth}
+\begin{figure}[htbp]
 \centering
-\includegraphics[width=\linewidth]{figures/biopca_scree.pdf}
-\subcaption{Explained variance}
-\label{fig:biopca_scree}
-\end{subfigure}
-
-\vspace{0.5em}
-
-\begin{subfigure}[t]{0.90\textwidth}
-\centering
-\includegraphics[width=\linewidth]{figures/biopca_loadings.pdf}
-\subcaption{Loading spectra}
-\label{fig:biopca_loadings}
-\end{subfigure}
-\caption{Participant-level joint PCA of the fingerprint and C--H stretching blocks after MFA block weighting ($n=147$). \subref{fig:biopca_scree} Explained variance per component and cumulative total. \subref{fig:biopca_loadings} Loading spectra of PC1--PC3 in the MFA-weighted space. The sign of a component is arbitrary, so only the relative signs of bands within a component are interpretable. Shaded spans mark the high-loading intervals (Section~S2 of the SI), labelled with their main peak positions in \si{\per\centi\metre}.}
-\label{fig:biopca} 
+\includegraphics[width=0.90\textwidth]{figures/biopca_loadings.pdf}
+\caption{Loading spectra of the first three components of the participant-level joint PCA of the fingerprint and C--H stretching blocks after MFA block weighting ($n=147$). Row labels give the variance explained by each component (cumulative 92.0\%). Loadings are in the MFA-weighted space. The sign of a component is arbitrary, so only the relative signs of bands within a component are interpretable. Shaded spans mark the high-loading intervals (Section~S2 of the SI), labelled with their main peak positions in \si{\per\centi\metre}.}
+\label{fig:biopca}
 \end{figure}
 
 
@@ -520,18 +509,36 @@ The reproducible spectral differences in lipid-, protein-, nucleic acid-, and ca
 
 Future studies should evaluate whether the spectral differences identified here can be reproduced in age- and sex-balanced cohorts and validated across independent sites and instrument platforms. Establishing biological specificity will require orthogonal characterization of EV-enriched fractions, molecular profiling, and targeted biochemical validation of the tentative Raman assignments. Because large longitudinal cohorts, balanced recruitment, and complete molecular profiling are costly and slow, Raman spectroscopy may be useful upstream to identify candidate biochemical targets before more resource-intensive investigations are undertaken. Such studies will be required to determine whether the participant-level spectral patterns observed here contain reproducible source-specific, prognostic, or clinically relevant information beyond that detectable in the present dataset.
 
-
 \section*{Data Availability}
 
 Processed participant-level matrices, frozen configuration files, and analysis scripts are available from the corresponding author on reasonable request. Raw Raman data and linked clinical data are restricted by local participant data governance. 
 
-\section*{Ethics Declaration}
+\color{red}
+\section*{Declarations}
 
-The study protocol received approval from {\color{red}[full institutional review board and approval number]}. Written informed consent was obtained from all participants or their legal representatives.
+\subsection*{Ethics Approval and Consent to Participate}
+The clinical sample collection protocols used in this study were reviewed and authorized by the Research Ethics Committee of the Northern Savo Hospital District (Kuopio, Finland). All participants or their legally authorized representatives provided written informed consent prior to blood collection and clinical history extraction. This study was conducted in strict adherence to the principles of the Declaration of Helsinki.
+\color{black}
 
-\section*{Author Contributions}
+% \section*{Author Contributions}
 
-{\color{red}[CRediT taxonomy statement ?.]}
+% {\color{red}[CRediT taxonomy statement ?.]}
+
+\section*{Author Contributions} 
+
+\begin{itemize}
+    \item Conceptualization: [names]. 
+    \item Methodology: [names]. 
+    \item Investigation: [names]. 
+    \item Formal analysis: [names]. 
+    \item Data curation: [names]. 
+    \item Visualization: [names]. 
+    \item Writing -- original draft: [names]. 
+    \item Writing -- review \& editing: [names]. 
+    \item Supervision: [names]. 
+    \item Funding acquisition: [names].
+\end{itemize}
+
 
 \section*{Declaration of Competing Interests}
 
@@ -539,7 +546,7 @@ The authors declare no competing interests.
 
 \section*{Funding}
 
-{\color{red}[Funding statement.]}
+This work was supported by the Research Council of Finland (PREIN Flagship no. 368653) and the Academy of Finland flagship GeneCellNano (project no. 323669).
 
 \section*{Acknowledgements}
 

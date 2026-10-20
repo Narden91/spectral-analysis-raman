@@ -715,13 +715,8 @@ PC_COLORS = {"PC1": "#264653", "PC2": "#2A9D8F", "PC3": "#E76F51"}
 BIOPCA_BLOCK_TITLES = {"1300": "Fingerprint", "2850": "C–H stretch"}
 
 
-# Figure 2 is assembled in LaTeX from two separate PDFs so each panel can be
-# authored at the exact width its \includegraphics requests. Both are saved
-# with bbox_inches=None, so neither is rescaled on the page. Panel A sits above
-# the full-width loading spectra of panel B, which need the horizontal room;
-# the two heights together keep the stacked float within one page.
-BIOPCA_PANEL_HEIGHT_IN = 2.2
-BIOPCA_SCREE_FRACTION = 0.42
+# Figure 2 is authored at the exact width its \includegraphics requests and
+# saved with bbox_inches=None, so it is not rescaled on the page.
 BIOPCA_LOADING_FRACTION = 0.90
 BIOPCA_LOADING_HEIGHT_IN = 3.1
 BIOPCA_LABEL_MIN_GAP_CM = 60.0
@@ -741,68 +736,8 @@ def _save_exact(fig, stem: str) -> None:
     plt.close(fig)
 
 
-def make_biopca_scree_figure() -> None:
-    """Figure 2A: explained variance of the whole-spectrum joint PCA.
-
-    Reads the archived ``explained_variance.csv``; no PCA refitting. A single
-    percentage axis replaces the twin axis of the pipeline's ``plot_scree``:
-    both series are percentages, and a twin axis is unreadable in a panel this
-    narrow.
-    """
-    variance = pd.read_csv(BIOPCA_WHOLE_EXPLAINED_VARIANCE).sort_values("PC")
-    ratios = variance["explained_variance_ratio"].to_numpy(dtype=float) * 100.0
-
-    fig, ax = plt.subplots(
-        figsize=(panel_width_in(BIOPCA_SCREE_FRACTION), BIOPCA_PANEL_HEIGHT_IN),
-        constrained_layout=True,
-    )
-    components = np.arange(1, ratios.size + 1)
-    ax.bar(components, ratios, color="#457B9D", width=0.68, label="Individual")
-    ax.plot(
-        components,
-        np.cumsum(ratios),
-        "o-",
-        color="#CC3311",
-        linewidth=1.6,
-        markersize=4.5,
-        label="Cumulative",
-    )
-    for component, ratio in zip(components, ratios, strict=True):
-        # Inside the bar for PC1/PC2: the cumulative marker sits on the PC1 bar
-        # top, so an outside label would collide with it.
-        ax.annotate(
-            f"{ratio:.1f}",
-            (component, ratio),
-            textcoords="offset points",
-            xytext=(0, -4) if ratio > 12 else (0, 4),
-            ha="center",
-            va="top" if ratio > 12 else "bottom",
-            fontsize=8,
-            color="white" if ratio > 12 else NEUTRAL,
-        )
-    ax.set_xticks(components, [f"PC{index}" for index in components])
-    ax.set_ylim(0, 108)
-    ax.set_xlabel("Component")
-    ax.set_ylabel("Explained variance (%)")
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.grid(axis="y", color="#D9D9D9", linewidth=0.6)
-    ax.set_axisbelow(True)
-    ax.legend(
-        frameon=False,
-        # Right-centre is the only region clear of both the bars and the
-        # cumulative line at this panel height.
-        loc="center right",
-        bbox_to_anchor=(1.0, 0.55),
-        fontsize=7.5,
-        handlelength=1.4,
-        borderpad=0.1,
-        labelspacing=0.25,
-    )
-    _save_exact(fig, "biopca_scree")
-
-
 def make_biopca_loading_figure() -> None:
-    """Figure 2B: loading spectra of the whole-spectrum joint PCA.
+    """Figure 2: loading spectra of the whole-spectrum joint PCA.
 
     Reads the archived ``loadings.csv`` and ``loading_regions.csv``; no PCA
     refitting or region re-detection. One row per component, one column per
@@ -1691,7 +1626,6 @@ def main() -> None:
     make_subject_spectra_figure(rng)
     make_global_spectra_figures()
     make_band_effect_figure(rng)
-    make_biopca_scree_figure()
     make_biopca_loading_figure()
     make_clinical_correlation_heatmap_figure()
     make_candidate_region_overview_figure()
