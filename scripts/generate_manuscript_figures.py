@@ -93,12 +93,19 @@ MOCA_PLS_PERMUTATION = (
     / "pls_regression"
     / "pls_permutation_results.csv"
 )
-BIOPCA_WHOLE_REGION_CONTRIBUTIONS = (
+BIOPCA_WHOLE_LOADINGS = (
     ROOT
     / "Results_control_vs_disease"
     / "03_whole_spectrum_1300_plus_2850"
     / "04_biological_pca"
-    / "region_contributions.csv"
+    / "loadings.csv"
+)
+BIOPCA_WHOLE_LOADING_REGIONS = (
+    ROOT
+    / "Results_control_vs_disease"
+    / "03_whole_spectrum_1300_plus_2850"
+    / "04_biological_pca"
+    / "loading_regions.csv"
 )
 BIOPCA_WHOLE_EXPLAINED_VARIANCE = (
     ROOT
@@ -705,18 +712,19 @@ def make_band_effect_figure_landscape(result: pd.DataFrame) -> None:
 
 
 PC_COLORS = {"PC1": "#264653", "PC2": "#2A9D8F", "PC3": "#E76F51"}
-BLOCK_TAGS = {"1300": "FP", "2850": "CH"}
+BIOPCA_BLOCK_TITLES = {"1300": "Fingerprint", "2850": "C–H stretch"}
 
 
 # Figure 2 is assembled in LaTeX from two separate PDFs so each panel can be
-# authored at the exact width its \includegraphics requests. Both are saved at
-# BIOPCA_PANEL_HEIGHT_IN with bbox_inches=None, so neither is rescaled on the
-# page and the two panels share a type size and a baseline.
-# A + gap + B = 0.42 + 0.02 + 0.46 = 0.90 of the text block, matching the
-# minipage widths in the manuscript's Figure 2 float.
-BIOPCA_PANEL_HEIGHT_IN = 3.0
+# authored at the exact width its \includegraphics requests. Both are saved
+# with bbox_inches=None, so neither is rescaled on the page. Panel A sits above
+# the full-width loading spectra of panel B, which need the horizontal room;
+# the two heights together keep the stacked float within one page.
+BIOPCA_PANEL_HEIGHT_IN = 2.2
 BIOPCA_SCREE_FRACTION = 0.42
-BIOPCA_LOADING_FRACTION = 0.46
+BIOPCA_LOADING_FRACTION = 0.90
+BIOPCA_LOADING_HEIGHT_IN = 3.1
+BIOPCA_LABEL_MIN_GAP_CM = 60.0
 
 
 def _save_exact(fig, stem: str) -> None:
@@ -781,8 +789,10 @@ def make_biopca_scree_figure() -> None:
     ax.set_axisbelow(True)
     ax.legend(
         frameon=False,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 1.0),
+        # Right-centre is the only region clear of both the bars and the
+        # cumulative line at this panel height.
+        loc="center right",
+        bbox_to_anchor=(1.0, 0.55),
         fontsize=7.5,
         handlelength=1.4,
         borderpad=0.1,
@@ -792,61 +802,80 @@ def make_biopca_scree_figure() -> None:
 
 
 def make_biopca_loading_figure() -> None:
-    """Figure 2B: loading-derived intervals of the whole-spectrum joint PCA.
+    """Figure 2B: loading spectra of the whole-spectrum joint PCA.
 
-    Reads the archived ``region_contributions.csv``; no PCA refitting or region
-    re-detection. Every detected interval belongs to exactly one component, so
-    the chart draws one bar per interval coloured by component rather than a
-    PC-grouped matrix whose rows would each be two-thirds empty.
+    Reads the archived ``loadings.csv`` and ``loading_regions.csv``; no PCA
+    refitting or region re-detection. One row per component, one column per
+    block. Each row shares its y-axis across blocks because MFA weighting puts
+    both blocks in one space, which is what makes their magnitudes comparable.
+    Shaded spans are the archived high-loading intervals (SI Section S2).
     """
-    contributions = pd.read_csv(BIOPCA_WHOLE_REGION_CONTRIBUTIONS)
-    contributions["block_tag"] = (
-        contributions["spectral_block"].astype(str).map(BLOCK_TAGS)
-    )
-    bounds = contributions["region_label"].str.extract(
-        r"(?P<low>[\d.]+)\D+(?P<high>[\d.]+)\s*cm"
-    )
-    contributions["compact_label"] = (
-        "["
-        + contributions["block_tag"]
-        + "] "
-        + bounds["low"].astype(float).round(0).astype(int).astype(str)
-        + "–"
-        + bounds["high"].astype(float).round(0).astype(int).astype(str)
-    )
-    if contributions["compact_label"].duplicated().any():
-        raise ValueError("Loading-region labels are not unique across components")
-    regions = contributions.sort_values("relative_absolute_contribution")
+    loadings = pd.read_csv(BIOPCA_WHOLE_LOADINGS)
+    loadings["spectral_block"] = loadings["spectral_block"].astype(str)
+    regions = pd.read_csv(BIOPCA_WHOLE_LOADING_REGIONS)
+    regions["spectral_block"] = regions["spectral_block"].astype(str)
+    variance = pd.read_csv(BIOPCA_WHOLE_EXPLAINED_VARIANCE).set_index("PC")
+    blocks = list(BIOPCA_BLOCK_TITLES)
+    axes_cm = {
+        block: loadings.loc[loadings["spectral_block"].eq(block), "raman_shift"].to_numpy(dtype=float)
+        for block in blocks
+    }
+    pcs = ("PC1", "PC2", "PC3")
 
-    fig, ax = plt.subplots(
-        figsize=(panel_width_in(BIOPCA_LOADING_FRACTION), BIOPCA_PANEL_HEIGHT_IN),
+    fig, axes = plt.subplots(
+        len(pcs),
+        len(blocks),
+        figsize=(panel_width_in(BIOPCA_LOADING_FRACTION), BIOPCA_LOADING_HEIGHT_IN),
+        sharex="col",
+        sharey="row",
+        gridspec_kw={"width_ratios": [np.ptp(axes_cm[block]) for block in blocks]},
         constrained_layout=True,
     )
-    y = np.arange(regions.shape[0])
-    ax.barh(
-        y,
-        regions["relative_absolute_contribution"].to_numpy(dtype=float),
-        height=0.74,
-        color=[PC_COLORS[pc] for pc in regions["PC"]],
-    )
-    ax.set_yticks(y, regions["compact_label"])
-    ax.tick_params(axis="y", length=0, labelsize=7, pad=1.5)
-    ax.set_ylim(-0.7, regions.shape[0] - 0.3)
-    ax.set_xlim(0, None)
-    ax.set_xlabel("Relative contribution")
-    ax.spines[["top", "right", "left"]].set_visible(False)
-    ax.grid(axis="x", color="#D9D9D9", linewidth=0.6)
-    ax.set_axisbelow(True)
-    ax.legend(
-        handles=[Patch(facecolor=PC_COLORS[pc], label=pc) for pc in ("PC1", "PC2", "PC3")],
-        frameon=False,
-        loc="lower right",
-        fontsize=7.5,
-        handlelength=1.2,
-        borderpad=0.1,
-        labelspacing=0.25,
-    )
-    _save_exact(fig, "biopca_loading_regions")
+    for row, pc in enumerate(pcs):
+        color = PC_COLORS[pc]
+        for col, block in enumerate(blocks):
+            ax = axes[row, col]
+            values = loadings.loc[loadings["spectral_block"].eq(block), f"{pc}_loading"].to_numpy(dtype=float)
+            ax.axhline(0.0, color=NEUTRAL, linewidth=0.5)
+            intervals = regions.loc[regions["PC"].eq(pc) & regions["spectral_block"].eq(block)]
+            for _, interval in intervals.iterrows():
+                ax.axvspan(
+                    interval["start_cm-1"], interval["end_cm-1"], color=color, alpha=0.16, linewidth=0
+                )
+            ax.plot(axes_cm[block], values, color=color, linewidth=0.9)
+            # Adjacent intervals (e.g. 1048/1101) would print overlapping labels;
+            # keep the stronger one, the weaker interval stays shaded.
+            labelled: list[float] = []
+            for _, interval in intervals.sort_values("peak_absolute_loading", ascending=False).iterrows():
+                peak_cm = float(interval["peak_shift_cm-1"])
+                peak = float(interval["peak_loading"])
+                if any(abs(peak_cm - other) < BIOPCA_LABEL_MIN_GAP_CM for other in labelled):
+                    continue
+                labelled.append(peak_cm)
+                ax.annotate(
+                    f"{peak_cm:.0f}",
+                    (peak_cm, peak),
+                    textcoords="offset points",
+                    xytext=(0, 1.5 if peak >= 0 else -1.5),
+                    ha="center",
+                    va="bottom" if peak >= 0 else "top",
+                    fontsize=GLOBAL_PEAK_LABEL_PT,
+                    color=NEUTRAL,
+                )
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.tick_params(labelsize=7)
+            ax.margins(x=0.01, y=0.30)
+            if row == 0:
+                ax.set_title(BIOPCA_BLOCK_TITLES[block], fontsize=8)
+            if col == 0:
+                ratio = float(variance.loc[pc, "explained_variance_ratio"]) * 100.0
+                ax.set_ylabel(f"{pc} ({ratio:.1f}%)", fontsize=7.5)
+            else:
+                ax.tick_params(axis="y", left=False, labelleft=False)
+                ax.spines["left"].set_visible(False)
+    fig.supxlabel(r"Raman shift (cm$^{-1}$)", fontsize=8)
+    fig.supylabel("Loading (MFA-weighted)", fontsize=8)
+    _save_exact(fig, "biopca_loadings")
 
 
 def make_clinical_correlation_heatmap_figure() -> None:
