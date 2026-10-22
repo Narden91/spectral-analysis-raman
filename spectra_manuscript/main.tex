@@ -2,12 +2,8 @@
 
 \usepackage{amssymb} \usepackage{amsmath} \usepackage{lineno} \usepackage{subcaption} \usepackage{hyperref} \usepackage{cleveref} \usepackage{booktabs} \usepackage{tabularx} \usepackage{array} \usepackage{siunitx} \usepackage{xcolor}
 
-% Absorb the few unbreakable long tokens (siunitx units, hyphenated
-% compounds) that otherwise overhang the 390pt text block.
 \emergencystretch=2em
 
-% Panel labels are typeset by LaTeX rather than baked into the figure files,
-% so they match the document font and stay referenceable.
 \renewcommand\thesubfigure{\Alph{subfigure}}
 \captionsetup[subfigure]{labelformat=simple, labelsep=space, labelfont=bf,
                          justification=centering, skip=2pt}
@@ -23,14 +19,13 @@
 
 \title{Participant-level Raman spectroscopy of circulating EV-enriched fractions reveals distributed spectral differences in ischemic stroke patients}
 
-% Authors
 \author[1]{Emanuele Nardone}
 
 \author[1]{Nikita Belko\corref{cor1}}
 \ead{nikita.belko@uef.fi}
 \cortext[cor1]{Corresponding author}
 
-\author[3]{Tuomas Kilpeläinen}
+\author[9]{Tuomas Kilpeläinen}
 
 \author[3]{Olga Neustroeva}
 
@@ -40,11 +35,12 @@
 
 \author[7]{Aurel Popa-Wagner}
 
-\author[2]{Jacopo Zini}
+\author[2,8]{Jacopo Zini}
 
-\author[2]{Francesco Piga}
+\author[2,3]{Francesco Piga}
+\ead{francescopiga.fp@gmail.com}
 
-\author[4]{Saara Siekkinen}
+\author[4,10,11]{Saara Zini}
 
 \author[4]{Pia Damlin}
 
@@ -54,8 +50,6 @@
 
 \author[1]{Polina Kuzhir}
 
-
-% Affiliations
 
 \affiliation[1]{
     organization={Department of Physics and Mathematics,
@@ -69,6 +63,8 @@
                   Division of Pharmaceutical Biosciences,
                   Faculty of Pharmacy,
                   University of Helsinki},
+    addressline={Viikinkaari 5 E},
+    postcode={00790},
     city={Helsinki},
     country={Finland}
 }
@@ -89,8 +85,6 @@
     country={Finland}
 }
 
-% Additional affiliations — confirm official department names
-
 \affiliation[5]{
     organization={Jagiellonian University},
     city={Kraków},
@@ -108,9 +102,43 @@
     country={Country?}
 }
 
+\affiliation[8]{
+    organization={Pharmaceutical Sciences Laboratory,
+                  Åbo Akademi University},
+    addressline={Artillerigatan 6A},
+    postcode={20520},
+    city={Turku},
+    country={Finland}
+}
+
+\affiliation[9]{
+    organization={Department of Health Sciences,
+                  School of Pharmacy,
+                  University of Eastern Finland},
+    city={Kuopio},
+    country={Finland}
+}
+
+\affiliation[10]{
+    organization={A.I. Virtanen Institute for Molecular Sciences,
+                  Faculty of Health Sciences,
+                  University of Eastern Finland},
+    city={Kuopio},
+    country={Finland}
+}
+
+\affiliation[11]{
+    organization={Department of Bioproducts and Biosystems,
+                  School of Chemical Engineering,
+                  Aalto University},
+    addressline={Vuorimiehentie 1},
+    postcode={FI-02150},
+    city={Espoo},
+    country={Finland}
+}
+
 \begin{abstract}
 Raman spectroscopy provides a label-free vibrational profile of extracellular-vesicle (EV)-enriched biofluid fractions. Participant-level Raman profiles were obtained from 97 participants with ischemic stroke and 50 controls. After quality control and region-specific normalization, spectra acquired at individual spatial sampling locations were aggregated into a single median spectrum per participant in the fingerprint (734--1788~\si{\per\centi\metre}) and C--H stretching (2451--3197~\si{\per\centi\metre}) regions, so that inference was carried out at the participant rather than the measurement level. The objectives were to characterize participant-level spectral variation, assess exploratory case-control separation, and examine associations with clinical outcomes within the stroke cohort. Participant-level spectra showed 21 reproducible Raman bands and shoulder features associated with lipids, proteins, nucleic acids, and carotenoids.
-% Lipid-associated regions accounted for most of the normalized spectral variance (fingerprint PC1, 75.8\%; C--H PC1, 67.1\%), a pattern that persisted in a disease-subset sensitivity analysis. 
 Lipid-associated regions accounted for most of the normalized spectral variance (fingerprint PC1, 75.8\%; C--H PC1, 67.1\%), a pattern that persisted when PCA was repeated using only spectra from participants with ischemic stroke.
 All 21 features differed between stroke and control participants after false-discovery-rate correction, with increases and decreases distributed across multiple correlated Raman domains. The primary whole-spectrum partial least-squares discriminant analysis (PLS-DA) model gave modest discrimination (balanced accuracy 0.655, 95\% CI 0.538--0.771; ROC--AUC 0.711, 95\% CI 0.550--0.823; sex-stratified permutation $p=0.005$). Within the stroke cohort, no whole-spectrum association survived correction for multiplicity, and Montreal Cognitive Assessment (MoCA) scores gave negative cross-validated $R^2$, so the spectra did not support the prediction of cognitive outcome. Participant-level Raman spectroscopy, therefore, identifies reproducible biochemical differences within compositionally complex EV-enriched fractions and identifies lipid-, protein-, nucleic acid-, and carotenoid-associated regions for molecular follow-up in larger, balanced cohorts.
 \end{abstract}
@@ -150,7 +178,6 @@ In addition to MoCA scores, cognitive performance was assessed using Repeatable 
 
 Because some clinical measurements were unavailable for all participants, we compared participants with and without available outcome data, using Mann-Whitney tests for age and Fisher exact tests for sex and lesion side (\Cref{tab:cohortA} and Table~S1). This analysis was intended to identify potential biases caused by missing observations rather than to evaluate Raman spectral differences between groups. Missing cognitive outcomes were disproportionately associated with left-sided strokes, suggesting that missingness was related to clinical characteristics rather than occurring at random; the resulting selection effect is discussed in \cref{subsec:limitations}.
 
-% Separate file for the table
 \input{table_cohortA}
 
 The protocol was approved by {\color{red}[full institutional review board name and approval number]}. All participants or their legal representatives provided written informed consent before enrollment.
@@ -163,28 +190,16 @@ Blood was collected longitudinally from stroke patients at two predefined time p
 Clarified supernatant (0.5~mL) was applied onto a qEVoriginal/35~nm column (cat.\ no.\ ICO-35-100; Izon Science) previously equilibrated with $0.2\,\mu\text{m}$-filtered Dulbecco's Phosphate-Buffered Saline (DPBS; cat.\ no.\ D8537; Sigma-Aldrich). Following passage of the 2.0~mL void volume with DPBS, sequential 0.4~mL fractions were collected. Fractions 2--4 were pooled, transferred to an Amicon Ultra-4 centrifugal filter unit (10~kDa molecular weight cut-off; cat.\ no.\ UFC8010; MilliporeSigma), and concentrated at $4{,}000 \times g$ for 40~min at room temperature. The concentrated EV fraction was adjusted to a final volume of $100\,\mu\text{L}$ with DPBS and stored at $-80\,^\circ\text{C}$.
 
 Particle size distribution and concentration were quantified using a NanoSight NS300 instrument (Malvern Panalytical) operating NTA software v3.2. Samples were diluted in $0.2\,\mu\text{m}$-filtered DPBS to achieve an optimal target concentration of 20--60 particles/frame. Three 30-s videos were recorded per sample at $25\,^\circ\text{C}$ under constant syringe-pump flow, with a fixed camera level of 14 and a detection threshold of 4. Blood collection, processing, storage, and isolation parameters were reported in accordance with the MIBlood-EV guidelines  \cite{lucien2023}.
-%Circulating EV-enriched fractions were prepared from plasma collected using {\color{red}[specify anticoagulant]} at {\color{red}[time relative to stroke and before/after treatment]}. Samples were processed within {\color{red}[time from blood collection to plasma separation/freezing]} and stored at {\color{red}[temperature]}. For EV isolation, frozen plasma was thawed at 37~\si{\degreeCelsius} and immediately placed on ice. The plasma was centrifuged at 3000~$\times g$ for 10~min at 4~\si{\degreeCelsius}, after which the supernatant was transferred to a new tube and maintained on ice. Samples were equilibrated to room temperature immediately before SEC isolation. The total number of freeze--thaw cycles was {\color{red}[confirm number of freeze--thaw cycles]}.
-
-%Size-exclusion chromatography (SEC) was performed using qEVoriginal 35~nm Gen~2 columns (Izon Science), with a maximum plasma input volume of 500~\si{\micro\litre}, PBS as the running buffer, and 0.4~mL fractions. Fractions F2, F3, and F4 were pooled and concentrated using Amicon Ultra-4 centrifugal filters with a 10~kDa molecular-weight cutoff (Merck Millipore, UFC8010). The final concentrate volume was determined by the least concentrated sample and was typically approximately 100~\si{\micro\litre}.
-
-% A 10~\si{\micro\litre} aliquot of each concentrated sample was used for nanoparticle tracking analysis. Particle concentration and size were assessed using {\color{red}[NTA instrument and settings]}. Blood collection, processing, storage, and isolation variables are reported in accordance with MIBlood-EV \cite{lucien2023}.
-
-% Circulating EV-enriched fractions were prepared from {\color{red}[plasma/serum; specify anticoagulant]} collected {\color{red}[time relative to stroke and before/after treatment]}. Samples were processed within {\color{red}[time]} using {\color{red}[centrifugation speeds, durations, temperatures, and filtration steps]}, stored at {\color{red}[temperature]}, and underwent {\color{red}[number]} freeze-thaw cycle(s). Size-exclusion chromatography (SEC) used {\color{red}[column manufacturer and model]}, with {\color{red}[input volume]}, {\color{red}[buffer]}, {\color{red}[fraction volume]}, and {\color{red}[pooled fraction numbers]}. Particle concentration and size were assessed by nanoparticle tracking analysis using {\color{red}[instrument and settings]}. Blood collection, processing, storage, and isolation variables are reported in accordance with MIBlood-EV \cite{lucien2023}.
-
 Because SEC isolation and particle counting do not exclude lipoproteins or other co-isolates, the samples are referred to as EV-enriched fractions, following MISEV2023 guidance on nomenclature for incompletely characterized preparations \cite{welsh2024}. Spectral features cannot be attributed exclusively to EVs or to brain-derived EV populations.
 
 \subsection{Raman acquisition} 
 \label{subsec:acquisition}
 
-% Aliquots were deposited on {\color{red}[substrate]} and dried under {\color{red}[temperature, humidity, and duration]}. Spectra were collected with {\color{red}[manufacturer and instrument model]}, using {\color{red}[excitation wavelength]}~nm excitation, a {\color{red}[objective and numerical aperture]}, {\color{red}[laser power at the sample]}, {\color{red}[spectral resolution]}, {\color{red}[integration time]}, {\color{red}[number of accumulations]}, and {\color{red}[wavenumber calibration procedure]}. For each participant, {\color{red}[number]} physical areas were measured in each acquisition block using {\color{red}[map dimensions and spatial sampling interval]}. Each mapped area comprised Raman spectra acquired at multiple spatial sampling positions.
-% {\color{red}[Specify whether acquisition order was randomized or blocked by cohort and whether the operator was blinded to group.]}.
-% After edge trimming, the frozen analytical grids comprised 734--1788~\si{\per\centi\metre} (1055 fingerprint channels) and 2451--3197~\si{\per\centi\metre} (747 C--H-stretch channels).
-
-Immediately before measurement, each concentrated EV-enriched fraction was thawed at room temperature (representing a single freeze--thaw cycle following isolation), vortexed, and briefly centrifuged (at most 10~s each). A 1.5~\si{\micro\litre} droplet was deposited onto a CaF$_2$ substrate (LaserOptex Inc., China) that had been rinsed sequentially with deionized water and 70\% ethanol. The droplet was dried for 10--20~s with a hot-air dryer held approximately 20--30~cm from the substrate, keeping the sample-surface temperature at or below 30~\si{\degreeCelsius}; the laboratory was maintained at approximately 21.5~\si{\degreeCelsius} and 45\% relative humidity.
+Immediately before measurement, each concentrated EV-enriched fraction was thawed at room temperature, vortexed, and briefly centrifuged (at most 10~s each). For approximately 10 samples, measurement-setting adjustments at the beginning of the study required two to three thawing cycles at room temperature. A 1.5~\si{\micro\litre} droplet was deposited onto a CaF$_2$ substrate (LaserOptex Inc., China) that had been rinsed sequentially with deionized water and 70\% ethanol. The droplet was dried for 10--20~s with a hot-air dryer held approximately 20--30~cm from the substrate, keeping the sample-surface temperature at or below 30~\si{\degreeCelsius}; the laboratory was maintained at approximately 21.5~\si{\degreeCelsius} and 45\% relative humidity.
 
 Spectra were collected with an inVia Qontor Raman microscope (Renishaw plc, Wotton-under-Edge, UK) equipped with a CCD detector, using 785~nm excitation, a 1200~lines/mm grating, and a 50$\times$ objective (NA~0.75). The laser was operated at 100\% of its nominal output (approximately 50~mW total power; incident power at the sample position was not independently measured). Spectral dispersion was governed by the 1200~lines/mm grating under 785~nm excitation, with an estimated lateral spatial resolution of approximately 1~\si{\micro\metre}. Each sample was measured in two static acquisition blocks, with the grating centered at 1300~\si{\per\centi\metre} (fingerprint region; 3~s exposure, 2 accumulations) and at 2850~\si{\per\centi\metre} (C--H stretching region; 4~s exposure, 2 accumulations). The wavenumber axis was calibrated against the 520.5~\si{\per\centi\metre} band of the instrument's internal silicon reference.
 
-In each acquisition block, three physical areas within the coffee-ring region of the same dried droplet were mapped per sample, each as a 5$\times$5 grid of 25 positions spanning a 5~\si{\micro\metre} $\times$ 5~\si{\micro\metre} area (1~\si{\micro\metre} step size), giving 75 spectra per sample and block. Samples were received anonymized and measured in the order of the supplied sample list. Each measurement session was planned to include one female and one male stroke sample together with one female and one male control sample, so acquisition was balanced by cohort and sex within sessions rather than randomized.
+In each acquisition block, three physical areas within the coffee-ring region of the same dried droplet were mapped per sample, each as a 5$\times$5 grid of 25 positions spanning a 5~\si{\micro\metre} $\times$ 5~\si{\micro\metre} area (1~\si{\micro\metre} step size), giving 75 spectra per sample and block. Samples were received anonymized. Each measurement session included stroke samples from the first and second collections, from male or female participants, with a control sample included whenever possible. Limited control availability prevented consistent cohort and sex balance within sessions, and the number of samples measured per session varied with instrument availability.
 After edge trimming, the frozen analytical grids comprised 734--1788~\si{\per\centi\metre} (1055 fingerprint channels) and 2451--3197~\si{\per\centi\metre} (747 C--H-stretch channels).
 
 \subsection{Preprocessing and participant-level representation} \label{subsec:preprocessing}
@@ -520,10 +535,6 @@ Processed participant-level matrices, frozen configuration files, and analysis s
 The clinical sample collection protocols used in this study were reviewed and authorized by the Research Ethics Committee of the Northern Savo Hospital District (Kuopio, Finland). All participants or their legally authorized representatives provided written informed consent prior to blood collection and clinical history extraction. This study was conducted in strict adherence to the principles of the Declaration of Helsinki.
 \color{black}
 
-% \section*{Author Contributions}
-
-% {\color{red}[CRediT taxonomy statement ?.]}
-
 \section*{Author Contributions} 
 
 \begin{itemize}
@@ -554,4 +565,4 @@ This work was supported by the Research Council of Finland (PREIN Flagship no. 3
 
 \bibliographystyle{elsarticle-num} \bibliography{cas-refs}
 
-\end{document} 
+\end{document}
