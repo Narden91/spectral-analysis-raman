@@ -157,15 +157,20 @@ This study employed a single-cohort observational spectroscopy design, integrati
 \label{subsec:cohort}
 
 The spectral cohort included 97 participants with ischemic stroke (45 female, 52 male) and 50 controls (40 female, 10 male).
+
+Stroke participants were drawn from the IBioStroke study (Identification and Clinical Validation of Biomarkers for Long-Term Outcome After Cerebral Ischemia). The parent cohort prospectively enrolled patients with acute ischemic stroke admitted to the Comprehensive Stroke Center at the University Hospital in Krakow, Poland, between July 18, 2020, and December 14, 2022. Demographic, clinical, and laboratory data were collected prospectively \cite{deccwiek2025}.
+
+Eligibility for the parent stroke cohort required age $\geq 18$ years, ischemic stroke meeting the World Health Organization definition, and signed consent to participate. Exclusion criteria were a pre-stroke modified Rankin Scale score $>2$; a pre-stroke diagnosis of dementia or depression, established from patient or caregiver reports and/or available clinical documentation; and a concomitant chronic neurodegenerative disorder, chronic autoimmune disorder, or cancer.
+
 The distribution of males and females differed significantly between the stroke and control cohorts (45/97 \textit{vs}. 40/50 females, $\chi^2 = 13.9$, $p < 0.001$), indicating that sex may act as a confounding factor in subsequent spectroscopic analyses. Age data were available for all stroke participants but for only one control, which prevented an age-adjusted case-control analysis. MoCA scores were recorded at admission and three months after stroke; change was defined as $\Delta\mathrm{MoCA}=\mathrm{MoCA}_{3\mathrm{m}}- \mathrm{MoCA}_{\mathrm{baseline}}$.
 
-In addition to MoCA scores, cognitive performance was assessed using Repeatable Battery for the Assessment of Neuropsychological Status (RBANS), and stroke severity was characterized using Alberta Stroke Program Early Computed Tomography Score (ASPECTS). Analyses included only participants for whom the relevant clinical measurement was available. Missing values were not estimated, so the number of participants differed between analyses.
+In addition to MoCA scores, cognitive performance was assessed using the Repeatable Battery for the Assessment of Neuropsychological Status (RBANS), and stroke severity was characterized using the Alberta Stroke Program Early Computed Tomography Score (ASPECTS). Analyses included only participants for whom the relevant clinical measurement was available. Missing values were not estimated, so the number of participants differed between analyses.
 
 Because some clinical measurements were unavailable for all participants, we compared participants with and without available outcome data, using Mann-Whitney tests for age and Fisher exact tests for sex and lesion side (\Cref{tab:cohortA} and Table~S1). This analysis was intended to identify potential biases caused by missing observations rather than to evaluate Raman spectral differences between groups. Missing cognitive outcomes were disproportionately associated with left-sided strokes, suggesting that missingness was related to clinical characteristics rather than occurring at random; the resulting selection effect is discussed in \cref{subsec:limitations}.
 
 \input{table_cohortA}
 
-The protocol was approved by the Research Ethics Committee of the Northern Savo Hospital District (Kuopio, Finland; {\color{red}[approval number]}). All participants or their legal representatives provided written informed consent before enrollment.
+The IBioStroke protocol was approved by the Jagiellonian University Ethical Committee (approval no.\ 1072.6120.118.2020). All stroke participants provided written informed consent.
 
 \subsection{EV-enriched fraction preparation} 
 \label{subsec:ev_isolation}
@@ -180,11 +185,11 @@ Because SEC isolation and particle counting do not exclude lipoproteins or other
 \subsection{Raman acquisition} 
 \label{subsec:acquisition}
 
-Immediately before measurement, each concentrated EV-enriched fraction was thawed at room temperature, vortexed, and briefly centrifuged (at most 10~s each). For approximately 10 samples, measurement-setting adjustments at the beginning of the study required two to three thawing cycles at room temperature. A 1.5~\si{\micro\litre} droplet was deposited onto a CaF$_2$ substrate (LaserOptex Inc., China) that had been rinsed sequentially with deionized water and 70\% ethanol. The droplet was dried for 10--20~s with a hot-air dryer held approximately 20--30~cm from the substrate, keeping the sample-surface temperature at or below 30~\si{\degreeCelsius}; the laboratory was maintained at approximately 21.5~\si{\degreeCelsius} and 45\% relative humidity.
+Immediately before measurement, each concentrated EV-enriched fraction was thawed at room temperature, vortexed, and briefly centrifuged (at most 10~s each). For approximately 10 samples, adjustments to measurement settings at the beginning of the study required two to three thawing cycles at room temperature. A 1.5~\si{\micro\litre} droplet was deposited onto a CaF$_2$ substrate (LaserOptex Inc., China) that had been rinsed sequentially with deionized water and 70\% ethanol. The droplet was dried for 10--20~s with a hot-air dryer held approximately 20--30~cm from the substrate, keeping the sample-surface temperature at or below 30~\si{\degreeCelsius}; the laboratory was maintained at approximately 21.5~\si{\degreeCelsius} and 45\% relative humidity.
 
 Spectra were collected with an inVia Qontor Raman microscope (Renishaw plc, Wotton-under-Edge, UK) equipped with a CCD detector, using 785~nm excitation, a 1200~lines/mm grating, and a 50$\times$ objective (NA~0.75). The laser was operated at 100\% of its nominal output (approximately 50~mW total power; incident power at the sample position was not independently measured). Spectral dispersion was governed by the 1200~lines/mm grating under 785~nm excitation, with an estimated lateral spatial resolution of approximately 1~\si{\micro\metre}. Each sample was measured in two static acquisition blocks, with the grating centered at 1300~\si{\per\centi\metre} (fingerprint region; 3~s exposure, 2 accumulations) and at 2850~\si{\per\centi\metre} (C--H stretching region; 4~s exposure, 2 accumulations). The wavenumber axis was calibrated against the 520.5~\si{\per\centi\metre} band of the instrument's internal silicon reference.
 
-In each acquisition block, three physical areas within the coffee-ring region of the same dried droplet were mapped per sample, each as a 5$\times$5 grid of 25 positions spanning a 5~\si{\micro\metre} $\times$ 5~\si{\micro\metre} area (1~\si{\micro\metre} step size), giving 75 spectra per sample and block. Samples were received anonymized. Each measurement session included stroke samples from the first and second collections, from male or female participants, with a control sample included whenever possible. Limited control availability prevented consistent cohort and sex balance within sessions, and the number of samples measured per session varied with instrument availability.
+In each acquisition block, three physical areas within the coffee-ring region of the same dried droplet were mapped per sample, each as a 5$\times$5 grid of 25 positions spanning a 5~\si{\micro\metre} $\times$ 5~\si{\micro\metre} area (1~\si{\micro\metre} step size), giving 75 spectra per sample and block. Samples were received anonymized. Each measurement session included stroke samples from the first and second collections, from male or female participants, with a control sample included whenever possible. Limited availability of controls prevented consistent cohort and sex balance within sessions, and the number of samples measured per session varied with instrument availability.
 After edge trimming, the frozen analytical grids comprised 734--1788~\si{\per\centi\metre} (1055 fingerprint channels) and 2451--3197~\si{\per\centi\metre} (747 C--H-stretch channels).
 
 \subsection{Preprocessing and participant-level representation} \label{subsec:preprocessing}
@@ -289,7 +294,7 @@ CH$_3$ asymmetric stretch (overlapping with CH$_2$ modes) & lipids/proteins & 29
 
 \subsection{Case-control classification and confound checks} \label{subsec:cvd_ml_methods}
 
-Whole-spectrum and band-based classification models were developed using PLS-DA as the primary approach, with random forest and $L_1$-penalized logistic regression used as secondary models. Model optimisation and evaluation were performed within a nested cross-validation framework to minimise overfitting and to avoid leakage between model selection and performance estimation \cite{kapoor2023}. Performance was assessed using balanced accuracy, ROC--AUC, sensitivity, specificity, and Matthews correlation coefficient. Statistical significance was evaluated using permutation testing. Further details can be found in Section~S3 of the SI.
+Whole-spectrum and band-based classification models were developed using PLS-DA as the primary approach, with random forest and $L_1$-penalized logistic regression used as secondary models. Model optimization and evaluation were performed within a nested cross-validation framework to minimize overfitting and to avoid leakage between model selection and performance estimation \cite{kapoor2023}. Performance was assessed using balanced accuracy, ROC--AUC, sensitivity, specificity, and Matthews correlation coefficient. Statistical significance was evaluated using permutation testing. Further details can be found in Section~S3 of the SI.
 
 
 \subsection{Within-stroke associations and prediction} \label{subsec:clinical_methods}
@@ -362,7 +367,7 @@ The largest loadings fell on CH$_2$/CH$_3$ deformation and stretching bands and 
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=0.90\textwidth]{figures/biopca_loadings.pdf}
-\caption{Loading spectra of the first three components of the participant-level joint PCA of the fingerprint and C--H stretching blocks after MFA block weighting ($n=147$). Row labels give the variance explained by each component (cumulative 92.0\%). Loadings are in the MFA-weighted space. The sign of a component is arbitrary, so only the relative signs of bands within a component are interpretable. Shaded spans mark the high-loading intervals (Section~S2 of the SI), labelled with their main peak positions in \si{\per\centi\metre}.}
+\caption{Loading spectra of the first three components of the participant-level joint PCA of the fingerprint and C--H stretching blocks after MFA block weighting ($n=147$). Row labels give the variance explained by each component (cumulative 92.0\%). Loadings are in the MFA-weighted space. The sign of a component is arbitrary, so only the relative signs of bands within a component are interpretable. Shaded spans mark the high-loading intervals (Section~S2 of the SI), labeled with their main peak positions in \si{\per\centi\metre}.}
 \label{fig:biopca}
 \end{figure}
 
@@ -381,7 +386,7 @@ Stroke-control separation, therefore, reflects compositional differences spread 
 
 \begin{figure}[htbp]
 \centering \includegraphics[width=0.8\textwidth]{figures/case_control_band_effects_landscape.pdf}
-\caption{Differences between stroke and control cohorts across the 21 Raman bands and shoulder features identified in the participant-level spectra. Points represent rank-biserial effect sizes, and bars indicate participant-level 95\% confidence intervals. Positive values indicate higher relative intensities in the stroke cohort, negative values indicate lower. Axis labels abbreviate the assignments and peak positions of \cref{tab:raman_bands}; band assignments are tentative.}
+\caption{Differences between stroke and control cohorts across the 21 Raman bands and shoulder features identified in the participant-level spectra. Points represent rank-biserial effect sizes, and bars indicate participant-level 95\% confidence intervals. Positive values indicate higher relative intensities in the stroke cohort; negative values indicate lower. Axis labels abbreviate the assignments and peak positions of \cref{tab:raman_bands}; band assignments are tentative.}
 \label{fig:band_effects}
 \end{figure}
 
@@ -513,31 +518,30 @@ Future studies should evaluate whether the spectral differences identified here 
 
 Processed participant-level matrices, frozen configuration files, and analysis scripts are available from the corresponding author on reasonable request. Raw Raman data and linked clinical data are restricted by local participant data governance. 
 
-\color{red}
 \section*{Declarations}
 
 \subsection*{Ethics Approval and Consent to Participate}
-The clinical sample collection protocols used in this study were reviewed and authorized by the Research Ethics Committee of the Northern Savo Hospital District (Kuopio, Finland). All participants or their legally authorized representatives provided written informed consent prior to blood collection and clinical history extraction. This study was conducted in strict adherence to the principles of the Declaration of Helsinki.
-\color{black}
+The Jagiellonian University Ethical Committee approved the IBioStroke protocol (approval no.\ 1072.6120.118.2020). Procedures involving the stroke cohort were conducted in accordance with the Declaration of Helsinki and applicable guidelines and regulations. All stroke participants provided written informed consent.
 
-\section*{Author Contributions} 
 
-\color{blue}
-\begin{itemize}
-    \item Conceptualization: Emanuele Nardone.
-    \item Methodology: Emanuele Nardone and Nikita Belko.
-    \item Protocol measurement and optimization: Jacopo Zini and Francesco Piga.
-    \item Formal analysis: Emanuele Nardone and Nikita Belko.
-    \item Validation of analysis data: Tuomas Kilpeläinen.
-    \item Data curation: Emanuele Nardone and Tuomas Kilpeläinen.
-    \item Visualization: Emanuele Nardone and Nikita Belko.
-    \item Writing -- original draft: Emanuele Nardone and Nikita Belko.
-    \item Writing -- review \& editing: Emanuele Nardone, Nikita Belko, Emma Gribchenko, Pia Damlin and Polina Kuzhir.
-    \item Resources: Clinical plasma samples were collected at the clinic of Agnieszka Słowik.
-    \item Sample preparation and experimental support: Olga Neustroeva, Nikolaus Plesnila, Saara Zini, Pia Damlin, and Emma Gribchenko.
-    \item Supervision: Tarja Malm and Polina Kuzhir.
-\end{itemize}
-\color{black}
+% \section*{Author Contributions} 
+
+% \color{blue}
+% \begin{itemize}
+%     \item Conceptualization: Emanuele Nardone, Nikita Belko and Polina Kuzhir.
+%     \item Methodology: Emanuele Nardone and Nikita Belko.
+%     \item Protocol measurement and optimization: Jacopo Zini and Francesco Piga.
+%     \item Formal analysis: Emanuele Nardone and Nikita Belko.
+%     \item Validation of analysis data: Tuomas Kilpeläinen.
+%     \item Data curation: Emanuele Nardone and Tuomas Kilpeläinen.
+%     \item Visualization: Emanuele Nardone and Nikita Belko.
+%     \item Writing -- original draft: Emanuele Nardone and Nikita Belko.
+%     \item Writing -- review \& editing: Emanuele Nardone, Nikita Belko, Emma Gribchenko, Pia Damlin and Polina Kuzhir.
+%     \item Resources: Clinical plasma samples were collected at the clinic of Agnieszka Słowik.
+%     \item Sample preparation and experimental support: Olga Neustroeva, Nikolaus Plesnila, Saara Zini, Pia Damlin, and Emma Gribchenko.
+%     \item Supervision: Tarja Malm and Polina Kuzhir.
+% \end{itemize}
+% \color{black}
 
 
 \section*{Declaration of Competing Interests}
@@ -548,9 +552,6 @@ The authors declare no competing interests.
 
 This work was supported by the Research Council of Finland (PREIN Flagship no. 368653) and the Academy of Finland flagship GeneCellNano (project no. 323669).
 
-\section*{Acknowledgements}
-
-{\color{red}[Acknowledgements.]}
 
 \bibliographystyle{elsarticle-num} \bibliography{cas-refs}
 
