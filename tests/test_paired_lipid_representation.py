@@ -9,29 +9,35 @@ import pandas as pd
 import pytest
 from sklearn.linear_model import Ridge
 
-from src.analysis.paired_lipid_representation import (
-    CovariatePreprocessor,
+from src.analysis.paired_lipid.cohort import (
     PairedLipidConfig,
+    aggregate_samples_to_participants,
+    build_paired_cohort_dataset,
+    extract_sample_band_matrix,
+    load_clinical_master_verified,
+    parse_sample_label,
+)
+from src.analysis.paired_lipid.models import (
+    CovariatePreprocessor,
     PairedMoments,
     WeightedPLSResult,
     WeightedSpectralPreprocessor,
-    aggregate_samples_to_participants,
-    build_paired_cohort_dataset,
+    fit_ridge_grid,
+    predict_ridge_grid,
+)
+from src.analysis.paired_lipid.nested_cv import (
     compute_discriminability_and_retrieval,
     compute_endpoint_summary,
     compute_icc_a1,
     compute_subspace_principal_angles,
-    evaluate_bootstrap_calibration,
     evaluate_nested_cohort,
-    extract_sample_band_matrix,
-    fit_ridge_grid,
-    generate_synthetic_cohort,
-    load_clinical_master_verified,
     map_subspace_to_metric_orthonormal_basis,
-    parse_sample_label,
-    predict_ridge_grid,
     run_multiplicity_bootstrap,
     summarize_anchor_associations,
+)
+from src.analysis.paired_lipid.simulation import (
+    evaluate_bootstrap_calibration,
+    generate_synthetic_cohort,
     wilson_score_interval,
 )
 
@@ -237,10 +243,12 @@ def test_multiplicity_bootstrap_and_calibration_gate() -> None:
     lo, hi = boot["ci_95_delta_mse"]
     assert np.isfinite(lo) and np.isfinite(hi) and lo < hi
 
+    # n=30 draws can leave an inner division too few paired participants for k=5, which fails the
+    # interval by design; n=40 keeps this check about calibration bookkeeping, not small-n failure.
     cal = evaluate_bootstrap_calibration(
         n_repetitions=4,
         n_bootstraps=8,
-        n_participants=30,
+        n_participants=40,
         signal_strength=0.9,
         base_seed=500,
     )
@@ -248,6 +256,79 @@ def test_multiplicity_bootstrap_and_calibration_gate() -> None:
     assert 0.0 <= cal["unconditional_coverage"] <= 1.0
     w_lo, w_hi = wilson_score_interval(960, 1000)
     assert w_lo > 0.925 and w_hi < 1.0
+
+
+def _gpu_available() -> bool:
+    from src.analysis.paired_lipid.batched import _get_gpu_xp
+
+    return _get_gpu_xp() is not None
+
+
+@pytest.mark.parametrize(
+    "use_gpu",
+    [False, pytest.param(True, marks=pytest.mark.skipif(not _gpu_available(), reason="CuPy/CUDA unavailable"))],
+)
+def test_batched_bootstrap_draws_match_sequential_refits(use_gpu: bool) -> None:
+    # The batched engine re-derives ridge, PLS and the paired eigensolver in closed form;
+    # any drift from the sequential reference silently changes every bootstrap interval.
+    from src.analysis.paired_lipid.batched import (
+        _check_fast_batch_eligibility,
+        _get_dataset_gram_cache,
+        _run_batched_multiplicity_draws,
+    )
+    from src.analysis.paired_lipid.nested_cv import make_participant_splits
+
+    ds, _ = generate_synthetic_cohort(n_participants=40, n_single_sample=2, seed=404, compact_grid=True)
+    cfg = PairedLipidConfig()
+    n_p = ds.n_participants
+    paired_mask = np.isin(np.arange(n_p), ds.paired_participant_indices)
+    outer = make_participant_splits(n_p, paired_mask, cfg.n_outer_splits, cfg.primary_seed)
+    inner = [
+        make_participant_splits(tr.size, paired_mask[tr], cfg.n_inner_splits, cfg.primary_seed + 1000 * (f + 1))
+        for f, (tr, _) in enumerate(outer)
+    ]
+    rng = np.random.default_rng(5)
+    M = np.vstack(
+        [np.ones(n_p)] + [np.bincount(rng.integers(0, n_p, n_p), minlength=n_p).astype(float) for _ in range(3)]
+    )
+    gcache = _get_dataset_gram_cache(ds, cfg)
+    assert _check_fast_batch_eligibility(ds, outer, inner, M, cfg, gcache).all()
+
+    tol = 1e-8
+    d_pair, d_comp = _run_batched_multiplicity_draws(ds, ds.outcomes[cfg.primary_endpoint], outer, inner, M, cfg, gcache, use_gpu=use_gpu)
+    for b in range(M.shape[0]):
+        # include_band_paired disables the batched fast inner path, so the reference is fully sequential.
+        ref = evaluate_nested_cohort(
+            ds, cfg=cfg, participant_multiplicities=M[b], precomputed_splits=(outer, inner), include_band_paired=True
+        )
+        assert d_pair[b] == pytest.approx(ref["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=tol)
+        assert d_comp[b] == pytest.approx(ref["paired_vs_strongest_comparator"]["delta_mse"], abs=tol)
+
+
+def test_missing_secondary_endpoint_equals_zero_weight() -> None:
+    # A missing endpoint value must act exactly like weight 0: its placeholder never enters a fit or error.
+    from dataclasses import replace
+
+    ds, _ = generate_synthetic_cohort(n_participants=40, n_single_sample=2, seed=505, compact_grid=True)
+    missing = np.array([3, 11, 27])
+    y = ds.outcomes["hdl_mmol_l"].copy()
+    y_nan, y_far = y.copy(), y.copy()
+    y_nan[missing] = np.nan
+    y_far[missing] = 1e3
+    ds_nan = replace(ds, outcomes={**ds.outcomes, "hdl_mmol_l": y_nan})
+    ds_far = replace(ds, outcomes={**ds.outcomes, "hdl_mmol_l": y_far})
+    mult = np.ones(ds.n_participants)
+    mult[missing] = 0.0
+
+    res_nan = evaluate_nested_cohort(ds_nan, endpoint="hdl_mmol_l", allow_missing_outcome=True)
+    res_far = evaluate_nested_cohort(ds_far, endpoint="hdl_mmol_l", participant_multiplicities=mult)
+    assert res_nan["n_missing_outcome"] == 3
+    for model in ("covariate_ridge", "paired_linear_ridge", "strongest_comparator"):
+        a = res_nan["comparisons_vs_covariate_ridge"][model]["delta_mse"]
+        b = res_far["comparisons_vs_covariate_ridge"][model]["delta_mse"]
+        assert a == pytest.approx(b, abs=1e-10)
+    with pytest.raises(ValueError, match="missing values"):
+        evaluate_nested_cohort(ds_nan, endpoint="hdl_mmol_l")
 
 
 def test_manuscript_ml_scripts_and_approval_gate(tmp_path: Path) -> None:

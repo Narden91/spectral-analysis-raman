@@ -24,13 +24,14 @@ def run_all_pipeline(
     quick: bool = False,
     output_dir: str | Path | None = None,
     n_bootstraps: int = 0,
+    config_path: str | Path | None = None,
 ) -> dict[str, Path]:
     """Execute Steps 1-4 of the manuscript experiment suite."""
     target_dir = ensure_output_dir(output_dir)
     all_outputs: dict[str, Path] = {}
 
-    all_outputs.update(run_readiness_audit(output_dir=target_dir))
-    all_outputs.update(run_simulation_and_calibration(output_dir=target_dir, quick=quick))
+    all_outputs.update(run_readiness_audit(output_dir=target_dir, config_path=config_path))
+    all_outputs.update(run_simulation_and_calibration(output_dir=target_dir, quick=quick, config_path=config_path))
     all_outputs.update(
         run_primary_evaluation(
             use_synthetic=use_synthetic,
@@ -38,6 +39,7 @@ def run_all_pipeline(
             output_dir=target_dir,
             n_bootstraps=n_bootstraps,
             compact_grid=quick,
+            config_path=config_path,
         )
     )
     all_outputs.update(
@@ -46,6 +48,7 @@ def run_all_pipeline(
             approve_cohort_evaluation=approve_cohort_evaluation,
             output_dir=target_dir,
             compact_grid=quick,
+            config_path=config_path,
         )
     )
     return all_outputs
@@ -58,6 +61,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--quick", action="store_true", help="Use compact grids and quick repetition counts.")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--bootstraps", type=int, default=0)
+    parser.add_argument("--config", type=str, default=None, help="Experiment settings YAML.")
     return parser.parse_args(argv)
 
 
@@ -69,6 +73,7 @@ def main(argv: list[str] | None = None) -> None:
         quick=args.quick,
         output_dir=args.output_dir,
         n_bootstraps=args.bootstraps,
+        config_path=args.config,
     )
     for key, path in outputs.items():
         print(f"[run_all] verified artifact {key}: {path}")

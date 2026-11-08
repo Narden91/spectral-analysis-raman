@@ -2,7 +2,6 @@
 """Executable runner for the Raman EDA pipeline.
 
 This is the only supported command-line entry point for EDA.
-``src.analysis.run_eda.run_eda()`` remains available as an importable API.
 """
 
 # ruff: noqa: E402
@@ -34,6 +33,7 @@ from src import (
     setup_logging,
 )
 from src.analysis._single_range import _VALID_RANGES
+from src.analysis._single_range import _run_single_range_eda as run_eda
 from src.analysis.biological_pca import run_biological_pca
 from src.analysis.control_vs_disease_ml import run_control_vs_disease_ml_pipeline
 from src.analysis.disease_only_pipeline import run_disease_only_cross_region_pipeline
@@ -46,7 +46,6 @@ from src.analysis.eda_mode import (
     validate_eda_mode_config,
 )
 from src.analysis.io_utils import write_text_atomic
-from src.analysis.run_eda import run_eda
 from src.clinical.endpoints import build_and_write_clinical_endpoints
 from src.data_preparation import (
     data_source_summary,

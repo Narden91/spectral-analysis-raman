@@ -1,0 +1,268 @@
+\documentclass[preprint,12pt]{elsarticle}
+
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{lineno}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{siunitx}
+\usepackage{xcolor}
+
+\emergencystretch=2em
+
+\journal{IEEE Journal of Biomedical and Health Informatics / PLOS Computational Biology}
+
+\begin{document}
+
+\linenumbers
+
+\begin{frontmatter}
+
+\title{Learning reproducible Raman representations from paired technical samples to evaluate circulating lipid information in ischemic stroke}
+
+
+\author[1]{Emanuele Nardone\corref{cor1}}
+\ead{emanuele.nardone@uef.fi}
+\cortext[cor1]{Corresponding author}
+\author[1]{Nikita Belko}
+\author[2]{Tarja Malm}
+\author[1]{Polina Kuzhir}
+
+\affiliation[1]{
+    organization={Department of Physics and Mathematics, University of Eastern Finland (UEF)},
+    city={Joensuu},
+    country={Finland}
+}
+\affiliation[2]{
+    organization={A.I. Virtanen Institute for Molecular Sciences, University of Eastern Finland},
+    city={Kuopio},
+    country={Finland}
+}
+
+\begin{abstract}
+Raman microspectroscopy of size-exclusion-chromatography (SEC)-isolated plasma extracellular-vesicle (EV)-enriched fractions captures composite vibrational signals from vesicles and co-isolated lipoproteins. While lipid-associated Raman modes dominate between-participant spectral variance in ischemic stroke cohorts, technical variability across dried-droplet depositions and measurement maps can obscure reproducible biological variation. Here we evaluate whether a low-dimensional linear Raman representation learned from paired technical samples improves held-out prediction of recorded circulating low-density lipoprotein cholesterol (LDL-C) beyond clinical and technical covariates ($C$: age, sex, chronic statin use, acquisition-mode proportions, and a prespecified sample-label trend) and established spectral methods. Among 97 ischemic stroke participants with Raman measurements in the fingerprint (734--1788~\si{\per\centi\metre}, SNV-normalized) and C--H stretching (2451--3197~\si{\per\centi\metre}, area-normalized) blocks, 92 participants remain provisionally linkable after excluding records under identity review (90 with paired technical samples and 2 with single samples). Within a locked $5 \times 3$ participant-grouped nested cross-validation framework, we compare a regularized signal-to-disagreement generalized eigensolver against covariate-only ridge regression, fixed 21-band ridge regression, block-scaled PCA ridge regression, and partial least-squares (PLS) regression. Repeatability is assessed separately for full predictions and isolated spectral contributions ($s_{is} = \widehat{\beta}_Z^\top z_{is}$) using two-way mixed-effects, single-measure absolute-agreement intraclass correlation $\mathrm{ICC}(A,1)$, Bridgeford discriminability, and cross-position retrieval. Known-factor synthetic simulations evaluate interval calibration and test whether nonlinear covariate effects ($C^2$) can induce apparent spectral gains. The design aims to distinguish reproducible lipid-correlated spectral variation from covariate-driven agreement; following MISEV2023, it does not attribute any signal to vesicles rather than co-isolated particles.
+\end{abstract}
+
+\begin{keyword}
+Raman spectroscopy \sep extracellular-vesicle-enriched fractions \sep ischemic stroke \sep circulating lipids \sep generalized eigenvalue decomposition \sep repeatability \sep nested cross-validation
+\end{keyword}
+
+\end{frontmatter}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Circulating extracellular-vesicle (EV)-enriched fractions isolated from human plasma by size-exclusion chromatography (SEC) contain a heterogeneous mixture of vesicles, lipoproteins, and co-isolated plasma components \cite{welsh2024, gualerzi2019, koster2021}. Raman spectroscopy provides a label-free vibrational profile of these preparations across nucleic-acid-, protein-, carotenoid-, and lipid-associated spectral domains \cite{liu2025, czamara2015, bonizzi2025}. In our foundational participant-level characterization of the IBioStroke spectral cohort \cite{deccwiek2025}, lipid-associated deformation and stretching modes accounted for more than 60\% of the normalized inter-participant variance across both the fingerprint (734--1788~\si{\per\centi\metre}) and C--H stretching (2451--3197~\si{\per\centi\metre}) regions, yet whole-spectrum models did not support prediction of cognitive recovery.
+
+A central open question is whether the dominant, reproducible participant-level Raman variation in plasma EV-enriched fractions reflects circulating lipid measurements recorded in the clinical laboratory, specifically low-density lipoprotein cholesterol (LDL-C). Raman and partial least-squares (PLS) modeling of circulating lipids is established in whole serum \cite{silveira2017}, and Raman profiling of extracellular-particle fractions has recently been compared with biochemical lipid and protein assays \cite{bonizzi2025}. However, evaluating incremental lipid information in dried-droplet Raman maps of SEC-isolated fractions requires addressing three methodological challenges:
+\begin{enumerate}
+    \item \textbf{Hierarchical technical replication and unequal sample counts:} Spectra are acquired across multiple pixels within multiple spatial maps per dried technical sample, with most stroke participants contributing two technical samples from a single blood collection and a minority contributing one. Collapsing all maps into an unweighted participant median discards within-participant disagreement information, whereas treating samples or maps as independent rows induces pseudoreplication \cite{hurlbert1984, lazic2010}.
+    \item \textbf{Separation of spectral repeatability from shared clinical covariates:} When clinical covariates ($C$) and spectral features ($Z$) are combined in a predictive model, full-model predictions across technical repeats can exhibit high agreement solely because $C$ is identical across repeats of the same participant. Reliability must therefore be quantified specifically on the isolated spectral contribution $s_{is} = \widehat{\beta}_Z^\top z_{is}$ using an explicit absolute-agreement intraclass correlation model \cite{koo2016, koo2017erratum} alongside multivariate discriminability \cite{bridgeford2021}.
+    \item \textbf{Benchmarking against established spectral transformations and covariate nonlinearity:} Generalized eigenvalue decompositions that order spectral directions by signal-to-noise or between-to-within disagreement belong to the established noise-fraction family \cite{green1988}. Claiming a predictive or methodological contribution requires nested cross-validation against covariate-only ridge regression and established spectral comparators (curated Raman bands, block-scaled PCA, and PLS regression) as well as synthetic verification against nonlinear covariate proxy effects \cite{bates2024, bengio2004}.
+\end{enumerate}
+
+In this study, we formulate and evaluate a repeat-aware linear representation pipeline for the IBioStroke Raman cohort. We test whether paired technical-sample Raman representations improve held-out LDL-C prediction relative to a locked clinical and technical covariate model and established spectral baselines.
+
+\section{Materials and Methods}
+\label{sec:methods}
+
+\subsection{Cohort, clinical linkage, and measurement hierarchy}
+\label{subsec:cohort}
+
+Stroke participants were enrolled prospectively in the IBioStroke study at the Comprehensive Stroke Center, University Hospital in Krakow, Poland, between July 18, 2020, and December 14, 2022 \cite{deccwiek2025}. The protocol was approved by the Jagiellonian University Ethical Committee (approval no.\ 1072.6120.118.2020), and all participants provided written informed consent. Eligibility required age $\ge 18$~years and acute ischemic stroke meeting the World Health Organization definition; exclusions were pre-stroke modified Rankin Scale ($\mathrm{mRS}) > 2$, pre-stroke dementia or depression, and concomitant chronic neurodegenerative, autoimmune, or malignant disease.
+
+Although 97 stroke participants and 50 controls have raw spectral folders, participant eligibility for the present study is governed by a verified standalone clinical master table. Five stroke records carry an explicit folder-versus-clinical sex discrepancy (\texttt{SEX\_FOLDER\_CONFLICT}) and are excluded rather than silently relinked, leaving $N = 92$ provisionally linkable stroke participants (90 with two technical samples and 2 with one technical sample). A matched link status alone does not establish identity, so the remaining linkage flags are inspected before cohort evaluation. Control participants lack recorded lipid panels and have only one technical sample per participant; they are excluded from the primary model.
+
+For each eligible participant $i$, measurements follow the four-level hierarchy
+\[
+\text{participant } i \;\longrightarrow\; \text{technical sample } s \in \{A, B\} \;\longrightarrow\; \text{map } m \in \{1, 2, 3\} \;\longrightarrow\; \text{retained pixel } p,
+\]
+acquired separately for the fingerprint ($1300~\si{\per\centi\metre}$) and C--H stretching ($2850~\si{\per\centi\metre}$) blocks. Investigator confirmation recorded during study design identifies the paired technical samples ($A$ and $B$) as technical replicates from one collection, not longitudinal visits; this corrects the longitudinal description in the earlier cohort report. Which preparation and acquisition stages were repeated independently for $A$ and $B$ is not yet documented.
+
+\subsection{EV-enriched fraction isolation, Raman acquisition, and frozen preprocessing}
+\label{subsec:acquisition}
+
+Circulating EV-enriched fractions were isolated from $-80\,^\circ\text{C}$ plasma ($0.5~\si{\milli\litre}$ clarified at $3{,}000 \times g$ for $10~\si{\minute}$ at $4\,^\circ\text{C}$) using qEVoriginal/35~nm SEC columns (ICO-35-100, Izon Science) equilibrated with $0.2~\si{\micro\metre}$-filtered DPBS. After discarding the $2.0~\si{\milli\litre}$ void volume, pooled fractions 2--4 ($1.2~\si{\milli\litre}$) were concentrated on 10~kDa Amicon Ultra-4 filters (UFC8010, MilliporeSigma) at $4{,}000 \times g$ for $40~\si{\minute}$, adjusted to $100~\si{\micro\litre}$ in DPBS, characterized by Nanoparticle Tracking Analysis (NanoSight NS300, NTA v3.2), and stored at $-80\,^\circ\text{C}$ in accordance with MIBlood-EV and MISEV2023 guidelines \cite{lucien2023, welsh2024}.
+
+For Raman microspectroscopy, a $1.5~\si{\micro\litre}$ droplet was dried for $10\text{--}20~\si{\second}$ ($\le 30\,^\circ\text{C}$) on a $\mathrm{CaF}_2$ substrate. Spectra were collected on a Renishaw inVia Qontor microscope ($785~\si{\nano\metre}$ laser at $\approx 50~\si{\milli\watt}$ nominal output, $1200~\text{lines/mm}$ grating, $50\times$ objective, $\mathrm{NA}=0.75$, silicon calibration at $520.5~\si{\per\centi\metre}$). Three $5 \times 5$ pixel maps ($5~\si{\micro\metre} \times 5~\si{\micro\metre}$, $1~\si{\micro\metre}$ step) in the coffee-ring region were collected per technical sample in the fingerprint block ($3~\si{\second}$ exposure, 2 accumulations) and C--H block ($4~\si{\second}$ exposure, 2 accumulations).
+
+Raw pixel spectra underwent the frozen preprocessing pipeline (\Cref{tab:preprocessing_params}) onto fixed $1~\si{\per\centi\metre}$ grids: 734--1788~\si{\per\centi\metre} (1,055 channels, SNV-normalized) and 2451--3197~\si{\per\centi\metre} (747 channels, trapezoidal-area-normalized). Within each sample $s$ and block $b$, retained pixel spectra were aggregated by median within each map, and then by median across eligible maps. A technical sample is eligible if it contains both spectral blocks with at least two retained maps per block (with a three-map-complete subset evaluated as a sensitivity analysis).
+
+\begin{table}[ht]
+\centering
+\caption{Frozen pixel-level preprocessing and quality-control parameters.}
+\label{tab:preprocessing_params}
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.34\textwidth} >{\raggedright\arraybackslash}X@{}}
+\toprule
+Processing Stage & Locked Specification \\
+\midrule
+Dead / saturated pixel screen & Minimum spectral SD: $1.0$; saturation ceiling: $65{,}000$ \\
+Positive cosmic-ray correction & Spatial-neighbor $z > 8$; max width: 3 channels; 8 neighbors; max corrected fraction: $0.02$ \\
+Edge trim and interpolation & $\approx 15~\si{\per\centi\metre}$ trim; linear interpolation onto 734--1788 and 2451--3197~\si{\per\centi\metre} ($1~\si{\per\centi\metre}$ step, no extrapolation) \\
+Baseline correction & arPLS ($\lambda = 10^6$, $p = 0.01$, max 100 iterations, tolerance $0.001$); signed residuals retained \\
+Quality-control SNR gate & Minimum $\mathrm{SNR} = 5$; at least 4 retained pixels per map; at least 2 maps per sample and block \\
+Smoothing & Savitzky--Golay order 2 (fingerprint: 7 channels; C--H: 9 channels) \\
+Block normalization & Fingerprint: Standard Normal Variate (SNV); C--H: trapezoidal area \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Primary endpoint, covariates, and participant-weighted preprocessing}
+\label{subsec:endpoint}
+
+The primary comparison evaluates whether adding the learned paired linear spectral representation ($Z$) to locked clinical and technical covariates ($C$) reduces held-out squared prediction error for recorded LDL-C ($y_i$, in $\si{\milli\mole\per\litre}$) relative to covariate-only ridge regression:
+\begin{equation}
+\widehat{\Delta} = \frac{1}{n} \sum_{i=1}^{n} \left[ (y_i - \widehat{y}_{C,i})^2 - (y_i - \widehat{y}_{C+Z,i})^2 \right].
+\label{eq:delta_mse}
+\end{equation}
+Positive $\widehat{\Delta}$ values favor adding spectral features. We report $\widehat{\Delta}$, relative reduction $\widehat{\Delta}/\mathrm{MSE}_C$, $\mathrm{RMSE}$, $\mathrm{MAE}$, and descriptive calibration intercept and slope.
+
+The primary covariate vector $C_i$ comprises age (years), sex, chronic pre-stroke statin use, non-reference acquisition-mode proportions averaged across eligible samples, and the participant-average parsed numeric sample label as a declared technical drift proxy. Median imputation, missingness indicators, and zero-mean unit-variance standardization are fitted strictly inside each training division.
+
+To ensure equal population weight per biological participant during spectral preprocessing, training participant $i$ with multiplicity $\mu_i$ (where $\mu_i = 1$ in the base evaluation) and $m_i \in \{1, 2\}$ eligible samples assigns weight
+\begin{equation}
+w_{is} = \frac{\mu_i}{N_{\text{eff}} m_i}, \qquad N_{\text{eff}} = \sum_{i \in \text{train}} \mu_i,
+\label{eq:sample_weights}
+\end{equation}
+to each sample $s$. Within each training division, block $b \in \{1300, 2850\}$ is centered by its $w_{is}$-weighted mean and scaled by $1/\sqrt{\lambda_1^{(b)}}$, where $\lambda_1^{(b)}$ is the leading eigenvalue of the weighted sample covariance of block $b$ (Multiple Factor Analysis convention). The scaled blocks are concatenated and projected onto the top $k \in \{5, 10, 15\}$ weighted principal components (capped by numerical rank and distinct paired training participants minus one).
+
+\subsection{Regularized paired signal-to-disagreement representation and comparators}
+\label{subsec:eigensolver}
+
+Let $x_{iA}, x_{iB} \in \mathbb{R}^k$ denote the $k$-dimensional weighted MFA-PCA coordinates of the two technical samples for the $n_p = \sum_{i \in \text{paired}} \mu_i$ paired training participants, and let $u_i = (x_{iA} + x_{iB})/2$. We define the uncentered within-participant disagreement matrix $W$ and between-participant covariance matrix $T$:
+\begin{equation}
+W = \frac{1}{2 n_p} \sum_{i \in \text{paired}} \mu_i (x_{iA} - x_{iB})(x_{iA} - x_{iB})^\top, \qquad
+T = \frac{1}{n_p - 1} \sum_{i \in \text{paired}} \mu_i (u_i - \bar{u})(u_i - \bar{u})^\top,
+\label{eq:W_and_T}
+\end{equation}
+where $\bar{u} = \frac{1}{n_p}\sum_i \mu_i u_i$. Leaving $x_{iA} - x_{iB}$ uncentered in $W$ penalizes systematic $A/B$ shifts alongside random sample disagreement. We solve the symmetric generalized eigenvalue problem
+\begin{equation}
+T v_j = \rho_j (W + \lambda \tau I_k) v_j, \qquad \tau = \frac{\operatorname{tr}(T)}{k},
+\label{eq:gep}
+\end{equation}
+for $\lambda \in \{0.001, 0.01, 0.1, 1, 10\}$, ordering directions by decreasing $\rho_1 \ge \rho_2 \ge \dots \ge \rho_k$, normalizing $v_j^\top (W + \lambda \tau I_k) v_j = 1$, fixing signs deterministically from training loadings, and retaining $r \in \{1, 2, 3\}$ directions ($V_r = [v_1, \dots, v_r]$). Participant-level representations $z_i = \frac{1}{m_i}\sum_s V_r^\top x_{is}$ are standardized on training data and combined with standardized $C_i$ in a ridge regression model optimizing $\frac{1}{N_{\text{eff}}}\sum_i \mu_i (y_i - \beta_0 - C_i^\top \beta_C - z_i^\top \beta_Z)^2 + \alpha (\|\beta_C\|^2 + \|\beta_Z\|^2)$ over $\alpha \in \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10, 10^2, 10^3\}$.
+
+On identical participant divisions, we evaluate:
+\begin{enumerate}
+    \item \textbf{Covariate-only ridge (`covariate\_ridge`):} Ridge regression on $C_i$ alone (primary baseline).
+    \item \textbf{Fixed 21-band summaries plus ridge (`fixed\_band\_ridge`):} Mean intensities across the 21 pre-specified Raman windows (\Cref{tab:raman_bands}) plus $C_i$.
+    \item \textbf{Block-scaled PCA plus ridge (`pca\_ridge`):} Same weighted MFA-PCA coordinates ($k \in \{5, 10, 15\}$) without the pair-disagreement step, plus $C_i$.
+    \item \textbf{PLS regression (`pls\_regression`):} Conventional 1D PLS regression ($c \in \{1, \dots, 5\}$ components) on concatenated standardized $C_i$ and participant-average block-scaled spectra.
+    \item \textbf{Paired linear representation plus ridge (`paired\_linear\_ridge`):} Designated primary spectral procedure, plus secondary ablation on the 21 fixed bands (`band\_paired\_ridge`).
+\end{enumerate}
+
+\subsection{Nested cross-validation, multiplicity bootstrap, and repeatability metrics}
+\label{subsec:validation}
+
+Evaluation uses a locked 5-fold outer participant partition and 3-fold inner selection partition stratified by pair availability (\texttt{primary\_seed = 42}; sensitivity seeds \texttt{101, 202, 303}). All samples, maps, and blocks of a participant remain in the same division. Inner selection minimizes participant-weighted validation MSE with a deterministic tie-breaking hierarchy favoring fewer retained directions ($r$), fewer PCA dimensions ($k$), and stronger regularization ($\lambda$, then $\alpha$). For a single method comparison against established comparators, the comparator with the lowest inner validation MSE is selected within each outer fold (`strongest\_comparator`).
+
+Uncertainty is evaluated via a 2,000-refit participant-level multiplicity bootstrap that resamples whole participants with replacement while keeping each participant's original outer and inner fold membership fixed, propagating multiplicity $\mu_i$ through all preprocessing, covariance, and regression steps. The interval is used for inference only if it passes a synthetic calibration check. In synthetic replicates drawn with validation seeds disjoint from development seeds, coverage is measured against the expected held-out risk difference of the procedure, estimated by scoring each replicate's fitted outer-fold models on one independent synthetic test cohort. The provisional gate requires a 95\% Wilson lower bound $\ge 0.925$ on unconditional 95\% coverage and $< 1\%$ failed dataset intervals.
+
+Within each outer fold, repeatability across paired test samples ($A$ and $B$) is quantified for both full predictions ($\widehat{y}_{iA}, \widehat{y}_{iB}$) and isolated spectral contributions ($s_{is} = \widehat{\beta}_Z^\top \tilde{z}_{is}$) using the two-way mixed-effects, single-measure, absolute-agreement intraclass correlation \cite{koo2016, koo2017erratum}:
+\begin{equation}
+\mathrm{ICC}(A, 1) = \frac{\mathrm{MS}_R - \mathrm{MS}_E}{\mathrm{MS}_R + (k_{\text{pos}} - 1)\mathrm{MS}_E + \frac{k_{\text{pos}}}{n_{\text{pair}}}(\mathrm{MS}_C - \mathrm{MS}_E)}, \qquad k_{\text{pos}} = 2,
+\label{eq:icc_a1}
+\end{equation}
+alongside mean paired difference, root mean squared paired difference ($\mathrm{RMSD}$), Bridgeford discriminability \cite{bridgeford2021}, and bidirectional ($A \leftrightarrow B$) top-1 retrieval accuracy. Fold subspaces are compared by mapping directions back to the 1,802 canonical spectral channels, orthonormalizing under the equal-block, equal-channel metric ($w_b = \frac{1}{2 p_b}$), and computing pairwise principal angles.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Cohort eligibility and synthetic calibration}
+\label{subsec:results_calibration}
+
+\textit{[Populated from \texttt{readiness\_manifest.json}, \texttt{simulation\_scenarios\_summary.csv}, and \texttt{simulation\_calibration\_report.csv} generated by \texttt{manuscript\_ml/}.]}
+
+\begin{table}[ht]
+\centering
+\caption{Summary of synthetic data-generating scenarios and primary endpoint recovery (populated from \texttt{simulation\_scenarios\_summary.csv}).}
+\label{tab:synthetic_scenarios}
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}X c c c c@{}}
+\toprule
+Scenario & Covariate Preset & $\widehat{\Delta}_{\text{paired}}$ & $\widehat{\Delta}_{\text{vs comp}}$ & Spectral $\mathrm{ICC}(A,1)$ \\
+\midrule
+Linear biological signal & Primary & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+No-association reference & Primary & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+Nonlinear $\text{age}^2$ proxy & Primary (linear $C$) & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+Nonlinear $\text{age}^2$ proxy & Quadratic age \& label & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+Systematic $A/B$ shift \& drift & Primary & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+Formula-linked LDL-C & Primary & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Primary held-out LDL-C prediction and comparator performance}
+\label{subsec:results_primary}
+
+\textit{[Populated from \texttt{comparator\_errors\_and\_differences.csv} and \texttt{fold\_selected\_settings.csv}.]}
+
+\begin{table}[ht]
+\centering
+\caption{Held-out LDL-C prediction performance across locked outer folds ($N = 92$ eligible stroke participants; populated from \texttt{comparator\_errors\_and\_differences.csv}).}
+\label{tab:primary_results}
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}X c c c c c@{}}
+\toprule
+Procedure & $\widehat{\Delta}$ ($\si{\milli\mole\squared\per\litre\squared}$) & $\widehat{\Delta}/\mathrm{MSE}_C$ & $\mathrm{RMSE}$ & $\mathrm{MAE}$ & Calibration (Int.\ / Slope) \\
+\midrule
+Covariate-only ridge ($C$) & $0.000$ & $0.000$ & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+Fixed 21-band + ridge & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+Block-scaled PCA + ridge & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+PLS regression ($C$ + spectra) & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+Paired linear + ridge ($C + Z$) & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+Paired vs.\ strongest comparator & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} & \texttt{[TBD]} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Technical-repeat agreement, discriminability, and subspace stability}
+\label{subsec:results_repeatability}
+
+\textit{[Populated from \texttt{baseline\_repeatability\_report.csv} and \texttt{subspace\_principal\_angles.csv}.]}
+
+\subsection{Sensitivity analyses and secondary laboratory anchors}
+\label{subsec:results_sensitivity}
+
+\textit{[Populated from \texttt{covariate\_and\_subset\_sensitivity.csv}, \texttt{outer\_partition\_seed\_sensitivity.csv}, \texttt{secondary\_endpoints\_summary.csv}, and \texttt{anchor\_associations\_continuous.csv}.]}
+
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+Interpretation of any predictive gain ($\widehat{\Delta} > 0$) is bounded by the physical and clinical properties of the dataset (\texttt{limitations\_table.csv}):
+\begin{enumerate}
+    \item \textbf{Retrospective adaptation:} Because earlier cohort explorations preceded this design, nested cross-validation controls internal selection bias but cannot eliminate prior researcher adaptation to the cohort.
+    \item \textbf{Normalized spectral shape vs.\ particle concentration:} SNV and area normalization remove absolute intensity scale; predictions reflect relative spectral shape rather than lipoprotein mass or EV concentration.
+    \item \textbf{MISEV2023 co-isolation boundaries:} SEC fractions co-isolate lipoproteins and plasma proteins alongside vesicles \cite{welsh2024, bracht2024}. Neither LDL-C prediction nor adjustment for clinical platelet count establishes whether the Raman signal arises from EVs, co-isolated lipoproteins, or residual platelet material.
+    \item \textbf{Laboratory assay and timing metadata:} Source lipid units are marked assumed in the clinical dictionary, fasting status and exact blood-draw timing relative to EV isolation are unrecorded, and calculated LDL-C shares inputs with total cholesterol, HDL-C, and triglycerides \cite{friedewald1972}.
+\end{enumerate}
+
+\section*{Declarations}
+
+\subsection*{Ethics Approval and Consent to Participate}
+The Jagiellonian University Ethical Committee approved the IBioStroke protocol (approval no.\ 1072.6120.118.2020). All stroke participants provided written informed consent in accordance with the Declaration of Helsinki.
+
+\subsection*{Author Contributions}
+\noindent
+\textbf{Conceptualization:} Emanuele Nardone, Nikita Belko, and Polina Kuzhir;
+\textbf{Methodology:} Emanuele Nardone and Nikita Belko;
+\textbf{Protocol measurement and optimization:} Jacopo Zini and Francesco Piga;
+\textbf{Formal analysis and software:} Emanuele Nardone and Nikita Belko;
+\textbf{Validation of analysis data:} Tuomas Kilpeläinen;
+\textbf{Data curation:} Emanuele Nardone and Tuomas Kilpeläinen;
+\textbf{Sample preparation and experimental support:} Olga Neustroeva, Agnieszka Słowik, Nikolaus Plesnila, Aurel Popa-Wagner, Saara Zini, Pia Damlin, and Emma Gribchenko;
+\textbf{Supervision:} Tarja Malm and Polina Kuzhir.
+
+\subsection*{Funding}
+This work was supported by the Research Council of Finland (PREIN Flagship no.\ 368653) and the Academy of Finland flagship GeneCellNano (project no.\ 323669).
+
+\bibliographystyle{elsarticle-num}
+\bibliography{references}
+
+\end{document}
+

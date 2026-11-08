@@ -1,0 +1,61 @@
+# Manuscript ML experiment settings (docs/research_design.md).
+# Lock these values before cohort evaluation. Every stage copies the resolved
+# values into run_provenance_<stage>.json next to its outputs.
+
+# Fields of src.analysis.paired_lipid.cohort.PairedLipidConfig. Unknown keys are an error.
+paired_lipid:
+  pca_dimensions: [5, 10, 15]
+  retained_directions: [1, 2, 3]
+  lambda_grid: [0.001, 0.01, 0.1, 1.0, 10.0]
+  ridge_alpha_grid: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
+  pls_component_grid: [1, 2, 3, 4, 5]
+  n_outer_splits: 5
+  n_inner_splits: 3
+  primary_seed: 42
+  sensitivity_seeds: [101, 202, 303]
+  min_maps_per_block: 2
+  rank_tolerance: 1.0e-8
+  eigenvalue_tolerance: 1.0e-10
+  primary_endpoint: ldl_mmol_l
+  secondary_endpoints: [hdl_mmol_l, triglycerides_mmol_l, plt_10e9_l]
+  covariate_preset: primary
+  mode_reference_category: NONE
+  local_candidate_window: 5
+
+seeds:
+  bootstrap_seed: 20261106      # participant multiplicity draws, primary interval
+  scenario_base_seed: 1000      # synthetic scenario suite
+  calibration_base_seed: 9000   # bootstrap calibration replicates
+
+readiness:
+  expected_identity_verified: 92   # stroke participants with verified spectral identity
+
+# Synthetic scenario suite. Keys other than `scenario` and `covariate_preset` are passed to
+# generate_synthetic_cohort. PROVISIONAL: n grid, tg_ldl_loading levels and map_dropout_fraction
+# await investigator confirmation.
+simulation:
+  # true: 10 cm^-1 synthetic grid (fast). The cohort uses 1 cm^-1; set false for a final
+  # calibration on the cohort grid (slower, not timed).
+  compact_grid: true
+  n_participants_grid: [60, 92, 150]
+  scenarios:
+    - {scenario: linear_biological_signal, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1}
+    - {scenario: no_association_reference, covariate_preset: primary,
+       signal_strength: 0.0, ab_shift_scale: 0.15, label_drift_scale: 0.0}
+    - {scenario: nonlinear_proxy_linear_covariates, covariate_preset: primary,
+       signal_strength: 0.0, ab_shift_scale: 0.15, label_drift_scale: 0.0, nonlinear_covariate_proxy: true}
+    - {scenario: nonlinear_proxy_quadratic_covariates, covariate_preset: quadratic_age_and_label,
+       signal_strength: 0.0, ab_shift_scale: 0.15, label_drift_scale: 0.0, nonlinear_covariate_proxy: true}
+    - {scenario: systematic_ab_shift_and_label_drift, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.45, label_drift_scale: 0.35}
+    - {scenario: formula_linked_friedewald_ldl, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1, formula_linked_ldl: true}
+    - {scenario: anchor_correlation_none, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1, tg_ldl_loading: 0.0}
+    - {scenario: anchor_correlation_high, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1, tg_ldl_loading: 0.7}
+    - {scenario: qc_map_dropout, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1, map_dropout_fraction: 0.2}
+    - {scenario: ablation_no_technical_covariates, covariate_preset: no_technical_covariates,
+       signal_strength: 0.85, ab_shift_scale: 0.45, label_drift_scale: 0.35}

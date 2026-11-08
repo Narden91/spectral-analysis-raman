@@ -125,3 +125,8 @@ This was a targeted literature and implementation review, not a systematic novel
 - Interpret the pair-difference second moment as disagreement unless its error assumptions hold; systematic A/B shifts contribute to it. Compare subspaces only after mapping them to common spectral coordinates and a declared metric.
 - Audit feature provenance before calling a comparator fixed. Training-only fitting cannot undo earlier feature selection using the complete cohort.
 - Keep comparison families, uncertainty targets, failure rules and simulation validation explicit. Attribution categories remain developmental until their statistics and operating characteristics are specified and checked.
+
+## 2026-11-08: Equivalence claims for fast numerical paths
+
+- Failure: a batched GPU bootstrap was reported to match the sequential refit to 6.6e-16, but only the unresampled base draw was compared, and the sequential function itself used the batched engine for inner selection. Resampled draws differed by up to 3e-2 (a tau=tr(W) bug and a mixed-precision eigensolver).
+- Prevention: test fast-vs-reference equivalence on several resampled draws, against a reference path that shares no code with the fast path (here include_band_paired=True), on every device the fast path supports.

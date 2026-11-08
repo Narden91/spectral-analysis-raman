@@ -1,34 +1,95 @@
 """Experiment runners for the reproducible Raman lipid representation study.
 
 All scripts delegate mathematical, statistical, and spectral operations to
-``src.analysis.paired_lipid_representation`` and ``src.analysis.io_utils``
+``src.analysis.paired_lipid`` and ``src.analysis.io_utils``
 to preserve DRY and KISS principles.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime, timezone
+from functools import lru_cache
+import hashlib
+from importlib import metadata
 import json
 from pathlib import Path
+import subprocess
 import sys
-import time
 from typing import Any, Literal, Mapping
 
 import pandas as pd
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.analysis.io_utils import write_csv_atomic
-from src.analysis.paired_lipid_representation import (
+from src.analysis.paired_lipid.cohort import (
+    PRE_EVENT_RISK_FACTORS,
     CohortDataset,
     PairedLipidConfig,
-    generate_synthetic_cohort,
     load_paired_cohort_from_store,
 )
+from src.analysis.paired_lipid.simulation import generate_synthetic_cohort
 
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Results_manuscript_ml"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "manuscript_ml.yaml"
+
+
+def load_manuscript_config(path: str | Path | None = None) -> tuple[PairedLipidConfig, dict[str, Any]]:
+    """Read the locked experiment settings; return the model config and the raw mapping."""
+    raw = yaml.safe_load(Path(path or DEFAULT_CONFIG_PATH).read_text(encoding="utf-8"))
+    fields = {k: tuple(v) if isinstance(v, list) else v for k, v in raw["paired_lipid"].items()}
+    return PairedLipidConfig(**fields), raw
+
+
+def _git(*args: str) -> str:
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=PROJECT_ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unavailable"
+
+
+def _package_versions() -> dict[str, str]:
+    versions = {}
+    for pkg in ("numpy", "scipy", "pandas", "scikit-learn", "joblib", "cupy-cuda12x", "cupy-cuda13x"):
+        try:
+            versions[pkg] = metadata.version(pkg)
+        except metadata.PackageNotFoundError:
+            continue
+    return versions
+
+
+def write_run_provenance(
+    target_dir: Path,
+    stage: str,
+    *,
+    config_path: str | Path | None,
+    cfg: PairedLipidConfig,
+    settings: Mapping[str, Any],
+    source_meta: Mapping[str, Any] | None = None,
+) -> Path:
+    """Save the resolved configuration, code version and data identity next to a stage's outputs."""
+    cfg_file = Path(config_path or DEFAULT_CONFIG_PATH)
+    payload = {
+        "stage": stage,
+        "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "argv": sys.argv,
+        "config_path": str(cfg_file),
+        "config_sha256": hashlib.sha256(cfg_file.read_bytes()).hexdigest(),
+        "resolved_paired_lipid_config": asdict(cfg),
+        "pre_event_risk_factors": list(PRE_EVENT_RISK_FACTORS),
+        "stage_settings": dict(settings),
+        "git_commit": _git("log", "-1", "--format=%H"),
+        "git_worktree_dirty": _git("status", "--porcelain") not in ("", "unavailable"),
+        "python": sys.version,
+        "packages": _package_versions(),
+        "data": dict(source_meta) if source_meta is not None else None,
+    }
+    return write_json_atomic(payload, target_dir / f"run_provenance_{stage}.json")
 
 
 def ensure_output_dir(output_dir: str | Path | None = None) -> Path:
@@ -60,15 +121,53 @@ def resolve_experiment_dataset(
     compact_grid: bool = False,
     cfg: PairedLipidConfig = PairedLipidConfig(),
 ) -> tuple[CohortDataset, dict[str, Any]]:
-    """Resolve either the synthetic benchmark cohort or the verified preprocessed cohort."""
-    if use_synthetic:
-        dataset, truth = generate_synthetic_cohort(
-            n_participants=synthetic_participants,
-            seed=synthetic_seed,
-            compact_grid=compact_grid,
+    """Resolve either the synthetic benchmark cohort or the verified preprocessed cohort.
+
+    Results are memoized per argument set within a process, so repeated stages
+    share one dataset object and its Gram cache. Treat the returned dataset as
+    read-only; call ``clear_dataset_cache()`` to force a reload.
+    """
+    if not use_synthetic and not approve_cohort_evaluation:
+        raise PermissionError(
+            "Cohort evaluation requires explicit '--approve-cohort-evaluation' after "
+            "completing all readiness checks in manuscript_ml/runbook.md."
         )
-        if subset_mode != "all_eligible":
-            # Rebuild synthetic dataset under requested subset_mode
+    return _resolve_experiment_dataset_cached(
+        use_synthetic,
+        str(Path(clinical_master_path).resolve()),
+        subset_mode,
+        endpoint,
+        synthetic_participants,
+        synthetic_seed,
+        compact_grid,
+        cfg,
+    )
+
+
+def clear_dataset_cache() -> None:
+    """Drop all memoized experiment datasets."""
+    _resolve_experiment_dataset_cached.cache_clear()
+
+
+@lru_cache(maxsize=16)
+def _resolve_experiment_dataset_cached(
+    use_synthetic: bool,
+    clinical_master_path: str,
+    subset_mode: str,
+    endpoint: str | None,
+    synthetic_participants: int,
+    synthetic_seed: int,
+    compact_grid: bool,
+    cfg: PairedLipidConfig,
+) -> tuple[CohortDataset, dict[str, Any]]:
+    if use_synthetic:
+        if subset_mode == "all_eligible":
+            dataset, truth = generate_synthetic_cohort(
+                n_participants=synthetic_participants,
+                seed=synthetic_seed,
+                compact_grid=compact_grid,
+            )
+        else:
             dataset, truth = _rebuild_synthetic_with_mode(
                 n_participants=synthetic_participants,
                 seed=synthetic_seed,
@@ -85,22 +184,22 @@ def resolve_experiment_dataset(
         }
         return dataset, meta
 
-    if not approve_cohort_evaluation:
-        raise PermissionError(
-            "Cohort evaluation requires explicit '--approve-cohort-evaluation' after "
-            "completing all readiness checks in manuscript_ml/runbook.md."
-        )
+    from src.data_preparation.store import get_active_data_source, resolve_data_source
+
+    source = get_active_data_source() or resolve_data_source()
     dataset, clin_audit = load_paired_cohort_from_store(
         clinical_master_path=clinical_master_path,
+        data_source=source,
         cfg=cfg,
         subset_mode=subset_mode,
         endpoint=endpoint,
     )
-    meta = {
+    return dataset, {
         "data_mode": "cohort",
         "clinical_audit": clin_audit,
+        "store_path": str(source.source_path),
+        "store_manifest_hash": str(source.manifest_hash),
     }
-    return dataset, meta
 
 
 def _rebuild_synthetic_with_mode(
@@ -114,14 +213,16 @@ def _rebuild_synthetic_with_mode(
 ) -> tuple[CohortDataset, dict[str, Any]]:
     """Helper to generate a synthetic cohort and apply a specific subset_mode."""
     import numpy as np
-    from src.analysis.paired_lipid_representation import build_paired_cohort_dataset
+    from src.analysis.paired_lipid.cohort import build_paired_cohort_dataset
 
     base_ds, truth = generate_synthetic_cohort(
         n_participants=n_participants,
         seed=seed,
         compact_grid=compact_grid,
     )
-    # Reconstruct map records from base_ds samples (3 maps per sample)
+    # Reconstruct map records from base_ds samples: 3 noisy maps per sample (generator map noise SD),
+    # and 2 maps in 20% of samples so that the three-map-complete subset actually excludes samples.
+    map_rng = np.random.default_rng(seed + 7)
     clin_df = base_ds.covariate_frame.copy()
     clin_df["participant_id"] = base_ds.participant_ids
     clin_df["cohort"] = "stroke"
@@ -135,10 +236,11 @@ def _rebuild_synthetic_with_mode(
     for s_idx in range(base_ds.n_samples):
         pid = str(base_ds.participant_ids[base_ds.sample_participant_idx[s_idx]])
         sid = str(base_ds.sample_ids[s_idx])
-        for m_idx in range(3):
+        n_maps = 2 if map_rng.random() < 0.2 else 3
+        for m_idx in range(n_maps):
             r_idx = len(spec_1300_rows)
-            spec_1300_rows.append(base_ds.sample_1300[s_idx])
-            spec_2850_rows.append(base_ds.sample_2850[s_idx])
+            spec_1300_rows.append(base_ds.sample_1300[s_idx] + map_rng.normal(0.0, 0.04, base_ds.sample_1300.shape[1]))
+            spec_2850_rows.append(base_ds.sample_2850[s_idx] + map_rng.normal(0.0, 0.04, base_ds.sample_2850.shape[1]))
             for rng_code in ("1300", "2850"):
                 map_rows.append(
                     {

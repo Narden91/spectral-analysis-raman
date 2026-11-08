@@ -22,13 +22,30 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from manuscript_ml import ensure_output_dir, resolve_experiment_dataset, write_json_atomic
+from manuscript_ml import (
+    ensure_output_dir,
+    load_manuscript_config,
+    resolve_experiment_dataset,
+    write_json_atomic,
+    write_run_provenance,
+)
 from src.analysis.io_utils import write_csv_atomic
-from src.analysis.paired_lipid_representation import (
-    PairedLipidConfig,
+from src.analysis.paired_lipid.nested_cv import (
     evaluate_nested_cohort,
     run_multiplicity_bootstrap,
 )
+
+# Role of each model in the comparison family (docs/research_design.md).
+MODEL_ROLES: dict[str, str] = {
+    "covariate_ridge": "reference",
+    "fixed_band_ridge": "established_comparator",
+    "pca_ridge": "established_comparator",
+    "pls_regression": "established_comparator",
+    "strongest_comparator": "established_comparator_selected_by_inner_mse",
+    "paired_linear_ridge": "proposed",
+    # Not tuned separately: reuses lambda, r and alpha selected for the PCA-input paired model.
+    "band_paired_ridge": "ablation_reuses_pca_paired_hyperparameters",
+}
 
 
 def _flatten_repeatability_rows(fold_repeatability: list[dict[str, Any]]) -> pd.DataFrame:
@@ -65,10 +82,12 @@ def run_primary_evaluation(
     output_dir: str | Path | None = None,
     n_bootstraps: int = 0,
     compact_grid: bool = False,
+    config_path: str | Path | None = None,
 ) -> dict[str, Path]:
     """Run the primary held-out LDL-C nested cross-validation and repeatability analysis."""
     target_dir = ensure_output_dir(output_dir)
-    cfg = PairedLipidConfig()
+    cfg, raw_cfg = load_manuscript_config(config_path)
+    bootstrap_seed = int(raw_cfg["seeds"]["bootstrap_seed"])
     dataset, source_meta = resolve_experiment_dataset(
         use_synthetic=use_synthetic,
         approve_cohort_evaluation=approve_cohort_evaluation,
@@ -111,21 +130,27 @@ def run_primary_evaluation(
     # Build comparator errors and differences table
     comp_rows: list[dict[str, Any]] = []
     for m_name, metrics in eval_res["comparisons_vs_covariate_ridge"].items():
-        comp_rows.append({"comparison": f"{m_name}_vs_covariate_ridge", "model": m_name, **metrics})
+        comp_rows.append(
+            {"comparison": f"{m_name}_vs_covariate_ridge", "model": m_name, "role": MODEL_ROLES[m_name], **metrics}
+        )
     comp_rows.append(
         {
             "comparison": "paired_linear_ridge_vs_strongest_comparator",
             "model": "paired_linear_ridge",
+            "role": MODEL_ROLES["paired_linear_ridge"],
             **eval_res["paired_vs_strongest_comparator"],
         }
     )
 
     if n_bootstraps > 0:
-        boot_res = run_multiplicity_bootstrap(dataset, cfg=cfg, n_bootstraps=n_bootstraps)
+        boot_res = run_multiplicity_bootstrap(
+            dataset, cfg=cfg, n_bootstraps=n_bootstraps, bootstrap_seed=bootstrap_seed
+        )
         manifest_payload["multiplicity_bootstrap"] = {
             "n_bootstraps_requested": boot_res["n_bootstraps_requested"],
             "n_bootstraps_succeeded": boot_res["n_bootstraps_succeeded"],
             "n_failed_refits": boot_res["n_failed_refits"],
+            "n_fallback_draws": boot_res["n_fallback_draws"],
             "interval_procedure_succeeded": boot_res["interval_procedure_succeeded"],
             "ci_95_delta_mse": boot_res["ci_95_delta_mse"],
             "ci_95_vs_comparator": boot_res["ci_95_vs_comparator"],
@@ -147,8 +172,17 @@ def run_primary_evaluation(
     write_csv_atomic(eval_res["fold_settings"], settings_path)
     write_csv_atomic(rep_df, rep_path)
     write_csv_atomic(eval_res["subspace_angles"], angles_path)
+    prov_path = write_run_provenance(
+        target_dir,
+        "primary_evaluation",
+        config_path=config_path,
+        cfg=cfg,
+        settings={"n_bootstraps": n_bootstraps, "bootstrap_seed": bootstrap_seed, "compact_grid": compact_grid},
+        source_meta=source_meta,
+    )
 
     return {
+        "run_provenance_primary_evaluation": prov_path,
         "eligibility_and_split_manifest": manifest_path,
         "nested_held_out_predictions": preds_path,
         "comparator_errors_and_differences": comp_path,
@@ -174,6 +208,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--bootstraps", type=int, default=0)
     parser.add_argument("--compact-grid", action="store_true")
+    parser.add_argument("--config", type=str, default=None, help="Experiment settings YAML.")
     return parser.parse_args(argv)
 
 
@@ -186,6 +221,7 @@ def main(argv: list[str] | None = None) -> None:
         output_dir=args.output_dir,
         n_bootstraps=args.bootstraps,
         compact_grid=args.compact_grid,
+        config_path=args.config,
     )
     for key, path in outputs.items():
         print(f"[run_primary_evaluation] wrote {key}: {path}")
