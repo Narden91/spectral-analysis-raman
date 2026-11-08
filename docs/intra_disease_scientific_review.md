@@ -8,7 +8,7 @@
 
 ## Executive Assessment
 
-The corrected intra-disease pipeline is scientifically conservative and now supports a null/feasibility interpretation. It does not support a claim that clinical decline is significantly correlated with specific Raman shifts or molecular groups in this cohort.
+The corrected intra-disease pipeline is scientifically conservative and now supports a feasibility interpretation with no supported association. It does not support a claim that clinical decline is significantly correlated with specific Raman shifts or molecular groups in this cohort.
 
 The strongest defensible conclusion is that the analysis searched for subject-level Raman spectral associations with baseline MoCA, 3-month MoCA, and delta MoCA, but no spectral intervals survived FDR or cluster-permutation correction. Candidate intervals remain useful as hypothesis-generating regions for future studies, not as validated disease-progression signals, biomarkers, predictors, or mechanistic biochemical evidence.
 

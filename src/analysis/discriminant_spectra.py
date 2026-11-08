@@ -307,7 +307,7 @@ def compute_subgroup_mean_spectra(
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Return (wavenumbers, {label: spectra_matrix}) for every subgroup in *block*.
 
-    Only rows whose *subgroup_column* is non-null are included.
+    Only rows whose *subgroup_column* is nonmissing are included.
     """
     col_wn = block_columns(list(frame.columns), block)
     if not col_wn:

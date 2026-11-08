@@ -403,7 +403,7 @@ def _build_report(
         "",
         "Candidate regions were detected at the subject level across clinical correlations, "
         "longitudinal ΔMoCA analyses, and disease-internal stratification tests, with cluster-mass permutation correction. "
-        "These whole-spectrum screens and their cluster-permutation nulls are marginal and unadjusted for age and sex. "
+        "These whole-spectrum screens and their cluster-permutation reference distributions are marginal and unadjusted for age and sex. "
         "When no corrected intervals were detected, fallback largest-effect intervals were retained only for transparent "
         "hypothesis generation and are not treated as statistical findings. "
         "Post-selection sensitivity models included age and sex only; SEC fraction, concentration, column/batch age, "

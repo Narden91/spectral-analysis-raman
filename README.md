@@ -7,6 +7,8 @@ Biological PCA, control-vs-disease modelling, and spectral plots.
 All scientific outputs are exploratory. They are not diagnostic, predictive,
 causal, biomarker, or clinical-utility evidence.
 
+The active follow-up study is specified in [the research design](docs/research_design.md). Earlier ideas, evidence limits and decisions are compacted in [the research history](AGENT_LEARNINGS.md#2026-11-06-research-evidence-and-decision-history).
+
 ## What the pipeline does
 
 1. Ingests Renishaw text exports and clinical metadata.
@@ -163,7 +165,7 @@ confounding checks, and limitations.
 Each EDA run records provenance in `00_run_metadata/`, including the resolved
 configuration and data-manifest snapshot. ML output is subject-level only;
 nested CV tuning remains inside outer training folds, permutation tests include
-a sex-stratified null, and importance summaries are derived across outer folds.
+a sex-stratified reference distribution, and importance summaries are derived across outer folds.
 The 10-repeat nested-CV estimate is descriptive; permutation p-values compare
 the real and permuted labels on the same fixed locked 5-fold plan. ML shows
 phase/resampling progress and atomically checkpoints compatible permutation and

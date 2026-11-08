@@ -1,15 +1,14 @@
 """Adaptive early-stopping for single-statistic Monte Carlo permutation tests.
 
-Applies only where one permutation null is compared against one observed
-statistic per call (independent p-value per invocation). It does not apply to
-shared family-wise nulls compared against many simultaneous statistics (e.g.
+Applies only where one permutation reference distribution is compared against
+one observed statistic per call (independent p-value per invocation). It does not apply to
+shared family-wise reference distributions used for many simultaneous statistics (e.g.
 cluster-mass maxima checked against multiple clusters in one block) — that
 case needs the tail resolved against the most extreme of several statistics,
 which this curtailment rule does not address and must not be used for.
 
 Method: after each batch of new draws, form the exact Clopper-Pearson
-confidence interval for the true one-sided tail probability p = P(null >=
-observed) from x = #{null >= observed} successes in k draws, at level
+confidence interval for the true one-sided tail probability p = P(reference_statistic >= observed) from x = #{reference_statistic >= observed} successes in k draws, at level
 `confidence`. Stop once the interval no longer straddles `alpha` (the
 decision "reject" vs "fail to reject" at that alpha is already certain at the
 requested confidence) or once `permutation_max` draws are reached. Never
@@ -73,7 +72,7 @@ def is_resolved(successes: int, draws: int, *, alpha: float, confidence: float) 
 def should_stop(successes: int, draws: int, config: SequentialStoppingConfig) -> bool:
     """Whether a permutation loop may stop after `draws` completed draws.
 
-    `successes` counts draws so far with null >= observed (the tail count
+    `successes` counts draws so far with reference_statistic >= observed (the tail count
     feeding the eventual Monte Carlo p-value `(1 + successes) / (draws + 1)`).
     Stopping is only permitted at or after `permutation_min` draws, and only
     on a `check_interval` boundary or at `permutation_max`.

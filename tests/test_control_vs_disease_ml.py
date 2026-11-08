@@ -105,7 +105,7 @@ def test_append_null_distribution_rows_records_deterministic_metadata() -> None:
 
 
 def test_append_null_distribution_rows_accepts_early_stopped_null() -> None:
-    """Adaptive stopping can resolve the null in fewer draws than the
+    """Adaptive stopping can resolve the permutation test in fewer draws than the
     configured ceiling (n_permutations). This must be accepted, not raise —
     the seeds recorded must be the first N of the same deterministic
     sequence a full, un-curtailed run would have used.
@@ -169,7 +169,7 @@ def _make_feature_matrix(
     sex_confound_strength: how much sex shifts feature means (confound channel).
     Sex is distributed unevenly across class by construction when > 0, mirroring
     the real cohort's sex/class association (used only in the mandatory
-    sex-stratified-null test).
+    sex-stratified reference test).
     """
     rng = np.random.default_rng(random_state)
     n_total = n_control + n_disease
@@ -676,7 +676,7 @@ def test_permutation_p_value_bounded(base_ml_cfg: dict) -> None:
 
 
 def test_permutation_null_centers_near_chance_on_pure_noise(base_ml_cfg: dict) -> None:
-    """With no real signal, the permutation null and the observed statistic should
+    """With no real signal, the permutation reference distribution and the observed statistic should
     both hover near balanced-accuracy 0.5 - i.e. permuting labels on noise data
     should not manufacture a small p-value.
     """
@@ -699,13 +699,13 @@ def test_permutation_null_centers_near_chance_on_pure_noise(base_ml_cfg: dict) -
     )
     # Not a strict guarantee (this is a stochastic test on noise data), but a
     # complete false positive (p < 0.05 on pure noise) should be rare given
-    # the null and observed are drawn from the same no-signal process.
+    # permuted and observed statistics follow the same no-signal process.
     assert p_value > 0.05
 
 
 def test_permutation_test_stops_early_on_clearly_unresolved_null(base_ml_cfg: dict) -> None:
     """Pure-noise data with a generous permutation_max must stop well short of
-    it: the null and the observed statistic are drawn from the same
+    it: permuted and observed statistics are drawn from the same
     no-signal process, so the tail probability resolves as clearly not
     significant long before the budget is exhausted.
     """
@@ -765,11 +765,11 @@ def test_permutation_test_runs_full_budget_when_never_resolved(base_ml_cfg: dict
 def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> None:
     """The decisive test: build a cohort where class is a PURE function of sex
     (no independent disease signal at all) and confirm:
-      - the UNRESTRICTED permutation null is fooled (small p-value, because the
+      - the UNRESTRICTED permutation reference distribution is fooled (small p-value, because the
         model IS discriminating classes, just via sex, and unrestricted
         permutation destroys the sex-class link the model relies on) — proving
-        an unrestricted null alone would falsely look like a real spectral finding.
-      - the SEX-STRATIFIED null is NOT fooled (large p-value), because permuting
+        an unrestricted reference distribution alone would falsely look like a real spectral finding.
+      - the SEX-STRATIFIED reference distribution is NOT fooled (large p-value), because permuting
         within sex strata preserves the sex-class association the model is
         actually exploiting, so permuted data score just as well as real data.
 
@@ -826,10 +826,10 @@ def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> N
     )
 
     assert p_unrestricted < 0.05, (
-        f"unrestricted null should be fooled by pure sex-confounded signal (p={p_unrestricted})"
+        f"unrestricted reference distribution should be fooled by pure sex-confounded signal (p={p_unrestricted})"
     )
     assert p_sex_stratified > 0.05, (
-        f"sex-stratified null should NOT be fooled by pure sex-confounded signal (p={p_sex_stratified})"
+        f"sex-stratified reference distribution should NOT be fooled by pure sex-confounded signal (p={p_sex_stratified})"
     )
 
 
@@ -933,7 +933,7 @@ def test_permutation_resume_from_already_resolved_checkpoint_draws_nothing_new(
     y = np.array([0] * 6 + [1] * 6)
     checkpoint = tmp_path / "permutation.parquet"
 
-    # Every null draw scores far below the observed statistic: unambiguously
+    # Every permutation draw scores far below the observed statistic: unambiguously
     # not significant, so the stopping rule should already be satisfied by
     # permutation_min draws once resumed.
     monkeypatch.setattr("src.analysis.control_vs_disease_ml._permuted_score", lambda *_args: 0.1)

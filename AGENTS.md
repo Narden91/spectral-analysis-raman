@@ -39,3 +39,12 @@ re-read whole files.
 After big code changes, refresh the graph with `graft build` (deterministic,
 no API key, $0).
 <!-- graft:end -->
+
+## Research decisions and wording
+
+- Before suggesting a research extension, read the dated idea history in `AGENT_LEARNINGS.md` and the active design in `docs/research_design.md`. Do not re-propose a recorded idea unless new evidence addresses its stated limitation; identify that evidence explicitly.
+- Maintain one active research design. When replacing a proposal, first preserve its question, method, evidence status, limitations, and conditions for reconsideration in the idea history. Removing a draft must not erase the research decision.
+- The words `null`, `substantive`, `arms`, and `bank` and their ordinary prose inflections are prohibited in authored prose, comments, docstrings, captions, and report labels. Apply the existing plain-language rules to other filler; do not invent an unspecified vocabulary blacklist.
+- Use the meaning-specific alternative: `no-association hypothesis`, `reference distribution`, `no detected association`, `specific contribution`, `study groups`, or `data repository`. Do not mechanically replace a word when that would change the scientific meaning.
+- Exceptions are the prohibition list itself, exact code identifiers, filenames, paths, data-format tokens, original citation titles, and verbatim quotations. Preserve public interfaces, parsing rules, and stored formats. Generated research outputs and generated Graft cards are not manually rewritten for style; update their maintained text sources instead.
+- Check wording and obsolete proposal links before completing documentation work. Record aggregate evidence with its date, source, and verification limits; keep private observations and task transcripts out of the learnings file.

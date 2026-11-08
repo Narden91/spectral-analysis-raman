@@ -254,7 +254,7 @@ def compute_spearman_feature_tests(
     """Whole-spectrum channel-wise screen against a clinical endpoint.
 
     Uses marginal (unadjusted) Spearman correlation, not covariate-residualized
-    `partial_spearman`. The cluster-permutation null in
+    `partial_spearman`. The cluster-permutation reference distribution in
     `apply_spearman_cluster_permutation` is also marginal, so the screen is
     internally consistent, but it remains exposed to age/sex confounding.
     Covariate adjustment is applied only in the confirmatory fixed panel

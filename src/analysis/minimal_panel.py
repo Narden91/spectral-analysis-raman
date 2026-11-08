@@ -344,7 +344,7 @@ def _nested_cv_elasticnet_with_selection(
 
     Selection on the full dataset before CV is classic data leakage: the held-out
     test subjects' labels influenced which features were chosen, biasing CV metrics
-    and the permutation null downward.  Here selection runs only on X_train so
+    and the permutation reference distribution downward.  Here selection runs only on X_train so
     X_test subjects are never seen during feature selection.
     """
     n_samples = X.shape[0]
@@ -468,7 +468,7 @@ def _permuted_continuous_r2(
 ) -> float:
     rng = np.random.default_rng(random_state)
     y_perm = y[rng.permutation(len(y))]
-    # Feature selection must be re-applied under permuted labels so the null
+    # Feature selection must be re-applied under permuted labels so the reference
     # distribution is not conditional on selection performed on observed labels.
     _, _, perf = _nested_cv_elasticnet_with_selection(
         X,

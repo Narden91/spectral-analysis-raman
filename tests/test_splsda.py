@@ -189,7 +189,7 @@ def test_splsda_permutation_test_stops_early_on_unambiguous_null():
     cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
 
     # Balanced-accuracy 0.5 is chance level for a balanced binary target, so a
-    # weak/noise classifier's permutation null should resolve as clearly not
+    # weak/noise classifier's permutation test should resolve as clearly not
     # significant well before the 2000-draw ceiling.
     p_value, n_used = _permutation_test(
         X,

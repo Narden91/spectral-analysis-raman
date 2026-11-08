@@ -1073,13 +1073,13 @@ def _clear_band_for_legend(ax, side: str, fraction: float) -> None:
 
 
 def make_clinical_null_figures() -> None:
-    """The four within-stroke null panels, drawn at the Figure 5 type scale."""
+    """The four within-stroke clinical association panels, drawn at the Figure 5 type scale."""
     with matplotlib.rc_context(CLINICAL_RC):
         _draw_clinical_null_panels()
 
 
 def _draw_clinical_null_panels() -> None:
-    """The four within-stroke null panels, one standalone PDF each.
+    """The four within-stroke clinical association panels, one standalone PDF each.
 
     Each panel supports the same negative conclusion, which is why they are
     assembled into a single float rather than published separately; every value
@@ -1171,7 +1171,7 @@ def _draw_clinical_null_panels() -> None:
     bar.outline.set_linewidth(0.4)
     _save_exact(fig, "clinical_null_channelwise")
 
-    # Observed CV R^2 against each endpoint's own permutation null.
+    # Observed CV R^2 against each endpoint's own permutation reference distribution.
     fig, ax = _clinical_panel_axes()
     rng = np.random.default_rng(SEED)
     endpoints = list(MOCA_ENDPOINT_LABELS)
@@ -1461,10 +1461,10 @@ def _cvd_panel_axes():
 
 
 def make_cvd_classifier_figure() -> None:
-    """ROC curves (whole-spectrum models) and the primary permutation null.
+    """ROC curves (whole-spectrum models) and the primary permutation reference distribution.
 
     Sources only saved repeated-nested-CV out-of-fold predictions and the
-    already-computed sex-stratified permutation null; no predictions are
+    already-computed sex-stratified permutation reference distribution; no predictions are
     re-derived.
     """
     comparison = pd.read_csv(ML_MODEL_COMPARISON)
@@ -1536,11 +1536,11 @@ def make_cvd_classifier_figure() -> None:
     ax_null.spines[["top", "right"]].set_visible(False)
     ax_null.tick_params(direction="out", length=3)
     # Labelled at the line rather than through a legend: a legend box in a
-    # corner of a 2.6 in panel sits on the null bars, and it separates the
+    # corner of a 2.6 in panel sits on the reference bars, and it separates the
     # observed value from the line it names. The p-value belongs here too --
     # it is what the panel is evidence for, and it was only in the caption.
     ax_null.set_ylim(0, float(counts.max()) * 1.2)
-    # The observed line lands past the null's right tail; without a margin it
+    # The observed line lands past the reference distribution's right tail; without a margin it
     # is drawn on the frame and reads as a clipped axis rather than a value.
     ax_null.set_xlim(right=observed + 0.02)
     ax_null.annotate(
@@ -1560,9 +1560,9 @@ def make_cvd_classifier_figure() -> None:
 
 
 def make_moca_prediction_figure() -> None:
-    """Observed CV R^2 against its permutation null for each MoCA endpoint.
+    """Observed CV R^2 against its permutation reference distribution for each MoCA endpoint.
 
-    Sources only the saved PLS-regression performance and permutation-null
+    Sources only the saved PLS-regression performance and permutation reference
     summary tables; no fold-level predictions are re-derived because none
     were persisted for these unsupported models.
     """
@@ -1605,7 +1605,7 @@ def make_moca_prediction_figure() -> None:
     ax.set_xticklabels([MOCA_ENDPOINT_LABELS[endpoint] for endpoint in endpoints])
     ax.set_ylabel("Cross-validated $R^2$")
     ax.set_title(
-        "Within-stroke MoCA prediction vs. permutation null", loc="left",
+        "Within-stroke MoCA: permutation comparison", loc="left",
         fontweight="bold", fontsize=8.5,
     )
     ax.spines[["top", "right"]].set_visible(False)

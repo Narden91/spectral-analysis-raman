@@ -44,7 +44,7 @@ def test_is_resolved_false_when_ci_straddles_alpha() -> None:
 
 
 def test_is_resolved_true_when_clearly_significant() -> None:
-    # Strong, unambiguous signal: null essentially never beats observed.
+    # Strong, unambiguous signal: permuted statistics essentially never exceed the observed statistic.
     assert is_resolved(0, 500, alpha=0.05, confidence=0.99)
 
 
@@ -181,7 +181,7 @@ def test_run_curtailed_permutation_draws_parallel_matches_serial() -> None:
 
 
 def test_never_stops_before_min_even_under_repeated_simulation() -> None:
-    # Monte Carlo sanity: across many synthetic null-vs-observed comparisons,
+    # Monte Carlo sanity: across many synthetic reference-versus-observed comparisons,
     # the rule must never report a stop decision before permutation_min draws.
     config = SequentialStoppingConfig(permutation_min=150, permutation_max=2000, check_interval=25)
     rng = np.random.default_rng(7)

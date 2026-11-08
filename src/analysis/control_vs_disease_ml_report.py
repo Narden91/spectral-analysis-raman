@@ -154,7 +154,7 @@ def plot_metric_comparison(comparison_df: pd.DataFrame, metric: str = "balanced_
 
 
 # ---------------------------------------------------------------------------
-# Permutation null histograms
+# Permutation reference distribution histograms
 # ---------------------------------------------------------------------------
 
 
@@ -179,7 +179,7 @@ def plot_permutation_null(
     null_label = "sex-stratified" if null_type == "sex_stratified" else "unrestricted"
     finalize_axis(
         ax,
-        title=f"{_model_label(model_name)} ({representation}) — {null_label} null, p={p_value:.4g}",
+        title=f"{_model_label(model_name)} ({representation}) — {null_label} reference distribution, p={p_value:.4g}",
         xlabel="Balanced accuracy (permuted labels)",
         ylabel="Count",
     )

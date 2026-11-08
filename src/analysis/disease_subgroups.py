@@ -203,7 +203,7 @@ def _gap_statistic(
 
 
 def _select_gap_k(gap: pd.DataFrame) -> int:
-    """Use the Tibshirani one-standard-error rule, allowing the null k=1 model.
+    """Use the Tibshirani one-standard-error rule, allowing the single-group k=1 model.
 
     If the gap keeps rising through the last tested k (no interior k satisfies
     the one-SE rule), the search ceiling is not an optimum -- it just means the

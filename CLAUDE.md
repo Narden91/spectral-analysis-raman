@@ -79,12 +79,12 @@ QC metrics → dead-pixel screen → cosmic detection/suppression → edge trim
 - The case-control ML layer is read-only downstream of Biological PCA. All
   tuning, scaling, and threshold selection must remain inside outer training
   folds. Permutations must reuse one fixed repeat of the locked outer-fold plan
-  for both the observed and every null score; repeated CV remains descriptive.
+  for both the observed and every permuted score; repeated CV remains descriptive.
   Persist resumable resampling checkpoints keyed by configuration, data, and
   feature-matrix identity. Report only
   outer-fold feature-importance summaries; forest importances use held-out-fold
   permutation scoring.
-- Permutation tests with one null distribution compared against one observed
+- Permutation tests with one reference distribution compared against one observed
   statistic per call (`control_vs_disease_ml`, `pls_regression`, `splsda`,
   `minimal_panel`, `robust_contrasts`) use adaptive early stopping via
   `src.statistics.sequential_permutation`: Clopper-Pearson curtailment (Besag
@@ -93,7 +93,7 @@ QC metrics → dead-pixel screen → cosmic detection/suppression → edge trim
   boundary, and never exceeding `permutation_max`
   (`n_permutations` if unset). Always report the actual draws used, not the
   configured ceiling. This does not apply to `src.statistics.cluster_permutation`'s
-  shared family-wise max-statistic null (compared against many simultaneous
+  shared family-wise max-statistic reference distribution (compared against many simultaneous
   cluster p-values per spectral block) — that case is not curtailed and keeps
   its fixed `n_permutations` draw count.
   Simulated under a plausible outcome mixture (mostly clear non-significant,

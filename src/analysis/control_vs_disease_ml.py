@@ -15,7 +15,7 @@ Output map:
     01_cohort                  class balance and confound counts
     02_model_evaluation        nested CV, importance, metrics, bootstrap CIs
     03_confounder_checks       sex-only baseline and female-only refits
-    04_permutation_tests       unrestricted and sex-stratified nulls
+    04_permutation_tests       unrestricted and sex-stratified reference distributions
     05_univariate_band_screen  descriptive Mann-Whitney tests with FDR
     06_report                  figures and final performance summary
 """
@@ -308,7 +308,7 @@ def _load_cohort(feature_matrix_path: str | Path | None) -> pd.DataFrame:
         mislabeled = frame.loc[frame["is_control"].astype(bool) & frame["diagnosis_family"].notna()]
         if not mislabeled.empty:
             logger.warning(
-                "Label anomaly: %d subject(s) marked is_control=True but carry a non-null "
+                "Label anomaly: %d subject(s) marked is_control=True but carry a nonmissing "
                 "diagnosis_family (%s). Verify labels before treating results as final. Subject_id(s): %s",
                 len(mislabeled),
                 sorted(mislabeled["diagnosis_family"].dropna().unique().tolist()),
@@ -882,7 +882,7 @@ def _single_split_balanced_accuracy(
     """Run one un-repeated outer StratifiedKFold pass; return balanced accuracy.
 
     This is the permutation-test workhorse. Permutation only needs a point
-    estimate per null draw — the null distribution's spread across draws
+    estimate per permutation draw — the reference distribution's spread across draws
     already captures Monte Carlo noise, so repeating the outer CV per
     permutation (as the observed estimate does) would multiply
     cost by n_outer_repeats for no statistical benefit. This mirrors the
@@ -1061,11 +1061,11 @@ def run_permutation_test(
 ) -> tuple[float, np.ndarray]:
     """Full-pipeline label-permutation test. Returns (p_value, null_distribution).
 
-    p = (1 + #{null >= observed}) / (n_drawn + 1). `strata` is None for the
-    unrestricted null, or an array of per-subject sex labels for the
-    sex-stratified null (§0.1): permuting within sex strata preserves the
+    p = (1 + #{reference_statistic >= observed}) / (n_drawn + 1). `strata` is None for the
+    unrestricted reference distribution, or an array of per-subject sex labels for the
+    sex-stratified reference distribution (§0.1): permuting within sex strata preserves the
     real sex-class association, so a model that only reads sex will score no
-    better under this null than under the unpermuted data.
+    better under this reference distribution than under the unpermuted data.
 
     Draws stop early once the Monte Carlo p-value's Clopper-Pearson interval
     clears `permutation_alpha` at `permutation_confidence` (Besag & Clifford
@@ -1075,7 +1075,7 @@ def run_permutation_test(
     deterministic seed to draw next; only the number of seeds actually
     *evaluated* is reduced. `permutation_min` draws always run first,
     preserving Monte Carlo p-value validity (the observed statistic must
-    always be counted alongside a real, pre-committed sample of the null).
+    always be counted alongside a real, pre-committed sample of the reference distribution).
     """
     if not np.isfinite(observed_balanced_accuracy):
         raise ValueError("Observed permutation statistic must be finite")
@@ -1651,7 +1651,7 @@ def _append_null_distribution_rows(
     n_permutations: int,
     n_splits: int,
 ) -> None:
-    """Append deterministic permutation rows for a null that may have stopped early.
+    """Append deterministic permutation rows for a permutation run that may have stopped early.
 
     `n_permutations` is the configured ceiling, not necessarily the draw
     count: adaptive stopping (`src.statistics.sequential_permutation`) can
@@ -1858,7 +1858,7 @@ def _write_model_comparison(
     family_p = comparison_df["permutation_p_value_sex_stratified"].to_numpy(dtype=float)
     if not np.isfinite(family_p).all():
         raise RuntimeError(
-            "Sex-stratified permutation inference failed; refusing to substitute an unrestricted null"
+            "Sex-stratified permutation inference failed; refusing to substitute an unrestricted reference distribution"
         )
     fdr_q, fdr_significant = fdr_correction(family_p, alpha=0.05)
     comparison_df["permutation_p_fdr_q"] = fdr_q
@@ -1979,7 +1979,7 @@ def run_control_vs_disease_ml_pipeline(
             workload_message = (
                 f"{representation}: subjects={len(y_valid)}, features={X_valid.shape[1]}, models={len(_MODEL_NAMES)}, "
                 f"workers={n_jobs}, permutation outer fits/model={permutation_outer_fits} "
-                f"({len(outer_split_plan[0])} locked folds × 2 nulls × {_n_permutations(ml_cfg)} draws)"
+                f"({len(outer_split_plan[0])} locked folds × 2 reference distributions × {_n_permutations(ml_cfg)} draws)"
             )
             logger.info("Control-vs-disease ML workload: %s", workload_message)
             progress.console.print(f"[cyan]ML workload:[/] {workload_message}")
@@ -2070,7 +2070,7 @@ def run_control_vs_disease_ml_pipeline(
                 pd.DataFrame(confounder_rows), confounder_dir / "confounder_analysis.csv", index=False
             )
 
-        with phase("null_distributions", "Write permutation null distributions"):
+        with phase("null_distributions", "Write permutation reference distributions"):
             outputs["permutation_null_distributions"] = write_csv_atomic(
                 pd.DataFrame(null_distribution_rows),
                 permutation_dir / "permutation_null_distributions.csv",

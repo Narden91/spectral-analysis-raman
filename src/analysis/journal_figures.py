@@ -7,7 +7,7 @@ Assembles 6 publication-quality figures from Tier-1 and Tier-2 outputs:
   fig3 — Difference spectrum + signed-effect map (block-separated)
   fig4 — NMF component spectra + spectral entropy vs ΔMoCA
   fig5 — Feature coupling heatmap + ratio–ratio regimes
-  fig6 — ΔMoCA whole-spectrum association landscape + PLS null check
+  fig6 — ΔMoCA whole-spectrum association landscape + PLS permutation check
 
 All figures are written to ``06_spectral_interpretability/figures/``.
 Captions use region-overlapping language; no diagnostic or causal claims.
@@ -441,7 +441,7 @@ def _fig5_coupling_regimes(coupling_path: Path, regimes_path: Path, output_path:
 
 
 # ---------------------------------------------------------------------------
-# Figure 6 — ΔMoCA whole-spectrum association landscape + PLS null check
+# Figure 6 — ΔMoCA whole-spectrum association landscape + PLS permutation check
 # ---------------------------------------------------------------------------
 
 _BLOCK_LABELS = {"1300": "Fingerprint", "2850": "CH-stretch"}
@@ -555,7 +555,7 @@ def _fig6_pls_null_panel(ax: plt.Axes, performance: pd.DataFrame) -> bool:
     ax.set_yticklabels([_TARGET_LABELS[t] for t in perf["target"]], fontsize=9)
     ax.invert_yaxis()
     ax.set_xlabel("Cross-validated R² (observed)")
-    ax.set_title("PLS1 regression vs. permutation null\n(R² ≤ 0 = no explanatory power beyond the mean)", fontsize=10)
+    ax.set_title("PLS1 regression: permutation comparison\n(R² ≤ 0 = no explanatory power beyond the mean)", fontsize=10)
 
     for y, row in zip(y_pos, perf.itertuples()):
         p_holm = getattr(row, "permutation_p_value_holm", np.nan)
@@ -591,7 +591,7 @@ def _fig6_moca_association_landscape(
 
     fig.suptitle(
         "ΔMoCA association landscape: exploratory whole-spectrum scan (Holm/FDR-corrected) "
-        "and PLS1 permutation check — no wavenumber or model exceeds the correction/null threshold",
+        "and PLS1 permutation check — no wavenumber or model exceeds the correction or permutation threshold",
         fontsize=9,
     )
     _save_and_close(fig, output_path)

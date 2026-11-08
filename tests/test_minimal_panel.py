@@ -235,11 +235,11 @@ def _panel_permutation_inputs(rng: np.random.Generator, n: int = 24, n_features:
 def test_permutation_test_continuous_respects_permutation_max() -> None:
     """Each draw here refits a nested-CV panel selection, which is expensive;
     the stopping rule must never exceed the configured ceiling regardless of
-    whether the null happens to resolve early on this small sample.
+    whether the permutation test happens to resolve early on this small sample.
     """
     rng = np.random.default_rng(31)
     X, feature_names = _panel_permutation_inputs(rng)
-    y = rng.normal(size=X.shape[0])  # pure noise target: R2 null centers near 0
+    y = rng.normal(size=X.shape[0])  # pure noise target: R2 reference distribution centers near 0
 
     p_value, _mean, _std, n_used = _permutation_test_continuous(
         X,
