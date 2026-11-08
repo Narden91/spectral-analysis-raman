@@ -249,3 +249,39 @@ def test_multiplicity_bootstrap_and_calibration_gate() -> None:
     w_lo, w_hi = wilson_score_interval(960, 1000)
     assert w_lo > 0.925 and w_hi < 1.0
 
+
+def test_manuscript_ml_scripts_and_approval_gate(tmp_path: Path) -> None:
+    from manuscript_ml import resolve_experiment_dataset
+    from manuscript_ml.run_all import run_all_pipeline
+
+    with pytest.raises(PermissionError, match="approve-cohort-evaluation"):
+        resolve_experiment_dataset(use_synthetic=False, approve_cohort_evaluation=False)
+
+    out_dir = tmp_path / "manuscript_outputs"
+    outputs = run_all_pipeline(
+        use_synthetic=True,
+        quick=True,
+        output_dir=out_dir,
+        n_bootstraps=4,
+    )
+    expected_keys = {
+        "readiness_manifest",
+        "limitations_table",
+        "simulation_scenarios_summary",
+        "simulation_calibration_report",
+        "eligibility_and_split_manifest",
+        "nested_held_out_predictions",
+        "comparator_errors_and_differences",
+        "fold_selected_settings",
+        "baseline_repeatability_report",
+        "subspace_principal_angles",
+        "covariate_and_subset_sensitivity",
+        "outer_partition_seed_sensitivity",
+        "secondary_endpoints_summary",
+        "anchor_associations_continuous",
+    }
+    assert expected_keys.issubset(set(outputs.keys()))
+    for path in outputs.values():
+        assert path.is_file()
+
+

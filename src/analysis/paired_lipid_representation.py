@@ -2297,3 +2297,144 @@ def summarize_anchor_associations(
             }
         )
     return pd.DataFrame(rows)
+
+
+def load_paired_cohort_from_store(
+    clinical_master_path: str | Path = "data/clinical_master.csv",
+    *,
+    data_source: Any | None = None,
+    cfg: PairedLipidConfig = PairedLipidConfig(),
+    subset_mode: Literal["all_eligible", "paired_only", "single_sample", "three_map_complete"] = "all_eligible",
+    endpoint: str | None = None,
+) -> tuple[CohortDataset, dict[str, Any]]:
+    """Load the stroke cohort hierarchy from the canonical preprocessed store and clinical master."""
+    from src.data_preparation.loaders import load_area_summaries, load_file_index
+
+    clin_df, clin_audit = load_clinical_master_verified(clinical_master_path)
+    file_index = load_file_index(data_source).copy()
+    if "is_control" in file_index.columns:
+        file_index = file_index.loc[~file_index["is_control"].fillna(False).astype(bool)].copy()
+
+    raw_id_col = "subject_id_raw" if "subject_id_raw" in file_index.columns else "subject_id"
+    file_index["participant_id"] = file_index[raw_id_col].astype(str).str.strip()
+    file_index["sample_id"] = file_index["slide_number"].astype(str).str.strip()
+    file_index["measurement_id"] = file_index["measurement_id"].astype(str)
+
+    sum_1300 = load_area_summaries(data_source, "1300")
+    sum_2850 = load_area_summaries(data_source, "2850")
+
+    def _extract_wn(feature_names: np.ndarray) -> np.ndarray:
+        vals: list[float] = []
+        for fn in feature_names:
+            token = str(fn).split("__")[-1]
+            vals.append(float(token))
+        return np.asarray(vals, dtype=float)
+
+    wn_1300 = _extract_wn(sum_1300["feature_names"])
+    wn_2850 = _extract_wn(sum_2850["feature_names"])
+
+    idx_map_1300 = {str(mid): i for i, mid in enumerate(sum_1300["measurement_ids"])}
+    idx_map_2850 = {str(mid): i for i, mid in enumerate(sum_2850["measurement_ids"])}
+
+    map_rows: list[dict[str, Any]] = []
+    for _, row in file_index.iterrows():
+        mid = str(row["measurement_id"])
+        rng_code = str(row["spectral_range"])
+        if rng_code == "1300" and mid in idx_map_1300:
+            r_idx = idx_map_1300[mid]
+        elif rng_code == "2850" and mid in idx_map_2850:
+            r_idx = idx_map_2850[mid]
+        else:
+            continue
+        map_rows.append(
+            {
+                "participant_id": str(row["participant_id"]),
+                "sample_id": str(row["sample_id"]),
+                "spectral_range": rng_code,
+                "row_index": int(r_idx),
+                "acquisition_mode": row.get("acquisition_mode", "NONE"),
+                "retained": True,
+            }
+        )
+
+    dataset = build_paired_cohort_dataset(
+        clin_df,
+        pd.DataFrame(map_rows),
+        np.asarray(sum_1300["area_summary"], dtype=float),
+        np.asarray(sum_2850["area_summary"], dtype=float),
+        wn_1300,
+        wn_2850,
+        cfg=cfg,
+        subset_mode=subset_mode,
+        endpoint=endpoint,
+    )
+    return dataset, clin_audit
+
+
+def build_limitations_table(clin_audit: Mapping[str, Any] | None = None) -> pd.DataFrame:
+    """Return a structured limitations table tied to source metadata and MISEV2023 requirements."""
+    rows = [
+        {
+            "domain": "retrospective_design",
+            "status": "documented_constraint",
+            "source_reference": "docs/research_design.md; AGENT_LEARNINGS.md",
+            "implication": (
+                "Earlier cohort results were known when the design was written; nested validation "
+                "reduces internal overfitting but cannot remove prior researcher adaptation."
+            ),
+        },
+        {
+            "domain": "sample_identity_and_linkage",
+            "status": (
+                f"{clin_audit.get('stroke_identity_excluded', 'unverified')} stroke records excluded for identity review"
+                if clin_audit
+                else "requires_clinical_master_verification"
+            ),
+            "source_reference": "data/clinical_master.csv; data/clinical_master_notes.md",
+            "implication": (
+                "Records with SEX_FOLDER_CONFLICT or filename/folder mismatches are excluded rather "
+                "than silently relinked."
+            ),
+        },
+        {
+            "domain": "laboratory_units_and_assay",
+            "status": "assumed_mmol_l_and_unconfirmed_formula",
+            "source_reference": "data/clinical_master_dictionary.csv",
+            "implication": (
+                "LDL-C, HDL-C, TG, and platelet units are marked assumed in the dictionary; "
+                "fasting status, blood-draw timing relative to EV isolation, and direct vs calculated "
+                "LDL-C (e.g., Friedewald) are unconfirmed."
+            ),
+        },
+        {
+            "domain": "misev2023_fraction_and_repeat_scope",
+            "status": "shared_isolation_possible",
+            "source_reference": "MISEV2023 (doi:10.1002/jev2.12404); docs/preprocessing.md",
+            "implication": (
+                "SNV and area-normalized spectra capture relative shape, not particle concentration or "
+                "fraction lipid mass. Repeat agreement measures only stages independently repeated; "
+                "co-isolated lipoproteins or platelets cannot be separated from EVs by Raman alone."
+            ),
+        },
+        {
+            "domain": "conditional_independence_and_confounding",
+            "status": "model_relative_comparison_only",
+            "source_reference": "docs/research_design.md",
+            "implication": (
+                "Positive delta MSE shows predictive improvement over linear ridge on C under the "
+                "observed protocol; spectra may proxy nonlinear covariate effects or unmeasured "
+                "technical preparation structure."
+            ),
+        },
+        {
+            "domain": "control_cohort_absence_of_lipids",
+            "status": "controls_excluded_from_primary_model",
+            "source_reference": "data/clinical_master.csv",
+            "implication": (
+                "Control participants have no recorded lipid values and only one sample per participant; "
+                "within-stroke lipid prediction does not validate case-control disease specificity."
+            ),
+        },
+    ]
+    return pd.DataFrame(rows)
+
