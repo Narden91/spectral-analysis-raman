@@ -170,12 +170,7 @@ class CovariatePreprocessor:
         out["sex_female"] = sex_num
         out["statin"] = pd.to_numeric(df.get("statin"), errors="coerce")
 
-        if preset == "no_technical_covariates":
-            return out  # ablation: demographic/statin covariates only, no acquisition mode or label trend
-
-        for col in sorted(c for c in df.columns if c.startswith("mode_prop_")):
-            out[col] = pd.to_numeric(df[col], errors="coerce")
-
+        # Acquisition modes are pooled as equivalent, so the label trend is the only technical covariate.
         if preset != "no_label_trend":
             lbl = pd.to_numeric(df.get("sample_label_trend"), errors="coerce")
             out["sample_label_trend"] = lbl

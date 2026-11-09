@@ -7,6 +7,7 @@ to preserve DRY and KISS principles.
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -90,6 +91,20 @@ def write_run_provenance(
         "data": dict(source_meta) if source_meta is not None else None,
     }
     return write_json_atomic(payload, target_dir / f"run_provenance_{stage}.json")
+
+
+def add_cohort_stage_args(parser: argparse.ArgumentParser) -> None:
+    """Add the flags shared by the cohort-evaluation stages (primary evaluation, sensitivity)."""
+    parser.add_argument("--cohort", action="store_true", help="Evaluate on the verified stroke cohort.")
+    parser.add_argument(
+        "--approve-cohort-evaluation",
+        action="store_true",
+        help="Confirm that all readiness gates in runbook.md are satisfied.",
+    )
+    parser.add_argument("--clinical-master", type=str, default=str(PROJECT_ROOT / "data" / "clinical_master.csv"))
+    parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--compact-grid", action="store_true")
+    parser.add_argument("--config", type=str, default=None, help="Experiment settings YAML.")
 
 
 def ensure_output_dir(output_dir: str | Path | None = None) -> Path:
@@ -211,7 +226,11 @@ def _rebuild_synthetic_with_mode(
     endpoint: str | None,
     cfg: PairedLipidConfig,
 ) -> tuple[CohortDataset, dict[str, Any]]:
-    """Helper to generate a synthetic cohort and apply a specific subset_mode."""
+    """Helper to generate a synthetic cohort and apply a specific subset_mode.
+
+    Known limitation (synthetic smoke runs only): the rebuilt maps add map noise on top of samples
+    that are already medians of noisy maps, so subset-mode spectra are noisier than the base cohort.
+    """
     import numpy as np
     from src.analysis.paired_lipid.cohort import build_paired_cohort_dataset
 
@@ -248,7 +267,6 @@ def _rebuild_synthetic_with_mode(
                         "sample_id": sid,
                         "spectral_range": rng_code,
                         "row_index": r_idx,
-                        "acquisition_mode": "SS",
                         "retained": True,
                     }
                 )

@@ -66,6 +66,37 @@ def test_load_clinical_master_verified_on_repo_master() -> None:
     assert stroke_verified["ldl_mmol_l"].notna().sum() == 92
 
 
+def test_clinical_ids_link_as_strings_and_exclusions_name_the_cause(tmp_path: Path) -> None:
+    # A "not_available" id once made pandas read ids as floats ("7.0"), so no participant linked.
+    master = tmp_path / "master.csv"
+    master.write_text(
+        "participant_key,cohort,spectral_subject_id,has_spectra,spectral_link_status,qc_flags,ldl_mmol_l\n"
+        "stroke_7,stroke,7,1,matched,none,3.1\n"
+        "stroke_8,stroke,8,1,matched,SEX_FOLDER_CONFLICT,2.9\n"
+        "stroke_11,stroke,not_available,0,unmatched,none,2.5\n",
+        encoding="utf-8",
+    )
+    frame, _ = load_clinical_master_verified(master)
+    assert frame.loc[0, "spectral_subject_id"] == "7"
+
+    rng = np.random.default_rng(0)
+    maps = pd.DataFrame(
+        [
+            {"participant_id": "7", "sample_id": sid, "spectral_range": rng_code, "row_index": 3 * s + m}
+            for s, sid in enumerate(("12", "13"))
+            for m in range(3)
+            for rng_code in ("1300", "2850")
+        ]
+    )
+    ds = build_paired_cohort_dataset(
+        frame, maps, rng.normal(size=(6, 4)), rng.normal(size=(6, 3)), np.arange(4.0), np.arange(3.0)
+    )
+    assert ds.participant_ids.tolist() == ["7"]
+    assert ds.manifest_summary["n_paired_participants"] == 1
+    reasons = {e["participant_id"]: e["reason"] for e in ds.exclusions}
+    assert reasons == {"8": "identity_review_required", "stroke_11": "no_spectra"}
+
+
 def test_hierarchy_exclusions_and_subset_modes() -> None:
     dataset_all, _ = generate_synthetic_cohort(
         n_participants=24,
@@ -276,17 +307,13 @@ def test_batched_bootstrap_draws_match_sequential_refits(use_gpu: bool) -> None:
         _get_dataset_gram_cache,
         _run_batched_multiplicity_draws,
     )
-    from src.analysis.paired_lipid.nested_cv import make_participant_splits
+    from src.analysis.paired_lipid.nested_cv import make_nested_splits
 
-    ds, _ = generate_synthetic_cohort(n_participants=40, n_single_sample=2, seed=404, compact_grid=True)
+    # n=70 keeps resampled divisions above the k<=15 cap, so every draw stays on the batched path.
+    ds, _ = generate_synthetic_cohort(n_participants=70, n_single_sample=2, seed=404, compact_grid=True)
     cfg = PairedLipidConfig()
     n_p = ds.n_participants
-    paired_mask = np.isin(np.arange(n_p), ds.paired_participant_indices)
-    outer = make_participant_splits(n_p, paired_mask, cfg.n_outer_splits, cfg.primary_seed)
-    inner = [
-        make_participant_splits(tr.size, paired_mask[tr], cfg.n_inner_splits, cfg.primary_seed + 1000 * (f + 1))
-        for f, (tr, _) in enumerate(outer)
-    ]
+    outer, inner = make_nested_splits(ds, cfg, cfg.primary_seed)
     rng = np.random.default_rng(5)
     M = np.vstack(
         [np.ones(n_p)] + [np.bincount(rng.integers(0, n_p, n_p), minlength=n_p).astype(float) for _ in range(3)]
@@ -303,6 +330,38 @@ def test_batched_bootstrap_draws_match_sequential_refits(use_gpu: bool) -> None:
         )
         assert d_pair[b] == pytest.approx(ref["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=tol)
         assert d_comp[b] == pytest.approx(ref["paired_vs_strongest_comparator"]["delta_mse"], abs=tol)
+
+
+def test_fast_inner_selection_matches_sequential_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Primary tables use the sequential path (include_band_paired); sensitivity and anchor tables use
+    # the fast inner path. Both must select the same settings and give the same held-out predictions.
+    import src.analysis.paired_lipid.nested_cv as nested_cv_mod
+    from src.analysis.paired_lipid.batched import _check_fast_batch_eligibility, _get_dataset_gram_cache
+
+    def _fail_if_sequential(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("default evaluation fell back to sequential inner selection")
+
+    ds, _ = generate_synthetic_cohort(n_participants=70, n_single_sample=2, seed=606, compact_grid=True)
+    cfg = PairedLipidConfig()
+    rng = np.random.default_rng(6)
+    M = np.vstack(
+        [np.ones(ds.n_participants)]
+        + [np.bincount(rng.integers(0, ds.n_participants, ds.n_participants), minlength=ds.n_participants) for _ in range(2)]
+    ).astype(float)
+    splits = evaluate_nested_cohort(ds, cfg=cfg)["splits"]
+    assert _check_fast_batch_eligibility(ds, *splits, M, cfg, _get_dataset_gram_cache(ds, cfg)).all()
+
+    for mult in M:
+        with monkeypatch.context() as mp:
+            mp.setattr(nested_cv_mod, "_select_inner_sequential", _fail_if_sequential)
+            fast = evaluate_nested_cohort(ds, cfg=cfg, participant_multiplicities=mult, precomputed_splits=splits)
+        seq = evaluate_nested_cohort(
+            ds, cfg=cfg, participant_multiplicities=mult, precomputed_splits=splits, include_band_paired=True
+        )
+        settings = [c for c in fast["fold_settings"].columns if c != "dropped_covariates"]
+        pd.testing.assert_frame_equal(fast["fold_settings"][settings], seq["fold_settings"][settings], rtol=1e-8)
+        for model, preds in fast["oof_predictions"].items():
+            np.testing.assert_allclose(preds, seq["oof_predictions"][model], rtol=0, atol=1e-8)
 
 
 def test_missing_secondary_endpoint_equals_zero_weight() -> None:

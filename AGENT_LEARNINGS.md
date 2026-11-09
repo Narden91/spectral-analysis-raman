@@ -130,3 +130,8 @@ This was a targeted literature and implementation review, not a systematic novel
 
 - Failure: a batched GPU bootstrap was reported to match the sequential refit to 6.6e-16, but only the unresampled base draw was compared, and the sequential function itself used the batched engine for inner selection. Resampled draws differed by up to 3e-2 (a tau=tr(W) bug and a mixed-precision eigensolver).
 - Prevention: test fast-vs-reference equivalence on several resampled draws, against a reference path that shares no code with the fast path (here include_band_paired=True), on every device the fast path supports.
+
+## 2026-11-09: Cohort join never ran end to end
+
+- Failure: the readiness audit passed on file presence and a clinical count, but the cohort join returned 0 participants. `not_available` made pandas read `spectral_subject_id` as float, so "7.0" never matched store id "7". All tests used synthetic cohorts.
+- Prevention: read identifier columns with an explicit string dtype. Before calling a pipeline experiment-ready, run the real-data join as a counts-only dry run and gate on the expected counts.

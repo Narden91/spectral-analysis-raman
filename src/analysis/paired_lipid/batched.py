@@ -34,6 +34,31 @@ def _to_np(xp: Any, arr: Any) -> np.ndarray:
     return np.asarray(arr, dtype=np.float64)
 
 
+# Tie rules (research_design.md): fewer retained directions, fewer PCA dimensions, then stronger
+# regularization. MSEs arrive rounded to 12 decimals, so exact ties are well defined.
+def _argmin_last(values: np.ndarray) -> np.ndarray:
+    """Argmin over the last axis; an exact tie goes to the last index (the larger ridge alpha)."""
+    return values.shape[-1] - 1 - np.argmin(values[..., ::-1], axis=-1)
+
+
+def _select_pca_setting(pca_r: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Best (k index, alpha index) per draw from MSEs of shape (B, n_k, n_alphas)."""
+    n_alphas = pca_r.shape[-1]
+    flat = np.argmin(pca_r[:, :, ::-1].reshape(pca_r.shape[0], -1), axis=1)
+    return flat // n_alphas, (n_alphas - 1) - (flat % n_alphas)
+
+
+def _select_paired_setting(pair_r: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Best (r, k, lambda, alpha) indices per draw from MSEs of shape (B, n_r, n_k, n_lam, n_alphas)."""
+    n_b, _, n_k, n_lam, n_alphas = pair_r.shape
+    rem = np.argmin(pair_r[:, :, :, ::-1, ::-1].reshape(n_b, -1), axis=1)
+    a_idx = (n_alphas - 1) - rem % n_alphas
+    rem = rem // n_alphas
+    lam_idx = (n_lam - 1) - rem % n_lam
+    rem = rem // n_lam
+    return rem // n_k, rem % n_k, lam_idx, a_idx
+
+
 def _get_dataset_gram_cache(dataset: CohortDataset, cfg: PairedLipidConfig) -> dict[str, Any]:
     """Memoize sample-level and participant-level Gram matrices and raw covariates on dataset."""
     key = f"gram_cache__{cfg.covariate_preset}"
@@ -700,11 +725,12 @@ def _check_fast_batch_eligibility(
     if gcache["has_missing_cov"] or list(cfg.retained_directions) != [1, 2, 3]:
         return np.zeros(n_b, dtype=bool)
 
-    min_k = min(cfg.pca_dimensions)
     max_pls_c = max(cfg.pls_component_grid)
     eligible = np.ones(n_b, dtype=bool)
     p_pair = dataset.paired_participant_indices
-    min_inner_pairs = min_k + 1
+    # Every configured k must stay below the design cap (paired participants - 1); otherwise
+    # the sequential path caps k, which the fixed-shape batched grid cannot represent.
+    min_inner_pairs = max(cfg.pca_dimensions) + 1
 
     for (tr_idx, te_idx), in_splits in zip(outer_splits, inner_splits_per_fold):
         if tr_idx.size - 2 < max_pls_c:
@@ -868,32 +894,13 @@ def _run_batched_multiplicity_draws(
                 pair_sse = pair_sse + batched_paired_schur_sse(xp, div, V_grid, k_list, alphas_xp)
             pair_mses = _to_np(xp, pair_sse / total_val_w[:, None, None, None])
 
-            M_batch_np = M_sub[b_start:b_end]
-            p_pair = dataset.paired_participant_indices
-            min_cap_fold = np.full(B, 999999, dtype=int)
-            for dconst in in_dconsts:
-                in_tr = dconst["tr_p"]
-                pair_itr = p_pair[np.isin(p_pair, in_tr)]
-                min_cap_fold = np.minimum(min_cap_fold, np.sum(M_batch_np[:, pair_itr] > 0, axis=1) - 1)
-            pair_mses_5d = pair_mses.reshape(B, n_r, n_k, n_lam, n_alphas)
-            for k_idx, k in enumerate(k_list):
-                inv_k = min_cap_fold < k
-                if np.any(inv_k):
-                    pca_mses[inv_k, k_idx, :] = np.inf
-                    pair_mses_5d[inv_k, :, k_idx, :, :] = np.inf
+            best_cov_a = _argmin_last(np.round(cov_mses, 12))
 
-            cov_r = np.round(cov_mses, 12)
-            best_cov_a = (n_alphas - 1) - np.argmin(cov_r[:, ::-1], axis=1)
-
-            band_r = np.round(band_mses, 12)
-            best_band_a = (n_alphas - 1) - np.argmin(band_r[:, ::-1], axis=1)
+            best_band_a = _argmin_last(np.round(band_mses, 12))
             best_band_mse = band_mses[np.arange(B), best_band_a]
 
             pca_r = np.round(pca_mses, 12)
-            pca_flat = pca_r[:, :, ::-1].reshape(B, -1)
-            best_pca_flat = np.argmin(pca_flat, axis=1)
-            best_pca_k_idx = best_pca_flat // n_alphas
-            best_pca_a = (n_alphas - 1) - (best_pca_flat % n_alphas)
+            best_pca_k_idx, best_pca_a = _select_pca_setting(pca_r)
             best_pca_mse = pca_r[np.arange(B), best_pca_k_idx, best_pca_a]
 
             pls_r = np.round(pls_mses, 12)
@@ -903,18 +910,9 @@ def _run_batched_multiplicity_draws(
             comp_stack = np.stack([best_band_mse, best_pca_mse, best_pls_mse], axis=1)
             best_comp_idx = np.argmin(comp_stack, axis=1)
 
-            pair_r = np.round(pair_mses.reshape(B, n_r, n_k, n_lam, n_alphas), 12)
-            pair_rev = pair_r[:, :, :, ::-1, ::-1].reshape(B, -1)
-            best_pair_flat = np.argmin(pair_rev, axis=1)
-            rem = best_pair_flat
-            best_a_rev = rem % n_alphas
-            rem //= n_alphas
-            best_l_rev = rem % n_lam
-            rem //= n_lam
-            best_k_idx = rem % n_k
-            best_r_idx = rem // n_k
-            best_pair_a = (n_alphas - 1) - best_a_rev
-            best_pair_l_idx = (n_lam - 1) - best_l_rev
+            best_r_idx, best_k_idx, best_pair_l_idx, best_pair_a = _select_paired_setting(
+                np.round(pair_mses.reshape(B, n_r, n_k, n_lam, n_alphas), 12)
+            )
 
             outer_div = batched_division_prep(
                 xp,

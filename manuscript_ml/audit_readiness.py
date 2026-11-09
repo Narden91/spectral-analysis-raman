@@ -8,6 +8,7 @@ and ``limitations_table.csv``.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 import sys
@@ -23,6 +24,7 @@ from src.analysis.io_utils import write_csv_atomic
 from src.analysis.paired_lipid.cohort import (
     build_limitations_table,
     load_clinical_master_verified,
+    load_paired_cohort_from_store,
 )
 from src.analysis.paired_lipid.batched import _get_gpu_xp
 from src.analysis.paired_lipid.nested_cv import (
@@ -56,6 +58,27 @@ def run_readiness_audit(
 
     store_path = Path(preprocessed_dir)
     store_manifest_exists = (store_path / "manifest.json").is_file()
+
+    # Dry-run the cohort join (counts only, no model fit): file presence alone once hid a join that
+    # returned zero participants.
+    expected_join = {k: int(v) for k, v in raw_cfg["readiness"]["expected_cohort_join"].items()}
+    cohort_join: dict[str, Any] = {"status": "not_run", "expected": expected_join}
+    if clin_ready and store_manifest_exists:
+        from src.data_preparation.store import get_active_data_source, resolve_data_source
+
+        try:
+            join_ds, _ = load_paired_cohort_from_store(
+                master_path, data_source=get_active_data_source() or resolve_data_source(), cfg=cfg
+            )
+            observed = {k: int(join_ds.manifest_summary[k]) for k in expected_join}
+            cohort_join.update(
+                status="ok",
+                observed=observed,
+                exclusion_reasons=dict(Counter(e["reason"] for e in join_ds.exclusions)),
+            )
+        except ValueError as exc:
+            cohort_join.update(status="failed", error=str(exc))
+    join_ready = cohort_join.get("observed") == expected_join
 
     # Benchmark a single 5x3 nested evaluation on a 92-participant full-grid synthetic cohort
     t_gen = time.perf_counter()
@@ -99,6 +122,8 @@ def run_readiness_audit(
             "expected_identity_verified": expected_verified,
             "identity_verified_matches_expected": bool(clin_ready),
             "ready_for_cohort_join": bool(clin_ready and store_manifest_exists),
+            "cohort_join": cohort_join,
+            "ready_for_cohort_evaluation": bool(clin_ready and join_ready),
         },
         "computational_readiness": {
             "dataset_build_seconds_full_grid": round(dataset_build_sec, 4),

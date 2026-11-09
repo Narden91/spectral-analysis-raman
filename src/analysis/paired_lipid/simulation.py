@@ -10,7 +10,6 @@ from scipy import linalg, stats
 from src.analysis.paired_lipid.cohort import (
     CohortDataset,
     PairedLipidConfig,
-    build_paired_cohort_dataset,
 )
 from src.analysis.paired_lipid.batched import (
     _get_gpu_xp,
@@ -49,8 +48,8 @@ def generate_synthetic_cohort(
     ``tg_ldl_loading`` sets how strongly triglycerides load on the LDL-C biological factor (anchor
     correlation). ``map_dropout_fraction`` is the share of samples that lose one map to QC.
     """
-    if map_dropout_fraction > 0.0 and n_participants > 900:
-        raise ValueError("map_dropout_fraction is implemented for n_participants <= 900 only.")
+    if n_participants < 2 or not 0 <= n_single_sample <= n_participants or maps_per_sample < 2:
+        raise ValueError("Need n_participants >= 2, 0 <= n_single_sample <= n_participants, maps_per_sample >= 2.")
     rng = np.random.default_rng(seed)
     step = 10.0 if compact_grid else 1.0
     wn_1300 = np.arange(734.0, 1788.0 + 0.5 * step, step, dtype=float)
@@ -110,218 +109,127 @@ def generate_synthetic_cohort(
     # Labels span a fixed range whatever n is, so label covariates never extrapolate between cohorts.
     label_scale = LABEL_RANGE / float(2 * n_participants)
 
-    if 2 <= n_participants <= 900 and 0 <= n_single_sample <= n_participants and maps_per_sample >= 2:
-        n_paired = n_participants - n_single_sample
-        n_samples = 2 * n_paired + n_single_sample
-        sample_1300 = np.empty((n_samples, wn_1300.size), dtype=float)
-        sample_2850 = np.empty((n_samples, wn_2850.size), dtype=float)
-        sample_p_idx = np.empty(n_samples, dtype=int)
-        sample_ids: list[str] = []
-        sample_lbls = np.empty(n_samples, dtype=float)
-        sample_counts = np.empty(n_participants, dtype=int)
-        paired_p_indices = np.arange(n_paired, dtype=int)
-        pair_a_indices = 2 * np.arange(n_paired, dtype=int)
-        pair_b_indices = pair_a_indices + 1
+    n_paired = n_participants - n_single_sample
+    n_samples = 2 * n_paired + n_single_sample
+    sample_1300 = np.empty((n_samples, wn_1300.size), dtype=float)
+    sample_2850 = np.empty((n_samples, wn_2850.size), dtype=float)
+    sample_p_idx = np.empty(n_samples, dtype=int)
+    sample_ids: list[str] = []
+    sample_lbls = np.empty(n_samples, dtype=float)
+    sample_counts = np.empty(n_participants, dtype=int)
+    paired_p_indices = np.arange(n_paired, dtype=int)
+    pair_a_indices = 2 * np.arange(n_paired, dtype=int)
+    pair_b_indices = pair_a_indices + 1
 
-        p_ids = np.array([str(100 + i) for i in range(n_participants)], dtype=str)
-        sex_arr = np.where(sex_female == 1, "female", "male").astype(object)
-        htn_arr = np.empty(n_participants, dtype=np.int64)
-        dm_arr = np.empty(n_participants, dtype=np.int64)
-        af_arr = np.empty(n_participants, dtype=np.int64)
-        cad_arr = np.empty(n_participants, dtype=np.int64)
-        smk_list: list[str] = []
-        apt_arr = np.empty(n_participants, dtype=np.int64)
-        aco_arr = np.empty(n_participants, dtype=np.int64)
-        mode_fp_arr = np.empty(n_participants, dtype=float)
-        mode_ss_arr = np.empty(n_participants, dtype=float)
-        mean_lbl_arr = np.empty(n_participants, dtype=float)
+    p_ids = np.array([str(100 + i) for i in range(n_participants)], dtype=str)
+    sex_arr = np.where(sex_female == 1, "female", "male").astype(object)
+    htn_arr = np.empty(n_participants, dtype=np.int64)
+    dm_arr = np.empty(n_participants, dtype=np.int64)
+    af_arr = np.empty(n_participants, dtype=np.int64)
+    cad_arr = np.empty(n_participants, dtype=np.int64)
+    smk_list: list[str] = []
+    apt_arr = np.empty(n_participants, dtype=np.int64)
+    aco_arr = np.empty(n_participants, dtype=np.int64)
+    mean_lbl_arr = np.empty(n_participants, dtype=float)
 
-        s_1300_buf = np.empty((maps_per_sample, wn_1300.size), dtype=float)
-        s_2850_buf = np.empty((maps_per_sample, wn_2850.size), dtype=float)
-        s_cursor = 0
+    s_1300_buf = np.empty((maps_per_sample, wn_1300.size), dtype=float)
+    s_2850_buf = np.empty((maps_per_sample, wn_2850.size), dtype=float)
+    s_cursor = 0
 
-        for i in range(n_participants):
-            htn_arr[i] = int(rng.binomial(1, 0.6))
-            dm_arr[i] = int(rng.binomial(1, 0.25))
-            af_arr[i] = int(rng.binomial(1, 0.2))
-            cad_arr[i] = int(rng.binomial(1, 0.18))
-            smk_list.append(str(rng.choice(["never", "former", "current"], p=[0.5, 0.3, 0.2])))
-            apt_arr[i] = int(rng.binomial(1, 0.3))
-            aco_arr[i] = int(rng.binomial(1, 0.15))
+    for i in range(n_participants):
+        htn_arr[i] = int(rng.binomial(1, 0.6))
+        dm_arr[i] = int(rng.binomial(1, 0.25))
+        af_arr[i] = int(rng.binomial(1, 0.2))
+        cad_arr[i] = int(rng.binomial(1, 0.18))
+        smk_list.append(str(rng.choice(["never", "former", "current"], p=[0.5, 0.3, 0.2])))
+        apt_arr[i] = int(rng.binomial(1, 0.3))
+        aco_arr[i] = int(rng.binomial(1, 0.15))
 
-            m_i = 1 if i in single_set else 2
-            sample_counts[i] = m_i
-            ss_sum = 0.0
-            lbl_sum = 0.0
-            for s_pos in range(m_i):
-                lbl_val = sample_counter * label_scale
-                sid = f"sample_{sample_counter}"
-                lbl_drift = label_drift_scale * (lbl_val / LABEL_RANGE)
-                sample_counter += 1
+        m_i = 1 if i in single_set else 2
+        sample_counts[i] = m_i
+        lbl_sum = 0.0
+        for s_pos in range(m_i):
+            lbl_val = sample_counter * label_scale
+            sid = f"sample_{sample_counter}"
+            lbl_drift = label_drift_scale * (lbl_val / LABEL_RANGE)
+            sample_counter += 1
 
-                ab_shift = ab_shift_scale if s_pos == 1 else -ab_shift_scale
-                sample_err = rng.normal(0.0, 0.65) + ab_shift + lbl_drift
-                base_1300 = (
-                    (z_bio[i, 0] + shared_prep[i]) * bio_1300_1
-                    + z_bio[i, 1] * bio_1300_2
-                    + sample_err * tech_1300
-                )
-                base_2850 = (
-                    (z_bio[i, 0] + shared_prep[i]) * bio_2850_1
-                    + z_bio[i, 1] * bio_2850_2
-                    + sample_err * tech_2850
-                )
-                is_ss = 1.0 if (i + s_pos) % 3 != 0 else 0.0
-                ss_sum += is_ss
-                lbl_sum += lbl_val
-
-                for map_idx in range(maps_per_sample):
-                    s_1300_buf[map_idx] = base_1300 + rng.normal(0.0, 0.04, size=wn_1300.size)
-                    s_2850_buf[map_idx] = base_2850 + rng.normal(0.0, 0.04, size=wn_2850.size)
-                n_kept = maps_per_sample
-                if map_dropout_fraction > 0.0 and rng.random() < map_dropout_fraction:
-                    n_kept -= 1
-
-                sample_1300[s_cursor] = np.median(s_1300_buf[:n_kept], axis=0)
-                sample_2850[s_cursor] = np.median(s_2850_buf[:n_kept], axis=0)
-                sample_p_idx[s_cursor] = i
-                sample_ids.append(sid)
-                sample_lbls[s_cursor] = lbl_val
-                s_cursor += 1
-
-            ss_prop = ss_sum / float(m_i)
-            mode_ss_arr[i] = ss_prop
-            mode_fp_arr[i] = 1.0 - ss_prop
-            mean_lbl_arr[i] = lbl_sum / float(m_i)
-
-        cov_df = pd.DataFrame(
-            {
-                "age_years": age.astype(float),
-                "sex": sex_arr,
-                "statin": statin.astype(np.int64),
-                "mode_prop_FP": mode_fp_arr,
-                "mode_prop_SS": mode_ss_arr,
-                "sample_label_trend": mean_lbl_arr,
-                "hypertension": htn_arr,
-                "diabetes": dm_arr,
-                "atrial_fibrillation": af_arr,
-                "coronary_artery_disease": cad_arr,
-                "smoking_status": pd.Series(smk_list, dtype=object),
-                "antiplatelet": apt_arr,
-                "anticoagulant": aco_arr,
-            }
-        )
-        dataset = CohortDataset(
-            participant_ids=p_ids,
-            outcomes={
-                "ldl_mmol_l": ldl.astype(float),
-                "hdl_mmol_l": hdl.astype(float),
-                "triglycerides_mmol_l": tg.astype(float),
-                "plt_10e9_l": plt_cnt.astype(float),
-            },
-            covariate_frame=cov_df,
-            wavenumbers_1300=wn_1300,
-            wavenumbers_2850=wn_2850,
-            sample_1300=sample_1300,
-            sample_2850=sample_2850,
-            sample_participant_idx=sample_p_idx,
-            sample_ids=np.asarray(sample_ids, dtype=str),
-            sample_parsed_labels=sample_lbls,
-            participant_sample_counts=sample_counts,
-            paired_participant_indices=paired_p_indices,
-            pair_sample_a_indices=pair_a_indices,
-            pair_sample_b_indices=pair_b_indices,
-            manifest_summary={
-                "subset_mode": "all_eligible",
-                "min_maps_per_block": 2,
-                "n_eligible_participants": n_participants,
-                "n_paired_participants": n_paired,
-                "n_single_sample_participants": n_single_sample,
-                "n_eligible_samples": n_samples,
-                "n_exclusions": 0,
-            },
-            exclusions=[],
-        )
-    else:
-        clin_rows: list[dict[str, Any]] = []
-        map_rows: list[dict[str, Any]] = []
-        spec_1300_list: list[np.ndarray] = []
-        spec_2850_list: list[np.ndarray] = []
-
-        for i in range(n_participants):
-            pid = str(100 + i)
-            clin_rows.append(
-                {
-                    "participant_key": f"stroke_{pid}",
-                    "cohort": "stroke",
-                    "spectral_subject_id": pid,
-                    "has_spectra": 1,
-                    "spectral_link_status": "matched",
-                    "qc_flags": "none",
-                    "age_years": float(age[i]),
-                    "sex": "female" if sex_female[i] == 1 else "male",
-                    "statin": int(statin[i]),
-                    "hypertension": int(rng.binomial(1, 0.6)),
-                    "diabetes": int(rng.binomial(1, 0.25)),
-                    "atrial_fibrillation": int(rng.binomial(1, 0.2)),
-                    "coronary_artery_disease": int(rng.binomial(1, 0.18)),
-                    "smoking_status": rng.choice(["never", "former", "current"], p=[0.5, 0.3, 0.2]),
-                    "antiplatelet": int(rng.binomial(1, 0.3)),
-                    "anticoagulant": int(rng.binomial(1, 0.15)),
-                    "ldl_mmol_l": float(ldl[i]),
-                    "hdl_mmol_l": float(hdl[i]),
-                    "triglycerides_mmol_l": float(tg[i]),
-                    "plt_10e9_l": float(plt_cnt[i]),
-                }
+            ab_shift = ab_shift_scale if s_pos == 1 else -ab_shift_scale
+            sample_err = rng.normal(0.0, 0.65) + ab_shift + lbl_drift
+            base_1300 = (
+                (z_bio[i, 0] + shared_prep[i]) * bio_1300_1
+                + z_bio[i, 1] * bio_1300_2
+                + sample_err * tech_1300
             )
-            m_i = 1 if i in single_set else 2
-            for s_pos in range(m_i):
-                lbl_val = sample_counter * label_scale
-                sid = f"sample_{lbl_val:.4f}"  # parsed back into the sample label downstream
-                lbl_drift = label_drift_scale * (lbl_val / LABEL_RANGE)
-                sample_counter += 1
+            base_2850 = (
+                (z_bio[i, 0] + shared_prep[i]) * bio_2850_1
+                + z_bio[i, 1] * bio_2850_2
+                + sample_err * tech_2850
+            )
+            lbl_sum += lbl_val
 
-                ab_shift = ab_shift_scale if s_pos == 1 else -ab_shift_scale
-                sample_err = rng.normal(0.0, 0.65) + ab_shift + lbl_drift
-                base_1300 = (
-                    (z_bio[i, 0] + shared_prep[i]) * bio_1300_1
-                    + z_bio[i, 1] * bio_1300_2
-                    + sample_err * tech_1300
-                )
-                base_2850 = (
-                    (z_bio[i, 0] + shared_prep[i]) * bio_2850_1
-                    + z_bio[i, 1] * bio_2850_2
-                    + sample_err * tech_2850
-                )
+            for map_idx in range(maps_per_sample):
+                s_1300_buf[map_idx] = base_1300 + rng.normal(0.0, 0.04, size=wn_1300.size)
+                s_2850_buf[map_idx] = base_2850 + rng.normal(0.0, 0.04, size=wn_2850.size)
+            n_kept = maps_per_sample
+            if map_dropout_fraction > 0.0 and rng.random() < map_dropout_fraction:
+                n_kept -= 1
 
-                mode = "SS" if (i + s_pos) % 3 != 0 else "FP"
-                for map_idx in range(maps_per_sample):
-                    row_idx = len(spec_1300_list)
-                    noise_1300 = rng.normal(0.0, 0.04, size=wn_1300.size)
-                    noise_2850 = rng.normal(0.0, 0.04, size=wn_2850.size)
-                    spec_1300_list.append(base_1300 + noise_1300)
-                    spec_2850_list.append(base_2850 + noise_2850)
-                    for rng_code in ("1300", "2850"):
-                        map_rows.append(
-                            {
-                                "participant_id": pid,
-                                "sample_id": sid,
-                                "spectral_range": rng_code,
-                                "row_index": row_idx,
-                                "acquisition_mode": mode,
-                                "retained": True,
-                                "map_number": map_idx + 1,
-                            }
-                        )
+            sample_1300[s_cursor] = np.median(s_1300_buf[:n_kept], axis=0)
+            sample_2850[s_cursor] = np.median(s_2850_buf[:n_kept], axis=0)
+            sample_p_idx[s_cursor] = i
+            sample_ids.append(sid)
+            sample_lbls[s_cursor] = lbl_val
+            s_cursor += 1
 
-        dataset = build_paired_cohort_dataset(
-            pd.DataFrame(clin_rows),
-            pd.DataFrame(map_rows),
-            np.vstack(spec_1300_list),
-            np.vstack(spec_2850_list),
-            wn_1300,
-            wn_2850,
-        )
+        mean_lbl_arr[i] = lbl_sum / float(m_i)
+
+    cov_df = pd.DataFrame(
+        {
+            "age_years": age.astype(float),
+            "sex": sex_arr,
+            "statin": statin.astype(np.int64),
+            "sample_label_trend": mean_lbl_arr,
+            "hypertension": htn_arr,
+            "diabetes": dm_arr,
+            "atrial_fibrillation": af_arr,
+            "coronary_artery_disease": cad_arr,
+            "smoking_status": pd.Series(smk_list, dtype=object),
+            "antiplatelet": apt_arr,
+            "anticoagulant": aco_arr,
+        }
+    )
+    dataset = CohortDataset(
+        participant_ids=p_ids,
+        outcomes={
+            "ldl_mmol_l": ldl.astype(float),
+            "hdl_mmol_l": hdl.astype(float),
+            "triglycerides_mmol_l": tg.astype(float),
+            "plt_10e9_l": plt_cnt.astype(float),
+        },
+        covariate_frame=cov_df,
+        wavenumbers_1300=wn_1300,
+        wavenumbers_2850=wn_2850,
+        sample_1300=sample_1300,
+        sample_2850=sample_2850,
+        sample_participant_idx=sample_p_idx,
+        sample_ids=np.asarray(sample_ids, dtype=str),
+        sample_parsed_labels=sample_lbls,
+        participant_sample_counts=sample_counts,
+        paired_participant_indices=paired_p_indices,
+        pair_sample_a_indices=pair_a_indices,
+        pair_sample_b_indices=pair_b_indices,
+        manifest_summary={
+            "subset_mode": "all_eligible",
+            "min_maps_per_block": 2,
+            "n_eligible_participants": n_participants,
+            "n_paired_participants": n_paired,
+            "n_single_sample_participants": n_single_sample,
+            "n_eligible_samples": n_samples,
+            "n_exclusions": 0,
+        },
+        exclusions=[],
+    )
 
     truth = {
         "bio_1300": np.column_stack([bio_1300_1, bio_1300_2]),

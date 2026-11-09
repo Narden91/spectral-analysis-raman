@@ -65,7 +65,6 @@ class PairedLipidConfig:
         "plt_10e9_l",
     )
     covariate_preset: str = "primary"
-    mode_reference_category: str = "NONE"
     local_candidate_window: int = 5
 
 
@@ -80,7 +79,6 @@ class SampleRecord:
     spec_2850: np.ndarray
     n_maps_1300: int
     n_maps_2850: int
-    mode_proportions: dict[str, float]
 
 
 @dataclass
@@ -147,6 +145,8 @@ def load_clinical_master_verified(master_path: str | Path) -> tuple[pd.DataFrame
         na_values=list(MISSING_TOKENS),
         keep_default_na=True,
         encoding="utf-8-sig",
+        # NA tokens make pandas infer float64 ids ("7.0"), which never match store ids ("7").
+        dtype={"spectral_subject_id": "string"},
     )
     if "participant_key" not in frame.columns or "cohort" not in frame.columns:
         raise ValueError("Clinical master must contain 'participant_key' and 'cohort' columns.")
@@ -204,7 +204,8 @@ def build_paired_cohort_dataset(
         Map-level metadata with columns: ``participant_id`` (or ``spectral_subject_id``),
         ``sample_id`` (or ``slide_number``), ``spectral_range`` ('1300' or '2850'),
         ``row_index`` (index into ``spectra_1300`` or ``spectra_2850``), and optional
-        ``acquisition_mode`` and ``retained`` (bool).
+        ``retained`` (bool). Acquisition modes (FP/SS) are pooled as equivalent (investigator
+        decision, 2026-11-09), so they enter no covariate.
     """
     target_col = endpoint or cfg.primary_endpoint
     min_maps = 3 if subset_mode == "three_map_complete" else cfg.min_maps_per_block
@@ -217,10 +218,19 @@ def build_paired_cohort_dataset(
 
     exclusions: list[dict[str, Any]] = []
     if "identity_verified" in clin.columns:
-        bad_id = clin.loc[~clin["identity_verified"].astype(bool)]
-        for pid in bad_id[id_col]:
-            exclusions.append({"participant_id": str(pid), "level": "participant", "reason": "identity_review_required"})
-        clin = clin.loc[clin["identity_verified"].astype(bool)].copy()
+        verified = clin["identity_verified"].astype(bool)
+        has_spec = clin.get("has_spectra", pd.Series(1, index=clin.index)).fillna(0).astype(int) == 1
+        keys = clin.get("participant_key", clin[id_col])
+        for pid, key, spec_ok in zip(clin.loc[~verified, id_col], keys[~verified], has_spec[~verified]):
+            # Records without spectra have no spectral id; report the clinical key instead.
+            exclusions.append(
+                {
+                    "participant_id": str(pid) if spec_ok else str(key),
+                    "level": "participant",
+                    "reason": "identity_review_required" if spec_ok else "no_spectra",
+                }
+            )
+        clin = clin.loc[verified].copy()
     elif "spectral_link_status" in clin.columns:
         matched = clin["spectral_link_status"].astype(str) == "matched"
         for pid in clin.loc[~matched, id_col]:
@@ -241,24 +251,12 @@ def build_paired_cohort_dataset(
     maps["spectral_range"] = maps["spectral_range"].astype(str)
     if "retained" in maps.columns:
         maps = maps.loc[maps["retained"].astype(bool)].copy()
-    maps["acquisition_mode"] = (
-        maps["acquisition_mode"].fillna("NONE").astype(str).str.upper()
-        if "acquisition_mode" in maps.columns
-        else "NONE"
-    )
-
-    all_modes = sorted(maps["acquisition_mode"].unique().tolist())
-    if not all_modes:
-        all_modes = [cfg.mode_reference_category]
 
     # Group maps by (participant_id, sample_id, spectral_range)
     grouped = maps.groupby(["participant_id", "sample_id", "spectral_range"], sort=False)
     sample_blocks: dict[tuple[str, str], dict[str, Any]] = {}
     for (pid, sid, rng), grp in grouped:
-        entry = sample_blocks.setdefault((str(pid), str(sid)), {"modes": []})
-        idx = grp["row_index"].to_numpy(dtype=int)
-        entry[f"idx_{rng}"] = idx
-        entry["modes"].extend(grp["acquisition_mode"].tolist())
+        sample_blocks.setdefault((str(pid), str(sid)), {})[f"idx_{rng}"] = grp["row_index"].to_numpy(dtype=int)
 
     participant_samples: dict[str, list[SampleRecord]] = {}
     for (pid, sid), info in sorted(sample_blocks.items()):
@@ -286,9 +284,6 @@ def build_paired_cohort_dataset(
                 {"participant_id": pid, "sample_id": sid, "level": "sample", "reason": "nonfinite_sample_median"}
             )
             continue
-        modes_list = info["modes"]
-        n_m = max(len(modes_list), 1)
-        mode_props = {m: modes_list.count(m) / float(n_m) for m in all_modes}
         parsed_lbl = parse_sample_label(sid)
         participant_samples.setdefault(pid, []).append(
             SampleRecord(
@@ -299,7 +294,6 @@ def build_paired_cohort_dataset(
                 spec_2850=med_2850,
                 n_maps_1300=int(idx_1300.size),
                 n_maps_2850=int(idx_2850.size),
-                mode_proportions=mode_props,
             )
         )
 
@@ -308,6 +302,10 @@ def build_paired_cohort_dataset(
         s_list.sort(key=lambda r: (float("inf") if np.isnan(r.parsed_label) else r.parsed_label, r.sample_id))
         if len(s_list) > 2:
             # Retain the first two deterministic technical samples if more than two exist
+            for dropped in s_list[2:]:
+                exclusions.append(
+                    {"participant_id": pid, "sample_id": dropped.sample_id, "level": "sample", "reason": "beyond_first_two_samples"}
+                )
             participant_samples[pid] = s_list[:2]
 
     kept_clin_rows: list[pd.Series] = []
@@ -320,7 +318,6 @@ def build_paired_cohort_dataset(
     paired_p_indices: list[int] = []
     pair_a_indices: list[int] = []
     pair_b_indices: list[int] = []
-    mode_rows: list[dict[str, float]] = []
     mean_labels: list[float] = []
 
     for _, row in clin.iterrows():
@@ -350,16 +347,10 @@ def build_paired_cohort_dataset(
             pair_a_indices.append(first_sample_global_idx)
             pair_b_indices.append(first_sample_global_idx + 1)
 
-        # In single_sample sensitivity mode, participant-level regression covariates/summaries
-        # for sample label and mode use the first sample (A); paired samples remain in flat arrays
-        # so training divisions can still fit W and T on paired training participants.
+        # In single_sample sensitivity mode, the participant-level sample-label covariate uses the
+        # first sample (A); paired samples remain in flat arrays so training divisions can still
+        # fit W and T on paired training participants.
         active_samples = [s_list[0]] if subset_mode == "single_sample" else s_list
-        avg_modes = {
-            f"mode_prop_{m}": float(np.mean([sr.mode_proportions.get(m, 0.0) for sr in active_samples]))
-            for m in all_modes
-            if m != cfg.mode_reference_category
-        }
-        mode_rows.append(avg_modes)
         finite_lbls = [sr.parsed_label for sr in active_samples if np.isfinite(sr.parsed_label)]
         mean_labels.append(float(np.mean(finite_lbls)) if finite_lbls else float("nan"))
 
@@ -367,13 +358,10 @@ def build_paired_cohort_dataset(
         raise ValueError("No eligible stroke participants remained after linkage and spectral checks.")
 
     kept_df = pd.DataFrame(kept_clin_rows).reset_index(drop=True)
-    mode_df = pd.DataFrame(mode_rows, index=kept_df.index)
     cov_df = pd.DataFrame(index=kept_df.index)
     cov_df["age_years"] = pd.to_numeric(kept_df.get("age_years"), errors="coerce")
     cov_df["sex"] = kept_df.get("sex", pd.Series(np.nan, index=kept_df.index)).astype(object)
     cov_df["statin"] = pd.to_numeric(kept_df.get("statin"), errors="coerce")
-    for m_col in mode_df.columns:
-        cov_df[m_col] = mode_df[m_col]
     cov_df["sample_label_trend"] = np.asarray(mean_labels, dtype=float)
 
     for rf in PRE_EVENT_RISK_FACTORS:
@@ -534,7 +522,6 @@ def load_paired_cohort_from_store(
                 "sample_id": str(row["sample_id"]),
                 "spectral_range": rng_code,
                 "row_index": int(r_idx),
-                "acquisition_mode": row.get("acquisition_mode", "NONE"),
                 "retained": True,
             }
         )

@@ -19,7 +19,6 @@ paired_lipid:
   primary_endpoint: ldl_mmol_l
   secondary_endpoints: [hdl_mmol_l, triglycerides_mmol_l, plt_10e9_l]
   covariate_preset: primary
-  mode_reference_category: NONE
   local_candidate_window: 5
 
 seeds:
@@ -29,6 +28,12 @@ seeds:
 
 readiness:
   expected_identity_verified: 92   # stroke participants with verified spectral identity
+  # Cohort join counts observed on 2026-11-09 (store + clinical master); a mismatch blocks evaluation.
+  expected_cohort_join:
+    n_eligible_participants: 92
+    n_paired_participants: 88
+    n_single_sample_participants: 4
+    n_eligible_samples: 180
 
 # Synthetic scenario suite. Keys other than `scenario` and `covariate_preset` are passed to
 # generate_synthetic_cohort. PROVISIONAL: n grid, tg_ldl_loading levels and map_dropout_fraction
@@ -57,5 +62,6 @@ simulation:
        signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1, tg_ldl_loading: 0.7}
     - {scenario: qc_map_dropout, covariate_preset: primary,
        signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1, map_dropout_fraction: 0.2}
-    - {scenario: ablation_no_technical_covariates, covariate_preset: no_technical_covariates,
+    # FP/SS modes are pooled, so the label trend is the only technical covariate to drop.
+    - {scenario: ablation_no_technical_covariates, covariate_preset: no_label_trend,
        signal_strength: 0.85, ab_shift_scale: 0.45, label_drift_scale: 0.35}

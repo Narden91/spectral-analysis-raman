@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from manuscript_ml import (
+    add_cohort_stage_args,
     ensure_output_dir,
     load_manuscript_config,
     resolve_experiment_dataset,
@@ -154,7 +155,7 @@ def run_primary_evaluation(
             "interval_procedure_succeeded": boot_res["interval_procedure_succeeded"],
             "ci_95_delta_mse": boot_res["ci_95_delta_mse"],
             "ci_95_vs_comparator": boot_res["ci_95_vs_comparator"],
-            "monte_carlo_se": boot_res["monte_carlo_se"],
+            "monte_carlo_se_of_mean": boot_res["monte_carlo_se_of_mean"],
         }
 
     comp_df = pd.DataFrame(comp_rows)
@@ -194,21 +195,8 @@ def run_primary_evaluation(
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run primary LDL-C nested evaluation and repeatability report.")
-    parser.add_argument(
-        "--cohort",
-        action="store_true",
-        help="Evaluate on the real stroke cohort instead of synthetic data.",
-    )
-    parser.add_argument(
-        "--approve-cohort-evaluation",
-        action="store_true",
-        help="Confirm that all readiness gates in runbook.md are satisfied.",
-    )
-    parser.add_argument("--clinical-master", type=str, default=str(PROJECT_ROOT / "data" / "clinical_master.csv"))
-    parser.add_argument("--output-dir", type=str, default=None)
+    add_cohort_stage_args(parser)
     parser.add_argument("--bootstraps", type=int, default=0)
-    parser.add_argument("--compact-grid", action="store_true")
-    parser.add_argument("--config", type=str, default=None, help="Experiment settings YAML.")
     return parser.parse_args(argv)
 
 

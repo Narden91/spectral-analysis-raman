@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from manuscript_ml import (
+    add_cohort_stage_args,
     ensure_output_dir,
     load_manuscript_config,
     resolve_experiment_dataset,
@@ -164,7 +165,7 @@ def run_sensitivity_and_secondary(
 
     # 4. Continuous exploratory anchor associations
     primary_eval = evaluate(base_ds, base_cfg)
-    anchor_df = summarize_anchor_associations(base_ds, primary_eval)
+    anchor_df = summarize_anchor_associations(base_ds, primary_eval, cfg=base_cfg)
 
     sens_path = target_dir / "covariate_and_subset_sensitivity.csv"
     seeds_path = target_dir / "outer_partition_seed_sensitivity.csv"
@@ -197,12 +198,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run covariate/subset/seed sensitivity analyses and secondary endpoints."
     )
-    parser.add_argument("--cohort", action="store_true", help="Run on the verified stroke cohort.")
-    parser.add_argument("--approve-cohort-evaluation", action="store_true")
-    parser.add_argument("--clinical-master", type=str, default=str(PROJECT_ROOT / "data" / "clinical_master.csv"))
-    parser.add_argument("--output-dir", type=str, default=None)
-    parser.add_argument("--compact-grid", action="store_true")
-    parser.add_argument("--config", type=str, default=None, help="Experiment settings YAML.")
+    add_cohort_stage_args(parser)
     return parser.parse_args(argv)
 
 
