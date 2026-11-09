@@ -134,7 +134,8 @@ def _mixed_prec_top_k_eigh(
     exact_fp64: bool = False,
 ) -> tuple[Any, Any]:
     """Extract top-max_k eigenpairs via active-sample LAPACK dsyevr or m=32 warp-resident RR."""
-    G_sym = 0.5 * (G_batch + xp.swapaxes(G_batch, -1, -2))
+    G_sym = G_batch + xp.swapaxes(G_batch, -1, -2)
+    G_sym *= 0.5  # in place: same result as 0.5 * (G + G^T), one (B, n_s, n_s) temporary fewer
     if xp is np:
         B, n_s, _ = G_sym.shape
         ev_out = np.zeros((B, max_k), dtype=np.float64)
@@ -157,6 +158,8 @@ def _mixed_prec_top_k_eigh(
         return ev_out, u_out
 
     if exact_fp64:
+        if sw is not None:
+            return _exact_top_k_eigh_active(xp, G_sym, max_k, sw)
         ev, u = xp.linalg.eigh(G_sym)
         return xp.maximum(ev[:, -max_k:][:, ::-1], 0.0), u[:, :, -max_k:][:, :, ::-1]
 
@@ -175,6 +178,39 @@ def _mixed_prec_top_k_eigh(
 
     ev, u = xp.linalg.eigh(G_sym)
     return xp.maximum(ev[:, -max_k:][:, ::-1], 0.0), u[:, :, -max_k:][:, :, ::-1]
+
+
+def _exact_top_k_eigh_active(xp: Any, G_sym: Any, max_k: int, sw: Any) -> tuple[Any, Any]:
+    """Exact fp64 top-max_k eigenpairs, solved only over each draw's active samples.
+
+    A sample of a participant with bootstrap multiplicity 0 has weight 0, so its gram row and
+    column are zero (about 37% of samples per draw). The top eigenpairs of the active block equal
+    those of the full matrix; eigh cost grows with the cube of the size, so solving the smaller
+    block is the speed-up. Draws are grouped by active count rounded up to a multiple of 8;
+    the extra rows in a group are zero rows and add only zero eigenvalues.
+    """
+    B, n_s, _ = G_sym.shape
+    active = sw > 0
+    n_act = _to_np(xp, xp.sum(active, axis=1)).astype(int)
+    # Unique sort keys: active samples first, each group in original sample order.
+    pos = xp.arange(n_s)[None, :]
+    order = xp.argsort(xp.where(active, pos, n_s + pos), axis=1)
+    sizes = np.minimum(-(-n_act // 8) * 8, n_s)
+
+    ev_out = xp.zeros((B, max_k), dtype=xp.float64)
+    u_out = xp.zeros((B, n_s, max_k), dtype=xp.float64)
+    for m in np.unique(sizes):
+        b_idx = xp.asarray(np.flatnonzero(sizes == m))
+        idx = order[b_idx, :m]
+        G_sub = xp.take_along_axis(G_sym[b_idx], idx[:, :, None], axis=1)
+        G_sub = xp.take_along_axis(G_sub, idx[:, None, :], axis=2)
+        ev, u = xp.linalg.eigh(G_sub)
+        k = min(max_k, int(m))
+        ev_out[b_idx, :k] = xp.maximum(ev[:, -k:][:, ::-1], 0.0)
+        u_grp = xp.zeros((b_idx.size, n_s, max_k), dtype=xp.float64)
+        u_grp[xp.arange(b_idx.size)[:, None], idx, :k] = u[:, :, -k:][:, :, ::-1]
+        u_out[b_idx] = u_grp
+    return ev_out, u_out
 
 
 def _precompute_division_constants(
@@ -331,26 +367,39 @@ def batched_division_prep(
     DK1_pair_div = dconst["DK1_pair_div"]
     DK2_pair_div = dconst["DK2_pair_div"]
 
+    # The (B, n_s, n_s) arrays below dominate GPU memory. In-place updates keep the operation
+    # order of the plain expressions (bitwise-identical results) with fewer live temporaries.
+    sw_outer = sqrt_w[:, :, None] * sqrt_w[:, None, :]
+
+    def _weighted_centered_gram(K_div: Any, k_mu: Any, mu_sq: Any) -> Any:
+        g = K_div[None, :, :] - k_mu[:, :, None]
+        g -= k_mu[:, None, :]
+        g += mu_sq[:, None, None]
+        g *= sw_outer
+        return g
+
     k1_mu_div = w_s @ K1_div
     mu1_sq = xp.sum(w_s * k1_mu_div, axis=1)
-    K1_cent_div = K1_div[None, :, :] - k1_mu_div[:, :, None] - k1_mu_div[:, None, :] + mu1_sq[:, None, None]
-    sw_outer = sqrt_w[:, :, None] * sqrt_w[:, None, :]
-    gram1 = K1_cent_div * sw_outer
-    eig1_1300 = _fast_top1_eigvalsh(xp, gram1, sqrt_w, dconst["Q0_1"])
+    gram = _weighted_centered_gram(K1_div, k1_mu_div, mu1_sq)
+    eig1_1300 = _fast_top1_eigvalsh(xp, gram, sqrt_w, dconst["Q0_1"])
     scale1_sq = 1.0 / xp.maximum(eig1_1300, 1e-12)
 
     k2_mu_div = w_s @ K2_div
     mu2_sq = xp.sum(w_s * k2_mu_div, axis=1)
-    K2_cent_div = K2_div[None, :, :] - k2_mu_div[:, :, None] - k2_mu_div[:, None, :] + mu2_sq[:, None, None]
-    gram2 = K2_cent_div * sw_outer
+    gram2 = _weighted_centered_gram(K2_div, k2_mu_div, mu2_sq)
+    del sw_outer
     eig1_2850 = _fast_top1_eigvalsh(xp, gram2, sqrt_w, dconst["Q0_2"])
     scale2_sq = 1.0 / xp.maximum(eig1_2850, 1e-12)
 
-    gram = scale1_sq[:, None, None] * gram1 + scale2_sq[:, None, None] * gram2
+    gram *= scale1_sq[:, None, None]
+    gram2 *= scale2_sq[:, None, None]
+    gram += gram2
+    del gram2
     max_k = max(cfg.pca_dimensions)
     eigvals_top, eigvecs_top = _mixed_prec_top_k_eigh(
         xp, gram, max_k, sw=sqrt_w, Q0_comb=dconst.get("Q0_comb"), exact_fp64=exact_fp64_eigh
     )
+    del gram
     s_kept = xp.sqrt(eigvals_top)
 
     alpha = (sqrt_w[:, :, None] * eigvecs_top) / xp.maximum(s_kept[:, None, :], 1e-12)

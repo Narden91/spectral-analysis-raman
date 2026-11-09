@@ -37,7 +37,6 @@ from src.analysis.paired_lipid.simulation import generate_synthetic_cohort
 def run_readiness_audit(
     *,
     clinical_master_path: str | Path = PROJECT_ROOT / "data" / "clinical_master.csv",
-    preprocessed_dir: str | Path = PROJECT_ROOT / "data" / "preprocessed",
     output_dir: str | Path | None = None,
     n_planned_bootstraps: int = 2000,
     n_planned_sim_reps: int = 1000,
@@ -56,7 +55,12 @@ def run_readiness_audit(
         clin_audit = {"status": "clinical_master_not_found", "path": str(master_path)}
         clin_ready = False
 
-    store_path = Path(preprocessed_dir)
+    # The store the loaders read (data.preprocessed_dir in the project config). Check presence
+    # first: resolve_data_source() would build a missing store, which an audit must never do.
+    from src import resolve_cfg
+    from src.data_preparation.store import _store_dir, get_active_data_source, resolve_data_source
+
+    store_path = _store_dir("preprocessed", resolve_cfg())
     store_manifest_exists = (store_path / "manifest.json").is_file()
 
     # Dry-run the cohort join (counts only, no model fit): file presence alone once hid a join that
@@ -64,19 +68,18 @@ def run_readiness_audit(
     expected_join = {k: int(v) for k, v in raw_cfg["readiness"]["expected_cohort_join"].items()}
     cohort_join: dict[str, Any] = {"status": "not_run", "expected": expected_join}
     if clin_ready and store_manifest_exists:
-        from src.data_preparation.store import get_active_data_source, resolve_data_source
-
         try:
-            join_ds, _ = load_paired_cohort_from_store(
-                master_path, data_source=get_active_data_source() or resolve_data_source(), cfg=cfg
-            )
+            source = get_active_data_source() or resolve_data_source()
+            cohort_join.update(store_path=str(source.source_path), store_manifest_hash=source.manifest_hash)
+            join_ds, _ = load_paired_cohort_from_store(master_path, data_source=source, cfg=cfg)
             observed = {k: int(join_ds.manifest_summary[k]) for k in expected_join}
             cohort_join.update(
                 status="ok",
                 observed=observed,
                 exclusion_reasons=dict(Counter(e["reason"] for e in join_ds.exclusions)),
             )
-        except ValueError as exc:
+        except (ValueError, RuntimeError) as exc:
+            # RuntimeError: the store failed validation in resolve_data_source.
             cohort_join.update(status="failed", error=str(exc))
     join_ready = cohort_join.get("observed") == expected_join
 
@@ -164,7 +167,6 @@ def run_readiness_audit(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit readiness gates and estimate computational budget.")
     parser.add_argument("--clinical-master", type=str, default=str(PROJECT_ROOT / "data" / "clinical_master.csv"))
-    parser.add_argument("--preprocessed-dir", type=str, default=str(PROJECT_ROOT / "data" / "preprocessed"))
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--planned-bootstraps", type=int, default=2000)
     parser.add_argument("--planned-sim-reps", type=int, default=1000)
@@ -176,7 +178,6 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     outputs = run_readiness_audit(
         clinical_master_path=args.clinical_master,
-        preprocessed_dir=args.preprocessed_dir,
         output_dir=args.output_dir,
         n_planned_bootstraps=args.planned_bootstraps,
         n_planned_sim_reps=args.planned_sim_reps,

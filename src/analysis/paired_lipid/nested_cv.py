@@ -874,56 +874,17 @@ def _select_inner_models_and_fit_outer(
         "pls_regression": pred_pls_ote,
     }
 
-    # Evaluate per-sample (A vs B) repeatability on paired outer-test participants
-    paired_test_pos = np.isin(dataset.paired_participant_indices, outer_test_idx)
-    paired_test_p = dataset.paired_participant_indices[paired_test_pos]
-    idx_a_te = dataset.pair_sample_a_indices[paired_test_pos]
-    idx_b_te = dataset.pair_sample_b_indices[paired_test_pos]
-
-    repeatability_info: dict[str, Any] = {"n_paired_test": int(paired_test_p.size)}
-    if paired_test_p.size >= 2:
-        X_cov_pair_te = outer_cov_prep.transform(dataset.covariate_frame, paired_test_p)
-        y_pair_a, s_pair_a = predict_ridge_grid(
-            fit_paired_outer, X_cov_pair_te, sample_paired_z[idx_a_te], alpha_idx=0
-        )
-        y_pair_b, s_pair_b = predict_ridge_grid(
-            fit_paired_outer, X_cov_pair_te, sample_paired_z[idx_b_te], alpha_idx=0
-        )
-        y_band_a, s_band_a = predict_ridge_grid(
-            fit_band_outer, X_cov_pair_te, sample_band_mat[idx_a_te], alpha_idx=0
-        )
-        y_band_b, s_band_b = predict_ridge_grid(
-            fit_band_outer, X_cov_pair_te, sample_band_mat[idx_b_te], alpha_idx=0
-        )
-        repeatability_info.update(
-            {
-                "paired_full_icc": compute_icc_a1(y_pair_a, y_pair_b),
-                "paired_spectral_icc": compute_icc_a1(s_pair_a, s_pair_b),
-                "fixed_band_full_icc": compute_icc_a1(y_band_a, y_band_b),
-                "fixed_band_spectral_icc": compute_icc_a1(s_band_a, s_band_b),
-                "paired_discriminability": compute_discriminability_and_retrieval(
-                    sample_paired_z[idx_a_te],
-                    sample_paired_z[idx_b_te],
-                    dataset.sample_parsed_labels[idx_a_te],
-                    dataset.sample_parsed_labels[idx_b_te],
-                    local_window=cfg.local_candidate_window,
-                ),
-                "pca_discriminability": compute_discriminability_and_retrieval(
-                    sample_pca_outer[idx_a_te, :sel_pca_k],
-                    sample_pca_outer[idx_b_te, :sel_pca_k],
-                    dataset.sample_parsed_labels[idx_a_te],
-                    dataset.sample_parsed_labels[idx_b_te],
-                    local_window=cfg.local_candidate_window,
-                ),
-                "band_discriminability": compute_discriminability_and_retrieval(
-                    sample_band_mat[idx_a_te],
-                    sample_band_mat[idx_b_te],
-                    dataset.sample_parsed_labels[idx_a_te],
-                    dataset.sample_parsed_labels[idx_b_te],
-                    local_window=cfg.local_candidate_window,
-                ),
-            }
-        )
+    repeatability_info = _outer_test_repeatability(
+        dataset,
+        cfg,
+        outer_test_idx,
+        outer_cov_prep,
+        fit_paired_outer,
+        fit_band_outer,
+        sample_paired_z,
+        sample_band_mat,
+        sample_pca_outer[:, :sel_pca_k],
+    )
 
     subspace_basis = map_subspace_to_metric_orthonormal_basis(
         outer_spec_prep,
@@ -992,29 +953,98 @@ def _select_inner_models_and_fit_outer(
         }
 
     if include_band_paired:
-        # Secondary band-input paired ablation
-        outer_band_moments = PairedMoments.from_sample_coordinates(
-            sample_band_mat, dataset, outer_train_idx, outer_w_tr
-        )
-        k_band = sample_band_mat.shape[1]
-        V_b, _, _ = outer_band_moments.solve_directions(
-            k_band, sel_lam, eigenvalue_tolerance=cfg.eigenvalue_tolerance
-        )
-        Z_b_sample = sample_band_mat @ V_b[:, : min(sel_r, k_band)]
-        Z_b_part = aggregate_samples_to_participants(
-            Z_b_sample, dataset, single_sample_only=single_sample_downstream
-        )
-        fit_bp = fit_ridge_grid(
-            X_cov_otr,
-            Z_b_part[outer_train_idx],
-            y_otr,
+        out["predictions"]["band_paired_ridge"] = _band_paired_ablation_predictions(
+            dataset,
+            cfg,
+            sample_band_mat,
+            outer_train_idx,
+            outer_test_idx,
             outer_w_tr,
-            [alphas[sel_a_idx]],
+            X_cov_otr,
+            X_cov_ote,
+            y_otr,
+            sel_lam,
+            sel_r,
+            alphas[sel_a_idx],
+            single_sample_downstream=single_sample_downstream,
         )
-        pred_bp, _ = predict_ridge_grid(fit_bp, X_cov_ote, Z_b_part[outer_test_idx], alpha_idx=0)
-        out["predictions"]["band_paired_ridge"] = pred_bp
 
     return out
+
+
+def _outer_test_repeatability(
+    dataset: CohortDataset,
+    cfg: PairedLipidConfig,
+    outer_test_idx: np.ndarray,
+    outer_cov_prep: CovariatePreprocessor,
+    fit_paired_outer: Any,
+    fit_band_outer: Any,
+    sample_paired_z: np.ndarray,
+    sample_band_mat: np.ndarray,
+    sample_pca_sel: np.ndarray,
+) -> dict[str, Any]:
+    """Per-sample (A vs B) ICCs and discriminability on the paired outer-test participants."""
+    paired_test_pos = np.isin(dataset.paired_participant_indices, outer_test_idx)
+    paired_test_p = dataset.paired_participant_indices[paired_test_pos]
+    idx_a_te = dataset.pair_sample_a_indices[paired_test_pos]
+    idx_b_te = dataset.pair_sample_b_indices[paired_test_pos]
+
+    info: dict[str, Any] = {"n_paired_test": int(paired_test_p.size)}
+    if paired_test_p.size < 2:
+        return info
+    X_cov_pair_te = outer_cov_prep.transform(dataset.covariate_frame, paired_test_p)
+    y_pair_a, s_pair_a = predict_ridge_grid(fit_paired_outer, X_cov_pair_te, sample_paired_z[idx_a_te], alpha_idx=0)
+    y_pair_b, s_pair_b = predict_ridge_grid(fit_paired_outer, X_cov_pair_te, sample_paired_z[idx_b_te], alpha_idx=0)
+    y_band_a, s_band_a = predict_ridge_grid(fit_band_outer, X_cov_pair_te, sample_band_mat[idx_a_te], alpha_idx=0)
+    y_band_b, s_band_b = predict_ridge_grid(fit_band_outer, X_cov_pair_te, sample_band_mat[idx_b_te], alpha_idx=0)
+    lbl_a = dataset.sample_parsed_labels[idx_a_te]
+    lbl_b = dataset.sample_parsed_labels[idx_b_te]
+
+    def _discrim(z: np.ndarray) -> dict[str, float]:
+        return compute_discriminability_and_retrieval(
+            z[idx_a_te], z[idx_b_te], lbl_a, lbl_b, local_window=cfg.local_candidate_window
+        )
+
+    info.update(
+        {
+            "paired_full_icc": compute_icc_a1(y_pair_a, y_pair_b),
+            "paired_spectral_icc": compute_icc_a1(s_pair_a, s_pair_b),
+            "fixed_band_full_icc": compute_icc_a1(y_band_a, y_band_b),
+            "fixed_band_spectral_icc": compute_icc_a1(s_band_a, s_band_b),
+            "paired_discriminability": _discrim(sample_paired_z),
+            "pca_discriminability": _discrim(sample_pca_sel),
+            "band_discriminability": _discrim(sample_band_mat),
+        }
+    )
+    return info
+
+
+def _band_paired_ablation_predictions(
+    dataset: CohortDataset,
+    cfg: PairedLipidConfig,
+    sample_band_mat: np.ndarray,
+    outer_train_idx: np.ndarray,
+    outer_test_idx: np.ndarray,
+    outer_w_tr: np.ndarray,
+    X_cov_otr: np.ndarray,
+    X_cov_ote: np.ndarray,
+    y_otr: np.ndarray,
+    lam: float,
+    r: int,
+    alpha: float,
+    *,
+    single_sample_downstream: bool,
+) -> np.ndarray:
+    """Secondary band-input paired ablation; reuses lambda, r and alpha of the PCA-input model."""
+    band_moments = PairedMoments.from_sample_coordinates(sample_band_mat, dataset, outer_train_idx, outer_w_tr)
+    k_band = sample_band_mat.shape[1]
+    V_b, _, _ = band_moments.solve_directions(k_band, lam, eigenvalue_tolerance=cfg.eigenvalue_tolerance)
+    Z_b_part = aggregate_samples_to_participants(
+        sample_band_mat @ V_b[:, : min(r, k_band)], dataset, single_sample_only=single_sample_downstream
+    )
+    fit_bp = fit_ridge_grid(X_cov_otr, Z_b_part[outer_train_idx], y_otr, outer_w_tr, [alpha])
+    pred_bp, _ = predict_ridge_grid(fit_bp, X_cov_ote, Z_b_part[outer_test_idx], alpha_idx=0)
+    return pred_bp
 
 
 def evaluate_nested_cohort(

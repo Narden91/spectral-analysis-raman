@@ -26,6 +26,7 @@ from src.analysis.io_utils import write_csv_atomic
 from src.analysis.paired_lipid.cohort import PairedLipidConfig
 from src.analysis.paired_lipid.nested_cv import evaluate_nested_cohort
 from src.analysis.paired_lipid.simulation import (
+    check_gate_attainable,
     evaluate_bootstrap_calibration,
     generate_synthetic_cohort,
 )
@@ -159,6 +160,7 @@ def run_simulation_and_calibration(
     cfg, raw_cfg = load_manuscript_config(config_path)
     seeds = raw_cfg["seeds"]
     sim_cfg = raw_cfg["simulation"]
+    cal_cfg = raw_cfg["calibration"]
     n_grid = [int(n) for n in sim_cfg["n_participants_grid"]]
     compact_grid = bool(sim_cfg["compact_grid"])
     if quick:
@@ -167,6 +169,8 @@ def run_simulation_and_calibration(
         n_bootstraps = min(n_bootstraps, 10)
         n_participants = min(n_participants, 36)
         n_grid = [n_participants]
+    # Fail before the scenario suite, not after it.
+    check_gate_attainable(n_calibration_reps, seed_set, float(cal_cfg["gate_wilson_lower_min"]))
 
     scenarios_df = run_synthetic_scenario_suite(
         scenarios=list(sim_cfg["scenarios"]),
@@ -181,13 +185,16 @@ def run_simulation_and_calibration(
         n_repetitions=n_calibration_reps,
         n_bootstraps=n_bootstraps,
         n_participants=n_participants,
-        signal_strength=0.85,
+        signal_strength=float(cal_cfg["signal_strength"]),
         base_seed=int(seeds["calibration_base_seed"]),
         cfg=cfg,
         n_jobs=n_jobs,
         use_gpu=use_gpu,
+        n_test_participants=int(cal_cfg["n_test_participants"]),
         seed_set=seed_set,
         compact_grid=compact_grid,
+        gate_wilson_lower_min=float(cal_cfg["gate_wilson_lower_min"]),
+        gate_max_failure_rate=float(cal_cfg["gate_max_failure_rate"]),
     )
     cal_df = pd.DataFrame([cal_summary])
 

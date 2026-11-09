@@ -147,7 +147,15 @@ def run_primary_evaluation(
         boot_res = run_multiplicity_bootstrap(
             dataset, cfg=cfg, n_bootstraps=n_bootstraps, bootstrap_seed=bootstrap_seed
         )
+        # The table estimates come from the sequential reference path (include_band_paired=True);
+        # the bootstrap base draw uses the batched engine. Recording both makes a disagreement visible.
+        nested_delta = eval_res["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"]
+        nested_vs_comp = eval_res["paired_vs_strongest_comparator"]["delta_mse"]
         manifest_payload["multiplicity_bootstrap"] = {
+            "point_estimate_delta_mse": boot_res["point_estimate_delta_mse"],
+            "point_estimate_vs_comparator": boot_res["point_estimate_vs_comparator"],
+            "abs_diff_point_estimate_vs_nested_cv": abs(boot_res["point_estimate_delta_mse"] - nested_delta),
+            "abs_diff_vs_comparator_vs_nested_cv": abs(boot_res["point_estimate_vs_comparator"] - nested_vs_comp),
             "n_bootstraps_requested": boot_res["n_bootstraps_requested"],
             "n_bootstraps_succeeded": boot_res["n_bootstraps_succeeded"],
             "n_failed_refits": boot_res["n_failed_refits"],

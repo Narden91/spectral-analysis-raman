@@ -14,6 +14,8 @@ from src.analysis.raman_bands import RAMAN_BANDS
 
 MISSING_TOKENS: tuple[str, ...] = ("unknown", "not_applicable", "not_available")
 
+SubsetMode = Literal["all_eligible", "paired_only", "single_sample", "three_map_complete"]
+
 
 IDENTITY_CONFLICT_FLAGS: frozenset[str] = frozenset(
     {
@@ -191,7 +193,7 @@ def build_paired_cohort_dataset(
     wavenumbers_2850: np.ndarray,
     *,
     cfg: PairedLipidConfig = PairedLipidConfig(),
-    subset_mode: Literal["all_eligible", "paired_only", "single_sample", "three_map_complete"] = "all_eligible",
+    subset_mode: SubsetMode = "all_eligible",
     endpoint: str | None = None,
 ) -> CohortDataset:
     """Construct the participant -> sample -> map hierarchy and covariate table.
@@ -474,7 +476,7 @@ def load_paired_cohort_from_store(
     *,
     data_source: Any | None = None,
     cfg: PairedLipidConfig = PairedLipidConfig(),
-    subset_mode: Literal["all_eligible", "paired_only", "single_sample", "three_map_complete"] = "all_eligible",
+    subset_mode: SubsetMode = "all_eligible",
     endpoint: str | None = None,
 ) -> tuple[CohortDataset, dict[str, Any]]:
     """Load the stroke cohort hierarchy from the canonical preprocessed store and clinical master."""

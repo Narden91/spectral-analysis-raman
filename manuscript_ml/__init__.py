@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any, Literal, Mapping
+from typing import Any, Mapping
 
 import pandas as pd
 import yaml
@@ -30,6 +30,7 @@ from src.analysis.paired_lipid.cohort import (
     PRE_EVENT_RISK_FACTORS,
     CohortDataset,
     PairedLipidConfig,
+    SubsetMode,
     load_paired_cohort_from_store,
 )
 from src.analysis.paired_lipid.simulation import generate_synthetic_cohort
@@ -129,7 +130,7 @@ def resolve_experiment_dataset(
     use_synthetic: bool,
     approve_cohort_evaluation: bool = False,
     clinical_master_path: str | Path = PROJECT_ROOT / "data" / "clinical_master.csv",
-    subset_mode: Literal["all_eligible", "paired_only", "single_sample", "three_map_complete"] = "all_eligible",
+    subset_mode: SubsetMode = "all_eligible",
     endpoint: str | None = None,
     synthetic_participants: int = 92,
     synthetic_seed: int = 42,
@@ -222,7 +223,7 @@ def _rebuild_synthetic_with_mode(
     n_participants: int,
     seed: int,
     compact_grid: bool,
-    subset_mode: Literal["all_eligible", "paired_only", "single_sample", "three_map_complete"],
+    subset_mode: SubsetMode,
     endpoint: str | None,
     cfg: PairedLipidConfig,
 ) -> tuple[CohortDataset, dict[str, Any]]:

@@ -135,3 +135,25 @@ This was a targeted literature and implementation review, not a systematic novel
 
 - Failure: the readiness audit passed on file presence and a clinical count, but the cohort join returned 0 participants. `not_available` made pandas read `spectral_subject_id` as float, so "7.0" never matched store id "7". All tests used synthetic cohorts.
 - Prevention: read identifier columns with an explicit string dtype. Before calling a pipeline experiment-ready, run the real-data join as a counts-only dry run and gate on the expected counts.
+
+## 2026-11-09: Clinical source and verification data
+
+- `data/clinical_data.csv` is deprecated. The clinical sources are `data/clinical_master.csv` and `data/clinical_master_dictionary.csv`. The paired-lipid code never reads `clinical_data.csv`, so a strict store-validation error about it does not block manuscript ML runs.
+- The investigator requires code checks on real data only. Synthetic runs are not accepted as verification evidence. To check code without producing a study result, use the real store spectra, covariates, sample labels and folds, and replace the outcomes with seeded dummy values before any model sees them.
+
+## 2026-11-09: Verified facts about the manuscript ML pipeline (do not re-test)
+
+Checked on real data at commit `12caecf` plus the uncommitted 2026-11-09 review changes. Rerun a check only when the store manifest hash (`b1c1016e…69c3`), `clinical_master.csv`, or the named code changes.
+
+| Fact | Evidence |
+|---|---|
+| Real cohort join: 92 eligible participants, 88 paired, 4 single-sample, 180 samples. | Readiness audit `cohort_join.status=ok`. Exclusions: 5 `no_spectra`, 5 `identity_review_required`, 2 `fewer_than_2_maps` (participant/sample 504/114 and 738/160). |
+| QC-rejected maps never reach the area summaries. | 721 (1300) and 717 (2850) summary rows; 0 all-NaN and 0 partially NaN rows. |
+| Covariates and outcomes are complete in the 92 eligible participants. | 0 missing in age, sex, statin, sample-label trend, the 7 risk factors, LDL-C, HDL-C, TG and platelets. Coding: sex `female`/`male`, smoking `never`/`former`/`current`, binaries 0/1. Every covariate preset is eligible for the fast path. |
+| Fast inner selection equals the sequential reference. | Dummy outcome: identical selected settings and predictions for all 6 models. |
+| Batched bootstrap equals sequential refits. | Base draw plus 20 multiplicity draws: max difference 3.6e-14 (CPU) and 3.1e-14 (GPU, exact fp64). Bootstrap base draw versus nested-CV point estimate: 1.5e-15. |
+| GPU bootstrap cost, 2000 draws, exact fp64, 15.9 GiB GPU. | Before: 72.1 s, 10.3 GiB peak pool (real data). The `eigh` share before the change (92%) was profiled on a synthetic cohort only; on real data after the change `eigh` is still 85% of 37.3 s, so a faster exact top-k solver is the next speed lever. After the active-sample `eigh` and in-place gram updates: 38.5 s and 3.79 GiB (batch 2048), 40.2 s and 1.95 GiB (1024), 48.7 s and 0.98 GiB (512). The in-place change is bitwise identical; the active-sample change moved draws by at most 8.2e-14. |
+| Calibration gate needs at least 48 replicates. | At 100% coverage the Wilson 95% lower bound is n/(n+z^2): 0.9259 at 48 and 0.9244 at 47. With 1000 replicates, 950 covered gives 0.935 and 940 gives 0.924. `check_gate_attainable` refuses a validation run below 48. |
+| The full test suite passes. | `uv run --group gpu pytest -q`: 425 passed, 0 skipped (282 s) after the review changes, including the GPU batched-vs-sequential test; plus `test_calibration_gate_minimum_repetitions`. |
+
+- Prevention: before a new equivalence, join or timing test, check this table. Re-test only what a later change touches, on real data, against a reference path that shares no code with the fast path.

@@ -13,7 +13,7 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 import sys
-from typing import Any, Literal
+from typing import Any, get_args
 
 import pandas as pd
 
@@ -29,7 +29,7 @@ from manuscript_ml import (
     write_run_provenance,
 )
 from src.analysis.io_utils import write_csv_atomic
-from src.analysis.paired_lipid.cohort import PairedLipidConfig
+from src.analysis.paired_lipid.cohort import PairedLipidConfig, SubsetMode
 from src.analysis.paired_lipid.nested_cv import (
     evaluate_nested_cohort,
     summarize_anchor_associations,
@@ -42,12 +42,21 @@ COVARIATE_PRESETS: tuple[str, ...] = (
     "quadratic_age_and_label",
     "pre_event_risk_factors",
 )
-SUBSET_MODES: tuple[Literal["all_eligible", "paired_only", "single_sample", "three_map_complete"], ...] = (
-    "all_eligible",
-    "paired_only",
-    "single_sample",
-    "three_map_complete",
-)
+SUBSET_MODES: tuple[SubsetMode, ...] = get_args(SubsetMode)
+
+
+def _paired_metrics(res: dict[str, Any], *, with_mae: bool = False) -> dict[str, float]:
+    """Paired-model summary columns shared by every sensitivity table, in output column order."""
+    m_pair = res["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]
+    row = {
+        "delta_mse_paired": m_pair["delta_mse"],
+        "relative_mse_reduction": m_pair["relative_mse_reduction"],
+        "rmse_paired": m_pair["rmse_model"],
+    }
+    if with_mae:
+        row["mae_paired"] = m_pair["mae_model"]
+    row["delta_vs_strongest_comparator"] = res["paired_vs_strongest_comparator"]["delta_mse"]
+    return row
 
 
 def run_sensitivity_and_secondary(
@@ -61,13 +70,17 @@ def run_sensitivity_and_secondary(
 ) -> dict[str, Path]:
     """Run all prespecified sensitivity analyses, secondary endpoints, and anchor summaries."""
     target_dir = ensure_output_dir(output_dir)
-    base_cfg, _ = load_manuscript_config(config_path)
-    eval_memo: dict[tuple[int, PairedLipidConfig, str | None, int | None, bool], dict[str, Any]] = {}
+    base_cfg, raw_cfg = load_manuscript_config(config_path)
+    anchor_cfg = raw_cfg["anchors"]
+    eval_memo: dict[tuple[Any, ...], dict[str, Any]] = {}
 
     def evaluate(ds: Any, cfg: PairedLipidConfig, **kwargs: Any) -> dict[str, Any]:
         # Deterministic evaluations repeat across axes (e.g. primary preset, primary seed,
-        # anchors); compute each distinct (dataset, config, options) only once.
-        key = (id(ds), cfg, kwargs.get('endpoint'), kwargs.get('outer_seed'), bool(kwargs.get('single_sample_downstream', False)))
+        # anchors); compute each distinct (dataset, config, options) only once. The key holds
+        # every option, and outer_seed=None means the primary seed, so equal runs share one entry.
+        seed = kwargs.get("outer_seed")
+        options = {**kwargs, "outer_seed": cfg.primary_seed if seed is None else int(seed)}
+        key = (id(ds), cfg, tuple(sorted(options.items())))
         if key not in eval_memo:
             eval_memo[key] = evaluate_nested_cohort(ds, cfg=cfg, **kwargs)
         return eval_memo[key]
@@ -86,16 +99,12 @@ def run_sensitivity_and_secondary(
     for preset in COVARIATE_PRESETS:
         cfg_p = replace(base_cfg, covariate_preset=preset)
         res_p = evaluate(base_ds, cfg_p)
-        m_pair = res_p["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]
         sens_rows.append(
             {
                 "sensitivity_axis": "covariate_preset",
                 "setting": preset,
                 "n_participants": base_ds.n_participants,
-                "delta_mse_paired": m_pair["delta_mse"],
-                "relative_mse_reduction": m_pair["relative_mse_reduction"],
-                "rmse_paired": m_pair["rmse_model"],
-                "delta_vs_strongest_comparator": res_p["paired_vs_strongest_comparator"]["delta_mse"],
+                **_paired_metrics(res_p),
             }
         )
 
@@ -113,16 +122,12 @@ def run_sensitivity_and_secondary(
             base_cfg,
             single_sample_downstream=(s_mode == "single_sample"),
         )
-        m_pair = res_sub["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]
         sens_rows.append(
             {
                 "sensitivity_axis": "subset_mode",
                 "setting": s_mode,
                 "n_participants": ds_sub.n_participants,
-                "delta_mse_paired": m_pair["delta_mse"],
-                "relative_mse_reduction": m_pair["relative_mse_reduction"],
-                "rmse_paired": m_pair["rmse_model"],
-                "delta_vs_strongest_comparator": res_sub["paired_vs_strongest_comparator"]["delta_mse"],
+                **_paired_metrics(res_sub),
             }
         )
 
@@ -130,15 +135,11 @@ def run_sensitivity_and_secondary(
     seed_rows: list[dict[str, Any]] = []
     for seed in (base_cfg.primary_seed, *base_cfg.sensitivity_seeds):
         res_s = evaluate(base_ds, base_cfg, outer_seed=seed)
-        m_pair = res_s["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]
         seed_rows.append(
             {
                 "outer_seed": int(seed),
                 "role": "primary_locked" if seed == base_cfg.primary_seed else "sensitivity_only",
-                "delta_mse_paired": m_pair["delta_mse"],
-                "relative_mse_reduction": m_pair["relative_mse_reduction"],
-                "rmse_paired": m_pair["rmse_model"],
-                "delta_vs_strongest_comparator": res_s["paired_vs_strongest_comparator"]["delta_mse"],
+                **_paired_metrics(res_s),
             }
         )
 
@@ -148,24 +149,25 @@ def run_sensitivity_and_secondary(
     # missing this endpoint is left out of every fold's training and test error.
     for ep in base_cfg.secondary_endpoints:
         res_ep = evaluate(base_ds, base_cfg, endpoint=ep, allow_missing_outcome=True)
-        m_pair = res_ep["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]
         sec_rows.append(
             {
                 "endpoint": ep,
                 "family_role": "secondary_descriptive",
                 "n_participants": base_ds.n_participants - res_ep["n_missing_outcome"],
                 "n_missing_endpoint": res_ep["n_missing_outcome"],
-                "delta_mse_paired": m_pair["delta_mse"],
-                "relative_mse_reduction": m_pair["relative_mse_reduction"],
-                "rmse_paired": m_pair["rmse_model"],
-                "mae_paired": m_pair["mae_model"],
-                "delta_vs_strongest_comparator": res_ep["paired_vs_strongest_comparator"]["delta_mse"],
+                **_paired_metrics(res_ep, with_mae=True),
             }
         )
 
     # 4. Continuous exploratory anchor associations
     primary_eval = evaluate(base_ds, base_cfg)
-    anchor_df = summarize_anchor_associations(base_ds, primary_eval, cfg=base_cfg)
+    anchor_df = summarize_anchor_associations(
+        base_ds,
+        primary_eval,
+        n_resamples=int(anchor_cfg["n_resamples"]),
+        seed=int(anchor_cfg["seed"]),
+        cfg=base_cfg,
+    )
 
     sens_path = target_dir / "covariate_and_subset_sensitivity.csv"
     seeds_path = target_dir / "outer_partition_seed_sensitivity.csv"

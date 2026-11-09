@@ -253,6 +253,25 @@ def wilson_score_interval(successes: int, total: int, confidence: float = 0.95) 
     return (max(0.0, center - half), min(1.0, center + half))
 
 
+def min_reps_for_gate(wilson_lower_min: float, confidence: float = 0.95) -> int:
+    """Smallest repetition count whose Wilson lower bound at 100% coverage reaches the gate."""
+    # At n/n coverage the Wilson lower bound is n / (n + z^2).
+    z_sq = float(stats.norm.ppf(0.5 + 0.5 * confidence)) ** 2
+    return math.ceil(wilson_lower_min * z_sq / (1.0 - wilson_lower_min))
+
+
+def check_gate_attainable(n_repetitions: int, seed_set: str, wilson_lower_min: float) -> tuple[bool, int]:
+    """Return (attainable, minimum reps); raise for a validation run that cannot pass the gate."""
+    min_reps = min_reps_for_gate(wilson_lower_min)
+    if seed_set == "validation" and n_repetitions < min_reps:
+        # Even 100% coverage cannot reach the Wilson lower bound, so refuse before any compute.
+        raise ValueError(
+            f"Validation calibration needs >= {min_reps} repetitions to be able to pass the gate "
+            f"(Wilson lower >= {wilson_lower_min}); got {n_repetitions}."
+        )
+    return n_repetitions >= min_reps, min_reps
+
+
 def _eval_single_calibration_rep(
     rep_seed: int,
     n_participants: int,
@@ -299,6 +318,8 @@ def evaluate_bootstrap_calibration(
     n_test_participants: int = 5000,
     seed_set: Literal["development", "validation"] = "development",
     compact_grid: bool = True,
+    gate_wilson_lower_min: float = 0.925,
+    gate_max_failure_rate: float = 0.01,
 ) -> dict[str, Any]:
     """Evaluate bootstrap interval coverage, width, bias, and failure rate in synthetic repetitions.
 
@@ -308,6 +329,7 @@ def evaluate_bootstrap_calibration(
     Development and validation replicates draw seeds from disjoint ranges; only the validation
     set gives a confirmatory gate result.
     """
+    gate_attainable, min_reps = check_gate_attainable(n_repetitions, seed_set, gate_wilson_lower_min)
     lo_seed, hi_seed = CALIBRATION_SEED_RANGES[seed_set]
     rng = np.random.default_rng(base_seed)
     rep_seeds = rng.integers(lo_seed, hi_seed, size=n_repetitions)
@@ -375,7 +397,7 @@ def evaluate_bootstrap_calibration(
     cond_cov = float(cond_covered) / float(n_success) if n_success > 0 else float("nan")
     fail_rate = float(n_repetitions - n_success) / float(n_repetitions) if n_repetitions > 0 else float("nan")
     wilson_lo, wilson_hi = wilson_score_interval(uncond_covered, n_repetitions, confidence=0.95)
-    passes_gate = bool(wilson_lo >= 0.925 and fail_rate < 0.01)
+    passes_gate = bool(wilson_lo >= gate_wilson_lower_min and fail_rate < gate_max_failure_rate)
 
     return {
         "seed_set": seed_set,
@@ -395,4 +417,6 @@ def evaluate_bootstrap_calibration(
         "dataset_failure_rate": fail_rate,
         "mean_interval_width": float(np.mean(widths)) if widths else float("nan"),
         "passes_provisional_gate": passes_gate,
+        "gate_attainable": gate_attainable,
+        "min_reps_for_gate": min_reps,
     }

@@ -26,6 +26,18 @@ seeds:
   scenario_base_seed: 1000      # synthetic scenario suite
   calibration_base_seed: 9000   # bootstrap calibration replicates
 
+calibration:
+  signal_strength: 0.85          # LDL-C signal of the calibration replicates
+  n_test_participants: 5000      # independent synthetic test cohort that defines the target
+  # Provisional gate: Wilson 95% lower bound of unconditional coverage, and dataset failure rate.
+  # A validation run below the replicate count that can reach the lower bound is refused.
+  gate_wilson_lower_min: 0.925
+  gate_max_failure_rate: 0.01
+
+anchors:
+  n_resamples: 200               # participant resamples for sign stability and intervals
+  seed: 42
+
 readiness:
   expected_identity_verified: 92   # stroke participants with verified spectral identity
   # Cohort join counts observed on 2026-11-09 (store + clinical master); a mismatch blocks evaluation.

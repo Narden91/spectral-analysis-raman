@@ -36,10 +36,22 @@ from src.analysis.paired_lipid.nested_cv import (
     summarize_anchor_associations,
 )
 from src.analysis.paired_lipid.simulation import (
+    check_gate_attainable,
     evaluate_bootstrap_calibration,
     generate_synthetic_cohort,
+    min_reps_for_gate,
     wilson_score_interval,
 )
+
+
+def test_calibration_gate_minimum_repetitions() -> None:
+    # 100% coverage gives Wilson lower n/(n + z^2): 48 is the first n reaching 0.925.
+    assert min_reps_for_gate(0.925) == 48
+    assert wilson_score_interval(48, 48)[0] >= 0.925 > wilson_score_interval(47, 47)[0]
+    assert check_gate_attainable(48, "validation", 0.925) == (True, 48)
+    assert check_gate_attainable(20, "development", 0.925) == (False, 48)
+    with pytest.raises(ValueError, match=">= 48 repetitions"):
+        check_gate_attainable(47, "validation", 0.925)
 
 
 def test_parse_sample_label_memoized_and_deterministic() -> None:
