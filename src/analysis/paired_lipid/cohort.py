@@ -3,28 +3,20 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import lru_cache
-import hashlib
 import re
 from pathlib import Path
 from typing import Any, Literal, Mapping
 import numpy as np
 import pandas as pd
 from src.analysis.raman_bands import RAMAN_BANDS
+from src.metadata.clinical_master import (
+    IDENTITY_CONFLICT_FLAGS as IDENTITY_CONFLICT_FLAGS,
+    MISSING_TOKENS as MISSING_TOKENS,
+    load_clinical_master_verified as load_clinical_master_verified,
+)
 
-
-MISSING_TOKENS: tuple[str, ...] = ("unknown", "not_applicable", "not_available")
 
 SubsetMode = Literal["all_eligible", "paired_only", "single_sample", "three_map_complete"]
-
-
-IDENTITY_CONFLICT_FLAGS: frozenset[str] = frozenset(
-    {
-        "SEX_FOLDER_CONFLICT",
-        "SPECTRAL_FILENAME_FOLDER_CONFLICT",
-        "POSSIBLE_SPECTRA_IN_ANOTHER_FOLDER",
-        "MULTIPLE_SEX_FOLDERS",
-    }
-)
 
 
 PRE_EVENT_RISK_FACTORS: tuple[str, ...] = (
@@ -134,52 +126,6 @@ def parse_sample_label(raw_label: object) -> float:
         match = _NUMERIC_TOKEN_RE.search(cleaned)
         return float(match.group(0)) if match is not None else float("nan")
 
-
-def load_clinical_master_verified(master_path: str | Path) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Load and audit the standalone clinical master table per study readiness rules."""
-    path = Path(master_path)
-    raw_bytes = path.read_bytes()
-    sha256_hash = hashlib.sha256(raw_bytes).hexdigest()
-    frame = pd.read_csv(
-        path,
-        na_values=list(MISSING_TOKENS),
-        keep_default_na=True,
-        encoding="utf-8-sig",
-        # NA tokens make pandas infer float64 ids ("7.0"), which never match store ids ("7").
-        dtype={"spectral_subject_id": "string"},
-    )
-    if "participant_key" not in frame.columns or "cohort" not in frame.columns:
-        raise ValueError("Clinical master must contain 'participant_key' and 'cohort' columns.")
-    if frame["participant_key"].duplicated().any():
-        raise ValueError("Duplicate participant_key entries detected in clinical master.")
-
-    has_spec_mask = frame.get("has_spectra", pd.Series(0, index=frame.index)).fillna(0).astype(int) == 1
-    spec_subset = frame.loc[has_spec_mask]
-    if spec_subset.duplicated(subset=["cohort", "spectral_subject_id"]).any():
-        raise ValueError("Duplicate (cohort, spectral_subject_id) among participants with spectra.")
-
-    def _has_identity_conflict(flags_val: object) -> bool:
-        if pd.isna(flags_val):
-            return False
-        tokens = {tok.strip() for tok in str(flags_val).split(";") if tok.strip()}
-        return bool(tokens & IDENTITY_CONFLICT_FLAGS)
-
-    conflict_series = frame.get("qc_flags", pd.Series("none", index=frame.index)).map(_has_identity_conflict)
-    link_matched = frame.get("spectral_link_status", pd.Series("", index=frame.index)).astype(str) == "matched"
-    frame = frame.copy()
-    frame["identity_verified"] = has_spec_mask & link_matched & (~conflict_series)
-
-    stroke_mask = frame["cohort"].astype(str) == "stroke"
-    stroke_verified = frame.loc[stroke_mask & frame["identity_verified"]]
-    audit = {
-        "clinical_master_sha256": sha256_hash,
-        "total_rows": int(len(frame)),
-        "stroke_with_spectra": int((stroke_mask & has_spec_mask).sum()),
-        "stroke_identity_verified": int(len(stroke_verified)),
-        "stroke_identity_excluded": int((stroke_mask & has_spec_mask & ~frame["identity_verified"]).sum()),
-        "control_with_spectra": int(((~stroke_mask) & has_spec_mask).sum()),
-    }
-    return frame, audit
 
 
 def build_paired_cohort_dataset(
@@ -562,12 +508,12 @@ def build_limitations_table(clin_audit: Mapping[str, Any] | None = None) -> pd.D
         },
         {
             "domain": "laboratory_units_and_assay",
-            "status": "assumed_mmol_l_and_unconfirmed_formula",
+            "status": "measurement_definition_requires_source_documentation",
             "source_reference": "data/clinical_master_dictionary.csv",
             "implication": (
-                "LDL-C, HDL-C, TG, and platelet units are marked assumed in the dictionary; "
-                "fasting status, blood-draw timing relative to EV isolation, and direct vs calculated "
-                "LDL-C (e.g., Friedewald) are unconfirmed."
+                "Interpret outcomes in their recorded source units. Assay methods, fasting status, "
+                "treatment timing and any calculated-LDL formula require source documentation; "
+                "this code does not infer them."
             ),
         },
         {
@@ -585,9 +531,9 @@ def build_limitations_table(clin_audit: Mapping[str, Any] | None = None) -> pd.D
             "status": "model_relative_comparison_only",
             "source_reference": "docs/research_design.md",
             "implication": (
-                "Positive delta MSE shows predictive improvement over linear ridge on C under the "
-                "observed protocol; spectra may proxy nonlinear covariate effects or unmeasured "
-                "technical preparation structure."
+                "Observed error differences compare fitted procedures. They do not establish "
+                "biological specificity or conditional association, and spectra may proxy "
+                "nonlinear covariate effects or unmeasured technical preparation structure."
             ),
         },
         {
@@ -595,8 +541,8 @@ def build_limitations_table(clin_audit: Mapping[str, Any] | None = None) -> pd.D
             "status": "controls_excluded_from_primary_model",
             "source_reference": "data/clinical_master.csv",
             "implication": (
-                "Control participants have no recorded lipid values and only one sample per participant; "
-                "within-stroke lipid prediction does not validate case-control disease specificity."
+                "Controls are outside the primary within-stroke analysis. This design does not "
+                "establish case-control disease specificity."
             ),
         },
     ]

@@ -24,20 +24,20 @@ from src.analysis.band_features import (
     band_integral,
     band_median_snr,
     build_named_index,
-    count_window_channels,
 )
-from src.analysis.clinical_feature_associations import feature_columns, load_disease_feature_frame
+from src.analysis.clinical_feature_associations import load_disease_feature_frame_with_bc
 from src.analysis.io_utils import write_csv_atomic, write_text_atomic
+from src.analysis.raman_bands import RAMAN_BANDS
 from src.data_preparation.manifest import config_hash
 
 logger = logging.getLogger(__name__)
 
 _SNR_GATED_INTEGRALS = frozenset(
     {
-        "structural_protein_925",
-        "structural_protein_980",
+        "c_o_c_sugar_925",
+        "beta_sheet_980",
         "tyrosine_851",
-        "tyrosine_821",
+        "o_p_o_821",
     }
 )
 
@@ -52,6 +52,8 @@ def panel_provenance(panel: dict[str, Any]) -> dict[str, str]:
         raise ValueError("panel provenance_type must be 'post_hoc_fixed' or 'externally_preregistered'")
     fields = {
         "provenance_type": provenance_type,
+        "spectral_basis": "pre_normalization",
+        "band_statistic": "trapezoidal_integral",
         "registration_id": str(panel.get("registration_id") or ""),
         "registered_at": str(panel.get("registered_at") or ""),
         "registration_url": str(panel.get("registration_url") or ""),
@@ -77,7 +79,7 @@ def _integral_spec(name: str, spec: list[Any]) -> tuple[str, str, float, float]:
 
 
 def _primary_hypothesis_lines(primary: dict[str, Any]) -> list[str]:
-    feature = primary.get("feature", "oxidative_index")
+    feature = primary.get("feature", "carotenoid_to_carbonyl_ratio")
     endpoint = primary.get("endpoint", "delta_moca")
     covariates = primary.get("covariates", ["age", "sex"])
     covariate_text = ", ".join(str(item) for item in covariates)
@@ -108,7 +110,7 @@ def write_preregistration_snapshot(
     provenance = panel_provenance(panel)
     yaml_block = yaml.safe_dump({"analysis": {"preregistered_panel": panel}}, sort_keys=False)
     title = (
-        "Externally pre-registered panel"
+        "Declared external panel registration"
         if provenance["provenance_type"] == "externally_preregistered"
         else "Fixed post hoc Raman panel"
     )
@@ -122,6 +124,7 @@ def write_preregistration_snapshot(
         f"- Registration ID: {provenance['registration_id'] or 'not available'}",
         f"- Registered at: {provenance['registered_at'] or 'not available'}",
         f"- Registration URL: {provenance['registration_url'] or 'not available'}",
+        "- External registration details are supplied metadata, not independently verified by this snapshot.",
         f"- Analysis-plan hash: {provenance['analysis_plan_hash']}",
         "",
         *_primary_hypothesis_lines(panel.get("primary_hypothesis", {})),
@@ -139,37 +142,8 @@ def write_preregistration_snapshot(
 
     path = target_dir / "preregistration.md"
     write_text_atomic(path, "\n".join(lines))
-    logger.info("Wrote pre-registration snapshot to %s", path)
+    logger.info("Wrote panel-configuration snapshot to %s", path)
     return path
-
-
-def _resolve_lipid_carbonyl_window(
-    columns: list[str],
-    panel: dict[str, Any],
-    runtime_notes: list[str],
-) -> tuple[str, float, float]:
-    primary_name = "lipid_carbonyl_1721"
-    fallback_name = "lipid_carbonyl_1721_fallback"
-    integrals = panel.get("integrals", {})
-    if primary_name not in integrals:
-        raise ValueError("Pre-registered panel is missing lipid_carbonyl_1721 integral")
-
-    _, block, lower, upper = _integral_spec(primary_name, integrals[primary_name])
-    if count_window_channels(columns, block=block, lower=lower, upper=upper) >= 3:
-        return block, lower, upper
-
-    if fallback_name not in integrals:
-        runtime_notes.append(
-            f"{primary_name} window [{lower}, {upper}] has <3 channels and no fallback is configured."
-        )
-        return block, lower, upper
-
-    _, fb_block, fb_lower, fb_upper = _integral_spec(fallback_name, integrals[fallback_name])
-    runtime_notes.append(
-        f"{primary_name} narrow window [{lower}, {upper}] had <3 channels; "
-        f"using fallback [{fb_lower}, {fb_upper}]."
-    )
-    return fb_block, fb_lower, fb_upper
 
 
 def build_panel_matrix(
@@ -186,15 +160,16 @@ def build_panel_matrix(
 
     integrals_cfg: dict[str, list[Any]] = dict(panel.get("integrals", {}))
     resolved_integrals: dict[str, pd.Series] = {}
-    lipid_block, lipid_lo, lipid_hi = _resolve_lipid_carbonyl_window(columns, panel, notes)
 
     for integral_name, spec in integrals_cfg.items():
-        if integral_name == "lipid_carbonyl_1721_fallback":
-            continue
-        if integral_name == "lipid_carbonyl_1721":
-            block, lower, upper = lipid_block, lipid_lo, lipid_hi
-        else:
-            _, block, lower, upper = _integral_spec(integral_name, spec)
+        _, block, lower, upper = _integral_spec(integral_name, spec)
+        if integral_name in RAMAN_BANDS:
+            expected = RAMAN_BANDS[integral_name].bounds
+            if (lower, upper) != expected:
+                raise ValueError(f"Panel band '{integral_name}' window differs from the Raman registry")
+        elif integral_name != "ch_bulk_2885" or (block, lower, upper) != ("2850", 2850, 2950):
+            raise ValueError(f"Unknown panel band or composite window: {integral_name}")
+        block = f"{block}_bc"
 
         if integral_name in _SNR_GATED_INTEGRALS:
             snr = band_median_snr(frame, columns, block=block, lower=lower, upper=upper)
@@ -207,6 +182,9 @@ def build_panel_matrix(
         series = band_integral(frame, columns, block=block, lower=lower, upper=upper)
         if series.notna().any():
             resolved_integrals[integral_name] = series
+
+    if not resolved_integrals:
+        return pd.DataFrame(index=frame.index), []
 
     index_specs: dict[str, list[str]] = {
         str(name): [str(item) for item in components]
@@ -235,6 +213,7 @@ def build_panel_matrix(
 def run_preregistered_panel(
     *,
     feature_matrix_path: str | Path | None = None,
+    bc_feature_matrix_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
@@ -254,8 +233,9 @@ def run_preregistered_panel(
         runtime_notes=runtime_notes,
     )
 
-    disease_only, _meta = load_disease_feature_frame(feature_matrix_path=feature_matrix_path)
-    all_columns = feature_columns(disease_only)
+    disease_only, _meta, all_columns = load_disease_feature_frame_with_bc(
+        feature_matrix_path=feature_matrix_path, bc_feature_matrix_path=bc_feature_matrix_path,
+    )
     panel_matrix, column_order = build_panel_matrix(
         disease_only,
         all_columns,

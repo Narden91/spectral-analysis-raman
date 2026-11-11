@@ -252,7 +252,12 @@ def _fmt(value: object, digits: int = 3) -> str:
 
 
 def _primary_row(comparison_df: pd.DataFrame) -> pd.Series | None:
-    primary = comparison_df.loc[comparison_df["is_primary_model"].astype(bool)]
+    flags = comparison_df["is_primary_model"]
+    if not flags.isin([True, False]).all():
+        raise ValueError("Primary-model flags must be recorded boolean values")
+    primary = comparison_df.loc[flags.astype(bool)]
+    if len(primary) > 1:
+        raise ValueError("The comparison table identifies more than one primary model")
     return primary.iloc[0] if not primary.empty else None
 
 
@@ -260,6 +265,8 @@ def _confounder_row(confounder_df: pd.DataFrame, model_name: str, representation
     if confounder_df.empty:
         return None
     match = confounder_df.loc[(confounder_df["model"] == model_name) & (confounder_df["representation"] == representation)]
+    if len(match) > 1:
+        raise ValueError("Confounder results contain duplicate model/representation rows")
     return match.iloc[0] if not match.empty else None
 
 
@@ -271,121 +278,73 @@ def _build_report_text(
 ) -> str:
     cohort = dict(zip(cohort_df["metric"], cohort_df["value"]))
     primary = _primary_row(comparison_df)
-
     lines = [
-        "# Control vs. Disease ML Classification — Exploratory Report",
-        "",
-        "**Status: exploratory only.** No diagnostic, biomarker, causal, or clinical-utility",
-        "claim is made anywhere in this report. Single-cohort, single-site, no external",
-        "validation. Confound checks and uncertainty estimates are reported below.",
-        "",
-        "## Cohort",
-        "",
+        "# Control vs. Disease ML Classification - Exploratory Report", "",
+        "**Status: exploratory only.** No diagnostic, biomarker, causal, or clinical-utility claim.",
+        "These results have no external validation. Confound checks do not establish disease specificity.", "",
+        "## Cohort", "",
         f"- Total subjects: {cohort.get('n_subjects_total', 'n/a')} "
-        f"({cohort.get('n_disease', 'n/a')} disease, {cohort.get('n_control', 'n/a')} control; "
-        f"imbalance ratio {_fmt(cohort.get('imbalance_ratio_disease_to_control'), 2)}:1)",
-        f"- Majority-class baseline: accuracy {_fmt(cohort.get('majority_class_baseline_accuracy'), 3)}, "
-        f"balanced accuracy {_fmt(cohort.get('majority_class_baseline_balanced_accuracy'), 3)}",
-        f"- Sex vs. class association: χ²={_fmt(cohort.get('sex_vs_class_chi2'), 2)}, "
-        f"p={_fmt(cohort.get('sex_vs_class_chi2_p_value'), 4)} "
-        "— **this cohort's sex distribution is significantly associated with class** "
-        "(see Confounding section below).",
-        f"- Age adjustment: {cohort.get('age_adjustment_status', 'n/a')} "
-        "(no age data exists for controls in this cohort; not attempted, not claimed anywhere).",
-        "",
-        "## Primary result",
-        "",
+        f"({cohort.get('n_disease', 'n/a')} disease, {cohort.get('n_control', 'n/a')} control)",
+        f"- Majority-class baseline: accuracy {_fmt(cohort.get('majority_class_baseline_accuracy'))}, "
+        f"balanced accuracy {_fmt(cohort.get('majority_class_baseline_balanced_accuracy'))}",
+        f"- Sex/gender metadata field: {cohort.get('sex_covariate_column', 'not reported')}",
+        f"- Sex vs. class association: chi-square={_fmt(cohort.get('sex_vs_class_chi2'), 2)}, "
+        f"p={_fmt(cohort.get('sex_vs_class_chi2_p_value'), 4)}",
+        f"- Recorded ages: control={_fmt(cohort.get('n_control_with_age'), 0)}, "
+        f"disease={_fmt(cohort.get('n_disease_with_age'), 0)}. Age is not modeled.",
+        "", "## Primary result", "",
     ]
-
     if primary is None:
-        lines.append("No model was configured as primary (`analysis.control_vs_disease_ml.primary_model`).")
+        lines.append("No primary model is identified in the supplied comparison table.")
     else:
-        lines.extend(
-            [
-                f"Pre-specified primary model: **{_model_label(primary['model'])}** on the **{primary['representation']}** representation.",
-                "",
-                f"- Balanced accuracy: {_fmt(primary['balanced_accuracy_mean'])} "
-                f"(95% CI {_fmt(primary.get('bootstrap_balanced_accuracy_ci_low'))}–{_fmt(primary.get('bootstrap_balanced_accuracy_ci_high'))})",
-                f"- ROC-AUC: {_fmt(primary['roc_auc_mean'])} "
-                f"(95% CI {_fmt(primary.get('bootstrap_roc_auc_ci_low'))}–{_fmt(primary.get('bootstrap_roc_auc_ci_high'))})",
-                f"- MCC: {_fmt(primary['mcc_mean'])}; sensitivity: {_fmt(primary['sensitivity_mean'])}; specificity: {_fmt(primary['specificity_mean'])}",
-                f"- Permutation-test observed balanced accuracy (one locked 5-fold plan): "
-                f"{_fmt(primary['permutation_observed_balanced_accuracy'])}",
-                f"- Unrestricted permutation p-value: {_fmt(primary['permutation_p_value_unrestricted'], 4)}",
-                f"- **Sex-stratified permutation p-value (primary inferential test, §0.1): "
-                f"{_fmt(primary['permutation_p_value_sex_stratified'], 4)}** "
-                f"(BH-FDR q={_fmt(primary.get('permutation_p_fdr_q'), 4)})",
-            ]
-        )
+        lines.extend([
+            f"Configured primary model: **{_model_label(primary['model'])}** on **{primary['representation']}**.", "",
+            f"- Balanced accuracy: {_fmt(primary['balanced_accuracy_mean'])}; "
+            f"bootstrap percentile interval {_fmt(primary.get('bootstrap_balanced_accuracy_ci_low'))} "
+            f"to {_fmt(primary.get('bootstrap_balanced_accuracy_ci_high'))}",
+            f"- ROC-AUC: {_fmt(primary['roc_auc_mean'])}; "
+            f"bootstrap percentile interval {_fmt(primary.get('bootstrap_roc_auc_ci_low'))} "
+            f"to {_fmt(primary.get('bootstrap_roc_auc_ci_high'))}",
+            f"- MCC: {_fmt(primary['mcc_mean'])}; sensitivity: {_fmt(primary['sensitivity_mean'])}; "
+            f"specificity: {_fmt(primary['specificity_mean'])}",
+            f"- Permutation observed balanced accuracy: {_fmt(primary['permutation_observed_balanced_accuracy'])}; "
+            f"locked outer folds: {primary.get('permutation_cv_splits', 'not reported')}",
+            f"- Unrestricted permutation p-value: {_fmt(primary['permutation_p_value_unrestricted'], 4)}",
+            f"- Sex-stratified permutation p-value: {_fmt(primary['permutation_p_value_sex_stratified'], 4)}; "
+            f"BH-FDR q={_fmt(primary.get('permutation_p_fdr_q'), 4)}", "",
+            "Bootstrap percentile intervals describe this procedure; independent coverage calibration is not established.",
+        ])
         confounder = _confounder_row(confounder_df, primary["model"], primary["representation"])
-        if confounder is not None and confounder.get("status") == "ok":
-            lines.extend(
-                [
-                    "",
-                    "## Confounding (§0.1)",
-                    "",
-                    "This cohort's controls are 80% female and its disease group is 46% female — a",
-                    "structural association present in the data itself, not introduced by this analysis.",
-                    "A classifier separating Control from Disease is therefore not automatically a clean",
-                    "disease classifier; it could equally be reading sex. Two checks address this:",
-                    "",
-                    f"- **Female-only sensitivity refit** (n={confounder.get('n_female_disease', 'n/a')} disease / "
-                    f"{confounder.get('n_female_control', 'n/a')} control): balanced accuracy "
-                    f"{_fmt(confounder.get('female_only_balanced_accuracy_mean'))}. The signal does not collapse toward "
-                    "chance when restricted to one sex, which it would if it were purely a sex effect.",
-                    f"- **Sex-only baseline** (logistic regression on sex alone): balanced accuracy "
-                    f"{_fmt(confounder.get('sex_only_balanced_accuracy'))}, ROC-AUC {_fmt(confounder.get('sex_only_roc_auc'))}. "
-                    f"The primary model's ROC-AUC ({_fmt(primary['roc_auc_mean'])}) exceeds this baseline.",
-                    "",
-                    "Age could not be checked the same way: no age data exists for 49 of 50 controls in",
-                    "this cohort, and no proxy exists in the source data. This is a permanent limitation",
-                    "of this cohort, not a gap this analysis could close.",
-                ]
-            )
-
-    lines.extend(
-        [
-            "",
-            "## All models",
-            "",
-            dataframe_to_markdown(
-                comparison_df[
-                    [
-                        "model", "representation", "n_subjects", "balanced_accuracy_mean", "permutation_observed_balanced_accuracy", "roc_auc_mean", "mcc_mean",
-                        "permutation_p_value_unrestricted", "permutation_p_value_sex_stratified", "permutation_p_fdr_q",
-                    ]
-                ].round(4)
-            ),
-        ]
-    )
-
+        if confounder is not None:
+            lines.extend([
+                "", "## Confounding", "",
+                f"- Female-only sensitivity refit status: {confounder.get('status', 'not reported')}; "
+                f"n={confounder.get('n_female_disease', 'n/a')} disease / "
+                f"{confounder.get('n_female_control', 'n/a')} control; "
+                f"balanced accuracy={_fmt(confounder.get('female_only_balanced_accuracy_mean'))}",
+                f"- Sex-only baseline: balanced accuracy={_fmt(confounder.get('sex_only_balanced_accuracy'))}, "
+                f"ROC-AUC={_fmt(confounder.get('sex_only_roc_auc'))}",
+                "These descriptive comparisons do not establish that sex or other confounding has been removed.",
+            ])
+    columns = [
+        "model", "representation", "n_subjects", "balanced_accuracy_mean",
+        "permutation_observed_balanced_accuracy", "roc_auc_mean", "mcc_mean",
+        "permutation_p_value_unrestricted", "permutation_p_value_sex_stratified", "permutation_p_fdr_q",
+    ]
+    lines.extend(["", "## All models", "", dataframe_to_markdown(comparison_df[columns].round(4))])
     if not band_screen_df.empty:
         n_significant = int(band_screen_df.get("significant_fdr", pd.Series(dtype=bool)).sum())
-        lines.extend(
-            [
-                "",
-                "## Univariate band screen (descriptive context)",
-                "",
-                f"{n_significant} of {len(band_screen_df)} biochemical bands show a BH-FDR-significant",
-                "Control-vs-Disease difference (Mann-Whitney U). This is descriptive context for the",
-                "multivariate models above, not itself a claim, and is not gated on any model's",
-                "significance.",
-            ]
-        )
-
-    lines.extend(
-        [
-            "",
-            "## Limitations",
-            "",
-            "- Single cohort, single site. No external validation.",
-            "- Age not modeled: no data for controls, no proxy available.",
-            "- Exploratory only: no diagnostic, biomarker, causal, or clinical-utility claim is made.",
-            "- Per CLAUDE.md §6, this ML layer is separate from and does not attach any claim to the",
-            "  Biological PCA layer.",
-            "",
-        ]
-    )
+        lines.extend([
+            "", "## Univariate spectral-window screen", "",
+            f"{n_significant} of {len(band_screen_df)} tested windows pass the configured BH-FDR threshold.",
+            "These normalized spectral means are descriptive shape features, not molecular concentrations.",
+        ])
+    lines.extend([
+        "", "## Limitations", "",
+        "- No external validation is supplied by this run.",
+        "- Age is not included in the spectral classifiers; completeness is reported from the supplied cohort.",
+        "- Associations do not establish disease specificity, particle identity, or clinical utility.", "",
+    ])
     return "\n".join(lines)
 
 

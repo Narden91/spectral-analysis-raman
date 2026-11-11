@@ -35,7 +35,8 @@ from src.data_preparation.manifest import (
 from src.data_preparation.validation import validate_store
 from src.io.file_crawler import build_file_index, disambiguate_subject_ids
 from src.io.txt_reader import read_txt_spectrum
-from src.metadata.clinical import load_clinical_data, merge_index_with_clinical
+from src.metadata.clinical import _load_raw_clinical_data, load_clinical_data, merge_index_with_clinical
+from src.metadata.clinical_master import clinical_source_paths
 from src.preprocessing.pipeline import flatten_spectra_rows, run_preprocessing
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ def _raw_text_dir(cfg: dict) -> Path:
 
 
 def _clinical_data_path(cfg: dict) -> Path:
-    return resolve_project_path(_data_cfg(cfg).get("clinical_data_path", "data/clinical_data.csv"))
+    return resolve_project_path(_data_cfg(cfg).get("clinical_data_path", "data/clinical_master.csv"))
 
 
 def _code_version() -> str:
@@ -396,7 +397,7 @@ def _generated_signatures(root: Path) -> dict[str, dict[str, Any]]:
 
 
 def _input_signatures(cfg: dict, measurements: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    signatures = {str(_clinical_data_path(cfg)): file_signature(_clinical_data_path(cfg))}
+    signatures = {str(path): file_signature(path) for path in clinical_source_paths(cfg).values()}
     for row in measurements[["filepath", "raw_file_signature"]].itertuples(index=False):
         path = Path(str(row.filepath))
         stat = path.stat()
@@ -414,6 +415,7 @@ def _build_manifest(
 ) -> dict[str, Any]:
     return {
         "manifest_version": MANIFEST_VERSION, "schema_version": SCHEMA_VERSION, "store_type": store_type,
+        "clinical_sources": {key: str(path) for key, path in clinical_source_paths(cfg).items()},
         "created_at": iso_utc_now(), "source": source, "table_format": "parquet", "array_format": "npy",
         "input_signatures": _input_signatures(cfg, measurements) if store_type == "parsed" else {}, "generated_file_signatures": _generated_signatures(store_dir),
         "preprocessing_config_hash": config_hash(cfg.get("preprocessing", {})),
@@ -463,6 +465,8 @@ def build_parsed_store(
     progress_callback: ProgressCallback | None = None,
 ) -> MaterializedStore:
     config = _cfg(cfg)
+    clinical_paths = clinical_source_paths(config)
+    _load_raw_clinical_data(clinical_paths["clinical_data_path"])
     store_path = store_dir("parsed", config)
     if store_path.exists() and not force and validate_store(store_path, "parsed", config).is_valid:
         from src.data_preparation.manifest import load_manifest

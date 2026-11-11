@@ -20,7 +20,7 @@ from src.data_preparation.store import DataSource, get_active_data_source, resol
 _TABLE_CACHE: dict[tuple[str, str, str], pd.DataFrame] = {}
 _ARRAY_CACHE: dict[tuple[str, str, str, str], tuple[np.ndarray, np.ndarray]] = {}
 _SUMMARY_CACHE: dict[tuple[str, str, str], dict[str, np.ndarray]] = {}
-_WHOLE_AREA_CACHE: dict[tuple[str, str], dict[str, np.ndarray]] = {}
+_WHOLE_AREA_CACHE: dict[tuple[str, str, str], dict[str, np.ndarray]] = {}
 
 
 def _source_key(source: DataSource) -> tuple[str, str]:
@@ -198,12 +198,12 @@ def _coordinates_by_measurement(parsed: Path, source: DataSource) -> dict[str, p
     pixels = pd.read_parquet(parsed / "pixels.parquet", columns=["measurement_id", "pixel_index", "x", "y"])
     qc = pd.read_parquet(
         source.source_path / "qc.parquet",
-        columns=["measurement_id", "pixel_index", "normalized_row", "retained"],
+        columns=["measurement_id", "pixel_index", "normalized_row", "pre_normalization_row", "retained"],
     )
-    retained = qc.loc[qc["retained"].astype(bool), ["measurement_id", "pixel_index", "normalized_row"]]
+    retained = qc.loc[qc["retained"].astype(bool), ["measurement_id", "pixel_index", "normalized_row", "pre_normalization_row"]]
     resolved = retained.merge(pixels, on=["measurement_id", "pixel_index"], validate="one_to_one")
     return {
-        str(measurement_id): group[["x", "y", "normalized_row"]]
+        str(measurement_id): group[["x", "y", "normalized_row", "pre_normalization_row"]]
         for measurement_id, group in resolved.groupby("measurement_id", sort=False)
     }
 
@@ -212,16 +212,20 @@ def _whole_area_features(axes: dict[str, np.ndarray]) -> np.ndarray:
     return np.concatenate([_feature_names(code, axes[code]) for code in SPECTRAL_RANGES])
 
 
-def load_whole_area_store(data_source: DataSource | None = None) -> dict[str, np.ndarray]:
+def load_whole_area_store(
+    data_source: DataSource | None = None, *, basis: str = "normalized",
+) -> dict[str, np.ndarray]:
     source = _source(data_source)
-    key = _source_key(source)
+    if basis not in {"normalized", "pre_normalization"}:
+        raise ValueError(f"Unsupported spectral basis: {basis}")
+    key = (*_source_key(source), basis)
     cached = _WHOLE_AREA_CACHE.get(key)
     if cached is not None:
         return cached
 
     measurements = load_file_index(source).copy()
     measurements["pair_key"] = _pair_key(measurements)
-    spectral_data = {code: _load_array(source, code, basis="normalized") for code in SPECTRAL_RANGES}
+    spectral_data = {code: _load_array(source, code, basis=basis) for code in SPECTRAL_RANGES}
     arrays = {code: values[0] for code, values in spectral_data.items()}
     axes = {code: values[1] for code, values in spectral_data.items()}
     coordinates = _coordinates_by_measurement(_parsed_path(source), source)
@@ -246,8 +250,8 @@ def load_whole_area_store(data_source: DataSource | None = None) -> dict[str, np
         values.append(
             np.concatenate(
                 (
-                    np.nanmedian(arrays["1300"][paired["normalized_row_1300"].to_numpy(dtype=int)], axis=0),
-                    np.nanmedian(arrays["2850"][paired["normalized_row_2850"].to_numpy(dtype=int)], axis=0),
+                    np.nanmedian(arrays["1300"][paired[f"{basis}_row_1300"].to_numpy(dtype=int)], axis=0),
+                    np.nanmedian(arrays["2850"][paired[f"{basis}_row_2850"].to_numpy(dtype=int)], axis=0),
                 )
             )
         )

@@ -169,3 +169,38 @@ Checked on real data at commit `12caecf` plus the uncommitted 2026-11-09 review 
 | The full test suite passes. | `uv run --group gpu pytest -q`: 425 passed, 0 skipped (282 s) after the review changes, including the GPU batched-vs-sequential test; plus `test_calibration_gate_minimum_repetitions`. |
 
 - Prevention: before a new equivalence, join or timing test, check this table. Re-test only what a later change touches, on real data, against a reference path that shares no code with the fast path.
+
+## 2026-11-11: Retired panel interpretations and unsupported figure content
+
+The Tier C correction retains the exploratory question of whether recorded
+clinical endpoints associate with measured spectral features. The former fixed
+panel used `membrane_integrity_index = ch_bulk_2885 / lipid_carbonyl_1721`,
+`oxidative_index = carotenoid_1525 / lipid_carbonyl_1721`,
+`protein_remodeling_index = protein_1555 / (structural_protein_925 + structural_protein_980)`,
+and `tyrosine_environment_index = tyrosine_851 / tyrosine_821`. These were
+retrospective spectral ratios, without evidence validating membrane integrity,
+oxidation, protein remodeling, or a tyrosine-doublet interpretation.
+
+Their old windows were carbonyl 1710-1735 (fallback 1700-1750), carotenoid 1156
+1145-1170, protein 1555 1540-1570, structural 925 915-935, structural 980 970-990,
+tyrosine 851 845-858, and the misnamed 821 band 815-828, all in inverse
+centimetres. The revised implementation uses the maintained registry for atomic
+bands, preserves CH 2850-2950 as an explicit composite, and gives ratios neutral
+names. Previous outputs do not become results under the revised definitions;
+they require regeneration with the recorded basis and feature provenance.
+Reconsider biological index interpretations only with independent measurement
+validation of the named quantity and an explicit analysis definition.
+
+The former manuscript graphical abstract and replay-RNG helper were retired.
+The graphic embedded fixed cohort sizes, variance shares, performance values,
+channel counts and a clinical conclusion. Its source had no verified connection
+between those literals and the current run. Advancing a random stream through
+unrelated simulated spectra also obscured the actual bootstrap seed definition.
+A future graphical abstract must derive every study quantity from identified
+saved results; an explanatory schematic must be labelled as such. Recorded
+reference mean/SD values are summaries, not empirical draws: figures must not
+manufacture samples from them to depict a measured distribution.
+
+Evidence: source review against the pre-change `017e635` tree and the approved
+Tier C implementation on 2026-11-11. This record documents code definitions and
+reporting defects; it does not assert a new cohort result or assay validation.

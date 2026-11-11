@@ -19,6 +19,7 @@ from src.analysis._single_range import (
     _write_pca_pc1_dominance_report,
 )
 from src.analysis.eda_mode import resolve_eda_analysis_mode
+from src.analysis.io_utils import write_json_atomic
 from src.analysis.joint_dr import joint_pca_mfa
 from src.analysis.statistics import (
     run_pca,
@@ -221,6 +222,10 @@ def _run_global_drivers_phase(
         band_intensity_export.insert(0, "group", all_labels)
         band_intensity_export.insert(0, "subject_id", all_sids)
         band_intensity_export.to_csv(drivers_dir / "band_intensities.csv", index=False)
+        write_json_atomic(drivers_dir / "biochemical_feature_metadata.json", {
+            "spectral_basis": "pre_normalization", "band_statistic": "mean",
+            "ratio_statistic": "ratio_of_band_means", "aggregation_level": "paired_area",
+        })
 
         ratio_pairs = [
             (str(pair[0]), str(pair[1]))
@@ -390,14 +395,23 @@ def _run_whole_spectra_eda(
     wavenumbers: np.ndarray,
     group_ids: dict[str, list[str]],
     range_title: str,
+    *,
+    pre_normalization_groups: dict[str, np.ndarray],
 ) -> dict:
     analysis_mode = resolve_eda_analysis_mode(config)
     all_spectra = np.vstack(list(groups.values()))
     all_labels = np.concatenate([np.full(v.shape[0], k) for k, v in groups.items()])
     all_sids = []
     for key in groups:
-        all_sids.extend(group_ids.get(key, [f"{key}_{i}" for i in range(groups[key].shape[0])]))
+        if key not in group_ids or len(group_ids[key]) != groups[key].shape[0]:
+            raise ValueError("Whole-spectrum rows require matching recorded subject identifiers")
+        all_sids.extend(group_ids[key])
 
+    if set(pre_normalization_groups) != set(groups):
+        raise ValueError("Whole-spectrum companion groups differ from normalized groups")
+    if any(pre_normalization_groups[key].shape != groups[key].shape for key in groups):
+        raise ValueError("Whole-spectrum companion rows or axes are not aligned")
+    band_spectra = np.vstack([pre_normalization_groups[key] for key in groups])
     split_index = whole_spectra_split_index(wavenumbers)
     relational_bands: dict[str, tuple[float, float]] = {}
     fingerprint_bands: dict[str, tuple[float, float]] = {}
@@ -413,7 +427,7 @@ def _run_whole_spectra_eda(
                 split_index,
             )
             band_intensity_df = compute_band_intensities(
-                all_spectra,
+                band_spectra,
                 wavenumbers,
                 relational_bands,
             )

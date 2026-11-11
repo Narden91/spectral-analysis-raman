@@ -84,6 +84,9 @@ def test_run_covariate_region_models_reports_missing_covariates_and_formulas(tmp
     matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
     candidate_path = tmp_path / "candidate_regions_cluster_corrected.csv"
     _feature_matrix().to_parquet(matrix_path, index=False)
+    _feature_matrix().rename(columns=lambda col: col.replace("1300__", "1300_bc__").replace("2850__", "2850_bc__")).to_parquet(
+        tmp_path / "subject_feature_matrix_whole_bc.parquet", index=False,
+    )
     _candidate_regions().to_csv(candidate_path, index=False)
 
     written = run_covariate_region_models(
@@ -128,6 +131,9 @@ def test_run_covariate_region_models_skips_writes_when_no_candidates(tmp_path: P
     matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
     candidate_path = tmp_path / "candidate_regions_cluster_corrected.csv"
     _feature_matrix().to_parquet(matrix_path, index=False)
+    _feature_matrix().rename(columns=lambda col: col.replace("1300__", "1300_bc__").replace("2850__", "2850_bc__")).to_parquet(
+        tmp_path / "subject_feature_matrix_whole_bc.parquet", index=False,
+    )
     # Empty candidate table (Phase 6 produced zero rows): only a header, no
     # data rows for run_covariate_region_models to iterate over.
     pd.DataFrame(columns=["source_analysis", "analysis_name", "target", "group_variable"]).to_csv(

@@ -36,16 +36,15 @@ def _integrated_candidates() -> pd.DataFrame:
             "max_abs_effect": [0.8, 0.5, 0.3, 0.4],
             "integrated_abs_effect": [7.0, 4.0, 2.0, 3.0],
             "evidence_status": [
-                "independently_validated",
+                "cluster_supported_exploratory",
                 "cluster_supported_exploratory",
                 "effect_only_fallback",
                 "fdr_descriptive",
             ],
             "fdr_significant": [True, True, False, True],
-            "cluster_permutation_significant": [True, False, False, False],
+            "cluster_permutation_significant": [True, True, False, False],
             "covariate_persisted": [True, True, False, False],
             "pls_vip_coverage": [True, False, False, False],
-            "splsda_selected": [False, False, False, False],
             "n_supporting_sources": [2, 2, 1, 1],
             "biochemical_class": ["protein", "protein", "unassigned", "lipid"],
             "interpretation_note": ["note"] * 4,
@@ -73,13 +72,13 @@ def test_run_candidate_region_report_produces_outputs(tmp_path: Path) -> None:
     assert "candidate_region_figures" in outputs
 
     report_text = outputs["candidate_region_report"].read_text(encoding="utf-8")
-    assert "Robust" in report_text
+    assert "Robust" not in report_text
     assert "Exploratory" in report_text
-    assert "Unstable" in report_text
-    assert "Confounded" in report_text
+    assert "Unsupported" in report_text
+    assert "Confounded" not in report_text
 
     summary = pd.read_csv(outputs["candidate_region_summary"])
-    assert set(summary["finding_class"]) == {"robust", "exploratory", "unstable", "confounded"}
+    assert set(summary["finding_class"]) == {"exploratory", "unsupported"}
     assert summary["n_regions"].sum() == 4
 
     assert any(outputs["candidate_region_figures"].glob("*.png"))
@@ -88,7 +87,7 @@ def test_run_candidate_region_report_produces_outputs(tmp_path: Path) -> None:
 def test_build_panel_report_section_contains_four_domains_without_blocked_terms() -> None:
     ranking = pd.DataFrame(
         {
-            "feature_name": ["oxidative_index", "membrane_integrity_index", "protein_remodeling_index"],
+            "feature_name": ["carotenoid_to_carbonyl_ratio", "ch_bulk_to_carbonyl_ratio", "tryptophan_to_sugar_beta_sheet_ratio"],
             "effect_size_flag": [True, True, True],
             "bootstrap_ci_excludes_zero": [True, False, False],
             "permutation_flag": [True, False, False],
@@ -99,13 +98,13 @@ def test_build_panel_report_section_contains_four_domains_without_blocked_terms(
     text = build_panel_report_section(ranking=ranking)
 
     for section in [
-        "Membrane Remodeling",
-        "Protein Structural Heterogeneity",
+        "Carbonyl and CH-Stretch Features",
+        "Fingerprint Features and Ratios",
             "Tentatively Assigned Raman Ratios",
-        "System-Level EV Disruption",
+        "Overall Descriptive Feature Summary",
     ]:
         assert section in text
-    assert "carotenoid-like / lipoprotein-associated" in text
+    assert "do not identify a molecular source" in text
     blocked = ["biomarker", "diagnostic", "predictive", "causal"]
     assert not any(term in text.lower() for term in blocked)
 
@@ -114,7 +113,7 @@ def test_run_panel_report_section_writes_section_and_readme(tmp_path: Path) -> N
     evidence_flags_path = tmp_path / "panel_evidence_flags.csv"
     pd.DataFrame(
         {
-            "feature_name": ["oxidative_index"],
+            "feature_name": ["carotenoid_to_carbonyl_ratio"],
             "effect_size_flag": [True],
             "bootstrap_ci_excludes_zero": [True],
             "permutation_flag": [True],
@@ -185,3 +184,18 @@ def test_report_claims_minimal_panel_only_for_nonempty_artifact(tmp_path: Path) 
     )
     report_text = outputs["candidate_region_report"].read_text(encoding="utf-8")
     assert "The candidate-derived minimal panel was selected" in report_text
+
+
+def test_candidate_label_cannot_fabricate_independent_validation():
+    row = pd.Series({"evidence_status": "independently_validated", "cluster_permutation_significant": True})
+    with pytest.raises(ValueError, match="cannot verify a claim of independent validation"):
+        candidate_region_report._classify_candidate(row)
+
+
+def test_cluster_status_label_alone_is_not_selection_evidence():
+    assert candidate_region_report._classify_candidate(pd.Series({"evidence_status": "cluster_supported_exploratory"})) == "unsupported"
+
+
+def test_absent_panel_checks_are_missing_not_zero():
+    counts = candidate_region_report._panel_flag_counts(pd.DataFrame({"feature_name": ["recorded_feature"]}))
+    assert counts["n_features"].isna().all()

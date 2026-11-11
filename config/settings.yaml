@@ -11,7 +11,8 @@ data:
   source: "preprocessed"        # str: one of {"parsed", "preprocessed"}
   auto_build: false             # bool: analysis never builds or mutates data stores
   raw_text_dir: "data/raw"      # str: original canonical spectra tree
-  clinical_data_path: "data/clinical_data.csv"  # str: source clinical CSV
+  clinical_data_path: "data/clinical_master.csv"  # verified clinical source
+  clinical_dictionary_path: "data/clinical_master_dictionary.csv"  # clinical definitions and provenance
   parsed_dir: "data/parsed"     # str: validated materialized store before preprocessing
   preprocessed_dir: "data/preprocessed"  # str: materialized store after preprocessing
   file_extension: ".txt"        # str: spectrum file suffix
@@ -71,7 +72,7 @@ preprocessing:
   baseline:
     method: "arpls"  # str: baseline algorithm ("arpls", "snip", ...)
     lam: 1000000.0  # float: arPLS roughness penalty (larger = smoother)
-    p: 0.01  # float: arPLS asymmetry weight, 0 < p < 1
+    p: 0.01  # float: ALS asymmetry weight, 0 < p < 1
     snip:
       max_half_window: 50  # int: max half-window for SNIP
       decreasing: true  # bool: true if window decreases during iterations
@@ -96,38 +97,26 @@ preprocessing:
   retention:
     min_pixels_per_area: 4  # int: drop a file/measurement if fewer pixels survive QC
     min_pixels_per_subject: 10  # int: drop a subject-range if fewer pixels survive QC
-  cache:
-    enabled: false  # bool: persist/read the deterministic data_preprocessed/ cache
-    version: 2  # int: bump to force-invalidate every cached area
   quality_filter:
     spectral_quality:
       enabled: true  # bool: enable spectral quality gating
       snr_threshold: 5.0  # float: minimum signal-to-noise ratio
       peak_window: 5  # int: half-width in channels for peak search
       noise_channels: 20  # int: trailing channels used to estimate noise
-      min_area_percentile: null  # deprecated: batch-relative rejection is disabled
       min_integrated_signal: null  # requires an independently calibrated block-specific reference
-      # Compute SNR/area on a virtual edge-trimmed preview so edge artifacts
-      # that will later be removed cannot drive rejection.
-      use_trim_aware_preview: true  # bool
       # Fixed wavenumber windows (cm^-1) used to anchor the SNR peak search.
       # Deterministic: the anchor never depends on subject/batch content.
       # Falls back to peak detection only if no window overlaps the axis.
       anchor_windows:
         fingerprint: [[995.0, 1015.0], [1435.0, 1470.0], [1630.0, 1680.0]]
         ch_stretch: [[2840.0, 2975.0]]
-    baseline_clip:
-      enabled: false  # signed baseline residuals are preserved; metrics remain descriptive
-    axis_extrapolation:
-      enabled: true  # bool: enable QC gate on interpolation beyond measured range
-      max_extrapolated_fraction: 0.02  # float: reject spectra where >2% of canonical channels extrapolated
   # Region-specific overrides take precedence over global defaults.
   ranges:
     fingerprint:
       baseline:
         method: "arpls"  # str: baseline algorithm
         lam: 1000000.0  # float: arPLS roughness penalty
-        p: 0.01  # float: arPLS asymmetry weight
+        p: 0.01  # float: ALS asymmetry weight
         arpls:
           lam: 1000000.0  # float: arPLS roughness penalty
           ratio: 0.001  # float: convergence ratio threshold
@@ -155,15 +144,11 @@ preprocessing:
   # Normalization modes used by the preprocessing orchestrator.
   normalization:
     method: "snv"  # str: default normalization ("vector", "snv", "none", ...)
-    default_mode: "eda"  # str: selected mode key ("eda", "cross")
     modes:
       eda: "snv"  # str: normalization for EDA track
       cross: "none"  # str: normalization for cross-range fusion
   artifacts:
-    save_qc_tables: true  # bool: write per-area QC tables
     save_stage_arrays: false  # bool: save intermediate per-stage spectra
-    stage_arrays: ["raw", "cosmic_corrected", "baseline", "baseline_corrected", "smoothed", "normalized"]  # list[str]: stages to persist if enabled
-    format: "npz"  # str: file format for saved arrays
 
 # ---------------------------------------------------------------------------
 # Output

@@ -85,6 +85,7 @@ def test_disease_only_whole_spectra_skips_ratio_summary(
         wavenumbers=wavenumbers,
         group_ids=group_ids,
         range_title="whole spectra",
+        pre_normalization_groups=groups,
     )
 
     drivers_dir = whole_spectra_output_guard / "global_drivers"

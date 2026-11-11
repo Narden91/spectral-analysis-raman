@@ -22,18 +22,17 @@ def _panel_config() -> dict:
                 "provenance_type": "post_hoc_fixed",
                 "min_snr_for_peak_fit": 0.1,
                 "integrals": {
-                    "lipid_carbonyl_1721": ["1300", 1710.0, 1735.0],
-                    "lipid_carbonyl_1721_fallback": ["1300", 1700.0, 1750.0],
+                    "lipid_carbonyl_1721": ["1300", 1710.0, 1730.0],
                     "carotenoid_1525": ["1300", 1510.0, 1535.0],
-                    "protein_1555": ["1300", 1540.0, 1570.0],
+                    "tryptophan_1555": ["1300", 1550.0, 1560.0],
                     "ch_bulk_2885": ["2850", 2850.0, 2950.0],
                 },
                 "indices": {
-                    "membrane_integrity_index": ["ch_bulk_2885", "lipid_carbonyl_1721"],
-                    "oxidative_index": ["carotenoid_1525", "lipid_carbonyl_1721"],
+                    "ch_bulk_to_carbonyl_ratio": ["ch_bulk_2885", "lipid_carbonyl_1721"],
+                    "carotenoid_to_carbonyl_ratio": ["carotenoid_1525", "lipid_carbonyl_1721"],
                 },
                 "primary_hypothesis": {
-                    "feature": "oxidative_index",
+                    "feature": "carotenoid_to_carbonyl_ratio",
                     "endpoint": "delta_moca",
                     "direction": "negative",
                     "test": "partial_spearman",
@@ -53,7 +52,7 @@ def _feature_matrix() -> pd.DataFrame:
             "1300__1715.0": [20.0, 22.0],
             "1300__1725.0": [21.0, 23.0],
             "1300__1710.0": [19.0, 21.0],
-            "1300__1735.0": [22.0, 24.0],
+            "1300__1730.0": [22.0, 24.0],
             "1300__1520.0": [10.0, 11.0],
             "1300__1530.0": [11.0, 12.0],
             "1300__1510.0": [9.0, 10.0],
@@ -77,7 +76,7 @@ def test_preregistration_snapshot_is_frozen(tmp_path: Path) -> None:
 
     assert "Primary exploratory anchor" in text
     assert "Fixed post hoc Raman panel" in text
-    assert "oxidative_index" in text
+    assert "carotenoid_to_carbonyl_ratio" in text
     assert "delta_moca" in text
     assert "partial Spearman" in text
     assert "analysis:" in text
@@ -88,37 +87,29 @@ def test_preregistration_snapshot_is_frozen(tmp_path: Path) -> None:
 
 
 def test_named_indices_are_primary_columns() -> None:
-    frame = _feature_matrix()
+    frame = _feature_matrix().rename(columns=lambda col: col.replace("1300__", "1300_bc__").replace("2850__", "2850_bc__"))
     columns = [column for column in frame.columns if "__" in column]
     panel_matrix, column_order = build_panel_matrix(frame, columns, cfg=_panel_config())
 
-    assert column_order[:2] == ["membrane_integrity_index", "oxidative_index"]
+    assert column_order[:2] == ["ch_bulk_to_carbonyl_ratio", "carotenoid_to_carbonyl_ratio"]
     assert "lipid_carbonyl_1721" in column_order
-    assert "oxidative_index" in panel_matrix.columns
+    assert "carotenoid_to_carbonyl_ratio" in panel_matrix.columns
 
 
-def test_1720_fallback_when_narrow_window_too_small() -> None:
-    frame = pd.DataFrame(
-        {
-            "1300__1700.0": [19.0],
-            "1300__1715.0": [20.0],
-            "1300__1740.0": [21.0],
-            "1300__1750.0": [22.0],
-            "1300__1520.0": [10.0],
-            "2850__2860.0": [30.0],
-        }
-    )
-    columns = [column for column in frame.columns if column.startswith("1300__") or column.startswith("2850__")]
-    notes: list[str] = []
-    _, column_order = build_panel_matrix(frame, columns, cfg=_panel_config(), runtime_notes=notes)
-
-    assert any("fallback" in note for note in notes)
-    assert "lipid_carbonyl_1721" in column_order
+def test_narrow_carbonyl_window_is_not_expanded_when_coverage_is_missing() -> None:
+    frame = pd.DataFrame({"1300_bc__1700.0": [19.0], "1300_bc__1715.0": [20.0],
+                          "1300_bc__1740.0": [21.0], "1300_bc__1750.0": [22.0]})
+    panel, order = build_panel_matrix(frame, list(frame), cfg=_panel_config())
+    assert "lipid_carbonyl_1721" not in order
+    assert "carotenoid_to_carbonyl_ratio" not in panel
 
 
 def test_run_preregistered_panel_writes_outputs(tmp_path: Path) -> None:
     matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
     _feature_matrix().to_parquet(matrix_path, index=False)
+    _feature_matrix().rename(columns=lambda col: col.replace("1300__", "1300_bc__").replace("2850__", "2850_bc__")).to_parquet(
+        tmp_path / "subject_feature_matrix_whole_bc.parquet", index=False,
+    )
 
     outputs = run_preregistered_panel(
         feature_matrix_path=matrix_path,
@@ -128,7 +119,7 @@ def test_run_preregistered_panel_writes_outputs(tmp_path: Path) -> None:
 
     assert set(outputs) == {"preregistration", "panel_provenance", "panel_feature_matrix"}
     panel = pd.read_csv(outputs["panel_feature_matrix"])
-    assert list(panel.columns[:3]) == ["subject_id", "membrane_integrity_index", "oxidative_index"]
+    assert list(panel.columns[:3]) == ["subject_id", "ch_bulk_to_carbonyl_ratio", "carotenoid_to_carbonyl_ratio"]
     provenance = pd.read_csv(outputs["panel_provenance"])
     assert provenance.loc[0, "provenance_type"] == "post_hoc_fixed"
 

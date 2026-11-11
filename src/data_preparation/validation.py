@@ -18,6 +18,7 @@ from src.data_preparation.manifest import (
     hash_manifest,
     load_manifest,
 )
+from src.metadata.clinical_master import clinical_source_paths
 
 
 @dataclass
@@ -214,6 +215,15 @@ def validate_store(path: str | Path, expected_store_type: str, config: dict, *, 
     _validate_cohorts(store_path, subjects, errors)
 
     stale = False
+    try:
+        current_clinical_sources = {key: str(path) for key, path in clinical_source_paths(config).items()}
+    except (OSError, ValueError) as exc:
+        stale = True
+        errors.append(f"Configured clinical sources cannot be read: {type(exc).__name__}")
+    else:
+        if manifest.get("clinical_sources") != current_clinical_sources:
+            stale = True
+            errors.append("Store is stale relative to configured clinical sources")
     if expected_store_type == "preprocessed" and manifest.get("preprocessing_config_hash") != config_hash(config.get("preprocessing", {})):
         stale = True
         errors.append("Store is stale relative to resolved preprocessing configuration")

@@ -1,4 +1,4 @@
-"""Phase 9: PLS-L1DA Exploratory Classifier (sPLS-DA-like model)."""
+"""Phase 9: exploratory PLS followed by L1 logistic classification."""
 
 from __future__ import annotations
 
@@ -34,6 +34,15 @@ def _splsda_cfg(cfg: dict) -> dict:
     return cfg.get("analysis", {}).get("splsda", {})
 
 
+def _spectral_coefficients(
+    pls: PLSRegression,
+    latent_coefficients: np.ndarray,
+    scaler: StandardScaler,
+) -> np.ndarray:
+    """Express the fitted latent logistic slope in the original feature units."""
+    return (pls.x_rotations_ @ np.asarray(latent_coefficients).ravel()) / scaler.scale_
+
+
 def _tune_pls_l1da(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -42,22 +51,20 @@ def _tune_pls_l1da(
     n_inner_splits: int,
     random_state: int,
 ) -> tuple[int, float]:
-    best_n_comp = component_grid[0]
-    best_c = c_range[0]
-    best_score = -1.0
-
-    min_class_count = np.min(np.bincount(y_train))
+    if not component_grid or not c_range:
+        raise ValueError("PLS-L1DA requires nonempty component and logistic grids")
+    min_class_count = int(np.min(np.bincount(y_train, minlength=2)))
     n_splits = min(n_inner_splits, min_class_count)
     if n_splits < 2:
-        return best_n_comp, best_c
-
+        raise ValueError("PLS-L1DA requires two training participants per class for inner CV")
     inner_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     folds = list(inner_cv.split(X_train, y_train))
-
-    for n_comp in component_grid:
-        if n_comp > X_train.shape[0] - 2 or n_comp > X_train.shape[1] or n_comp < 1:
-            continue
-
+    max_components = min(X_train.shape[1], min(len(train) - 1 for train, _ in folds))
+    valid_grid = [candidate for candidate in component_grid if 1 <= candidate <= max_components]
+    if not valid_grid:
+        raise ValueError("PLS-L1DA component grid has no candidate supported by every inner training fold")
+    best_n_comp, best_c, best_score = valid_grid[0], c_range[0], -1.0
+    for n_comp in valid_grid:
         for c in c_range:
             scores = []
             for tr_idx, te_idx in folds:
@@ -74,7 +81,7 @@ def _tune_pls_l1da(
                 X_te_pls = pls.transform(X_te)
 
                 clf = l1_logistic_model(c=c, random_state=random_state)
-                fit_with_convergence_capture(clf, X_tr_pls, y_tr, context="sPLS-DA inner CV")
+                fit_with_convergence_capture(clf, X_tr_pls, y_tr, context="PLS-L1DA inner CV")
 
                 preds = clf.predict(X_te_pls)
                 scores.append(balanced_accuracy_score(y_te, preds))
@@ -159,15 +166,14 @@ def _permuted_splsda_score(
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 
-        n_c = min(best_n_comp, X_train.shape[0] - 2)
-        pls = PLSRegression(n_components=max(1, n_c), scale=False)
+        pls = PLSRegression(n_components=best_n_comp, scale=False)
         pls.fit(X_train_scaled, y_train)
 
         X_train_pls = pls.transform(X_train_scaled)
         X_test_pls = pls.transform(X_test_scaled)
 
         clf = l1_logistic_model(c=best_c, random_state=random_state)
-        fit_with_convergence_capture(clf, X_train_pls, y_train, context="sPLS-DA permutation CV")
+        fit_with_convergence_capture(clf, X_train_pls, y_train, context="PLS-L1DA permutation CV")
 
         y_pred[test_idx] = clf.predict(X_test_pls)
 
@@ -192,10 +198,15 @@ def run_splsda_classifier(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     gate_p = float(splsda_cfg.get("gate_on_pls_p_value", 0.05))
+    if pls_outputs is None or "pls_permutation_results" not in pls_outputs:
+        raise ValueError("PLS-L1DA requires recorded PLS permutation results to evaluate its gate")
     if pls_outputs is not None and "pls_permutation_results" in pls_outputs:
         try:
             pls_perm = pd.read_csv(pls_outputs["pls_permutation_results"])
-            if pls_perm["permutation_p_value"].min() >= gate_p:
+            gate_values = pd.to_numeric(pls_perm["permutation_p_value"], errors="raise").to_numpy(dtype=float)
+            if gate_values.size == 0 or not np.isfinite(gate_values).all() or ((gate_values < 0) | (gate_values > 1)).any():
+                raise ValueError("Recorded PLS permutation p-values must be finite values in [0, 1]")
+            if gate_values.min() >= gate_p:
                 logger.info("Skipping PLS-L1DA: No PLS model passed permutation gate (p < %s)", gate_p)
                 gated_targets = splsda_cfg.get("targets", [])
                 if not gated_targets:
@@ -268,8 +279,8 @@ def run_splsda_classifier(
                         n_artifacts=2,
                     ).as_row(),
                 }
-        except Exception as e:
-            logger.warning("Could not read PLS permutation results to check gate: %s", e)
+        except (OSError, ValueError, KeyError) as exc:
+            raise RuntimeError("Cannot evaluate the recorded PLS permutation gate") from exc
 
     disease_only, feature_meta = load_disease_feature_frame(feature_matrix_path=feature_matrix_path)
     all_feature_columns = feature_columns(disease_only)
@@ -340,7 +351,6 @@ def run_splsda_classifier(
 
         y_pred = np.zeros_like(y, dtype=int)
         y_prob = np.zeros_like(y, dtype=float)
-        fold_selected: list[np.ndarray] = []
         fold_signs: list[np.ndarray] = []
 
         for train_idx, test_idx in cv_strategy.split(X, y):
@@ -360,9 +370,8 @@ def run_splsda_classifier(
             X_test_pls = pls.transform(X_test_scaled)
 
             clf = l1_logistic_model(c=best_c, random_state=random_state)
-            fit_with_convergence_capture(clf, X_train_pls, y_train, context="sPLS-DA outer CV")
-            fold_weights = np.dot(pls.x_loadings_, clf.coef_.ravel())
-            fold_selected.append(np.abs(fold_weights) > 1e-12)
+            fit_with_convergence_capture(clf, X_train_pls, y_train, context="PLS-L1DA outer CV")
+            fold_weights = _spectral_coefficients(pls, clf.coef_, scaler)
             fold_signs.append(np.sign(fold_weights))
 
             y_pred[test_idx] = clf.predict(X_test_pls)
@@ -387,12 +396,9 @@ def run_splsda_classifier(
         X_scaled_pls = final_pls.transform(X_scaled)
 
         final_clf = l1_logistic_model(c=final_c, random_state=random_state)
-        fit_with_convergence_capture(final_clf, X_scaled_pls, y, context="sPLS-DA final fit")
+        fit_with_convergence_capture(final_clf, X_scaled_pls, y, context="PLS-L1DA final fit")
 
-        log_reg_coefs = final_clf.coef_.ravel()
-        pls_loadings = final_pls.x_loadings_
-        overall_weights = np.dot(pls_loadings, log_reg_coefs)
-        selection_frequency = np.mean(np.vstack(fold_selected), axis=0)
+        overall_weights = _spectral_coefficients(final_pls, final_clf.coef_, final_scaler)
         sign_stability = np.abs(np.mean(np.vstack(fold_signs), axis=0))
 
         for i, col in enumerate(all_feature_columns):
@@ -402,11 +408,9 @@ def run_splsda_classifier(
                 "feature_name": col,
                 "spectral_block": meta["spectral_block"],
                 "wavenumber": meta["wavenumber"],
-                "loading_weight": float(overall_weights[i]),
-                "selected": bool(overall_weights[i] != 0.0),
+                "coefficient": float(overall_weights[i]),
                 "estimation_scope": "full_data_descriptive",
                 "validated": False,
-                "selection_frequency": float(selection_frequency[i]),
                 "sign_stability": float(sign_stability[i]),
             })
 
@@ -463,9 +467,9 @@ def run_splsda_classifier(
         # written unconditionally above.
         if bands_rows:
             bands_df = pd.DataFrame(bands_rows)
-            bands_path = target_dir / "pls_l1da_selected_bands.csv"
+            bands_path = target_dir / "pls_l1da_feature_coefficients.csv"
             bands_df.to_csv(bands_path, index=False)
-            res["pls_l1da_selected_bands"] = bands_path
+            res["pls_l1da_feature_coefficients"] = bands_path
 
         if perm_rows:
             perm_df = pd.DataFrame(perm_rows)

@@ -62,7 +62,7 @@ def test_run_disease_stratification_writes_expected_outputs(tmp_path: Path) -> N
     candidates = pd.read_csv(written["stratification_candidate_regions"])
 
     assert "low_vs_high_moca" in set(tests["contrast_name"])
-    assert "decline_vs_stable_or_improved" in set(tests["contrast_name"])
+    assert "decline_vs_stable_or_improved" not in set(tests["contrast_name"])
     assert "mannwhitney" in set(tests["test"].dropna())
     assert "kruskal" in set(tests["test"].dropna())
     assert "insufficient sample size" in set(tests["status"])

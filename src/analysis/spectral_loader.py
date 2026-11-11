@@ -94,11 +94,12 @@ def build_whole_spectra_group_matrices(
     max_subjects: int | None = None,
     *,
     data_source: DataSource | None = None,
+    basis: str = "normalized",
     **_: object,
 ) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, list[str]]]:
     """Build all whole-spectrum groups from the same paired-pixel store."""
     frame = _normalized_index(df_index)
-    payload = load_whole_area_store(data_source)
+    payload = load_whole_area_store(data_source, basis=basis)
     axis = _axis(payload["feature_names"])
     matrices: dict[str, np.ndarray] = {}
     ids: dict[str, list[str]] = {}

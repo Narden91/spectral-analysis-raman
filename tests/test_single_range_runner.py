@@ -71,7 +71,7 @@ def test_whole_range_delegates_with_matching_subject_ids(prepared_cohort, monkey
     monkeypatch.setattr(runner, "build_whole_spectra_group_matrices", lambda *args, **kwargs: (wave, groups, ids))
     expected = {"whole_result": True}
 
-    def run_whole(index, actual_groups, actual_wave, actual_ids, title):
+    def run_whole(index, actual_groups, actual_wave, actual_ids, title, *, pre_normalization_groups):
         assert actual_groups is groups
         assert actual_ids is ids
         np.testing.assert_array_equal(actual_wave, wave)

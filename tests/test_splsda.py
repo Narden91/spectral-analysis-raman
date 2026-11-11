@@ -104,7 +104,7 @@ def test_splsda_produces_expected_outputs(mock_load, synthetic_feature_matrix, m
     )
 
     assert len(outputs) == 3
-    for key in ["pls_l1da_cv_performance", "pls_l1da_selected_bands", "pls_l1da_permutation_results"]:
+    for key in ["pls_l1da_cv_performance", "pls_l1da_feature_coefficients", "pls_l1da_permutation_results"]:
         assert key in outputs
         assert outputs[key].exists()
 
@@ -115,8 +115,8 @@ def test_splsda_produces_expected_outputs(mock_load, synthetic_feature_matrix, m
     assert "group_variable" in perf_df.columns
     assert set(perf_df["group_variable"]) == {"moca_severity_group", "delta_moca_group"}
     assert set(perf_df["inference_role"]) == {"conditional_exploratory"}
-    bands_df = pd.read_csv(outputs["pls_l1da_selected_bands"])
-    assert {"estimation_scope", "validated", "selection_frequency", "sign_stability"}.issubset(bands_df.columns)
+    bands_df = pd.read_csv(outputs["pls_l1da_feature_coefficients"])
+    assert {"estimation_scope", "validated", "coefficient", "sign_stability"}.issubset(bands_df.columns)
     assert not bands_df["validated"].any()
 
 
@@ -224,3 +224,46 @@ def test_splsda_permutation_test_returns_full_budget_when_never_resolved():
         splsda_cfg={"permutation_min": 10, "permutation_check_interval": 10, "permutation_confidence": 0.999999},
     )
     assert n_used == 10
+
+
+def test_spectral_coefficient_projection_matches_fitted_decision_changes():
+    from sklearn.cross_decomposition import PLSRegression
+    from sklearn.preprocessing import StandardScaler
+
+    from src.analysis.sklearn_utils import l1_logistic_model
+    from src.analysis.splsda import _spectral_coefficients
+
+    rng = np.random.default_rng(14)
+    X = rng.normal(size=(30, 5)) * np.array([1., 2., 3., 4., 5.])
+    y = (X[:, 0] + X[:, 2] > 0).astype(int)
+    scaler = StandardScaler().fit(X)
+    transformed = scaler.transform(X)
+    pls = PLSRegression(n_components=2, scale=False).fit(transformed, y)
+    classifier = l1_logistic_model(c=1., random_state=1).fit(pls.transform(transformed), y)
+    scores = classifier.decision_function(pls.transform(transformed))
+    coefficients = _spectral_coefficients(pls, classifier.coef_, scaler)
+    np.testing.assert_allclose(scores - scores[0], (X - X[0]) @ coefficients, rtol=1e-12, atol=1e-12)
+
+
+def test_component_grid_respects_every_inner_training_fold():
+    from src.analysis.splsda import _tune_pls_l1da
+    X = np.arange(48, dtype=float).reshape(8, 6) + np.eye(8, 6)
+    y = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    selected, _ = _tune_pls_l1da(X, y, [1, 4, 6], [1.], 2, 42)
+    assert selected == 1
+    with pytest.raises(ValueError, match="every inner training fold"):
+        _tune_pls_l1da(X, y, [4, 6], [1.], 2, 42)
+
+
+def test_missing_recorded_gate_cannot_start_model_fitting(tmp_path):
+    with pytest.raises(ValueError, match="recorded PLS permutation results"):
+        run_splsda_classifier(output_dir=tmp_path, cfg={"analysis": {"splsda": {"enabled": True}}})
+
+
+def test_invalid_recorded_gate_cannot_fall_through_to_classifier(tmp_path):
+    gate = tmp_path / "invalid_gate.csv"
+    pd.DataFrame({"permutation_p_value": [np.nan]}).to_csv(gate, index=False)
+    with patch("src.analysis.splsda.load_disease_feature_frame") as load:
+        with pytest.raises(RuntimeError, match="recorded PLS permutation gate"):
+            run_splsda_classifier(pls_outputs={"pls_permutation_results": gate}, output_dir=tmp_path)
+        load.assert_not_called()

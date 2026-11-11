@@ -8,7 +8,7 @@ from src.analysis.robustness_ranking import compute_evidence_flags
 def test_compute_evidence_flags_is_deterministic() -> None:
     contrasts = pd.DataFrame(
         {
-            "feature_name": ["oxidative_index", "membrane_integrity_index", "protein_remodeling_index"],
+            "feature_name": ["carotenoid_to_carbonyl_ratio", "ch_bulk_to_carbonyl_ratio", "tryptophan_to_sugar_beta_sheet_ratio"],
             "feature_family": ["named_index", "named_index", "named_index"],
             "status": ["ok", "ok", "ok"],
             "cliffs_delta": [0.8, 0.3, 0.1],
@@ -19,7 +19,7 @@ def test_compute_evidence_flags_is_deterministic() -> None:
     )
     consistency = pd.DataFrame(
         {
-            "feature_name": ["oxidative_index", "membrane_integrity_index"],
+            "feature_name": ["carotenoid_to_carbonyl_ratio", "ch_bulk_to_carbonyl_ratio"],
             "consistent": [True, True],
         }
     )
@@ -29,15 +29,15 @@ def test_compute_evidence_flags_is_deterministic() -> None:
         consistency,
         effect_size_threshold=0.147,
         perm_p_threshold=0.10,
-        anchor_feature="oxidative_index",
+        anchor_feature="carotenoid_to_carbonyl_ratio",
     )
 
     assert ranking["feature_name"].tolist() == [
-        "membrane_integrity_index",
-        "oxidative_index",
-        "protein_remodeling_index",
+        "carotenoid_to_carbonyl_ratio",
+        "ch_bulk_to_carbonyl_ratio",
+        "tryptophan_to_sugar_beta_sheet_ratio",
     ]
-    anchor = ranking.loc[ranking["feature_name"] == "oxidative_index"].iloc[0]
+    anchor = ranking.loc[ranking["feature_name"] == "carotenoid_to_carbonyl_ratio"].iloc[0]
     assert bool(anchor["effect_size_flag"])
     assert bool(anchor["bootstrap_ci_excludes_zero"])
     assert bool(anchor["permutation_flag"])

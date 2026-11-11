@@ -17,6 +17,7 @@ from src.analysis.band_features import band_mean, infer_block_from_upper, ratio_
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
+    load_disease_feature_frame_with_bc,
 )
 from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, PhaseStatus
 from src.analysis.spectral_regions import candidate_region_feature_names
@@ -207,7 +208,7 @@ def _ratio_predictors(frame: pd.DataFrame, feature_names: list[str], cfg: dict) 
     band_series: dict[str, pd.Series] = {}
     for band_name, limits in bands_cfg.items():
         lower, upper = float(limits[0]), float(limits[1])
-        block = infer_block_from_upper(upper)
+        block = f"{infer_block_from_upper(upper)}_bc"
         band_series[str(band_name)] = _band_feature(frame, feature_names, block, lower, upper)
 
     ratios: dict[str, pd.Series] = {}
@@ -272,6 +273,7 @@ def run_covariate_region_models(
     *,
     feature_matrix_path: str | Path | None = None,
     candidate_regions_path: str | Path | None = None,
+    bc_feature_matrix_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     cfg: dict | None = None,
 ) -> dict[str, Path]:
@@ -306,7 +308,10 @@ def run_covariate_region_models(
 
     requested_covariates = [str(item) for item in model_cfg.get("covariates", ["age", "sex"])]
     min_subjects = int(model_cfg.get("min_subjects", 8))
-    ratio_frame = _ratio_predictors(disease_only, all_feature_columns, cfg)
+    biochemical_frame, _, bc_columns = load_disease_feature_frame_with_bc(
+        feature_matrix_path=feature_matrix_path, bc_feature_matrix_path=bc_feature_matrix_path,
+    )
+    ratio_frame = _ratio_predictors(biochemical_frame, bc_columns, cfg)
 
     model_rows: list[dict[str, object]] = []
     availability_rows: list[dict[str, object]] = []
@@ -437,6 +442,8 @@ def run_covariate_region_models(
                     "outcome_type": outcome_type,
                     "predictor_type": predictor_type,
                     "predictor_name": predictor_name,
+                    "spectral_basis": "pre_normalization" if predictor_type == "ratio" else "normalized",
+                    "predictor_statistic": "ratio_of_band_means" if predictor_type == "ratio" else "region_mean",
                     "spectral_block": region["spectral_block"] if region is not None else pd.NA,
                     "candidate_region_id": region["candidate_region_id"] if region is not None else pd.NA,
                     "start_cm-1": region["start_cm-1"] if region is not None else np.nan,

@@ -154,15 +154,26 @@ def _collect_cross_phase_multiplicity(
         cluster_rows = df[df["cluster_p_value"].notna()].copy()
         if cluster_rows.empty:
             continue
-        cluster_rows = cluster_rows.drop_duplicates(
-            subset=["cluster_id"] if "cluster_id" in cluster_rows.columns else None,
-            keep="first",
-        )
+        if "cluster_id" not in cluster_rows or cluster_rows["cluster_id"].isna().any():
+            raise ValueError("Cluster p-values require a cluster identity")
+        identity_columns = [
+            column for column in (
+                "analysis_name", "target", "endpoint", "contrast_name", "group_variable",
+                "spectral_block", "cluster_id",
+            ) if column in cluster_rows
+        ]
+        grouped_p = cluster_rows.groupby(identity_columns, dropna=False)["cluster_p_value"]
+        if grouped_p.nunique().gt(1).any():
+            raise ValueError("One cluster identity has inconsistent p-values")
+        cluster_rows = cluster_rows.drop_duplicates(subset=identity_columns, keep="first")
         for _, row in cluster_rows.iterrows():
             records.append({
                 "phase": phase_label,
                 "spectral_block": row.get("spectral_block", pd.NA),
                 "cluster_id": row.get("cluster_id", pd.NA),
+                "analysis_name": row.get("analysis_name", pd.NA),
+                "contrast_name": row.get("contrast_name", pd.NA),
+                "group_variable": row.get("group_variable", pd.NA),
                 "target": row.get("target", row.get("endpoint", pd.NA)),
                 "cluster_p_value": float(row["cluster_p_value"]),
             })
@@ -333,7 +344,6 @@ def _run_candidate_followup_phases(
                 feature_matrix_path=feature_matrix_path,
                 pls_feature_effects_path=pls_outputs.get("pls_feature_effects"),
                 pls_performance_path=pls_outputs.get("pls_regression_performance"),
-                splsda_bands_path=splsda_outputs.get("pls_l1da_selected_bands", ""),
                 cfg=cfg,
             )
             outputs["integrated_candidates"] = integrated_outputs

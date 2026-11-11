@@ -37,7 +37,7 @@ The readiness audit command is:
 uv run --group gpu python manuscript_ml/audit_readiness.py --output-dir Results_manuscript_ml/readiness_review
 ```
 
-Its linkage check reads the real store, while its runtime benchmark is synthetic by design. The latter is simulation evidence, not a real-data implementation check. Inspect `cohort_join`, expected-count checks, data identity and `limitations_table.csv`; do not equate the machine flag with completion of the clinical metadata requirements.
+The audit checks current clinical identities and real-store join counts without fitting models or running a synthetic timing benchmark. Computational runtime is marked unmeasured until a separately authorized real-data check records it. Inspect `cohort_join`, expected-count checks, data identity and `limitations_table.csv`; the real-cohort resolver enforces the identity and join-count checks, while the clinical metadata requirements remain separate.
 
 ## 2. Simulation development and coverage validation
 
@@ -116,3 +116,6 @@ Report `secondary_endpoints_summary.csv` for HDL-C, triglycerides and platelets 
 - Describe relative normalized spectral shape under the measured protocol. Do not infer EV specificity, particle concentration, brain origin, causal effects or clinical utility.
 - Retain failed analyses and limitations. An unsupported primary result does not authorize switching outcomes or preprocessing to rescue the claim.
 - Build the LaTeX draft and check citations, table references, wording and links. Keep participant artifacts private; publication and release require separate approval.
+
+
+Cohort stages now default to real data and still require `--approve-cohort-evaluation`. Use `--synthetic` only for explicitly labelled development work in a separate output directory. The cohort `run_all.py` workflow runs simulation calibration only with `--include-simulation-calibration`; the dedicated calibration script remains an explicit development tool.

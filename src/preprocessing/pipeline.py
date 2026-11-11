@@ -144,16 +144,24 @@ def _validate_preprocessing_config(region_key: str, cfg: dict | None = None) -> 
     allowed_bl = {"arpls", "als", "snip"}
     if bl_method not in allowed_bl:
         raise ValueError(f"Unknown baseline method in config: {bl_method!r}. Must be one of {allowed_bl}")
-    if bl_method in {"arpls", "als"}:
-        lam = float(bl_cfg.get("lam", 1e6))
-        ratio = float(bl_cfg.get("ratio", 1e-3))
-        max_iter = int(bl_cfg.get("max_iter", 100))
-        if lam <= 0:
-            raise ValueError(f"Baseline lam must be > 0, got {lam}")
-        if ratio <= 0:
-            raise ValueError(f"Baseline ratio must be > 0, got {ratio}")
+    if bl_method == "arpls":
+        arpls_cfg = bl_cfg.get("arpls", {})
+        lam = float(arpls_cfg.get("lam", bl_cfg.get("lam", 1e6)))
+        ratio = float(arpls_cfg.get("ratio", 1e-3))
+        max_iter = int(arpls_cfg.get("max_iter", 100))
+        if not np.isfinite(lam) or lam <= 0:
+            raise ValueError("arPLS lam must be finite and > 0")
+        if not np.isfinite(ratio) or ratio <= 0:
+            raise ValueError("arPLS ratio must be finite and > 0")
         if max_iter < 1:
-            raise ValueError(f"Baseline max_iter must be >= 1, got {max_iter}")
+            raise ValueError("arPLS max_iter must be >= 1")
+    elif bl_method == "als":
+        lam = float(bl_cfg.get("lam", 1e6))
+        p = float(bl_cfg.get("p", 0.01))
+        if not np.isfinite(lam) or lam <= 0:
+            raise ValueError("ALS lam must be finite and > 0")
+        if not np.isfinite(p) or not 0 < p < 1:
+            raise ValueError("ALS p must lie strictly between 0 and 1")
 
 
 def _spectral_quality_cfg(cfg: dict | None = None) -> dict:
@@ -476,17 +484,18 @@ def _spatial_cosmic_detection(
     z_threshold: float,
     n_neighbors: int,
     max_width: int,
+    window: int = 2,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Detect cosmic-ray spikes using spatial neighbor medians.
 
     Falls back to local median detection when coordinates are missing or invalid.
     """
     if spectra.size == 0 or pixel_coords is None or len(pixel_coords) != len(spectra):
-        return _local_cosmic_detection(spectra, z_threshold=z_threshold, window=2, max_width=max_width)
+        return _local_cosmic_detection(spectra, z_threshold=z_threshold, window=window, max_width=max_width)
 
     coords = np.asarray(pixel_coords, dtype=float)
-    if coords.ndim != 2 or coords.shape[1] != 2 or len(coords) < 3:
-        return _local_cosmic_detection(spectra, z_threshold=z_threshold, window=2, max_width=max_width)
+    if coords.ndim != 2 or coords.shape[1] != 2 or len(coords) < 3 or not np.isfinite(coords).all():
+        return _local_cosmic_detection(spectra, z_threshold=z_threshold, window=window, max_width=max_width)
 
     diffs = coords[:, None, :] - coords[None, :, :]
     distances = np.sqrt(np.sum(diffs**2, axis=2))
@@ -520,6 +529,7 @@ def _detect_cosmic_spikes(
 
     thr = float(cr_cfg.get("z_threshold", 8.0))
     max_width = int(cr_cfg.get("max_width", 3))
+    fallback_window = int(cr_cfg.get("window", 2))
     method = str(cr_cfg.get("method", "spatial")).strip().lower()
     if method == "spatial" and pixel_coords is not None:
         neighbor_count = int(cr_cfg.get("n_neighbors", 8))
@@ -529,8 +539,8 @@ def _detect_cosmic_spikes(
             z_threshold=thr,
             n_neighbors=neighbor_count,
             max_width=max_width,
+            window=fallback_window,
         )
-    fallback_window = int(cr_cfg.get("window", 2))
     return _local_cosmic_detection(arr, z_threshold=thr, window=fallback_window, max_width=max_width)
 
 
@@ -960,6 +970,7 @@ def _apply_quality_filter(
     wavenumbers: np.ndarray,
     region_key: str,
     cfg: dict | None = None,
+    audit_metrics_df: pd.DataFrame | None = None,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, pd.DataFrame, dict[str, float]]:
     qf_cfg = _spectral_quality_cfg(cfg=cfg)
     peak_window = int(qf_cfg.get("peak_window", 5))
@@ -972,6 +983,8 @@ def _apply_quality_filter(
     noise[noise == 0] = 1e-10
     metrics_df.loc[:, "post_baseline_snr"] = signal / noise
     metrics_df.loc[:, "post_baseline_signal_area"] = np.trapezoid(np.abs(result), axis=1)
+    if audit_metrics_df is not None:
+        _update_qc_metrics(audit_metrics_df, metrics_df)
     quality_mask, quality_stats = spectral_quality_mask(result, wavenumbers=wavenumbers, region=region_key, cfg=cfg)
     kept_indices = np.where(retained_mask)[0]
     dropped = kept_indices[~quality_mask]
@@ -1233,6 +1246,7 @@ def run_preprocessing(
             wavenumbers=wn,
             region_key=region_key,
             cfg=cfg,
+            audit_metrics_df=initial_metrics_df,
         )
     else:
         quality_stats = {}

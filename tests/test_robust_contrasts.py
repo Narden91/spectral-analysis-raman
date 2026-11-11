@@ -28,8 +28,8 @@ def _cfg() -> dict:
                 "min_subjects_per_group": 3,
                 "min_subjects_continuous": 5,
                 "indices": {
-                    "oxidative_index": ["carotenoid_1525", "lipid_carbonyl_1721"],
-                    "membrane_integrity_index": ["ch_bulk_2885", "lipid_carbonyl_1721"],
+                    "carotenoid_to_carbonyl_ratio": ["carotenoid_1525", "lipid_carbonyl_1721"],
+                    "ch_bulk_to_carbonyl_ratio": ["ch_bulk_2885", "lipid_carbonyl_1721"],
                 },
                 "integrals": {
                     "carotenoid_1525": ["1300", 1510, 1535],
@@ -37,7 +37,7 @@ def _cfg() -> dict:
                     "ch_bulk_2885": ["2850", 2850, 2950],
                 },
                 "primary_hypothesis": {
-                    "feature": "oxidative_index",
+                    "feature": "carotenoid_to_carbonyl_ratio",
                     "endpoint": "delta_moca",
                     "direction": "negative",
                     "test": "partial_spearman",
@@ -70,8 +70,8 @@ def _frame() -> pd.DataFrame:
             "subject_id": [f"S{i:02d}" for i in range(12)],
             "condition": ["Disease"] * 12,
             "is_control": [False] * 12,
-            "oxidative_index": [0.1, 0.2, 0.15, 0.25, 0.2, 0.18, 1.1, 1.2, 1.15, 1.25, 1.2, 1.18],
-            "membrane_integrity_index": [1.0, 1.1, 0.9, 1.2, 1.1, 1.0, 1.8, 1.9, 2.0, 1.7, 1.8, 1.9],
+            "carotenoid_to_carbonyl_ratio": [0.1, 0.2, 0.15, 0.25, 0.2, 0.18, 1.1, 1.2, 1.15, 1.25, 1.2, 1.18],
+            "ch_bulk_to_carbonyl_ratio": [1.0, 1.1, 0.9, 1.2, 1.1, 1.0, 1.8, 1.9, 2.0, 1.7, 1.8, 1.9],
             "carotenoid_1525": np.linspace(10, 21, 12),
             "lipid_carbonyl_1721": np.linspace(20, 31, 12),
             "ch_bulk_2885": np.linspace(30, 41, 12),
@@ -102,7 +102,7 @@ def test_permutation_pvalue_bounds() -> None:
     ok = contrasts.loc[contrasts["status"] == "ok"]
 
     assert ok["perm_p_value"].between(1 / 20, 1).all()
-    separated = ok.loc[ok["feature_name"] == "oxidative_index", "perm_p_value"]
+    separated = ok.loc[ok["feature_name"] == "carotenoid_to_carbonyl_ratio", "perm_p_value"]
     assert separated.min() < 0.2
 
 
@@ -197,8 +197,8 @@ def test_run_confirmatory_panel_statistics_writes_outputs(tmp_path: Path) -> Non
     frame = _frame()
     feature_matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
     panel_matrix_path = tmp_path / "panel_feature_matrix.csv"
-    frame.drop(columns=["oxidative_index", "membrane_integrity_index", "carotenoid_1525", "lipid_carbonyl_1721", "ch_bulk_2885"]).to_parquet(feature_matrix_path, index=False)
-    frame[["subject_id", "oxidative_index", "membrane_integrity_index", "carotenoid_1525", "lipid_carbonyl_1721", "ch_bulk_2885"]].to_csv(panel_matrix_path, index=False)
+    frame.drop(columns=["carotenoid_to_carbonyl_ratio", "ch_bulk_to_carbonyl_ratio", "carotenoid_1525", "lipid_carbonyl_1721", "ch_bulk_2885"]).to_parquet(feature_matrix_path, index=False)
+    frame[["subject_id", "carotenoid_to_carbonyl_ratio", "ch_bulk_to_carbonyl_ratio", "carotenoid_1525", "lipid_carbonyl_1721", "ch_bulk_2885"]].to_csv(panel_matrix_path, index=False)
 
     outputs = run_confirmatory_panel_statistics(
         feature_matrix_path=feature_matrix_path,

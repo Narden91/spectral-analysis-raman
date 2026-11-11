@@ -12,8 +12,8 @@ Produces:
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -77,7 +77,7 @@ def _flatten_repeatability_rows(fold_repeatability: list[dict[str, Any]]) -> pd.
 
 def run_primary_evaluation(
     *,
-    use_synthetic: bool = True,
+    use_synthetic: bool = False,
     approve_cohort_evaluation: bool = False,
     clinical_master_path: str | Path = PROJECT_ROOT / "data" / "clinical_master.csv",
     output_dir: str | Path | None = None,
@@ -95,6 +95,7 @@ def run_primary_evaluation(
         clinical_master_path=clinical_master_path,
         compact_grid=compact_grid,
         cfg=cfg,
+        readiness=raw_cfg["readiness"],
     )
 
     eval_res = evaluate_nested_cohort(dataset, cfg=cfg, include_band_paired=True)
@@ -213,7 +214,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     outputs = run_primary_evaluation(
-        use_synthetic=not args.cohort,
+        use_synthetic=args.synthetic,
         approve_cohort_evaluation=args.approve_cohort_evaluation,
         clinical_master_path=args.clinical_master,
         output_dir=args.output_dir,

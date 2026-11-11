@@ -120,26 +120,6 @@ def _pls_vip() -> pd.DataFrame:
     )
 
 
-def _splsda_bands() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "group_variable": ["delta_moca_group"] * 6,
-            "feature_name": [
-                "1300__1240.0",
-                "1300__1245.0",
-                "1300__1250.0",
-                "2850__2840.0",
-                "2850__2850.0",
-                "2850__2930.0",
-            ],
-            "spectral_block": ["1300"] * 3 + ["2850"] * 3,
-            "wavenumber": [1240.0, 1245.0, 1250.0, 2840.0, 2850.0, 2930.0],
-            "loading_weight": [0.5, 0.3, 0.0, 0.0, 0.2, 0.0],
-            "selected": [True, True, False, False, True, False],
-        }
-    )
-
-
 @pytest.fixture
 def input_paths(tmp_path: Path) -> dict[str, Path]:
     matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
@@ -154,15 +134,11 @@ def input_paths(tmp_path: Path) -> dict[str, Path]:
     vip_path = tmp_path / "pls_feature_effects.parquet"
     _pls_vip().to_parquet(vip_path, index=False)
 
-    splsda_path = tmp_path / "pls_l1da_selected_bands.csv"
-    _splsda_bands().to_csv(splsda_path, index=False)
-
     return {
         "feature_matrix": matrix_path,
         "candidate_regions": candidate_path,
         "covariate_models": covariate_path,
         "pls_vip": vip_path,
-        "splsda_bands": splsda_path,
     }
 
 
@@ -172,7 +148,6 @@ def test_run_integrated_candidates_produces_expected_outputs(input_paths: dict[s
         candidate_regions_path=input_paths["candidate_regions"],
         covariate_models_path=input_paths["covariate_models"],
         pls_feature_effects_path=input_paths["pls_vip"],
-        splsda_bands_path=input_paths["splsda_bands"],
         output_dir=tmp_path,
         cfg={
             "analysis": {"integrated_candidates": {"enabled": True, "vip_threshold": 1.0}},
@@ -202,6 +177,9 @@ def test_run_integrated_candidates_produces_expected_outputs(input_paths: dict[s
     assert "significance_supported" in df.columns
     assert "interpretation_note" in df.columns
     assert "biochemical_class" in df.columns
+    assert df["biological_pca_overlap"].isna().all()
+    assert df["biological_pca_annotation_status"].eq("not_supplied").all()
+    assert "splsda_selected" not in df.columns
 
     supported = df.loc[df["candidate_region_id"] == "1300_R1"]
     assert supported["evidence_status"].iloc[0] == "cluster_supported_exploratory"
@@ -235,3 +213,19 @@ def test_run_integrated_candidates_skips_write_when_no_candidate_regions(tmp_pat
     assert outputs["_status"]["phase_key"] == "integrated_candidates"
     assert outputs["_status"]["status"] == "missing_required_data"
     assert not (tmp_path / "out" / "integrated_candidate_regions.csv").exists()
+
+
+def test_supplied_biological_regions_are_used_without_canonical_directory_fallback(input_paths, tmp_path):
+    regions_path = tmp_path / "current_loading_regions.csv"
+    pd.DataFrame({"spectral_block": ["1300"], "start_cm-1": [1240.0], "end_cm-1": [1250.0], "PC": ["PC1"]}).to_csv(regions_path, index=False)
+    outputs = run_integrated_candidates(
+        feature_matrix_path=input_paths["feature_matrix"],
+        candidate_regions_path=input_paths["candidate_regions"],
+        covariate_models_path=input_paths["covariate_models"],
+        pls_feature_effects_path=input_paths["pls_vip"],
+        biological_pca_region_paths={"PCA_1330": regions_path},
+        output_dir=tmp_path / "out", cfg={"analysis": {"integrated_candidates": {"enabled": True}}},
+    )
+    result = pd.read_csv(outputs["integrated_candidate_regions"])
+    assert result.loc[result["candidate_region_id"].eq("1300_R1"), "biological_pca_overlap"].iloc[0]
+    assert result["biological_pca_annotation_status"].eq("provided_run_inputs").all()

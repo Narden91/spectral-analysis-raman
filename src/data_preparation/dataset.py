@@ -194,12 +194,12 @@ class AnalysisRamanDataset:
             subject_ids=payload["subject_ids"],
         )
 
-    def whole_area_summaries(self) -> AreaSpectraView:
-        payload = loaders.load_whole_area_store(self._source)
+    def whole_area_summaries(self, basis: SpectralBasis = "normalized") -> AreaSpectraView:
+        payload = loaders.load_whole_area_store(self._source, basis=basis)
         return AreaSpectraView(
             values=_readonly(payload["values"]),
             feature_names=payload["feature_names"],
-            basis="normalized",
+            basis=basis,
             spectral_range="both",
             area_ids=payload["area_ids"],
             measurement_ids=payload["measurement_ids"],

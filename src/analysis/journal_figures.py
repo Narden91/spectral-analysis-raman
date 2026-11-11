@@ -40,10 +40,10 @@ from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, STATUS_OK, P
 logger = logging.getLogger(__name__)
 
 _INDEX_COLS = [
-    "membrane_integrity_index",
-    "oxidative_index",
-    "protein_remodeling_index",
-    "tyrosine_environment_index",
+    "ch_bulk_to_carbonyl_ratio",
+    "carotenoid_to_carbonyl_ratio",
+    "tryptophan_to_sugar_beta_sheet_ratio",
+    "tyrosine_to_o_p_o_ratio",
 ]
 _COLORS = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00"]
 _SMALL_EFFECT_THRESHOLD = 0.147
@@ -100,9 +100,9 @@ def _fig1_cohort_rainclouds(panel_matrix_path: Path, output_path: Path) -> bool:
                        ncol=min(4, len(labels_leg)), fontsize=7, bbox_to_anchor=(0.5, -0.02))
 
     suptitle = (
-        "Named EV biochemical indices by contrast group"
+        "Fixed Raman feature ratios by contrast group"
         if group_col
-        else "Named EV biochemical indices (no contrast group available)"
+        else "Fixed Raman feature ratios (no contrast group available)"
     )
     fig.suptitle(suptitle, fontsize=9)
     fig.tight_layout(rect=[0, 0.05, 1, 1])
@@ -400,10 +400,10 @@ def _plot_fig5_coupling(ax: plt.Axes, coupling: pd.DataFrame) -> None:
 
 
 def _plot_fig5_regimes(ax: plt.Axes, regimes: pd.DataFrame) -> None:
-    ox_col = "oxidative_index" if "oxidative_index" in regimes.columns else None
-    mem_col = "membrane_integrity_index" if "membrane_integrity_index" in regimes.columns else None
+    ox_col = "carotenoid_to_carbonyl_ratio" if "carotenoid_to_carbonyl_ratio" in regimes.columns else None
+    mem_col = "ch_bulk_to_carbonyl_ratio" if "ch_bulk_to_carbonyl_ratio" in regimes.columns else None
     if ox_col and mem_col:
-        for regime, grp in regimes.groupby("biochemical_regime"):
+        for regime, grp in regimes.groupby("ratio_group"):
             ax.scatter(
                 grp[mem_col].to_numpy(dtype=float),
                 grp[ox_col].to_numpy(dtype=float),
@@ -411,17 +411,17 @@ def _plot_fig5_regimes(ax: plt.Axes, regimes: pd.DataFrame) -> None:
                 color=REGIME_PALETTE.get(str(regime), "#888888"),
                 alpha=0.75, s=45, edgecolors="white", linewidths=0.4,
             )
-        ax.set_xlabel("Membrane integrity index")
-        ax.set_ylabel("Oxidative index")
+        ax.set_xlabel("CH bulk / carbonyl ratio")
+        ax.set_ylabel("Carotenoid / carbonyl ratio")
         ax.legend(fontsize=7)
-    ax.set_title("Ratio–ratio biochemical regimes")
+    ax.set_title("Descriptive ratio quadrants")
 
 
 def _fig5_coupling_regimes(coupling_path: Path, regimes_path: Path, output_path: Path) -> bool:
     coupling = load_csv_or_empty(coupling_path)
     regimes = load_csv_or_empty(regimes_path)
     has_coupling = not coupling.empty and "feature_a" in coupling.columns
-    has_regimes = not regimes.empty and "biochemical_regime" in regimes.columns
+    has_regimes = not regimes.empty and "ratio_group" in regimes.columns
     if not has_coupling and not has_regimes:
         return False
 
@@ -434,7 +434,7 @@ def _fig5_coupling_regimes(coupling_path: Path, regimes_path: Path, output_path:
     if has_regimes:
         _plot_fig5_regimes(ax_list.pop(0), regimes)
 
-    fig.suptitle("Feature coupling and biochemical regimes", fontsize=9)
+    fig.suptitle("Feature coupling and descriptive ratio groups", fontsize=9)
     fig.tight_layout()
     _save_and_close(fig, output_path)
     return True
@@ -555,7 +555,7 @@ def _fig6_pls_null_panel(ax: plt.Axes, performance: pd.DataFrame) -> bool:
     ax.set_yticklabels([_TARGET_LABELS[t] for t in perf["target"]], fontsize=9)
     ax.invert_yaxis()
     ax.set_xlabel("Cross-validated R² (observed)")
-    ax.set_title("PLS1 regression: permutation comparison\n(R² ≤ 0 = no explanatory power beyond the mean)", fontsize=10)
+    ax.set_title("PLS1 regression: permutation comparison", fontsize=10)
 
     for y, row in zip(y_pos, perf.itertuples()):
         p_holm = getattr(row, "permutation_p_value_holm", np.nan)
@@ -591,7 +591,7 @@ def _fig6_moca_association_landscape(
 
     fig.suptitle(
         "ΔMoCA association landscape: exploratory whole-spectrum scan (Holm/FDR-corrected) "
-        "and PLS1 permutation check — no wavenumber or model exceeds the correction or permutation threshold",
+        "and PLS1 permutation comparison",
         fontsize=9,
     )
     _save_and_close(fig, output_path)
@@ -639,7 +639,7 @@ def run_journal_figures(
 
     anchor_feature = (
         cfg.get("analysis", {}).get("preregistered_panel", {})
-        .get("primary_hypothesis", {}).get("feature", "oxidative_index")
+        .get("primary_hypothesis", {}).get("feature", "carotenoid_to_carbonyl_ratio")
     )
     pmat = Path(panel_matrix_path) if panel_matrix_path is not None else panel_dir / "panel_feature_matrix.csv"
 

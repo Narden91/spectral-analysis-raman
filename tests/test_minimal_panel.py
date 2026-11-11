@@ -66,6 +66,9 @@ def _integrated_candidates() -> pd.DataFrame:
 def input_paths(tmp_path: Path) -> dict[str, Path]:
     matrix_path = tmp_path / "subject_feature_matrix_whole.parquet"
     _feature_matrix().to_parquet(matrix_path, index=False)
+    _feature_matrix().rename(columns=lambda col: col.replace("1300__", "1300_bc__").replace("2850__", "2850_bc__")).to_parquet(
+        tmp_path / "subject_feature_matrix_whole_bc.parquet", index=False,
+    )
 
     integrated_path = tmp_path / "integrated_candidate_regions.csv"
     _integrated_candidates().to_csv(integrated_path, index=False)
@@ -141,9 +144,9 @@ def test_run_minimal_panel_produces_expected_outputs(input_paths: dict[str, Path
 
 def test_run_minimal_panel_accepts_preregistered_panel_source(input_paths: dict[str, Path], tmp_path: Path) -> None:
     panel_matrix = _feature_matrix()[["subject_id"]].copy()
-    panel_matrix["oxidative_index"] = _feature_matrix()["delta_moca"] + np.linspace(0, 1, len(panel_matrix))
-    panel_matrix["membrane_integrity_index"] = -_feature_matrix()["delta_moca"]
-    panel_matrix["protein_remodeling_index"] = np.linspace(0, 1, len(panel_matrix))
+    panel_matrix["carotenoid_to_carbonyl_ratio"] = _feature_matrix()["delta_moca"] + np.linspace(0, 1, len(panel_matrix))
+    panel_matrix["ch_bulk_to_carbonyl_ratio"] = -_feature_matrix()["delta_moca"]
+    panel_matrix["tryptophan_to_sugar_beta_sheet_ratio"] = np.linspace(0, 1, len(panel_matrix))
     panel_path = tmp_path / "panel_feature_matrix.csv"
     panel_matrix.to_csv(panel_path, index=False)
 
@@ -169,9 +172,9 @@ def test_run_minimal_panel_accepts_preregistered_panel_source(input_paths: dict[
                 },
                 "preregistered_panel": {
                     "indices": {
-                        "oxidative_index": ["carotenoid_1525", "lipid_carbonyl_1721"],
-                        "membrane_integrity_index": ["ch_bulk_2885", "lipid_carbonyl_1721"],
-                        "protein_remodeling_index": ["protein_1555", "structural_protein_925", "structural_protein_980"],
+                        "carotenoid_to_carbonyl_ratio": ["carotenoid_1525", "lipid_carbonyl_1721"],
+                        "ch_bulk_to_carbonyl_ratio": ["ch_bulk_2885", "lipid_carbonyl_1721"],
+                        "tryptophan_to_sugar_beta_sheet_ratio": ["tryptophan_1555", "c_o_c_sugar_925", "beta_sheet_980"],
                     },
                     "integrals": {},
                 },
@@ -183,7 +186,7 @@ def test_run_minimal_panel_accepts_preregistered_panel_source(input_paths: dict[
     assert "panel_minimal_model_coefficients" in outputs
     assert outputs["panel_minimal_model_performance"].name == "panel_minimal_model_performance.csv"
     features = pd.read_csv(outputs["panel_minimal_model_features"])
-    assert set(features["feature_source"]) <= {"preregistered_index"}
+    assert set(features["feature_source"]) <= {"fixed_panel_ratio"}
 
 
 def test_candidate_panel_skips_when_cluster_support_gate_fails(

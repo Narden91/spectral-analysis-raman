@@ -1,7 +1,7 @@
 """Generate subject-level figures used by the Raman EV manuscript.
 
 The script reads only analysis outputs and writes publication figures plus the
-effect-size source table under ``manuscript/paper``.  All resampling is at the
+effect-size source table under the explicitly selected private output directory.  All resampling is at the
 participant level; pixel- and area-level observations are never resampled.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 # ruff: noqa: E402
 # Direct execution needs project imports after path and plotting-backend setup.
+import argparse
 import sys
 from pathlib import Path
 
@@ -23,14 +24,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Patch
+from matplotlib.patches import Patch
 from scipy import stats
 from sklearn.metrics import roc_curve
 
+from scripts.source_provenance import write_source_provenance
 from src import load_config
 from src.analysis.io_utils import load_csv_or_empty
 from src.analysis.journal_figures import _plot_block_panel
 from src.analysis.raman_bands import RAMAN_BANDS
+from src.data_preparation.manifest import hash_file
 from src.reporting.candidate_region_report import _classify_candidate
 from src.visualization.spectral_summary_plots import (
     BAND_CATEGORY_COLORS,
@@ -49,8 +52,22 @@ from src.visualization.theme import (
     set_manuscript_theme,
 )
 
-FIGURE_DIR = ROOT / "manuscript" / "paper" / "figures"
-FIGURE_DATA_DIR = ROOT / "manuscript" / "paper" / "figure_data"
+_SOURCE_FILES: set[Path] = set()
+_RENDER_PLOT_CONFIGS: list[dict] = []
+
+
+def _read_source_csv(path: str | Path, **kwargs) -> pd.DataFrame:
+    _SOURCE_FILES.add(Path(path).resolve())
+    return pd.read_csv(path, **kwargs)
+
+
+def _load_source_csv_or_empty(path: str | Path) -> pd.DataFrame:
+    _SOURCE_FILES.add(Path(path).resolve())
+    return load_csv_or_empty(path)
+
+
+FIGURE_DIR = ROOT / "Results_manuscript" / "figures"
+FIGURE_DATA_DIR = ROOT / "Results_manuscript" / "figure_data"
 SUBJECT_SPECTRA = (
     ROOT
     / "Results_control_vs_disease"
@@ -219,23 +236,6 @@ BAND_SHORT_LABELS = {
 BAND_WINDOWS = {key: band.bounds for key, band in RAMAN_BANDS.items()}
 
 
-def advance_rng_past_subject_spectra(rng: np.random.Generator) -> None:
-    """Replay the draws of the removed subject-spectra bootstrap figure.
-
-    That figure ran before the band-effect bootstrap on the same ``rng``. The
-    published ``case_control_band_effects_bootstrap.csv`` depends on the
-    stream position, so the removed figure's calls are repeated with the same
-    order, bounds, and sizes: 2 regions x (control, disease) x N_BOOTSTRAP.
-    The values are discarded; only the generator state matters.
-    """
-    condition = pd.read_csv(SUBJECT_SPECTRA, usecols=["condition"])["condition"]
-    for _region in ("1300", "2850"):
-        for group in ("control", "disease"):
-            n_subjects = int(condition.eq(group).sum())
-            for _ in range(N_BOOTSTRAP):
-                rng.integers(0, n_subjects, size=n_subjects)
-
-
 def spectral_columns(
     frame: pd.DataFrame, prefix: str
 ) -> tuple[list[str], np.ndarray]:
@@ -254,14 +254,14 @@ def _manuscript_plot_cfg(max_peaks: int | None = None) -> dict:
     21-window registry stays the single source for the figure, the analysis,
     and the band table. ``max_peaks`` narrows the label set for the manuscript
     only: rotated labels are as tall as they are long, so every extra one costs
-    vertical space that the printed figure does not have. The full 21-window
-    panel is Figure 3 and Table 3; this figure only orients the reader.
+    vertical space in the printed figure. The band definitions remain those
+    of the complete registry even when fewer peak labels are displayed.
     """
     profile = load_config("config/plots.yaml")
     peak_detection = dict(profile["plotting"]["peak_detection"])
     if max_peaks is not None:
         peak_detection["max_peaks"] = max_peaks
-    return {
+    settings = {
         "bands": {
             name: tuple(bounds)
             for name, bounds in profile["whole_spectra"]["bands"].items()
@@ -269,6 +269,8 @@ def _manuscript_plot_cfg(max_peaks: int | None = None) -> dict:
         "peak_detection": peak_detection,
         "raman_band_style": profile["plotting"]["raman_band_style"],
     }
+    _RENDER_PLOT_CONFIGS.append(settings)
+    return settings
 
 
 def _shared_display_scale(traces: list[np.ndarray]) -> list[np.ndarray]:
@@ -350,7 +352,7 @@ def make_global_spectra_figures() -> None:
     name: the assembling float supplies both through ``\subcaption``, so the
     labels stay in the document's type and stay referenceable.
     """
-    frame = pd.read_csv(SUBJECT_SPECTRA)
+    frame = _read_source_csv(SUBJECT_SPECTRA)
     plot_cfg = _manuscript_plot_cfg(max_peaks=GLOBAL_MAX_PEAK_LABELS)
     conditions = (
         ("control", CONTROL, "Control"),
@@ -469,8 +471,8 @@ def bootstrap_rank_biserial(
 
 
 def make_band_effect_figure(rng: np.random.Generator) -> None:
-    spectra = pd.read_csv(SUBJECT_SPECTRA)
-    screen = pd.read_csv(BAND_SCREEN).set_index("band")
+    spectra = _read_source_csv(SUBJECT_SPECTRA)
+    screen = _read_source_csv(BAND_SCREEN).set_index("band")
     feature_columns = [
         column
         for column in spectra.columns
@@ -610,11 +612,11 @@ def make_biopca_loading_figure() -> None:
     both blocks in one space, which is what makes their magnitudes comparable.
     Shaded spans are the archived high-loading intervals (SI Section S2).
     """
-    loadings = pd.read_csv(BIOPCA_WHOLE_LOADINGS)
+    loadings = _read_source_csv(BIOPCA_WHOLE_LOADINGS)
     loadings["spectral_block"] = loadings["spectral_block"].astype(str)
-    regions = pd.read_csv(BIOPCA_WHOLE_LOADING_REGIONS)
+    regions = _read_source_csv(BIOPCA_WHOLE_LOADING_REGIONS)
     regions["spectral_block"] = regions["spectral_block"].astype(str)
-    variance = pd.read_csv(BIOPCA_WHOLE_EXPLAINED_VARIANCE).set_index("PC")
+    variance = _read_source_csv(BIOPCA_WHOLE_EXPLAINED_VARIANCE).set_index("PC")
     blocks = list(BIOPCA_BLOCK_TITLES)
     axes_cm = {
         block: loadings.loc[loadings["spectral_block"].eq(block), "raman_shift"].to_numpy(dtype=float)
@@ -696,7 +698,7 @@ def make_difference_spectrum_figure() -> None:
     effect) axes pair, and the pair here simply lives in two figures instead
     of two rows of one.
     """
-    diff = load_csv_or_empty(DIFFERENCE_SPECTRUM)
+    diff = _load_source_csv_or_empty(DIFFERENCE_SPECTRUM)
     if diff.empty or "wavenumber" not in diff.columns or "block" not in diff.columns:
         return
     contrast = (
@@ -752,8 +754,10 @@ def make_panel_effect_sizes_figure() -> None:
     a fixed ``output_dir/figures/...png`` path) against the already-
     materialized panel contrast table.
     """
-    contrasts = load_csv_or_empty(PANEL_CONTRAST_TESTS)
-    ok = contrasts.loc[contrasts.get("status", "") == "ok"].copy()
+    contrasts = _load_source_csv_or_empty(PANEL_CONTRAST_TESTS)
+    if contrasts.empty or "status" not in contrasts:
+        return
+    ok = contrasts.loc[contrasts["status"] == "ok"].copy()
     if ok.empty or "cliffs_delta" not in ok.columns:
         return
     features = ok["feature_name"].astype(str).str.replace("_", " ", regex=False)
@@ -852,29 +856,56 @@ def _clear_band_for_legend(ax, side: str, fraction: float) -> None:
         ax.set_ylim(bottom - fraction * span, top)
 
 
-def make_clinical_null_figures() -> None:
+def make_clinical_association_figures() -> None:
     """The four within-stroke clinical association panels, drawn at the Figure 5 type scale."""
     with matplotlib.rc_context(CLINICAL_RC):
-        _draw_clinical_null_panels()
+        _draw_clinical_association_panels()
 
 
-def _draw_clinical_null_panels() -> None:
+def _plot_moca_reference_summary(
+    ax: plt.Axes,
+    performance: pd.DataFrame,
+    permutation: pd.DataFrame,
+) -> None:
+    """Show recorded summary statistics without implying an empirical density."""
+    required = {"null_distribution_mean", "null_distribution_std"}
+    if "r2" not in performance or not required.issubset(permutation):
+        raise ValueError("MoCA plot requires recorded observed R2 and reference mean/SD")
+    endpoints = [name for name in MOCA_ENDPOINT_LABELS if name in performance.index and name in permutation.index]
+    if not endpoints:
+        raise ValueError("No matching recorded MoCA performance and permutation summaries")
+    means = permutation.loc[endpoints, "null_distribution_mean"].to_numpy(dtype=float)
+    deviations = permutation.loc[endpoints, "null_distribution_std"].to_numpy(dtype=float)
+    observed = performance.loc[endpoints, "r2"].to_numpy(dtype=float)
+    if not (np.isfinite(means).all() and np.isfinite(deviations).all() and np.isfinite(observed).all()) or (deviations < 0).any():
+        raise ValueError("MoCA reference summaries and observed scores must be finite; SD must be nonnegative")
+    positions = np.arange(len(endpoints))
+    ax.errorbar(positions, means, yerr=deviations, fmt="o", capsize=3,
+                color="#888888", label="Reference mean +/- SD")
+    ax.scatter(positions, observed, color=DISEASE, s=26, zorder=5, label="Observed")
+    ax.axhline(0, color=NEUTRAL, linestyle="--", linewidth=0.9)
+    ax.set_xticks(positions)
+    ax.set_xticklabels([CLINICAL_ENDPOINT_LABELS[name] for name in endpoints], fontsize=CLINICAL_SMALL_FS)
+    ax.set_ylabel("Cross-validated $R^2$")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(fontsize=CLINICAL_SMALL_FS, frameon=False)
+
+
+def _draw_clinical_association_panels() -> None:
     """The four within-stroke clinical association panels, one standalone PDF each.
 
-    Each panel supports the same negative conclusion, which is why they are
-    assembled into a single float rather than published separately; every value
-    is read from the same archived table used by the corresponding standalone
-    analysis output, and nothing is recomputed here.
+    Values are read from the archived tables. Reference means and standard
+    deviations are displayed as summaries, without generating artificial draws.
     """
-    candidates = load_csv_or_empty(INTEGRATED_CANDIDATE_REGIONS)
-    correlations = load_csv_or_empty(CLINICAL_CORRELATION_MATRIX)
-    performance = pd.read_csv(MOCA_PLS_PERFORMANCE).set_index("target")
-    permutation = pd.read_csv(MOCA_PLS_PERMUTATION).set_index("target")
-    entropy = load_csv_or_empty(SPECTRAL_ENTROPY)
+    candidates = _load_source_csv_or_empty(INTEGRATED_CANDIDATE_REGIONS)
+    correlations = _load_source_csv_or_empty(CLINICAL_CORRELATION_MATRIX)
+    performance = _read_source_csv(MOCA_PLS_PERFORMANCE).set_index("target")
+    permutation = _read_source_csv(MOCA_PLS_PERMUTATION).set_index("target")
+    entropy = _load_source_csv_or_empty(SPECTRAL_ENTROPY)
     if candidates.empty or correlations.empty:
         return
 
-    # Candidate-region screen: every region is classified "unstable".
+    # Candidate-region classes come from each recorded evidence status.
     fig, ax = _clinical_panel_axes()
     candidates = candidates.assign(
         report_class=candidates.apply(_classify_candidate, axis=1)
@@ -886,7 +917,7 @@ def _draw_clinical_null_panels() -> None:
             block_df["max_abs_effect"].to_numpy(dtype=float),
             s=12,
             marker=marker,
-            color="#F4A261",
+            color=block_df["report_class"].map({"exploratory": "#E9C46A", "unsupported": "#F4A261"}),
             edgecolors="white",
             linewidths=0.3,
             label=f"{block} block",
@@ -904,7 +935,7 @@ def _draw_clinical_null_panels() -> None:
         borderpad=0.3,
         handletextpad=0.4,
     )
-    _save_exact(fig, "clinical_null_candidates")
+    _save_exact(fig, "clinical_candidates")
 
     # Channel-wise correlation surface, fingerprint block only.
     fig, ax = _clinical_panel_axes(height=CLINICAL_HEATMAP_HEIGHT_IN)
@@ -949,50 +980,11 @@ def _draw_clinical_null_panels() -> None:
     bar.set_label(r"Spearman $\rho$", fontsize=CLINICAL_SMALL_FS, labelpad=2)
     bar.ax.tick_params(labelsize=CLINICAL_SMALL_FS, length=2, pad=1.0)
     bar.outline.set_linewidth(0.4)
-    _save_exact(fig, "clinical_null_channelwise")
+    _save_exact(fig, "clinical_channelwise")
 
-    # Observed CV R^2 against each endpoint's own permutation reference distribution.
     fig, ax = _clinical_panel_axes()
-    rng = np.random.default_rng(SEED)
-    endpoints = list(MOCA_ENDPOINT_LABELS)
-    for position, endpoint in enumerate(endpoints):
-        draws = rng.normal(
-            permutation.loc[endpoint, "null_distribution_mean"],
-            permutation.loc[endpoint, "null_distribution_std"],
-            size=2000,
-        )
-        violin = ax.violinplot(draws, positions=[position], widths=0.7, showextrema=False)
-        for body in violin["bodies"]:
-            body.set_facecolor("#B0B0B0")
-            body.set_alpha(0.55)
-            body.set_edgecolor("none")
-        ax.scatter(
-            [position],
-            [performance.loc[endpoint, "r2"]],
-            color=DISEASE,
-            s=26,
-            zorder=5,
-            label="Observed" if position == 0 else None,
-        )
-    ax.axhline(0, color=NEUTRAL, linestyle="--", linewidth=0.9)
-    ax.set_xticks(range(len(endpoints)))
-    ax.set_xticklabels(
-        [CLINICAL_ENDPOINT_LABELS[endpoint] for endpoint in endpoints],
-        fontsize=CLINICAL_SMALL_FS,
-    )
-    ax.set_ylabel("Cross-validated $R^2$")
-    ax.spines[["top", "right"]].set_visible(False)
-    _clear_band_for_legend(ax, "bottom", 0.24)
-    ax.legend(
-        loc="lower left",
-        fontsize=CLINICAL_SMALL_FS,
-        frameon=True,
-        framealpha=1.0,
-        edgecolor="none",
-        borderpad=0.3,
-        handletextpad=0.4,
-    )
-    _save_exact(fig, "clinical_null_moca")
+    _plot_moca_reference_summary(ax, performance, permutation)
+    _save_exact(fig, "clinical_moca_reference_summary")
 
     # Unsupervised descriptor distribution, fingerprint block.
     fig, ax = _clinical_panel_axes()
@@ -1001,228 +993,9 @@ def _draw_clinical_null_panels() -> None:
     ax.set_xlabel("Spectral entropy (fingerprint)")
     ax.set_ylabel("Participants")
     ax.spines[["top", "right"]].set_visible(False)
-    _save_exact(fig, "clinical_null_entropy")
+    _save_exact(fig, "clinical_entropy")
 
 
-def make_graphical_abstract() -> None:
-    """Create a data-backed graphical abstract for journal submission."""
-    spectra = pd.read_csv(SUBJECT_SPECTRA)
-    columns, wavenumbers = spectral_columns(spectra, "1300__")
-    control_mean = spectra.loc[
-        spectra["condition"].eq("control"), columns
-    ].to_numpy(dtype=float).mean(axis=0)
-    disease_mean = spectra.loc[
-        spectra["condition"].eq("disease"), columns
-    ].to_numpy(dtype=float).mean(axis=0)
-
-    fig = plt.figure(figsize=(13.28, 5.31), facecolor="white")
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.axis("off")
-
-    ax.text(
-        0.5,
-        0.945,
-        "Subject-level Raman analysis separates spectral structure,"
-        " group discrimination, and clinical prediction",
-        ha="center",
-        va="center",
-        fontsize=18,
-        fontweight="bold",
-        color="#222222",
-    )
-
-    panels = (
-        (0.025, 0.12, 0.29, 0.75, "#EAF3F8"),
-        (0.355, 0.12, 0.29, 0.75, "#FDF1E8"),
-        (0.685, 0.12, 0.29, 0.75, "#F0F0F0"),
-    )
-    for x, y, width, height, face in panels:
-        ax.add_patch(
-            FancyBboxPatch(
-                (x, y),
-                width,
-                height,
-                boxstyle="round,pad=0.012,rounding_size=0.018",
-                linewidth=1.2,
-                edgecolor="#666666",
-                facecolor=face,
-            )
-        )
-    for start, end in ((0.318, 0.352), (0.648, 0.682)):
-        ax.add_patch(
-            FancyArrowPatch(
-                (start, 0.50),
-                (end, 0.50),
-                arrowstyle="-|>",
-                mutation_scale=20,
-                linewidth=1.5,
-                color="#555555",
-            )
-        )
-
-    ax.text(
-        0.17,
-        0.81,
-        "Participant is the inferential unit",
-        ha="center",
-        va="center",
-        fontsize=15,
-        fontweight="bold",
-    )
-    ax.text(
-        0.17,
-        0.72,
-        "50 controls  |  97 ischemic stroke",
-        ha="center",
-        va="center",
-        fontsize=12,
-    )
-    spectrum_ax = fig.add_axes([0.06, 0.36, 0.22, 0.27], facecolor="none")
-    spectrum_ax.plot(wavenumbers, control_mean, color=CONTROL, linewidth=1.5)
-    spectrum_ax.plot(wavenumbers, disease_mean, color=DISEASE, linewidth=1.5)
-    spectrum_ax.set_xlabel(r"Raman shift (cm$^{-1}$)", fontsize=9)
-    spectrum_ax.set_ylabel("SNV value", fontsize=9)
-    spectrum_ax.tick_params(labelsize=8, length=2)
-    spectrum_ax.spines[["top", "right"]].set_visible(False)
-    ax.text(
-        0.17,
-        0.245,
-        "Pixels → measurement median\n→ participant median",
-        ha="center",
-        va="center",
-        fontsize=13,
-        linespacing=1.4,
-    )
-    ax.text(
-        0.17,
-        0.16,
-        "No pixel-level pseudoreplication",
-        ha="center",
-        va="center",
-        fontsize=11,
-        color="#333333",
-    )
-
-    ax.text(
-        0.50,
-        0.81,
-        "What the cohort supports",
-        ha="center",
-        va="center",
-        fontsize=15,
-        fontweight="bold",
-    )
-    ax.text(
-        0.50,
-        0.66,
-        "Broad lipid-associated variation",
-        ha="center",
-        va="center",
-        fontsize=14,
-        color="#8C4A00",
-        fontweight="bold",
-    )
-    ax.text(
-        0.50,
-        0.585,
-        "PC1: 75.8% fingerprint  |  67.1% C–H",
-        ha="center",
-        va="center",
-        fontsize=12,
-    )
-    ax.plot([0.395, 0.605], [0.50, 0.50], color="#AAAAAA", linewidth=1)
-    ax.text(
-        0.50,
-        0.425,
-        "Modest case–control separation",
-        ha="center",
-        va="center",
-        fontsize=14,
-        color="#8C4A00",
-        fontweight="bold",
-    )
-    ax.text(
-        0.50,
-        0.34,
-        "PLS-DA balanced accuracy 0.655\n"
-        "95% CI 0.538–0.771",
-        ha="center",
-        va="center",
-        fontsize=12,
-        linespacing=1.35,
-    )
-    ax.text(
-        0.50,
-        0.19,
-        "Exploratory and residually confounded",
-        ha="center",
-        va="center",
-        fontsize=11,
-        color="#333333",
-    )
-
-    ax.text(
-        0.83,
-        0.81,
-        "Current translational boundary",
-        ha="center",
-        va="center",
-        fontsize=15,
-        fontweight="bold",
-    )
-    ax.text(
-        0.83,
-        0.64,
-        "0 / 1802",
-        ha="center",
-        va="center",
-        fontsize=30,
-        color="#555555",
-        fontweight="bold",
-    )
-    ax.text(
-        0.83,
-        0.55,
-        "clinical channels FDR-supported",
-        ha="center",
-        va="center",
-        fontsize=12,
-    )
-    ax.text(
-        0.83,
-        0.41,
-        r"All MoCA models: CV $R^2 < 0$",
-        ha="center",
-        va="center",
-        fontsize=15,
-        color="#555555",
-        fontweight="bold",
-    )
-    ax.text(
-        0.83,
-        0.27,
-        "Not a diagnostic or prognostic biomarker",
-        ha="center",
-        va="center",
-        fontsize=12,
-    )
-    ax.text(
-        0.83,
-        0.17,
-        "Next: balanced external validation\n"
-        "and EV-subpopulation-resolved assays",
-        ha="center",
-        va="center",
-        fontsize=11,
-        linespacing=1.35,
-    )
-
-    output = ROOT / "manuscript" / "paper" / "graphical_abstract"
-    fig.savefig(output.with_suffix(".pdf"), bbox_inches="tight")
-    fig.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight")
-    plt.close(fig)
 
 
 # Figure 4 is assembled in LaTeX from one PDF per panel, at 0.48 + 0.02 + 0.48
@@ -1240,6 +1013,36 @@ def _cvd_panel_axes():
     )
 
 
+def _recorded_primary_permutation(
+    comparison: pd.DataFrame, reference: pd.DataFrame,
+) -> tuple[pd.Series, np.ndarray]:
+    """Validate the recorded primary score, reference draws and reported p-value."""
+    if "is_primary_model" not in comparison:
+        raise ValueError("Comparison table must identify its configured primary model")
+    primary_mask = comparison["is_primary_model"].map(lambda value: isinstance(value, (bool, np.bool_)) and bool(value))
+    primary_rows = comparison.loc[primary_mask]
+    if len(primary_rows) != 1:
+        raise ValueError("Comparison table must identify exactly one configured primary model")
+    primary = primary_rows.iloc[0]
+    selected = reference.loc[
+        reference["model"].eq(primary["model"])
+        & reference["representation"].eq(primary["representation"])
+        & reference["null_type"].eq("sex_stratified")
+    ]
+    draws = pd.to_numeric(selected["null_balanced_accuracy"], errors="raise").to_numpy(dtype=float)
+    observed = float(primary["permutation_observed_balanced_accuracy"])
+    p_value = float(primary["permutation_p_value_sex_stratified"])
+    if draws.size == 0 or not np.isfinite(draws).all() or not np.isfinite(observed) or not np.isfinite(p_value):
+        raise ValueError("Classifier plot requires finite recorded draws, observed score and p-value")
+    expected_count = primary.get("n_permutations_sex_stratified")
+    if pd.notna(expected_count) and int(expected_count) != len(draws):
+        raise ValueError("Recorded primary reference count does not match the comparison table")
+    calculated_p = (1 + np.count_nonzero(draws >= observed)) / (len(draws) + 1)
+    if not np.isclose(p_value, calculated_p, rtol=0, atol=1e-12):
+        raise ValueError("Recorded primary p-value does not match its observed score and reference draws")
+    return primary, draws
+
+
 def make_cvd_classifier_figure() -> None:
     """ROC curves (whole-spectrum models) and the primary permutation reference distribution.
 
@@ -1247,8 +1050,7 @@ def make_cvd_classifier_figure() -> None:
     already-computed sex-stratified permutation reference distribution; no predictions are
     re-derived.
     """
-    comparison = pd.read_csv(ML_MODEL_COMPARISON)
-    comparison = comparison[comparison["representation"] == "whole"].set_index("model")
+    comparison = _read_source_csv(ML_MODEL_COMPARISON)
 
     # One standalone PDF per panel: the float assembles them with \subcaption,
     # so the panel letters are typeset by LaTeX and stay referenceable.
@@ -1257,7 +1059,7 @@ def make_cvd_classifier_figure() -> None:
 
     mean_fpr = np.linspace(0, 1, 200)
     for model in ("pls_da", "random_forest", "l1_logistic"):
-        predictions = pd.read_csv(
+        predictions = _read_source_csv(
             ML_MODEL_EVAL_DIR / f"{model}_whole_cv_predictions.csv"
         )
         tprs = []
@@ -1278,19 +1080,9 @@ def make_cvd_classifier_figure() -> None:
             linewidth=1.4,
             label=CVD_MODEL_LABELS[model],
         )
-        if model == "pls_da":
-            se_tpr = tprs.std(axis=0, ddof=1) / np.sqrt(tprs.shape[0])
-            ax_roc.fill_between(
-                mean_fpr,
-                np.clip(mean_tpr - 1.96 * se_tpr, 0, 1),
-                np.clip(mean_tpr + 1.96 * se_tpr, 0, 1),
-                color=color,
-                alpha=0.15,
-                linewidth=0,
-            )
-
     ax_roc.plot([0, 1], [0, 1], color=NEUTRAL, linestyle="--", linewidth=0.9,
                 label="Chance")
+    ax_roc.set_title("Mean repeated-CV ROC (descriptive)")
     ax_roc.set_xlabel("False positive rate")
     ax_roc.set_ylabel("True positive rate")
     ax_roc.set_xlim(-0.02, 1.02)
@@ -1299,30 +1091,25 @@ def make_cvd_classifier_figure() -> None:
     ax_roc.tick_params(direction="out", length=3)
     ax_roc.legend(frameon=False, loc="lower right", fontsize=7.5, labelspacing=0.4)
 
-    null = pd.read_csv(ML_PERMUTATION_NULL)
-    primary_null = null[
-        (null["model"] == "pls_da")
-        & (null["representation"] == "whole")
-        & (null["null_type"] == "sex_stratified")
-    ]["null_balanced_accuracy"].to_numpy()
-    observed = float(comparison.loc["pls_da", "balanced_accuracy_mean"])
-    p_value = 0.005
+    reference = _read_source_csv(ML_PERMUTATION_NULL)
+    primary, primary_reference = _recorded_primary_permutation(comparison, reference)
+    observed = float(primary["permutation_observed_balanced_accuracy"])
+    p_value = float(primary["permutation_p_value_sex_stratified"])
     counts, _, _ = ax_null.hist(
-        primary_null, bins=22, color="#B0B0B0", edgecolor="white", linewidth=0.4
+        primary_reference, bins=22, color="#B0B0B0", edgecolor="white", linewidth=0.4
     )
-    ax_null.axvline(observed, color=CVD_MODEL_COLORS["pls_da"], linewidth=1.6)
+    primary_color = CVD_MODEL_COLORS[str(primary["model"])]
+    ax_null.axvline(observed, color=primary_color, linewidth=1.6)
     ax_null.set_xlabel("Balanced accuracy\n(sex-stratified permuted labels)")
     ax_null.set_ylabel("Permutation draws")
     ax_null.spines[["top", "right"]].set_visible(False)
     ax_null.tick_params(direction="out", length=3)
-    # Labelled at the line rather than through a legend: a legend box in a
-    # corner of a 2.6 in panel sits on the reference bars, and it separates the
-    # observed value from the line it names. The p-value belongs here too --
-    # it is what the panel is evidence for, and it was only in the caption.
+    ax_null.set_title(f"Configured primary: {CVD_MODEL_LABELS[str(primary['model'])]} ({primary['representation']})")
     ax_null.set_ylim(0, float(counts.max()) * 1.2)
-    # The observed line lands past the reference distribution's right tail; without a margin it
-    # is drawn on the frame and reads as a clipped axis rather than a value.
-    ax_null.set_xlim(right=observed + 0.02)
+    low = min(float(primary_reference.min()), observed)
+    high = max(float(primary_reference.max()), observed)
+    margin = max(0.02, (high - low) * 0.05)
+    ax_null.set_xlim(low - margin, high + margin)
     ax_null.annotate(
         f"Observed {observed:.3f}\n$p$ = {p_value:.3f}",
         xy=(observed, ax_null.get_ylim()[1] * 0.97),
@@ -1331,7 +1118,7 @@ def make_cvd_classifier_figure() -> None:
         ha="right",
         va="top",
         fontsize=7.5,
-        color=CVD_MODEL_COLORS["pls_da"],
+        color=primary_color,
         linespacing=1.3,
     )
 
@@ -1340,20 +1127,44 @@ def make_cvd_classifier_figure() -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, required=True,
+                        help="Private Results directory for figures and source tables")
+    parser.add_argument("--source-run-metadata", action="append", type=Path, default=[],
+                        help="Archived source-run metadata directory; may be repeated")
+    args = parser.parse_args()
+    _SOURCE_FILES.clear()
+    _RENDER_PLOT_CONFIGS.clear()
+    global FIGURE_DIR, FIGURE_DATA_DIR
+    FIGURE_DIR = args.output_dir.resolve() / "figures"
+    FIGURE_DATA_DIR = args.output_dir.resolve() / "figure_data"
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
     FIGURE_DATA_DIR.mkdir(parents=True, exist_ok=True)
     set_gallery_theme()
     set_manuscript_theme()
-    rng = np.random.default_rng(SEED)
-    advance_rng_past_subject_spectra(rng)
-    make_global_spectra_figures()
-    make_band_effect_figure(rng)
-    make_biopca_loading_figure()
-    make_difference_spectrum_figure()
-    make_panel_effect_sizes_figure()
-    make_cvd_classifier_figure()
-    make_clinical_null_figures()
-    make_graphical_abstract()
+    try:
+        rng = np.random.default_rng(SEED)
+        make_global_spectra_figures()
+        make_band_effect_figure(rng)
+        make_biopca_loading_figure()
+        make_difference_spectrum_figure()
+        make_panel_effect_sizes_figure()
+        make_cvd_classifier_figure()
+        make_clinical_association_figures()
+    finally:
+        write_source_provenance(
+            args.output_dir.resolve(), source_files=_SOURCE_FILES, source_metadata_dirs=args.source_run_metadata,
+            rendering_settings={
+                "renderer_sha256": hash_file(Path(__file__)),
+                "bootstrap_seed": SEED, "n_bootstrap": N_BOOTSTRAP,
+                "matplotlib_rcparams": {key: repr(value) for key, value in matplotlib.rcParams.items()},
+                "clinical_panel_rcparams": CLINICAL_RC,
+                "plot_configs": _RENDER_PLOT_CONFIGS,
+                "numpy_version": np.__version__, "pandas_version": pd.__version__,
+                "matplotlib_version": matplotlib.__version__,
+            },
+        )
+
 
 
 if __name__ == "__main__":

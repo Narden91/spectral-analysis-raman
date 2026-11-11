@@ -1,18 +1,17 @@
 """Step 1: Measurement, linkage, input lock, and computational readiness audit.
 
 Verifies the clinical master table, checks preprocessed store availability,
-benchmarks single-refit runtime and memory, and outputs ``readiness_manifest.json``
+records whether runtime has been measured on the real store, and outputs ``readiness_manifest.json``
 and ``limitations_table.csv``.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
-import sys
-import time
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -20,18 +19,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from manuscript_ml import ensure_output_dir, load_manuscript_config, write_json_atomic, write_run_provenance
+from manuscript_ml.readiness import evaluate_cohort_readiness
 from src.analysis.io_utils import write_csv_atomic
 from src.analysis.paired_lipid.cohort import (
     build_limitations_table,
     load_clinical_master_verified,
     load_paired_cohort_from_store,
 )
-from src.analysis.paired_lipid.batched import _get_gpu_xp
-from src.analysis.paired_lipid.nested_cv import (
-    evaluate_nested_cohort,
-    run_multiplicity_bootstrap,
-)
-from src.analysis.paired_lipid.simulation import generate_synthetic_cohort
 
 
 def run_readiness_audit(
@@ -42,7 +36,7 @@ def run_readiness_audit(
     n_planned_sim_reps: int = 1000,
     config_path: str | Path | None = None,
 ) -> dict[str, Path]:
-    """Execute the pre-evaluation readiness audit and computational benchmark."""
+    """Audit current measurement identities and joins without model fitting."""
     target_dir = ensure_output_dir(output_dir)
     cfg, raw_cfg = load_manuscript_config(config_path)
     expected_verified = int(raw_cfg["readiness"]["expected_identity_verified"])
@@ -82,33 +76,10 @@ def run_readiness_audit(
         except (ValueError, RuntimeError) as exc:
             # RuntimeError: the store failed validation in resolve_data_source.
             cohort_join.update(status="failed", error=str(exc))
-    join_ready = cohort_join.get("observed") == expected_join
 
-    # Benchmark a single 5x3 nested evaluation on a 92-participant full-grid synthetic cohort
-    t_gen = time.perf_counter()
-    bench_ds, _ = generate_synthetic_cohort(n_participants=92, n_single_sample=2, seed=42, compact_grid=False)
-    dataset_build_sec = float(time.perf_counter() - t_gen)
-    # Warm up band extraction cache once, matching run_multiplicity_bootstrap
-    _ = evaluate_nested_cohort(bench_ds, cfg=cfg)
-    t0 = time.perf_counter()
-    _ = evaluate_nested_cohort(bench_ds, cfg=cfg)
-    single_nested_sec = float(time.perf_counter() - t0)
-
-    has_gpu = _get_gpu_xp() is not None
-    if has_gpu:
-        _ = run_multiplicity_bootstrap(bench_ds, cfg=cfg, n_bootstraps=8, bootstrap_seed=1, use_gpu=True)
-        t_b0 = time.perf_counter()
-        _ = run_multiplicity_bootstrap(
-            bench_ds, cfg=cfg, n_bootstraps=min(n_planned_bootstraps, 200), bootstrap_seed=2, use_gpu=True
-        )
-        sample_b_sec = float(time.perf_counter() - t_b0)
-        est_bootstrap_sec = sample_b_sec * (float(n_planned_bootstraps) / float(min(n_planned_bootstraps, 200)))
-    else:
-        t_b0 = time.perf_counter()
-        _ = run_multiplicity_bootstrap(bench_ds, cfg=cfg, n_bootstraps=20, bootstrap_seed=2, use_gpu=False)
-        sample_b_sec = float(time.perf_counter() - t_b0)
-        est_bootstrap_sec = sample_b_sec * (float(n_planned_bootstraps) / 20.0)
-    spectral_bytes = int(bench_ds.sample_1300.nbytes + bench_ds.sample_2850.nbytes)
+    measured_readiness = evaluate_cohort_readiness(
+        clin_audit, cohort_join.get("observed", {}), raw_cfg["readiness"],
+    )
 
     n_pca = len(cfg.pca_dimensions)
     n_lam = len(cfg.lambda_grid)
@@ -125,16 +96,13 @@ def run_readiness_audit(
             "preprocessed_store_present": store_manifest_exists,
             "expected_identity_verified": expected_verified,
             "identity_verified_matches_expected": bool(clin_ready),
-            "ready_for_cohort_join": bool(clin_ready and store_manifest_exists),
+            "ready_for_cohort_join": cohort_join.get("status") == "ok",
             "cohort_join": cohort_join,
-            "ready_for_cohort_evaluation": bool(clin_ready and join_ready),
+            "ready_for_cohort_evaluation": measured_readiness["ready_for_cohort_evaluation"],
         },
         "computational_readiness": {
-            "dataset_build_seconds_full_grid": round(dataset_build_sec, 4),
-            "single_nested_eval_seconds_full_grid": round(single_nested_sec, 4),
-            "estimated_2000_bootstrap_minutes": round(est_bootstrap_sec / 60.0, 2),
-            "requires_separate_campaign_approval": bool((est_bootstrap_sec / 60.0) > 5.0),
-            "sample_spectral_memory_bytes": spectral_bytes,
+            "status": "real_data_runtime_not_measured",
+            "requires_separate_campaign_approval": True,
             "paired_candidates_per_inner_fold": paired_candidates_per_division,
             "planned_bootstrap_refits": n_planned_bootstraps,
             "planned_simulation_repetitions_per_scenario": n_planned_sim_reps,

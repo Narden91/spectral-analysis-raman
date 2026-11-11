@@ -50,3 +50,12 @@ def validate_configured_bands(bands: Mapping[str, object]) -> None:
     expected = {name: band.bounds for name, band in RAMAN_BANDS.items()}
     if observed != expected:
         raise ValueError("whole_spectra.bands does not match the curated 21-band Raman registry")
+
+
+def biochemical_class_map() -> dict[str, str]:
+    """Return the registry assignments using the analysis table's class labels."""
+    labels = {
+        "lipids": "lipid", "proteins": "protein", "nucleic_acids": "nucleic_acid",
+        "carotenoids": "carotenoid", "mixed": "mixed",
+    }
+    return {name: labels[band.category] for name, band in RAMAN_BANDS.items()}

@@ -17,8 +17,8 @@ def test_summarize_panel_by_subgroup_reports_features_and_endpoints() -> None:
     panel = pd.DataFrame(
         {
             "subject_id": ["S1", "S2", "S3", "S4"],
-            "oxidative_index": [0.2, 0.4, 1.0, 1.2],
-            "membrane_integrity_index": [2.0, 2.2, 3.0, 3.2],
+            "carotenoid_to_carbonyl_ratio": [0.2, 0.4, 1.0, 1.2],
+            "ch_bulk_to_carbonyl_ratio": [2.0, 2.2, 3.0, 3.2],
         }
     )
     assignments = pd.DataFrame(
@@ -39,7 +39,7 @@ def test_summarize_panel_by_subgroup_reports_features_and_endpoints() -> None:
     assert set(summary["variable_type"]) == {"panel_feature", "endpoint"}
     oxidative_s1 = summary.loc[
         (summary["subgroup_label"] == "subgroup_1")
-        & (summary["variable_name"] == "oxidative_index")
+        & (summary["variable_name"] == "carotenoid_to_carbonyl_ratio")
     ].iloc[0]
     assert oxidative_s1["n"] == 2
     assert oxidative_s1["median"] == pytest.approx(0.3)

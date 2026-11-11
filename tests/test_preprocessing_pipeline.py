@@ -231,3 +231,59 @@ def test_area_normalization_uses_supplied_wavenumber_axis() -> None:
         wavenumbers=wavenumbers,
     )
     assert np.isclose(np.trapezoid(np.abs(normalized[0]), x=wavenumbers), 1.0)
+
+
+@pytest.mark.parametrize("parameter,value", [("lam", -1), ("ratio", 0), ("max_iter", 0)])
+def test_nested_arpls_validation_checks_actual_parameters(parameter, value):
+    from src.preprocessing.pipeline import _validate_preprocessing_config
+
+    arpls = {"lam": 1000.0, "ratio": 0.001, "max_iter": 20, parameter: value}
+    cfg = {"preprocessing": {"normalization": {"method": "none"}, "baseline": {"method": "arpls", "arpls": arpls}}}
+    with pytest.raises(ValueError, match="arPLS"):
+        _validate_preprocessing_config("fingerprint", cfg)
+
+
+def test_nested_arpls_values_override_unused_top_level_parameters():
+    from src.preprocessing.pipeline import _validate_preprocessing_config
+
+    cfg = {"preprocessing": {"normalization": {"method": "none"}, "baseline": {
+        "method": "arpls", "lam": -1, "ratio": 0, "max_iter": 0,
+        "arpls": {"lam": 1000.0, "ratio": 0.001, "max_iter": 20},
+    }}}
+    _validate_preprocessing_config("fingerprint", cfg)
+
+
+@pytest.mark.parametrize("parameter,value", [("lam", -1), ("p", 0), ("p", 1)])
+def test_als_validation_uses_als_parameters(parameter, value):
+    from src.preprocessing.pipeline import _validate_preprocessing_config
+
+    cfg = {"preprocessing": {"normalization": {"method": "none"}, "baseline": {"method": "als", "lam": 1000.0, "p": 0.01, parameter: value}}}
+    with pytest.raises(ValueError, match="ALS"):
+        _validate_preprocessing_config("fingerprint", cfg)
+
+
+@pytest.mark.parametrize("coords", [np.ones((2, 3)), np.ones((2, 2)), np.full((2, 2), np.nan)])
+def test_spatial_cosmic_fallback_uses_configured_local_window(coords):
+    from src.preprocessing.pipeline import _local_cosmic_detection
+
+    spectra = np.array([[0., 0., 0., 0., 8., 8., 8., 0., 0., 0., 0.], [0., 1., 0., 1., 0., 9., 0., 1., 0., 1., 0.]])
+    cfg = {"method": "spatial", "window": 4, "z_threshold": 2.0, "max_width": 3}
+    actual = _detect_cosmic_spikes(spectra, coords, cfg)
+    expected = _local_cosmic_detection(spectra, z_threshold=2.0, window=4, max_width=3)
+    for actual_array, expected_array in zip(actual, expected):
+        np.testing.assert_array_equal(actual_array, expected_array)
+
+
+def test_rejected_quality_rows_keep_computed_stage_metrics():
+    cfg = deepcopy(src.config)
+    cfg["preprocessing"]["quality_filter"]["spectral_quality"]["snr_threshold"] = 1e12
+    cfg["preprocessing"]["cosmic_ray"]["max_corrected_fraction"] = 1.0
+    spectra = np.vstack([np.linspace(1., 2., 31), np.linspace(2., 3., 31)])
+    result = run_preprocessing(
+        spectra, np.arange(1000., 1031.), region="fingerprint", cfg=cfg,
+        screen_dead=False, suppress_cosmic=False, correct_bl=False,
+        smooth=False, filter_quality=True, normalize=False, trim=0,
+    )
+    assert not result.retained_mask.any()
+    assert np.isfinite(result.qc_metrics["post_baseline_snr"]).all()
+    assert np.isfinite(result.qc_metrics["post_baseline_signal_area"]).all()

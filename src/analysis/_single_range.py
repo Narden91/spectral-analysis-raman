@@ -23,7 +23,6 @@ import matplotlib.pyplot as plt
 
 from src import (
     config,
-    get_biological_pca_canonical_dir,
     get_eda_phase_dir,
     get_single_range_phase_dirs,
 )
@@ -267,6 +266,7 @@ def _run_intra_disease_correlation_phase(
     spectral_range: str,
     range_title: str,
     phase_dir,
+    biological_regions_path: Path | None = None,
 ) -> None:
     _log_phase("PHASE 5: Intra-disease clinical correlations")
     try:
@@ -285,12 +285,7 @@ def _run_intra_disease_correlation_phase(
 
         intra_dir = phase_dir("intra_disease")
         corr_df = compute_intra_disease_correlations(spectra_id, wn_id, clin_aligned)
-        biological_regions = pd.DataFrame()
-        model_name = {"1300": "PCA_1330", "2850": "PCA_2850"}.get(spectral_range)
-        if model_name is not None:
-            bio_regions_path = get_biological_pca_canonical_dir(model_name) / "loading_regions.csv"
-            if bio_regions_path.exists():
-                biological_regions = pd.read_csv(bio_regions_path)
+        biological_regions = pd.read_csv(biological_regions_path) if biological_regions_path is not None else pd.DataFrame()
 
         smoothed_by_target: dict[str, np.ndarray] = {}
         for target, grp in corr_df.groupby("target"):
@@ -812,6 +807,8 @@ def _run_region_robustness_phase(
 def _run_single_range_eda(
     spectral_range: str = "1300",
     max_subjects: int | None = None,
+    *,
+    biological_regions_path: Path | None = None,
 ):
     """Run EDA from the prepared store."""
     df_index, clinical_df, cohort_summary, analysis_mode, phase_dirs = _load_eda_cohort()
@@ -826,7 +823,18 @@ def _run_single_range_eda(
     if spectral_range == "both":
         from src.analysis._whole_spectra_runner import _run_whole_spectra_eda
 
-        return _run_whole_spectra_eda(df_index, groups, wavenumbers, group_ids, range_title)
+        bc_wave, bc_groups, bc_ids = build_whole_spectra_group_matrices(
+            df_index, group_configs_for_eda_mode(analysis_mode), max_subjects=max_subjects,
+            basis="pre_normalization",
+        )
+        if not np.array_equal(bc_wave, wavenumbers) or set(bc_groups) != set(groups):
+            raise ValueError("Whole-spectrum preprocessing bases have different axes or study groups")
+        for key, values in groups.items():
+            if bc_ids[key] != group_ids[key] or bc_groups[key].shape != values.shape:
+                raise ValueError("Whole-spectrum preprocessing bases have different row identities")
+        return _run_whole_spectra_eda(
+            df_index, groups, wavenumbers, group_ids, range_title, pre_normalization_groups=bc_groups,
+        )
 
     rw_cfg = config.get("analysis", {}).get("region_weighting", {})
     apply_to = set(rw_cfg.get("apply_to", []) if rw_cfg.get("enabled", False) else [])
@@ -840,7 +848,7 @@ def _run_single_range_eda(
     if analysis_mode == "disease_only":
         _run_intra_disease_correlation_phase(
             df_index=df_index, clinical_df=clinical_df, spectral_range=spectral_range,
-            range_title=range_title, phase_dir=phase_dir,
+            range_title=range_title, phase_dir=phase_dir, biological_regions_path=biological_regions_path,
         )
     _run_region_robustness_phase(groups, wavenumbers, spectral_range, phase_dirs, phase_dir)
     return {

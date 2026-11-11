@@ -35,7 +35,7 @@ from src.analysis.clinical_feature_associations import (
 )
 from src.analysis.io_utils import write_csv_atomic
 from src.analysis.preregistered_panel import panel_cfg
-from src.analysis.statistics import get_raman_bands
+from src.analysis.raman_bands import RAMAN_BANDS
 
 logger = logging.getLogger(__name__)
 
@@ -45,27 +45,29 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _BAND_LABELS: dict[str, str] = {
-    "lipid_carbonyl": "lipid-carbonyl-like region (~1720)",
-    "carotenoid_1525": "carotenoid-like / lipoprotein-associated region (~1525)",
-    "carotenoid_cc_1156": "carotenoid-like C-C region (~1156)",
-    "protein_1555": "protein-overlapping region (~1555)",
-    "structural_protein_925": "backbone C-C/C-N region (~925)",
-    "structural_protein_980": "backbone C-N region (~980)",
-    "tyrosine_851": "tyrosine Fermi doublet region (~851)",
-    "tyrosine_821": "tyrosine Fermi doublet region (~821)",
+    "lipid_carbonyl_1721": "carbonyl-overlapping region (~1721)",
+    "carotenoid_1525": "carotenoid-overlapping region (~1525)",
+    "carotenoid_1156": "carotenoid-overlapping C-C region (~1156)",
+    "tryptophan_1555": "tryptophan-overlapping region (~1555)",
+    "c_o_c_sugar_925": "sugar C-O-C-overlapping region (~925)",
+    "beta_sheet_980": "beta-sheet C-C-overlapping region (~980)",
+    "tyrosine_851": "tyrosine/glycan-overlapping region (~851)",
+    "o_p_o_821": "O-P-O-overlapping region (~821)",
 }
+
 
 
 def _annotate_component(component_loadings: np.ndarray, wavenumbers: np.ndarray, top_k: int = 3) -> str:
     """Return a conservative region-overlap annotation for one NMF component."""
-    raman_bands = get_raman_bands()
+    raman_bands = RAMAN_BANDS
     if not raman_bands or component_loadings.size == 0:
         return "unassigned"
 
     top_wavenumbers = wavenumbers[np.argsort(component_loadings)[::-1][:top_k]]
     labels: list[str] = []
-    for band_name, band_centre in raman_bands.items():
-        if any(abs(wn - band_centre) <= 15.0 for wn in top_wavenumbers):
+    for band_name, band in raman_bands.items():
+        band_centre = band.peak
+        if any(band.bounds[0] <= wn <= band.bounds[1] for wn in top_wavenumbers):
             label = _BAND_LABELS.get(band_name, f"region overlapping {band_name} (~{band_centre:.0f})")
             if label not in labels:
                 labels.append(label)

@@ -2,29 +2,29 @@
 
 Builds a single priority-ranked table from the cross-analysis candidate
 regions (Phase 6), covariate-adjusted models (Phase 7), PLS VIP coverage
-(Phase 8), PLS-L1DA selection (Phase 9), and biological PCA loading overlap.
+(Phase 8), and biological PCA loading overlap.
 
-All evidence is exploratory unless an independent validation source is supplied.
+These same-cohort annotations remain exploratory.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from src import get_biological_pca_canonical_dir, get_classification_phase_dir, get_cross_region_phase_dir
+from src import get_classification_phase_dir, get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import load_subject_feature_matrix
 from src.analysis.io_utils import load_csv_or_empty
 from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, PhaseStatus
+from src.analysis.raman_bands import biochemical_class_map
 from src.statistics.multiple_testing import holm_adjust_series
 
 logger = logging.getLogger(__name__)
-
-_BIOLOGICAL_PCA_MODELS = ("PCA_1330", "PCA_2850", "PCA_whole")
 
 _DEFAULT_COLUMNS = [
     "candidate_region_id",
@@ -48,8 +48,8 @@ _DEFAULT_COLUMNS = [
     "cluster_permutation_significant",
     "covariate_persisted",
     "pls_vip_coverage",
-    "splsda_selected",
     "biological_pca_overlap",
+    "biological_pca_annotation_status",
     "overlapping_biological_pcs",
     "biochemical_class",
     "max_abs_effect",
@@ -175,41 +175,19 @@ def _annotate_pls_vip_coverage(
     return pd.Series(out, index=candidates.index, dtype=bool)
 
 
-def _annotate_splsda_selection(
-    candidates: pd.DataFrame,
-    splsda_bands: pd.DataFrame | None,
-    feature_columns: list[str],
-) -> pd.Series:
-    if splsda_bands is None or splsda_bands.empty:
-        return pd.Series(False, index=candidates.index, dtype=bool)
-
-    required = {"feature_name", "selected"}
-    if not required.issubset(splsda_bands.columns):
-        logger.warning("PLS-L1DA bands table missing expected columns; skipping selection annotation")
-        return pd.Series(False, index=candidates.index, dtype=bool)
-
-    selected_features = set(
-        splsda_bands.loc[splsda_bands["selected"].fillna(False), "feature_name"].astype(str).unique()
-    )
-    out = []
-    for _, region in candidates.iterrows():
-        region_features = set(_region_feature_names(feature_columns, region))
-        out.append(bool(region_features & selected_features))
-    return pd.Series(out, index=candidates.index, dtype=bool)
 
 
-def _load_biological_pca_loading_regions() -> pd.DataFrame:
+def _load_biological_pca_loading_regions(paths: Mapping[str, str | Path]) -> pd.DataFrame:
+    """Read only explicitly supplied loading-region artifacts from the caller's run."""
     frames: list[pd.DataFrame] = []
-    for model_name in _BIOLOGICAL_PCA_MODELS:
-        path = get_biological_pca_canonical_dir(model_name) / "loading_regions.csv"
-        if not path.exists():
-            continue
+    required = {"spectral_block", "start_cm-1", "end_cm-1", "PC"}
+    for model_name, path in paths.items():
         df = pd.read_csv(path)
+        if not required.issubset(df.columns):
+            raise ValueError(f"Biological PCA region table for {model_name} lacks required columns")
         if not df.empty:
             frames.append(df)
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True, sort=False)
+    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
 
 
 def _annotate_biological_pca_overlap(
@@ -255,12 +233,7 @@ def _band_windows(cfg: dict[str, Any]) -> dict[str, tuple[float, float]]:
 
 
 def _band_class_map(cfg: dict[str, Any]) -> dict[str, str]:
-    classes_cfg = cfg.get("whole_spectra", {}).get("biochemical_classes", {})
-    out: dict[str, str] = {}
-    for class_name, band_names in classes_cfg.items():
-        for band_name in band_names:
-            out[str(band_name)] = str(class_name)
-    return out
+    return biochemical_class_map()
 
 
 def _annotate_biochemical_class(
@@ -340,9 +313,8 @@ def _interpretation_note(row: pd.Series) -> str:
         parts.append("covariate-persisted")
     if bool(row.get("pls_vip_coverage", False)):
         parts.append("PLS VIP coverage")
-    if bool(row.get("splsda_selected", False)):
-        parts.append("PLS-L1DA selected")
-    if bool(row.get("biological_pca_overlap", False)):
+    pca_overlap = row.get("biological_pca_overlap", False)
+    if pd.notna(pca_overlap) and bool(pca_overlap):
         parts.append("biological PCA loading overlap")
 
     if not parts:
@@ -359,7 +331,7 @@ def run_integrated_candidates(
     covariate_models_path: str | Path | None = None,
     pls_feature_effects_path: str | Path | None = None,
     pls_performance_path: str | Path | None = None,
-    splsda_bands_path: str | Path | None = None,
+    biological_pca_region_paths: Mapping[str, str | Path] | None = None,
     feature_matrix_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
@@ -386,8 +358,6 @@ def run_integrated_candidates(
         pls_feature_effects_path = get_classification_phase_dir("pls_regression") / "pls_feature_effects.parquet"
         if pls_performance_path is None:
             pls_performance_path = get_classification_phase_dir("pls_regression") / "pls_regression_performance.csv"
-    if splsda_bands_path is None:
-        splsda_bands_path = get_classification_phase_dir("splsda") / "pls_l1da_selected_bands.csv"
 
     candidates = _load_table_if_exists(candidate_regions_path)
     if candidates is None or candidates.empty:
@@ -405,7 +375,6 @@ def run_integrated_candidates(
     covariate_models = _load_table_if_exists(covariate_models_path)
     pls_vip = _load_table_if_exists(pls_feature_effects_path)
     pls_performance = _load_table_if_exists(pls_performance_path)
-    splsda_bands = _load_table_if_exists(splsda_bands_path)
 
     feature_columns: list[str] = []
     if feature_matrix_path is not None and Path(feature_matrix_path).exists():
@@ -458,12 +427,17 @@ def run_integrated_candidates(
         vip_threshold,
         significant_pls_targets=significant_pls_targets,
     )
-    candidates["splsda_selected"] = _annotate_splsda_selection(candidates, splsda_bands, feature_columns)
 
-    loading_regions = _load_biological_pca_loading_regions()
-    candidates["biological_pca_overlap"], candidates["overlapping_biological_pcs"] = (
-        _annotate_biological_pca_overlap(candidates, loading_regions)
-    )
+    if biological_pca_region_paths:
+        loading_regions = _load_biological_pca_loading_regions(biological_pca_region_paths)
+        candidates["biological_pca_overlap"], candidates["overlapping_biological_pcs"] = (
+            _annotate_biological_pca_overlap(candidates, loading_regions)
+        )
+        candidates["biological_pca_annotation_status"] = "provided_run_inputs"
+    else:
+        candidates["biological_pca_overlap"] = pd.Series(pd.NA, index=candidates.index, dtype="boolean")
+        candidates["overlapping_biological_pcs"] = pd.NA
+        candidates["biological_pca_annotation_status"] = "not_supplied"
     candidates["biochemical_class"] = _annotate_biochemical_class(candidates, cfg)
 
     candidates["evidence_status"] = candidates.apply(_assign_evidence_status, axis=1)

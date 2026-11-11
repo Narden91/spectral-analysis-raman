@@ -239,14 +239,17 @@ def test_analysis_dataset_area_summaries_matches_legacy_loader(configured_store_
     assert np.array_equal(normalized.area_ids, legacy["area_ids"])
 
 
-def test_analysis_dataset_whole_area_summaries_matches_legacy_loader(configured_store_paths: dict[str, Path]) -> None:
+@pytest.mark.parametrize("basis", ["normalized", "pre_normalization"])
+def test_analysis_dataset_whole_area_summaries_matches_legacy_loader(configured_store_paths: dict[str, Path], basis: str) -> None:
     build_preprocessed_store(src.config, force=True)
     dataset = open_analysis_dataset(src.config)
 
     from src.data_preparation.loaders import load_whole_area_store
 
-    legacy = load_whole_area_store(dataset.data_source)
-    view = dataset.whole_area_summaries()
+    legacy = load_whole_area_store(dataset.data_source, basis=basis)
+    view = dataset.whole_area_summaries(basis)
+    assert view.basis == basis
+    assert not view.values.flags.writeable
 
     assert np.array_equal(view.values, legacy["values"])
     assert np.array_equal(view.area_ids, legacy["area_ids"])

@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from src.analysis.band_features import ratio_from_integrals
 from src.analysis.statistics import REGION_BOUNDS, cohens_d, fdr_correction
 
 
@@ -51,12 +52,7 @@ def _ratio_column_name(band_a: str, band_b: str) -> str:
 
 
 def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
-    min_value = float(min(numerator.min(), denominator.min()))
-    offset = max(0.0, 1.0 - min_value)
-    adjusted_numerator = numerator + offset
-    adjusted_denominator = denominator + offset
-    adjusted_denominator = adjusted_denominator.where(adjusted_denominator > 0, np.nan)
-    return adjusted_numerator / adjusted_denominator
+    return ratio_from_integrals(numerator, denominator)
 
 
 def _correlation(x: np.ndarray, y: np.ndarray, method: str) -> float:

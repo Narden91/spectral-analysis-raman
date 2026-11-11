@@ -325,21 +325,31 @@ def _main() -> None:
             }
             logger.info("Clinical endpoints written to %s", endpoint_result.output_dir)
 
-        for spectral_range in ranges:
-            print_status(f"Starting {spectral_range} EDA")
-            run_eda(
-                spectral_range=spectral_range,
-                max_subjects=args.max_subjects,
-            )
-            print_status(f"Finished {spectral_range} EDA")
-
         biological_ran = False
         biological_outputs: dict[str, Path] = {}
-        if _should_run_biological_pca(ranges, args.skip_biological_pca):
+        if analysis_mode == "disease_only" and _should_run_biological_pca(ranges, args.skip_biological_pca):
             print_status("Starting Biological PCA")
             biological_outputs = run_biological_pca(max_subjects=args.max_subjects, data_source=data_source)
             biological_ran = True
             print_status("Finished Biological PCA")
+
+        for spectral_range in ranges:
+            print_status(f"Starting {spectral_range} EDA")
+            model_name = {"1300": "PCA_1330", "2850": "PCA_2850"}.get(spectral_range)
+            model_dir = biological_outputs.get(model_name)
+            run_eda(
+                spectral_range=spectral_range,
+                max_subjects=args.max_subjects,
+                biological_regions_path=model_dir / "loading_regions.csv" if model_dir is not None else None,
+            )
+            print_status(f"Finished {spectral_range} EDA")
+
+        if _should_run_biological_pca(ranges, args.skip_biological_pca):
+            if not biological_ran:
+                print_status("Starting Biological PCA")
+                biological_outputs = run_biological_pca(max_subjects=args.max_subjects, data_source=data_source)
+                biological_ran = True
+                print_status("Finished Biological PCA")
             if analysis_mode == "disease_only":
                 feature_matrix_path = biological_outputs.get("subject_feature_matrix_whole")
                 print_status("Starting disease-only cross-region phases")

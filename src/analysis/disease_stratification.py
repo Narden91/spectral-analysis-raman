@@ -45,12 +45,6 @@ BINARY_SPECS = (
         ordered_groups=("low_moca", "high_moca"),
         kind="binary",
     ),
-    StratificationSpec(
-        variable="delta_moca_group",
-        label="decline_vs_stable_or_improved",
-        ordered_groups=("decline", "stable_or_improved"),
-        kind="binary",
-    ),
 )
 LESION_SPEC = StratificationSpec(
     variable="lesion_location_group",

@@ -6,10 +6,9 @@ of the Biological PCA subject feature matrix. Config validation and phase
 docstrings define the confound handling, claims discipline, and data limits.
 
 Positive class = Disease (is_control == False -> 1). Exploratory only: no
-diagnostic, biomarker, causal, or clinical-utility claims. Age is not modeled
-anywhere in this pipeline because no age data exists for control subjects in
-this cohort (49/50 missing) and no proxy exists in the repository; inventing
-one would inject bias rather than remove it.
+diagnostic, biomarker, causal, or clinical-utility claims. These spectral
+classifiers do not include age as a predictor; availability is summarized from
+the supplied cohort rather than inferred from historical data.
 
 Output map:
     01_cohort                  class balance and confound counts
@@ -84,7 +83,7 @@ NEGATIVE_CLASS_LABEL = "Control"
 _MIN_SUBJECTS_PER_CLASS = 10
 _MIN_SUBJECTS_PER_CLASS_STRATIFIED = 10
 _MODEL_NAMES = ("pls_da", "l1_logistic", "random_forest")
-_CHECKPOINT_SCHEMA_VERSION = 1
+_CHECKPOINT_SCHEMA_VERSION = 2
 _CHECKPOINT_FLUSH_EVERY = 25
 
 PredictFn = Callable[[np.ndarray], np.ndarray]
@@ -168,6 +167,10 @@ class _CheckpointStore:
             raise ValueError("Resuming ML requires an explicit subject feature matrix path")
         identity = {
             "schema_version": _CHECKPOINT_SCHEMA_VERSION,
+            "implementation_sha256": config_hash({
+                name: hash_file(Path(__file__).with_name(name))
+                for name in ("control_vs_disease_ml.py", "pls_regression.py", "sklearn_utils.py")
+            }),
             "analysis_config_hash": config_hash(cfg_in),
             "ml_config_hash": config_hash(_ml_cfg(cfg_in)),
             "data_manifest_hash": data_manifest_hash or "not_supplied",
@@ -201,12 +204,28 @@ class _CheckpointStore:
     def stage_path(self, model_name: str, representation: str, label: str) -> Path:
         return self.directory / f"stage_{model_name}_{representation}_{label}.json"
 
-    def stage_complete(self, model_name: str, representation: str, label: str) -> bool:
-        return self.resume and self.stage_path(model_name, representation, label).exists()
+    def stage_complete(
+        self, model_name: str, representation: str, label: str, *, artifacts: Sequence[Path] = (),
+    ) -> bool:
+        path = self.stage_path(model_name, representation, label)
+        if not self.resume or not path.is_file():
+            return False
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        if stored.get("identity") != self.identity or stored.get("status") != "ok":
+            return False
+        hashes = stored.get("artifacts", {})
+        return all(
+            artifact.is_file() and hashes.get(str(artifact.resolve())) == hash_file(artifact)
+            for artifact in artifacts
+        )
 
-    def mark_stage_complete(self, model_name: str, representation: str, label: str) -> None:
+    def mark_stage_complete(
+        self, model_name: str, representation: str, label: str, *, artifacts: Sequence[Path] = (),
+    ) -> None:
         write_json_atomic(
-            self.stage_path(model_name, representation, label), {"identity": self.identity, "status": "ok"}
+            self.stage_path(model_name, representation, label),
+            {"identity": self.identity, "status": "ok",
+             "artifacts": {str(path.resolve()): hash_file(path) for path in artifacts}},
         )
 
 
@@ -313,7 +332,8 @@ def _labels(frame: pd.DataFrame) -> np.ndarray:
 
 
 def _sex_column(frame: pd.DataFrame) -> str | None:
-    return next((c for c in ("gender", "sex") if c in frame.columns), None)
+    """Prefer clinical sex; legacy gender metadata is never a per-row replacement."""
+    return next((c for c in ("sex", "gender") if c in frame.columns), None)
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +415,7 @@ def _cohort_summary(frame: pd.DataFrame) -> pd.DataFrame:
     ]
 
     sex_column = _sex_column(frame)
+    rows.append({"metric": "sex_covariate_column", "value": sex_column or "not_available"})
     if sex_column is not None:
         crosstab = pd.crosstab(is_control, frame[sex_column].astype(str))
         for control_flag, row in crosstab.iterrows():
@@ -413,7 +434,7 @@ def _cohort_summary(frame: pd.DataFrame) -> pd.DataFrame:
         for control_flag, count in age_non_null.items():
             group_label = NEGATIVE_CLASS_LABEL if control_flag else POSITIVE_CLASS_LABEL
             rows.append({"metric": f"n_{group_label.lower()}_with_age", "value": int(count)})
-    rows.append({"metric": "age_adjustment_status", "value": "not_attempted_no_control_age_data"})
+    rows.append({"metric": "age_adjustment_status", "value": "not_modeled"})
 
     return pd.DataFrame(rows)
 
@@ -452,12 +473,32 @@ def _tune_threshold(y_true: np.ndarray, scores: np.ndarray, metric: str) -> floa
     return _tune_threshold_and_score(y_true, scores, metric)[0]
 
 
-def _inner_cv_folds(X_train: np.ndarray, y_train: np.ndarray, n_inner_splits: int, random_state: int) -> list | None:
-    n_splits = min(n_inner_splits, int(np.bincount(y_train).min()))
+def _inner_cv_folds(
+    X_train: np.ndarray, y_train: np.ndarray, n_inner_splits: int, random_state: int,
+    *, groups: np.ndarray | None = None,
+) -> list | None:
+    if groups is None:
+        n_splits = min(n_inner_splits, int(np.bincount(y_train).min()))
+        if n_splits < 2:
+            return None
+        inner_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+        return list(inner_cv.split(X_train, y_train))
+
+    groups = np.asarray(groups)
+    if groups.shape != y_train.shape:
+        raise ValueError("Inner CV participant groups must match training rows")
+    _, first, inverse = np.unique(groups, return_index=True, return_inverse=True)
+    group_y = y_train[first]
+    if not np.array_equal(y_train, group_y[inverse]):
+        raise ValueError("Copies of a participant have inconsistent labels")
+    n_splits = min(n_inner_splits, int(np.bincount(group_y, minlength=2).min()))
     if n_splits < 2:
         return None
     inner_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    return list(inner_cv.split(X_train, y_train))
+    return [
+        (np.flatnonzero(np.isin(inverse, train_groups)), np.flatnonzero(np.isin(inverse, test_groups)))
+        for train_groups, test_groups in inner_cv.split(X_train[first], group_y)
+    ]
 
 
 def _scaled_inner_folds(
@@ -497,9 +538,10 @@ def _fit_pls_da(
     threshold_metric: str,
     random_state: int,
     n_jobs: int,
+    groups: np.ndarray | None = None,
 ) -> _ModelFit:
     component_grid = _pls_component_grid(ml_cfg)
-    folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state)
+    folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state, groups=groups)
     best_n_comp, best_threshold, best_score = component_grid[0], 0.5, -np.inf
 
     if folds is not None:
@@ -537,9 +579,10 @@ def _fit_l1_logistic(
     threshold_metric: str,
     random_state: int,
     n_jobs: int,
+    groups: np.ndarray | None = None,
 ) -> _ModelFit:
     c_grid = _logistic_c_grid(ml_cfg)
-    folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state)
+    folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state, groups=groups)
     best_c, best_threshold, best_score = c_grid[0], 0.5, -np.inf
 
     if folds is not None:
@@ -574,10 +617,11 @@ def _fit_random_forest(
     threshold_metric: str,
     random_state: int,
     n_jobs: int,
+    groups: np.ndarray | None = None,
 ) -> _ModelFit:
     n_estimators_grid = _rf_n_estimators_grid(ml_cfg)
     max_depth_grid = _rf_max_depth_grid(ml_cfg)
-    folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state)
+    folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state, groups=groups)
     best_params, best_threshold, best_score = (n_estimators_grid[0], max_depth_grid[0]), 0.5, -np.inf
 
     if folds is not None:
@@ -655,6 +699,7 @@ def _fit_tuned_model(
     threshold_metric: str,
     random_state: int,
     n_jobs: int,
+    groups: np.ndarray | None = None,
 ) -> _ModelFit:
     """Tune hyperparameters + decision threshold on inner CV; fit final model on all of X_train.
 
@@ -666,6 +711,8 @@ def _fit_tuned_model(
     fitter = _MODEL_FITTERS.get(model_name)
     if fitter is None:
         raise ValueError(f"Unknown model '{model_name}'")
+    if groups is not None:
+        return fitter(X_train, y_train, ml_cfg, n_inner_splits, threshold_metric, random_state, n_jobs, groups=groups)
     return fitter(X_train, y_train, ml_cfg, n_inner_splits, threshold_metric, random_state, n_jobs)
 
 
@@ -1135,18 +1182,7 @@ def _bootstrap_metric_sample(
     ml_cfg: dict[str, Any],
     seed: int,
 ) -> dict[str, float] | None:
-    """One out-of-bag bootstrap draw: fit on the in-bag resample, score on subjects never drawn.
-
-    Resampling subjects with replacement and then running cross-validation on
-    the resampled array (as a naive implementation might) leaks: a duplicated
-    subject's two copies can land in different CV folds, so the model can see
-    a near-identical copy of a "held-out" subject during training, inflating
-    performance metrics. The classic fix — used here — is out-of-bag scoring:
-    fit once on the in-bag resample (duplicates and all; that's fine, nothing
-    is held out from *fitting*), then evaluate only on the subjects whose
-    original row was never selected into this resample. Those subjects are
-    guaranteed absent from every duplicate too, so there is no leakage path.
-    """
+    """Fit an in-bag draw with grouped inner tuning, then score unseen participants."""
     rng = np.random.default_rng(seed)
     n_samples = X.shape[0]
     in_bag_idx = rng.integers(0, n_samples, size=n_samples)
@@ -1161,6 +1197,8 @@ def _bootstrap_metric_sample(
 
     n_inner_splits = _n_inner_splits(ml_cfg)
     threshold_metric = _threshold_metric(ml_cfg)
+    if _inner_cv_folds(X_in, y_in, n_inner_splits, seed, groups=in_bag_idx) is None:
+        return None
     fit = _fit_tuned_model(
         model_name,
         X_in,
@@ -1170,6 +1208,7 @@ def _bootstrap_metric_sample(
         threshold_metric=threshold_metric,
         random_state=seed,
         n_jobs=1,
+        groups=in_bag_idx,
     )
     scores = fit.predict_proba(X_out)
     y_pred = (scores >= fit.threshold).astype(int)
@@ -1325,7 +1364,7 @@ def _outer_fold_importance_frame(
         ml_cfg=ml_cfg,
         n_inner_splits=_n_inner_splits(ml_cfg),
         threshold_metric=_threshold_metric(ml_cfg),
-        random_state=random_state + repeat_index * 101 + fold_index,
+        random_state=random_state + repeat_index,
         n_jobs=estimator_n_jobs,
     )
     base = {
@@ -1484,35 +1523,42 @@ def _outer_fold_feature_importance(
 # ---------------------------------------------------------------------------
 
 
-def _sex_only_baseline(frame: pd.DataFrame, y: np.ndarray, valid_rows: np.ndarray) -> dict[str, object]:
-    """Logistic model using sex alone. The spectral model must beat this to
-    support any spectral claim (§0.1) — it is not itself a claim of anything.
-    """
+def _sex_only_baseline(
+    frame: pd.DataFrame, y: np.ndarray, valid_rows: np.ndarray,
+    *, outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]] | None = None,
+    random_state: int = 42,
+) -> dict[str, object]:
+    """Evaluate a sex-only model on the spectral models' held-out folds."""
     sex_column = _sex_column(frame)
     if sex_column is None:
         return {"status": "missing_sex_column"}
-
-    sex_values = frame.loc[valid_rows, sex_column].astype(str).to_numpy()
+    recorded_sex = frame.loc[valid_rows, sex_column].astype("string").str.strip().str.lower()
+    if not recorded_sex.isin(["male", "female"]).all():
+        return {"status": "missing_sex_values", "sex_covariate_column": sex_column}
+    sex_values = recorded_sex.to_numpy()
     y_valid = y[valid_rows]
     X_sex = (sex_values == "male").astype(float).reshape(-1, 1)
+    if outer_split_plan is None:
+        n_splits = min(5, int(np.bincount(y_valid).min()))
+        if n_splits < 2:
+            return {"status": "insufficient_class_size_for_cv"}
+        outer_split_plan = [list(StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state).split(X_sex, y_valid))]
 
-    n_splits = min(5, int(np.bincount(y_valid).min()))
-    if n_splits < 2:
-        return {"status": "insufficient_class_size_for_cv"}
-
-    outer_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-    y_pred = np.zeros_like(y_valid, dtype=int)
-    y_score = np.zeros_like(y_valid, dtype=float)
-    for train_idx, test_idx in outer_cv.split(X_sex, y_valid):
-        model = LogisticRegression(class_weight="balanced", random_state=42, max_iter=1000)
-        fit_with_convergence_capture(model, X_sex[train_idx], y_valid[train_idx], context="sex-only baseline")
-        train_scores = model.predict_proba(X_sex[train_idx])[:, 1]
-        y_score[test_idx] = model.predict_proba(X_sex[test_idx])[:, 1]
-        threshold = _tune_threshold(y_valid[train_idx], train_scores, "balanced_accuracy")
-        y_pred[test_idx] = (y_score[test_idx] >= threshold).astype(int)
-
-    metrics = _classification_metrics(y_valid, y_pred, y_score)
-    return {"status": "ok", **{f"sex_only_{k}": v for k, v in metrics.items()}}
+    repeat_metrics = []
+    for repeat_index, folds in enumerate(outer_split_plan):
+        y_pred = np.zeros_like(y_valid, dtype=int)
+        y_score = np.zeros_like(y_valid, dtype=float)
+        for train_idx, test_idx in folds:
+            model = LogisticRegression(class_weight="balanced", random_state=random_state + repeat_index, max_iter=1000)
+            fit_with_convergence_capture(model, X_sex[train_idx], y_valid[train_idx], context="sex-only baseline")
+            train_scores = model.predict_proba(X_sex[train_idx])[:, 1]
+            y_score[test_idx] = model.predict_proba(X_sex[test_idx])[:, 1]
+            threshold = _tune_threshold(y_valid[train_idx], train_scores, "balanced_accuracy")
+            y_pred[test_idx] = (y_score[test_idx] >= threshold).astype(int)
+        repeat_metrics.append(_classification_metrics(y_valid, y_pred, y_score))
+    metrics = pd.DataFrame(repeat_metrics).mean().to_dict()
+    return {"status": "ok", "sex_only_cv_repeats": len(repeat_metrics), "sex_covariate_column": sex_column,
+            **{f"sex_only_{key}": value for key, value in metrics.items()}}
 
 
 def _sex_stratified_refit(
@@ -1620,7 +1666,8 @@ def _run_observed_model_phase(
     cv_path = model_dir / f"{model_name}_{representation}_cv_predictions.csv"
     importance_folds_path = model_dir / f"{model_name}_{representation}_feature_importance_outer_folds.csv"
     importance_path = model_dir / f"{model_name}_{representation}_feature_importance.csv"
-    observed_complete = checkpoints.stage_complete(model_name, representation, "observed")
+    observed_artifacts = (cv_path, importance_folds_path, importance_path)
+    observed_complete = checkpoints.stage_complete(model_name, representation, "observed", artifacts=observed_artifacts)
     with phase(f"{model_name}_{representation}", f"{model_name} ({representation}) nested CV"):
         if (
             observed_complete
@@ -1671,7 +1718,7 @@ def _run_observed_model_phase(
             outputs[f"{model_name}_{representation}_feature_importance"] = write_csv_atomic(
                 importance_df, importance_path, index=False
             )
-            checkpoints.mark_stage_complete(model_name, representation, "observed")
+            checkpoints.mark_stage_complete(model_name, representation, "observed", artifacts=observed_artifacts)
     return oof, metrics
 
 
@@ -1870,11 +1917,15 @@ def run_control_vs_disease_ml_pipeline(
                     )
                 X_valid, y_valid = X[valid_rows], y[valid_rows]
 
-            strata = (
-                frame.loc[valid_rows, sex_column].astype(str).to_numpy()
-                if (sex_column is not None and stratify_by == "sex")
-                else None
-            )
+            strata = None
+            if sex_column is not None and stratify_by == "sex":
+                recorded_sex = frame.loc[valid_rows, sex_column].astype("string").str.strip().str.lower()
+                if not recorded_sex.isin(["male", "female"]).all():
+                    raise ValueError(
+                        "Sex-stratified inference requires complete recorded sex values; "
+                        "folder labels cannot replace missing clinical sex"
+                    )
+                strata = recorded_sex.to_numpy()
             if stratify_by == "sex" and strata is None:
                 raise ValueError(
                     "Sex-stratified classification requires a non-missing sex column; unrestricted inference is not a fallback"
@@ -1894,7 +1945,7 @@ def run_control_vs_disease_ml_pipeline(
             )
             logger.info("Control-vs-disease ML workload: %s", workload_message)
             progress.console.print(f"[cyan]ML workload:[/] {workload_message}")
-            sex_only = _sex_only_baseline(frame, y, valid_rows)
+            sex_only = _sex_only_baseline(frame, y, valid_rows, outer_split_plan=outer_split_plan, random_state=random_state)
 
             with phase(f"band_screen_{representation}", f"Univariate band screen ({representation})"):
                 if representation == "band_panel":

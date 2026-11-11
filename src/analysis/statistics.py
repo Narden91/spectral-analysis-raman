@@ -15,6 +15,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from src import config
+from src.analysis.raman_bands import RAMAN_BANDS as BAND_REGISTRY
 from src.constants import CANONICAL_REGION_BOUNDS
 
 logger = logging.getLogger(__name__)
@@ -442,13 +443,12 @@ def run_pca(
 
 
 def _load_raman_bands() -> dict[str, float]:
-    """Build {band_name: centre_wavenumber} from config whole_spectra.bands."""
-    bands_cfg: dict = config.get("whole_spectra", {}).get("bands", {})
-    return {name: float(lo + hi) / 2.0 for name, (lo, hi) in bands_cfg.items()}
+    """Build band centres from the curated Raman registry."""
+    return {name: float(band.peak) for name, band in BAND_REGISTRY.items()}
 
 
 def get_raman_bands() -> dict[str, float]:
-    """Return the canonical Raman band centres derived from settings.yaml."""
+    """Return the canonical peak positions from the Raman registry."""
     return _load_raman_bands()
 
 
@@ -473,9 +473,9 @@ def extract_band_intensities(
     wavenumbers : np.ndarray
         1D array.
     bands : dict
-        {band_name: target_wavenumber}. Defaults to RAMAN_BANDS.
+        {band_name: target_wavenumber}. Defaults to the registered windows.
     tolerance : float
-        +/- wavenumber tolerance for band integration.
+        +/- wavenumber tolerance for explicitly supplied custom centres.
 
     Returns
     -------
@@ -483,20 +483,15 @@ def extract_band_intensities(
         Columns correspond to band names; rows to spectra.
     """
     if bands is None:
-        # Filter bands to those within the wavenumber range
-        wmin, wmax = wavenumbers.min(), wavenumbers.max()
-        bands = {
-            k: v
-            for k, v in RAMAN_BANDS.items()
-            if wmin - tolerance <= v <= wmax + tolerance
-        }
-
+        windows = {name: band.bounds for name, band in BAND_REGISTRY.items()}
+    else:
+        windows = {name: (center - tolerance, center + tolerance) for name, center in bands.items()}
     result = {}
-    for name, center in bands.items():
-        mask = (wavenumbers >= center - tolerance) & (wavenumbers <= center + tolerance)
+    for name, (lower, upper) in windows.items():
+        mask = (wavenumbers >= lower) & (wavenumbers <= upper)
         if mask.any():
             result[name] = np.nanmean(spectra[:, mask], axis=1)
-        else:
+        elif bands is not None:
             result[name] = np.full(spectra.shape[0], np.nan)
 
     return pd.DataFrame(result)

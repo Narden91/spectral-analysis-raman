@@ -15,6 +15,10 @@
 # ---------------------------------------------------------------------------
 _extends: settings.yaml
 
+data:
+  clinical_data_path: data/clinical_master.csv
+  clinical_dictionary_path: data/clinical_master_dictionary.csv
+
 # ---------------------------------------------------------------------------
 # Run control — which spectral ranges to process by default
 # ---------------------------------------------------------------------------
@@ -29,16 +33,16 @@ analysis:
   mode: "disease_vs_control"  # str: one of {"disease_vs_control", "disease_only"}
   clinical_endpoints:
     enabled: true
-    clinical_table: data/clinical_data.csv
+    clinical_table: data/clinical_master.csv
     subject_id_col: subject_id
-    moca_baseline_col: moca_baseline_total
-    moca_3m_col: moca_3m_total
-    rbans_col: rbans_total
-    age_col: age
-    aspects_col: aspects_score
+    moca_baseline_col: moca_baseline
+    moca_3m_col: moca_3m
+    rbans_col: rbans_total_3m
+    age_col: age_years
+    aspects_col: aspects
     sex_col: sex
-    diagnosis_col: diagnosis_category
-    lesion_location_col: lesion_location
+    diagnosis_col: diagnosis_text
+    lesion_location_col: stroke_location
     severity_threshold: 20
     decline_threshold: 0
     mild_threshold: 25
@@ -289,23 +293,22 @@ analysis:
     min_snr_for_peak_fit: 5.0
     calibration_floor_cm: 1.5
     integrals:
-      lipid_carbonyl_1721: ["1300", 1710, 1735]
-      lipid_carbonyl_1721_fallback: ["1300", 1700, 1750]
-      carotenoid_cc_1156: ["1300", 1145, 1170]
+      lipid_carbonyl_1721: ["1300", 1710, 1730]
+      carotenoid_1156: ["1300", 1145, 1165]
       carotenoid_1525: ["1300", 1510, 1535]
-      protein_1555: ["1300", 1540, 1570]
-      structural_protein_925: ["1300", 915, 935]
-      structural_protein_980: ["1300", 970, 990]
-      tyrosine_851: ["1300", 845, 858]
-      tyrosine_821: ["1300", 815, 828]
+      tryptophan_1555: ["1300", 1550, 1560]
+      c_o_c_sugar_925: ["1300", 900, 938]
+      beta_sheet_980: ["1300", 965, 995]
+      tyrosine_851: ["1300", 836, 874]
+      o_p_o_821: ["1300", 812, 832]
       ch_bulk_2885: ["2850", 2850, 2950]
     indices:
-      membrane_integrity_index: [ch_bulk_2885, lipid_carbonyl_1721]
-      oxidative_index: [carotenoid_1525, lipid_carbonyl_1721]
-      protein_remodeling_index: [protein_1555, structural_protein_925, structural_protein_980]
-      tyrosine_environment_index: [tyrosine_851, tyrosine_821]
+      ch_bulk_to_carbonyl_ratio: [ch_bulk_2885, lipid_carbonyl_1721]
+      carotenoid_to_carbonyl_ratio: [carotenoid_1525, lipid_carbonyl_1721]
+      tryptophan_to_sugar_beta_sheet_ratio: [tryptophan_1555, c_o_c_sugar_925, beta_sheet_980]
+      tyrosine_to_o_p_o_ratio: [tyrosine_851, o_p_o_821]
     primary_hypothesis:
-      feature: oxidative_index
+      feature: carotenoid_to_carbonyl_ratio
       endpoint: delta_moca
       direction: negative
       test: partial_spearman
@@ -321,9 +324,9 @@ analysis:
         - {name: trajectory_extreme, group_variable: delta_moca_group_extreme, ordered_groups: [decline, recovery]}
     covariates: [age, sex]
     peak_shape_windows:
-      lipid_carbonyl_1721: [1710, 1735]
-      protein_1555: [1540, 1570]
-      carotenoid_1525: [1510, 1535]
+      lipid_carbonyl_1721: ["1300", 1710, 1730]
+      tryptophan_1555: ["1300", 1550, 1560]
+      carotenoid_1525: ["1300", 1510, 1535]
     nmf:
       n_components: 3
       sparsity_alpha: 0.1
@@ -426,20 +429,21 @@ biological_pca:
       - lipid_carbonyl_1721
       - lipid_ester_1744
       - ch2_sym_stretch_2853
-      - ch2_asym_stretch_2890
-      - ch3_asym_stretch_2937
     protein:
-      - tyrosine_851
       - beta_sheet_980
       - c_o_c_n_1060
-      - amide_iii_1258
       - tryptophan_1555
-      - amide_i_1657
     nucleic_acid:
       - cytosine_786
       - o_p_o_821
       - c_o_c_sugar_925
-      - po2_cn_1112
     carotenoid:
       - carotenoid_1156
       - carotenoid_1525
+    mixed:
+      - ch2_asym_stretch_2890
+      - ch3_asym_stretch_2937
+      - tyrosine_851
+      - amide_iii_1258
+      - amide_i_1657
+      - po2_cn_1112

@@ -120,7 +120,7 @@ def run_robustness_ranking(
         consistency,
         effect_size_threshold=float(robustness.get("effect_size_threshold", 0.147)),
         perm_p_threshold=float(robustness.get("perm_p_threshold", 0.10)),
-        anchor_feature=str(panel.get("primary_hypothesis", {}).get("feature", "oxidative_index")),
+        anchor_feature=str(panel.get("primary_hypothesis", {}).get("feature", "carotenoid_to_carbonyl_ratio")),
     )
 
     output_path = target_dir / "panel_evidence_flags.csv"

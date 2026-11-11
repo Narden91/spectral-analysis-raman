@@ -8,15 +8,15 @@ to preserve DRY and KISS principles.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import subprocess
+import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import lru_cache
-import hashlib
 from importlib import metadata
-import json
 from pathlib import Path
-import subprocess
-import sys
 from typing import Any, Mapping
 
 import pandas as pd
@@ -109,7 +109,9 @@ def write_run_provenance(
 
 def add_cohort_stage_args(parser: argparse.ArgumentParser) -> None:
     """Add the flags shared by the cohort-evaluation stages (primary evaluation, sensitivity)."""
-    parser.add_argument("--cohort", action="store_true", help="Evaluate on the verified stroke cohort.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--cohort", action="store_true", help="Evaluate on the verified stroke cohort (default).")
+    mode.add_argument("--synthetic", action="store_true", help="Explicit development simulation; outputs are not cohort evidence.")
     parser.add_argument(
         "--approve-cohort-evaluation",
         action="store_true",
@@ -138,6 +140,7 @@ def resolve_experiment_dataset(
     synthetic_seed: int = 42,
     compact_grid: bool = False,
     cfg: PairedLipidConfig = PairedLipidConfig(),
+    readiness: Mapping[str, Any] | None = None,
 ) -> tuple[CohortDataset, dict[str, Any]]:
     """Resolve either the synthetic benchmark cohort or the verified preprocessed cohort.
 
@@ -150,6 +153,16 @@ def resolve_experiment_dataset(
             "Cohort evaluation requires explicit '--approve-cohort-evaluation' after "
             "completing all readiness checks in manuscript_ml/runbook.md."
         )
+    source_identity = ""
+    readiness_json = "{}"
+    if not use_synthetic:
+        from src.data_preparation.manifest import hash_file
+        from src.data_preparation.store import get_active_data_source, resolve_data_source
+
+        source = get_active_data_source() or resolve_data_source()
+        source_identity = hash_file(source.source_path / "manifest.json") + hash_file(clinical_master_path)
+        expectations = readiness if readiness is not None else load_manuscript_config()[1]["readiness"]
+        readiness_json = json.dumps(dict(expectations), sort_keys=True)
     return _resolve_experiment_dataset_cached(
         use_synthetic,
         str(Path(clinical_master_path).resolve()),
@@ -158,6 +171,8 @@ def resolve_experiment_dataset(
         synthetic_seed,
         compact_grid,
         cfg,
+        source_identity,
+        readiness_json,
     )
 
 
@@ -175,6 +190,8 @@ def _resolve_experiment_dataset_cached(
     synthetic_seed: int,
     compact_grid: bool,
     cfg: PairedLipidConfig,
+    source_identity: str,
+    readiness_json: str,
 ) -> tuple[CohortDataset, dict[str, Any]]:
     if use_synthetic:
         if subset_mode == "all_eligible":
@@ -206,9 +223,20 @@ def _resolve_experiment_dataset_cached(
         clinical_master_path=clinical_master_path,
         data_source=source,
         cfg=cfg,
-        subset_mode=subset_mode,
+        subset_mode="all_eligible",
     )
+    from manuscript_ml.readiness import evaluate_cohort_readiness
+
+    measured_readiness = evaluate_cohort_readiness(clin_audit, dataset.manifest_summary, json.loads(readiness_json))
+    if not measured_readiness["ready_for_cohort_evaluation"]:
+        raise RuntimeError("Current clinical identity or cohort-join counts do not match readiness expectations")
+    if subset_mode != "all_eligible":
+        dataset, _ = load_paired_cohort_from_store(
+            clinical_master_path=clinical_master_path, data_source=source, cfg=cfg, subset_mode=subset_mode,
+        )
     return dataset, {
+        "readiness": measured_readiness,
+        "source_identity": source_identity,
         "data_mode": "cohort",
         "clinical_audit": clin_audit,
         "store_path": str(source.source_path),
@@ -230,6 +258,7 @@ def _rebuild_synthetic_with_mode(
     that are already medians of noisy maps, so subset-mode spectra are noisier than the base cohort.
     """
     import numpy as np
+
     from src.analysis.paired_lipid.cohort import build_paired_cohort_dataset
 
     base_ds, truth = generate_synthetic_cohort(

@@ -49,7 +49,7 @@ def _cfg() -> dict:
         "whole_spectra": {
             "bands": {
                 "amide_iii_1258": [1240, 1280],
-                "ch2_bend_1300": [1290, 1320],
+                "ch2_twist_1301": [1290, 1320],
                 "ch2_sym_stretch_2853": [2840, 2865],
                 "ch3_asym_stretch_2937": [2920, 2945],
             }
@@ -65,7 +65,7 @@ def _cfg() -> dict:
                 "PCA_1330": {
                     "spectral_blocks": ["1300"],
                     "window": "full",
-                    "bands": ["amide_iii_1258", "ch2_bend_1300"],
+                    "bands": ["amide_iii_1258", "ch2_twist_1301"],
                 },
                 "PCA_2850": {
                     "spectral_blocks": ["2850"],
@@ -77,17 +77,17 @@ def _cfg() -> dict:
                     "window": "full",
                     "bands": [
                         "amide_iii_1258",
-                        "ch2_bend_1300",
+                        "ch2_twist_1301",
                         "ch2_sym_stretch_2853",
                         "ch3_asym_stretch_2937",
                     ],
                 },
             },
             "biochemical_classes": {
-                "lipid": ["ch2_bend_1300", "ch2_sym_stretch_2853"],
-                "protein": ["amide_iii_1258", "ch3_asym_stretch_2937"],
+                "lipid": ["ch2_twist_1301", "ch2_sym_stretch_2853"],
+                "protein": [],
                 "nucleic_acid": [],
-                "mixed": [],
+                "mixed": ["amide_iii_1258", "ch3_asym_stretch_2937"],
             },
         },
     }
@@ -174,7 +174,7 @@ def test_config_validation_rejects_missing_model() -> None:
 
 def test_config_validation_rejects_duplicate_class_mapping() -> None:
     cfg = _cfg()
-    cfg["biological_pca"]["biochemical_classes"]["protein"].append("ch2_bend_1300")
+    cfg["biological_pca"]["biochemical_classes"]["protein"].append("ch2_twist_1301")
     with pytest.raises(ValueError, match="multiple biochemical classes"):
         validate_biological_pca_config(cfg)
 

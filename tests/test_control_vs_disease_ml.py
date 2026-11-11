@@ -343,7 +343,7 @@ def test_cohort_summary_reports_confound_and_no_age_claim() -> None:
     assert metrics["positive_class"] == "Disease"
     assert metrics["negative_class"] == "Control"
     assert "sex_vs_class_chi2_p_value" in metrics
-    assert metrics["age_adjustment_status"] == "not_attempted_no_control_age_data"
+    assert metrics["age_adjustment_status"] == "not_modeled"
     assert metrics["n_control_with_age"] == 0
 
 

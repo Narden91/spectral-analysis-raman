@@ -180,8 +180,8 @@ def _bootstrap_ci(
 
     rng = np.random.default_rng(random_state)
     n_jobs = normalize_n_jobs(n_jobs)
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_bootstrap, dtype=np.int64)
     if n_jobs != 1:
-        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_bootstrap, dtype=np.int64)
         estimates = np.array(
             Parallel(n_jobs=n_jobs)(
                 delayed(_bootstrap_two_group_statistic)(left, right, statistic_fn, int(seed))
@@ -190,11 +190,9 @@ def _bootstrap_ci(
             dtype=float,
         )
     else:
-        estimates = np.empty(n_bootstrap, dtype=float)
-        for i in range(n_bootstrap):
-            boot_left = rng.choice(left, size=left.size, replace=True)
-            boot_right = rng.choice(right, size=right.size, replace=True)
-            estimates[i] = statistic_fn(boot_left, boot_right)
+        estimates = np.array([
+            _bootstrap_two_group_statistic(left, right, statistic_fn, int(seed)) for seed in seeds
+        ], dtype=float)
     finite = estimates[np.isfinite(estimates)]
     if finite.size == 0:
         return np.nan, np.nan
@@ -219,8 +217,8 @@ def _bootstrap_partial_spearman_ci(
 
     rng = np.random.default_rng(random_state)
     n_jobs = normalize_n_jobs(n_jobs)
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_bootstrap, dtype=np.int64)
     if n_jobs != 1:
-        seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_bootstrap, dtype=np.int64)
         estimates = np.array(
             Parallel(n_jobs=n_jobs)(
                 delayed(_bootstrap_partial_spearman_statistic)(
@@ -235,14 +233,10 @@ def _bootstrap_partial_spearman_ci(
             dtype=float,
         )
     else:
-        estimates = np.empty(n_bootstrap, dtype=float)
-        for i in range(n_bootstrap):
-            sample = complete.iloc[rng.integers(0, len(complete), size=len(complete))]
-            estimates[i] = partial_spearman(
-                sample[feature],
-                sample[endpoint],
-                sample[covariates],
-            )[0]
+        estimates = np.array([
+            _bootstrap_partial_spearman_statistic(complete, feature, endpoint, covariates, int(seed))
+            for seed in seeds
+        ], dtype=float)
     finite = estimates[np.isfinite(estimates)]
     if finite.size == 0:
         return np.nan, np.nan
@@ -394,7 +388,7 @@ def run_anchor_test(
     panel = panel_cfg(cfg)
     validate_sequential_stopping_config(panel, section="analysis.preregistered_panel")
     primary = panel.get("primary_hypothesis", {})
-    feature = str(primary.get("feature", "oxidative_index"))
+    feature = str(primary.get("feature", "carotenoid_to_carbonyl_ratio"))
     endpoint = str(primary.get("endpoint", "delta_moca"))
     covariates = [str(item) for item in primary.get("covariates", panel.get("covariates", []))]
     n_bootstrap, n_permutations, random_state, n_jobs = _resampling_settings(panel)

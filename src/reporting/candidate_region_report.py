@@ -1,7 +1,7 @@
 """Phase 14: Publication-oriented candidate-region report generator.
 
 Produces a markdown report and summary tables that separate findings into
-robust, exploratory, unstable, and confounded categories. All language is
+exploratory and unsupported categories. All language is
 conservative and descriptive; no diagnostic, predictive, causal, or biomarker
 claims are made.
 """
@@ -26,7 +26,7 @@ from src.analysis.io_utils import load_csv_or_empty, write_csv_atomic, write_tex
 
 logger = logging.getLogger(__name__)
 
-_CLASS_ORDER = ("robust", "exploratory", "unstable", "confounded")
+_CLASS_ORDER = ("exploratory", "unsupported")
 
 
 def _report_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -40,10 +40,11 @@ def _analysis_mode(cfg: dict[str, Any]) -> str:
 def _classify_candidate(row: pd.Series) -> str:
     evidence = str(row.get("evidence_status", "effect_only_fallback"))
     if evidence == "independently_validated":
-        return "robust"
-    if evidence == "cluster_supported_exploratory":
+        raise ValueError("This report cannot verify a claim of independent validation from a candidate-status label")
+    cluster_supported = row.get("cluster_permutation_significant", False)
+    if evidence == "cluster_supported_exploratory" and isinstance(cluster_supported, (bool, np.bool_)) and cluster_supported:
         return "exploratory"
-    return "unstable"
+    return "unsupported"
 
 
 def _format_region(row: pd.Series) -> str:
@@ -68,7 +69,7 @@ def _panel_flag_counts(ranking: pd.DataFrame) -> pd.DataFrame:
         {
             "descriptive_check": checks,
             "n_features": [
-                int(ranking.get(check, pd.Series(dtype=bool)).fillna(False).sum())
+                int(ranking[check].fillna(False).sum()) if check in ranking else pd.NA
                 for check in checks
             ],
         }
@@ -92,8 +93,8 @@ def _build_panel_readme(ranking: pd.DataFrame, anchor: pd.DataFrame | None) -> s
     if anchor is not None and not anchor.empty:
         row = anchor.iloc[0]
         anchor_line = (
-            f"- **Primary anchor result**: `{row.get('feature_name', 'oxidative_index')}` vs "
-            f"`{row.get('endpoint', 'delta_moca')}` (n={row.get('n', pd.NA)}, "
+            f"- **Primary anchor result**: `{row.get('feature_name', 'not_recorded')}` vs "
+            f"`{row.get('endpoint', 'not_recorded')}` (n={row.get('n', pd.NA)}, "
             f"rho={row.get('rho', pd.NA)}, permutation p={row.get('perm_p_value', pd.NA)}).\n"
         )
     else:
@@ -126,8 +127,8 @@ def build_panel_report_section(
     if anchor is not None and not anchor.empty:
         row = anchor.iloc[0]
         anchor_note = (
-            f"Anchor feature `{row.get('feature_name', 'oxidative_index')}` vs "
-            f"`{row.get('endpoint', 'delta_moca')}`: rho={row.get('rho', pd.NA)}, "
+            f"Anchor feature `{row.get('feature_name', 'not_recorded')}` vs "
+            f"`{row.get('endpoint', 'not_recorded')}`: rho={row.get('rho', pd.NA)}, "
             f"permutation p={row.get('perm_p_value', pd.NA)}."
         )
 
@@ -142,29 +143,29 @@ def build_panel_report_section(
         "",
         dataframe_to_markdown(flag_counts),
         "",
-        "## Membrane Remodeling",
+        "## Carbonyl and CH-Stretch Features",
         "",
-        _top_feature_line(ranking, ["membrane_integrity_index", "lipid_carbonyl_1721", "ch_bulk_2885"]),
+        _top_feature_line(ranking, ["ch_bulk_to_carbonyl_ratio", "lipid_carbonyl_1721", "ch_bulk_2885"]),
         "Interpretation is limited to regions overlapping lipid carbonyl and CH-stretch bands.",
         "",
-        "## Protein Structural Heterogeneity",
+        "## Fingerprint Features and Ratios",
         "",
         _top_feature_line(
             ranking,
-            ["protein_remodeling_index", "tyrosine_environment_index", "protein_1555", "structural_protein_925", "structural_protein_980"],
+            ["tryptophan_to_sugar_beta_sheet_ratio", "tyrosine_to_o_p_o_ratio", "tryptophan_1555", "c_o_c_sugar_925", "beta_sheet_980"],
         ),
-        "Interpretation is limited to regions overlapping protein-associated bands; weak bands require cautious reading.",
+        "These fingerprint windows have mixed tentative assignments; their ratios do not establish a protein mechanism.",
         "",
         "## Tentatively Assigned Raman Ratios",
         "",
-        _top_feature_line(ranking, ["oxidative_index", "carotenoid_1525", "carotenoid_cc_1156", "lipid_carbonyl_1721"]),
+        _top_feature_line(ranking, ["carotenoid_to_carbonyl_ratio", "carotenoid_1525", "carotenoid_1156", "lipid_carbonyl_1721"]),
         anchor_note,
-        "Carotenoid language is restricted to carotenoid-like / lipoprotein-associated signals.",
+        "Band assignments are tentative spectral context and do not identify a molecular source.",
         "",
-        "## System-Level EV Disruption",
+        "## Overall Descriptive Feature Summary",
         "",
         _top_feature_line(ranking, ranking["feature_name"].astype(str).tolist() if "feature_name" in ranking.columns else []),
-        "This domain integrates variance heterogeneity, endpoint consistency, and feature coupling when those artifacts are present.",
+        "The largest available feature effect is descriptive; it does not establish an EV mechanism.",
         "",
     ]
     return "\n".join(lines)
@@ -208,10 +209,8 @@ def _plot_overview(
 
     fig, axes = plt.subplots(2, 1, figsize=(16, 8), sharex=False)
     colors = {
-        "robust": "#2A9D8F",
         "exploratory": "#E9C46A",
-        "unstable": "#F4A261",
-        "confounded": "#E76F51",
+        "unsupported": "#F4A261",
     }
 
     for axis, block in zip(axes, ("1300", "2850")):
@@ -276,7 +275,6 @@ def _section_for_class(class_name: str, candidates: pd.DataFrame) -> str:
         "n_overlapping_analyses",
         "covariate_persisted",
         "pls_vip_coverage",
-        "splsda_selected",
         "biochemical_class",
         "interpretation_note",
     ]
@@ -328,10 +326,8 @@ def _build_report(
         "",
         "### Classification definitions",
         "",
-        "- **Robust**: independently validated in an external cohort; unavailable for this dataset.",
         "- **Exploratory**: supported by cluster-permutation inference in this cohort only.",
-        "- **Unstable**: channel-FDR-only, fallback-selected, or unsupported by corrected inference.",
-        "- **Confounded**: reserved for a prespecified model with measured confounders; not assigned from post-selection models.",
+        "- **Unsupported**: channel-FDR-only, fallback-selected, or unsupported by corrected inference.",
         "",
         "## Figures",
         "",
@@ -374,14 +370,11 @@ def _build_report(
         "",
         "## Methods note",
         "",
-        "Candidate regions were detected at the subject level across clinical correlations, "
-        "longitudinal ΔMoCA analyses, and disease-internal stratification tests, with cluster-mass permutation correction. "
-        "These whole-spectrum screens and their cluster-permutation reference distributions are marginal and unadjusted for age and sex. "
-        "When no corrected intervals were detected, fallback largest-effect intervals were retained only for transparent "
-        "hypothesis generation and are not treated as statistical findings. "
-        "Post-selection sensitivity models included age and sex only; SEC fraction, concentration, column/batch age, "
-        "sample volume, acquisition batch, and other technical confounders were unavailable. These models do not validate selection. "
-        "Results may therefore reflect residual confounding. ",
+        "Each region's recorded evidence status distinguishes cluster-supported intervals from "
+        "descriptive or fallback intervals. These whole-spectrum screens are marginal and unadjusted for age and sex. "
+        "Fallback intervals support hypothesis generation only. "
+        "Post-selection sensitivity summaries do not independently validate selection or establish "
+        "that clinical or technical confounding has been resolved. ",
         minimal_panel_note,
         "",
     ])
@@ -424,14 +417,13 @@ def run_candidate_region_report(
             "family_adjusted_p", "cluster_permutation_significant",
             "selection_basis", "significance_supported", "covariate_persisted",
             "max_abs_effect", "integrated_abs_effect", "n_overlapping_analyses",
-            "pls_vip_coverage", "splsda_selected",
+            "pls_vip_coverage",
             "biochemical_class", "interpretation_note",
         ])
 
     if "significance_supported" not in integrated.columns:
         integrated["significance_supported"] = (
-            integrated.get("fdr_significant", pd.Series(False, index=integrated.index)).fillna(False).astype(bool)
-            | integrated.get("cluster_permutation_significant", pd.Series(False, index=integrated.index))
+            integrated.get("cluster_permutation_significant", pd.Series(False, index=integrated.index))
             .fillna(False)
             .astype(bool)
         )

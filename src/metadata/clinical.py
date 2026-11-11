@@ -8,6 +8,7 @@ import pandas as pd
 
 from src import resolve_cfg, resolve_project_path
 from src.io.file_crawler import disambiguate_subject_ids
+from src.metadata.clinical_master import is_clinical_master, load_master_for_linkage
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +210,9 @@ def merge_index_with_clinical(
 
 
 def _load_raw_clinical_data(path: Path) -> pd.DataFrame:
-    clinical = pd.read_csv(path, encoding="utf-8-sig")
+    clinical = pd.read_csv(path, encoding="utf-8-sig", dtype={"subject_id": "string", "participant_id": "string"})
+    if is_clinical_master(clinical.columns):
+        return load_master_for_linkage(path)
     if clinical.empty:
         logger.warning("Clinical CSV is empty: %s", path)
         return pd.DataFrame(columns=["subject_id"])
@@ -236,6 +239,8 @@ def _build_curated_subject_table(
     subject_inventory: pd.DataFrame,
     clinical_df: pd.DataFrame,
 ) -> pd.DataFrame:
+    if is_clinical_master(clinical_df.columns):
+        return _build_master_subject_table(subject_inventory, clinical_df)
     curated = subject_inventory.copy()
     clinical = clinical_df.copy()
     clinical_cols: list[str] = []
@@ -287,6 +292,59 @@ def _build_curated_subject_table(
     tail = [col for col in curated.columns if col not in ordered]
     return curated[ordered + tail]
 
+
+
+def _build_master_subject_table(subject_inventory: pd.DataFrame, clinical: pd.DataFrame) -> pd.DataFrame:
+    """Link explicit cohort/ID pairs and keep unverified clinical observations missing."""
+    inventory = subject_inventory.copy()
+    inventory["subject_id_raw"] = inventory["subject_id_raw"].astype("string").str.strip()
+    master = clinical.copy()
+    master["_master_is_control"] = master["cohort"].eq("control")
+    master = master.loc[pd.to_numeric(master["has_spectra"], errors="raise").eq(1)].copy()
+    overlap = set(inventory.columns).intersection(master.columns)
+    master = master.rename(columns={column: f"{column}_clinical_raw" for column in overlap})
+    curated = inventory.merge(
+        master,
+        left_on=["subject_id_raw", "is_control"],
+        right_on=["spectral_subject_id", "_master_is_control"],
+        how="left",
+        validate="many_to_one",
+        sort=False,
+    ).drop(columns="_master_is_control")
+    verified = curated["identity_verified"].eq(True).fillna(False)
+    if curated.loc[verified].duplicated(["cohort", "spectral_subject_id"]).any():
+        raise ValueError("Verified clinical identity maps to multiple spectral subjects")
+    provenance = {
+        "participant_key", "cohort", "spectral_subject_id", "has_spectra", "has_clinical_record",
+        "spectral_link_status", "qc_flags", "identity_verified", "sex_source", "sex_spectral_folder",
+    }
+    clinical_columns = [column for column in master if column not in provenance and column in curated]
+    for column in clinical_columns:
+        curated[column] = curated[column].where(verified)
+    curated["identity_verified"] = verified
+    curated["clinical_present"] = verified
+    curated["gender_clinical_raw"] = curated.get("sex", pd.Series(pd.NA, index=curated.index))
+    curated["gender_matches_data"] = _compare_optional_text(curated["gender_clinical_raw"], curated["gender"])
+    curated["clinical_condition"] = curated["cohort"].map({"stroke": "Disease", "control": "Control"}).where(verified)
+    curated["group_matches_data"] = _compare_optional_text(curated["clinical_condition"], curated["condition"])
+    curated["diagnosis_raw"] = curated.get("diagnosis_text", pd.Series(pd.NA, index=curated.index))
+    curated["diagnosis_normalized"] = _normalize_diagnosis_series(curated["diagnosis_raw"])
+    curated["diagnosis_family"] = curated["diagnosis_normalized"].map(_diagnosis_family)
+    aliases = {
+        "age_years": "age_years", "rbans_total_3_months": "rbans_total_3m",
+        "moca_baseline_total": "moca_baseline", "moca_3_months_total": "moca_3m",
+        "aspects_scale_value": "aspects",
+    }
+    for alias, source in aliases.items():
+        source = f"{source}_clinical_raw" if source in overlap else source
+        curated[alias] = pd.to_numeric(curated.get(source, pd.Series(pd.NA, index=curated.index)), errors="raise")
+    curated["delta_moca"] = curated["moca_3_months_total"] - curated["moca_baseline_total"]
+    death = pd.to_numeric(curated.get("death", pd.Series(pd.NA, index=curated.index)), errors="raise")
+    if not death.dropna().isin([0, 1]).all():
+        raise ValueError("Clinical-master death values must be 0, 1, or missing")
+    curated["death_binary"] = death.astype("Int64")
+    ordered = [column for column in _CURATED_COLUMNS if column in curated]
+    return curated[ordered + [column for column in curated if column not in ordered]]
 
 def _prune_duplicate_clinical_matches(curated: pd.DataFrame, clinical_cols: list[str]) -> pd.DataFrame:
     if "subject_id_raw" not in curated.columns:
@@ -392,8 +450,9 @@ def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     data = data.rename(columns=col_map)
 
     if "subject_id" not in data.columns:
-        first_col = data.columns[0]
-        data = data.rename(columns={first_col: "subject_id"})
+        if "participant_id" not in data.columns:
+            raise ValueError("Clinical table requires an explicit subject_id or participant_id column")
+        data = data.rename(columns={"participant_id": "subject_id"})
 
     # Normalize "gender" header from CSV (already canonical)
     for column in data.columns:

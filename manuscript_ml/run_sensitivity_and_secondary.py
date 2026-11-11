@@ -10,9 +10,9 @@ Produces:
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import replace
 from pathlib import Path
-import sys
 from typing import Any, get_args
 
 import pandas as pd
@@ -61,14 +61,14 @@ def _paired_metrics(res: dict[str, Any], *, with_mae: bool = False) -> dict[str,
 
 def run_sensitivity_and_secondary(
     *,
-    use_synthetic: bool = True,
+    use_synthetic: bool = False,
     approve_cohort_evaluation: bool = False,
     clinical_master_path: str | Path = PROJECT_ROOT / "data" / "clinical_master.csv",
     output_dir: str | Path | None = None,
     compact_grid: bool = False,
     config_path: str | Path | None = None,
 ) -> dict[str, Path]:
-    """Run all prespecified sensitivity analyses, secondary endpoints, and anchor summaries."""
+    """Run the configured sensitivity analyses, secondary endpoints, and anchor summaries."""
     target_dir = ensure_output_dir(output_dir)
     base_cfg, raw_cfg = load_manuscript_config(config_path)
     anchor_cfg = raw_cfg["anchors"]
@@ -92,6 +92,7 @@ def run_sensitivity_and_secondary(
         subset_mode="all_eligible",
         compact_grid=compact_grid,
         cfg=base_cfg,
+        readiness=raw_cfg["readiness"],
     )
 
     # 1. Covariate preset and subset mode sensitivity
@@ -116,6 +117,7 @@ def run_sensitivity_and_secondary(
             subset_mode=s_mode,
             compact_grid=compact_grid,
             cfg=base_cfg,
+            readiness=raw_cfg["readiness"],
         )
         res_sub = evaluate(
             ds_sub,
@@ -207,7 +209,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     outputs = run_sensitivity_and_secondary(
-        use_synthetic=not args.cohort,
+        use_synthetic=args.synthetic,
         approve_cohort_evaluation=args.approve_cohort_evaluation,
         clinical_master_path=args.clinical_master,
         output_dir=args.output_dir,

@@ -24,9 +24,11 @@ from sklearn.preprocessing import StandardScaler
 
 from src import get_classification_phase_dir, get_confirmatory_panel_dir, get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
+from src.analysis.band_features import ratio_from_integrals
 from src.analysis.clinical_feature_associations import (
     feature_columns,
     load_disease_feature_frame,
+    load_disease_feature_frame_with_bc,
 )
 from src.analysis.io_utils import write_csv_atomic
 from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, STATUS_NOT_TESTED_GATE, PhaseStatus
@@ -124,7 +126,7 @@ def _build_ratio_features(frame: pd.DataFrame, feature_names: list[str], cfg: di
     band_series: dict[str, pd.Series] = {}
     for band_name, limits in bands_cfg.items():
         lower, upper = float(limits[0]), float(limits[1])
-        block = "1300" if upper < 2000 else "2850"
+        block = "1300_bc" if upper < 2000 else "2850_bc"
         band_series[str(band_name)] = _band_feature(frame, feature_names, block, lower, upper)
 
     ratios: dict[str, pd.Series] = {}
@@ -132,8 +134,7 @@ def _build_ratio_features(frame: pd.DataFrame, feature_names: list[str], cfg: di
         left, right = str(pair[0]), str(pair[1])
         if left not in band_series or right not in band_series:
             continue
-        denominator = band_series[right].replace(0.0, np.nan)
-        ratios[f"ratio__{left}__over__{right}"] = band_series[left] / denominator
+        ratios[f"ratio__{left}__over__{right}"] = ratio_from_integrals(band_series[left], band_series[right])
     return pd.DataFrame(ratios, index=frame.index)
 
 
@@ -159,16 +160,17 @@ def _build_feature_pool(
             pool[key] = frame[columns].mean(axis=1)
 
     # Biochemical band ratios.
-    ratios = _build_ratio_features(frame, all_feature_columns, cfg)
+    bc_columns = [name for name in frame if name.startswith(("1300_bc__", "2850_bc__"))]
+    ratios = _build_ratio_features(frame, bc_columns, cfg)
     for column in ratios.columns:
         pool[column] = ratios[column]
 
-    # Individual band integrals from configured biochemical bands.
+    # Individual band means on the pre-normalization basis.
     bands_cfg = cfg.get("whole_spectra", {}).get("bands", {})
     for band_name, limits in bands_cfg.items():
         lower, upper = float(limits[0]), float(limits[1])
-        block = "1300" if upper < 2000 else "2850"
-        series = _band_feature(frame, all_feature_columns, block, lower, upper)
+        block = "1300_bc" if upper < 2000 else "2850_bc"
+        series = _band_feature(frame, bc_columns, block, lower, upper)
         if series.notna().any():
             pool[f"band__{band_name}"] = series
 
@@ -745,16 +747,16 @@ def _select_panel(
 
 def _feature_source_and_description(feature_name: str, cfg: dict[str, Any]) -> tuple[str, str]:
     if feature_name in cfg.get("analysis", {}).get("preregistered_panel", {}).get("indices", {}):
-        return "preregistered_index", feature_name
+        return "fixed_panel_ratio", feature_name
     if feature_name in cfg.get("analysis", {}).get("preregistered_panel", {}).get("integrals", {}):
-        return "preregistered_integral", feature_name
+        return "fixed_panel_integral", feature_name
     if feature_name.startswith("region__"):
         return "candidate_region", feature_name.replace("region__", "")
     if feature_name.startswith("ratio__"):
         parts = feature_name.split("__")
         return "ratio", f"{parts[1]} / {parts[2]}"
     if feature_name.startswith("band__"):
-        return "band_integral", feature_name.replace("band__", "")
+        return "band_mean", feature_name.replace("band__", "")
     return "unknown", feature_name
 
 
@@ -762,6 +764,7 @@ def run_minimal_panel(
     *,
     feature_matrix_path: str | Path | None = None,
     integrated_candidates_path: str | Path | None = None,
+    bc_feature_matrix_path: str | Path | None = None,
     panel_matrix_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
@@ -786,6 +789,9 @@ def run_minimal_panel(
     if is_preregistered_source:
         pool = _load_preregistered_panel_pool(disease_only, panel_matrix_path)
     else:
+        disease_only, _feature_meta, _bc_columns = load_disease_feature_frame_with_bc(
+            feature_matrix_path=feature_matrix_path, bc_feature_matrix_path=bc_feature_matrix_path,
+        )
         if integrated_candidates_path is None:
             integrated_candidates_path = get_cross_region_phase_dir("integrated_candidates") / "integrated_candidate_regions.csv"
         integrated = _load_integrated_candidates(integrated_candidates_path)
@@ -914,6 +920,7 @@ def run_minimal_panel(
                 "feature_name": row["feature_name"],
                 "feature_source": source,
                 "feature_description": desc,
+                "spectral_basis": "normalized" if source == "candidate_region" else "pre_normalization",
                 "selection_frequency": float(row["selection_frequency"]),
                 "mean_absolute_coefficient": float(row["mean_absolute_coefficient"]),
                 "panel_selected": bool(row["feature_name"] in selected),
@@ -1035,6 +1042,7 @@ def run_minimal_panel(
                 "feature_name": row["feature_name"],
                 "feature_source": source,
                 "feature_description": desc,
+                "spectral_basis": "normalized" if source == "candidate_region" else "pre_normalization",
                 "selection_frequency": float(row["selection_frequency"]),
                 "mean_absolute_coefficient": float(row["mean_absolute_coefficient"]),
                 "panel_selected": bool(row["feature_name"] in selected),

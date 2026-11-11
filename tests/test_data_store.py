@@ -435,3 +435,51 @@ def test_code_version_rejects_empty_commit(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(materialize.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=""))
     with pytest.raises(RuntimeError, match="Repository version is empty"):
         materialize._code_version()
+
+
+def test_changed_clinical_source_path_invalidates_existing_store(configured_store_paths):
+    store = build_parsed_store(src.config, force=True)
+    alternate = configured_store_paths["clinical_path"].with_name("equal_clinical.csv")
+    alternate.write_bytes(configured_store_paths["clinical_path"].read_bytes())
+    override = deepcopy(src.config)
+    override["data"]["clinical_data_path"] = str(alternate)
+    validation = validate_store(store.path, "parsed", override)
+    assert not validation.is_valid
+    assert validation.is_stale
+    assert "configured clinical sources" in " ".join(validation.errors)
+
+
+def test_clinical_input_preflight_runs_before_spectral_crawl(tmp_path, monkeypatch):
+    import src.data_preparation.materialize as module
+
+    clinical = tmp_path / "master.csv"
+    pd.DataFrame({"participant_key": ["P1"]}).to_csv(clinical, index=False)
+    dictionary = tmp_path / "dictionary.csv"
+    pd.DataFrame({"column": ["participant_key"]}).to_csv(dictionary, index=False)
+    cfg = {"data": {"clinical_data_path": str(clinical), "clinical_dictionary_path": str(dictionary), "parsed_dir": str(tmp_path / "parsed")}}
+    calls = []
+    monkeypatch.setattr(module, "_prepare_file_index", lambda cfg: calls.append("crawl"))
+    with pytest.raises(ValueError, match="missing identity columns"):
+        module.build_parsed_store(cfg)
+    assert not calls
+    assert not (tmp_path / "parsed").exists()
+
+
+def test_master_dictionary_is_fingerprinted_and_invalidates_store(configured_store_paths):
+    clinical_path = configured_store_paths["clinical_path"]
+    dictionary = clinical_path.with_name("dictionary.csv")
+    pd.DataFrame({
+        "participant_key": ["C1", "D2"], "cohort": ["control", "stroke"],
+        "spectral_subject_id": ["1", "2"], "has_spectra": [1, 1],
+        "spectral_link_status": ["matched", "matched"], "qc_flags": ["none", "none"],
+        "sex": ["female", "male"], "age_years": [50, 60],
+    }).to_csv(clinical_path, index=False)
+    pd.DataFrame({"column": ["age_years"], "unit": ["years"]}).to_csv(dictionary, index=False)
+    cfg = deepcopy(src.config)
+    cfg["data"]["clinical_dictionary_path"] = str(dictionary)
+    store = build_parsed_store(cfg, force=True)
+    assert str(dictionary.resolve()) in store.manifest["input_signatures"]
+    assert store.manifest["clinical_sources"]["clinical_dictionary_path"] == str(dictionary.resolve())
+    assert validate_store(store.path, "parsed", cfg, strict=True).is_valid
+    pd.DataFrame({"column": ["age_years"], "unit": ["source-confirmed years"]}).to_csv(dictionary, index=False)
+    assert not validate_store(store.path, "parsed", cfg, strict=True).is_valid

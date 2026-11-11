@@ -25,6 +25,7 @@ from src import (
 )
 from src.analysis.eda_mode import resolve_eda_analysis_mode
 from src.analysis.joint_dr import joint_pca_mfa
+from src.analysis.raman_bands import biochemical_class_map
 from src.analysis.statistics import run_pca
 from src.analysis.subject_features import write_subject_feature_exports
 from src.data_preparation.loaders import (
@@ -127,22 +128,16 @@ def _band_windows(cfg: dict) -> dict[str, tuple[float, float]]:
 
 
 def _band_class_map(bp_cfg: dict) -> dict[str, str]:
-    class_cfg = bp_cfg.get("biochemical_classes", {})
-    if not isinstance(class_cfg, dict) or not class_cfg:
-        raise ValueError("biological_pca.biochemical_classes must be a non-empty mapping")
-    band_to_class: dict[str, str] = {}
-    for class_name, band_names in class_cfg.items():
-        if str(class_name) not in {"lipid", "protein", "nucleic_acid", "mixed", "carotenoid"}:
-            raise ValueError(f"Unsupported biochemical class '{class_name}'")
+    canonical = biochemical_class_map()
+    seen: set[str] = set()
+    for class_name, band_names in bp_cfg.get("biochemical_classes", {}).items():
         for band_name in band_names or []:
-            band_name = str(band_name)
-            if band_name in band_to_class:
-                raise ValueError(
-                    f"Band '{band_name}' maps to multiple biochemical classes: "
-                    f"{band_to_class[band_name]} and {class_name}"
-                )
-            band_to_class[band_name] = str(class_name)
-    return band_to_class
+            if band_name in seen:
+                raise ValueError(f"Band '{band_name}' maps to multiple biochemical classes")
+            if band_name not in canonical or canonical[band_name] != class_name:
+                raise ValueError(f"Band '{band_name}' class differs from the Raman registry")
+            seen.add(band_name)
+    return canonical
 
 
 def validate_biological_pca_config(cfg: dict) -> None:

@@ -1,8 +1,8 @@
-"""Phase Q: cross-feature coupling and biochemical regime assignments.
+"""Phase Q: cross-feature coupling and descriptive ratio groups.
 
-Quantifies coupling between band integrals and named indices via pairwise
-Spearman correlation with bootstrap CIs, then assigns per-subject biochemical
-regimes using the oxidative_index × membrane_integrity_index ratio-ratio plane.
+Quantifies pairwise Spearman correlations between band integrals and ratios,
+then describes cohort median splits of the carotenoid-to-carbonyl and
+CH-bulk-to-carbonyl ratios without assigning molecular or biological states.
 
 Outputs go to ``06_spectral_interpretability/05_feature_coupling/``.
 """
@@ -27,14 +27,14 @@ from src.analysis.preregistered_panel import panel_cfg
 
 logger = logging.getLogger(__name__)
 
-_OXIDATIVE_COL = "oxidative_index"
-_MEMBRANE_COL = "membrane_integrity_index"
-_PROTEIN_COL = "protein_remodeling_index"
+_CAROTENOID_COL = "carotenoid_to_carbonyl_ratio"
+_CH_BULK_COL = "ch_bulk_to_carbonyl_ratio"
+_TRYPTOPHAN_RATIO_COL = "tryptophan_to_sugar_beta_sheet_ratio"
 
 REGIME_PALETTE: dict[str, str] = {
-    "oxidative_dominant": "#D55E00",
-    "lipid_dominant": "#0072B2",
-    "protein_dominant": "#009E73",
+    "upper_carotenoid_ratio": "#D55E00",
+    "lower_carotenoid_upper_ch_bulk_ratio": "#0072B2",
+    "lower_carotenoid_lower_ch_bulk_ratio": "#009E73",
     "unknown": "#AAAAAA",
 }
 
@@ -134,52 +134,42 @@ def coupling_df_to_matrix(coupling: pd.DataFrame) -> tuple[np.ndarray, list[str]
 
 
 # ---------------------------------------------------------------------------
-# Biochemical regime assignment
+# Descriptive ratio groups
 # ---------------------------------------------------------------------------
 
 
-def assign_biochemical_regimes(
+def assign_ratio_groups(
     feature_frame: pd.DataFrame,
     *,
-    oxidative_col: str = _OXIDATIVE_COL,
-    membrane_col: str = _MEMBRANE_COL,
+    carotenoid_col: str = _CAROTENOID_COL,
+    ch_bulk_col: str = _CH_BULK_COL,
 ) -> pd.DataFrame:
-    """Assign per-subject biochemical regime from oxidative × membrane plane.
-
-    Regime logic (median-split):
-    - high oxidative_index → ``oxidative_dominant``
-    - low oxidative_index + high membrane_integrity_index → ``lipid_dominant``
-    - low oxidative_index + low membrane_integrity_index → ``protein_dominant``
-
-    Returns a copy of the input with an added ``biochemical_regime`` column.
-    """
+    """Describe cohort median splits of two ratios without assigning biology."""
     result = feature_frame.copy()
-    has_ox = oxidative_col in result.columns
-    has_mem = membrane_col in result.columns
+    has_ox = carotenoid_col in result.columns
+    has_mem = ch_bulk_col in result.columns
 
     if not has_ox and not has_mem:
-        result["biochemical_regime"] = "unknown"
+        result["ratio_group"] = "unknown"
         return result
 
-    ox = result[oxidative_col].to_numpy(dtype=float) if has_ox else np.full(len(result), np.nan)
-    mem = result[membrane_col].to_numpy(dtype=float) if has_mem else np.full(len(result), np.nan)
+    ox = result[carotenoid_col].to_numpy(dtype=float) if has_ox else np.full(len(result), np.nan)
+    mem = result[ch_bulk_col].to_numpy(dtype=float) if has_mem else np.full(len(result), np.nan)
     ox_finite = ox[np.isfinite(ox)]
     mem_finite = mem[np.isfinite(mem)]
     ox_med = float(np.median(ox_finite)) if ox_finite.size else np.nan
     mem_med = float(np.median(mem_finite)) if mem_finite.size else np.nan
 
     def _classify(o_val: float, m_val: float) -> str:
-        if not np.isfinite(o_val) and not np.isfinite(m_val):
+        if not np.isfinite(o_val) or not np.isfinite(m_val):
             return "unknown"
-        if not np.isfinite(o_val):
-            return "lipid_dominant" if (np.isfinite(m_val) and m_val >= mem_med) else "protein_dominant"
         if o_val >= ox_med:
-            return "oxidative_dominant"
+            return "upper_carotenoid_ratio"
         if np.isfinite(m_val) and m_val >= mem_med:
-            return "lipid_dominant"
-        return "protein_dominant"
+            return "lower_carotenoid_upper_ch_bulk_ratio"
+        return "lower_carotenoid_lower_ch_bulk_ratio"
 
-    result["biochemical_regime"] = [_classify(o, m) for o, m in zip(ox, mem)]
+    result["ratio_group"] = [_classify(o, m) for o, m in zip(ox, mem)]
     return result
 
 
@@ -219,28 +209,28 @@ def _plot_coupling_heatmap(coupling: pd.DataFrame, *, output_path: Path) -> None
 def _plot_regime_scatter(
     regimes: pd.DataFrame,
     *,
-    oxidative_col: str,
-    membrane_col: str,
+    carotenoid_col: str,
+    ch_bulk_col: str,
     output_path: Path,
 ) -> None:
-    """Scatter plot of oxidative × membrane plane coloured by regime."""
-    if regimes.empty or "biochemical_regime" not in regimes.columns:
+    """Scatter plot of carotenoid ratio × CH-bulk ratio plane coloured by descriptive median group."""
+    if regimes.empty or "ratio_group" not in regimes.columns:
         return
-    if oxidative_col not in regimes.columns or membrane_col not in regimes.columns:
+    if carotenoid_col not in regimes.columns or ch_bulk_col not in regimes.columns:
         return
 
     fig, ax = plt.subplots(figsize=(5, 4))
-    for regime, group in regimes.groupby("biochemical_regime"):
+    for regime, group in regimes.groupby("ratio_group"):
         ax.scatter(
-            group[membrane_col].to_numpy(dtype=float),
-            group[oxidative_col].to_numpy(dtype=float),
+            group[ch_bulk_col].to_numpy(dtype=float),
+            group[carotenoid_col].to_numpy(dtype=float),
             label=str(regime).replace("_", " "),
             color=REGIME_PALETTE.get(str(regime), "#888888"),
             alpha=0.75, edgecolors="white", linewidths=0.5, s=50,
         )
-    ax.set_xlabel(membrane_col.replace("_", " ") + " (a.u.)")
-    ax.set_ylabel(oxidative_col.replace("_", " ") + " (a.u.)")
-    ax.set_title("Ratio–ratio biochemical regimes")
+    ax.set_xlabel(ch_bulk_col.replace("_", " ") + " (a.u.)")
+    ax.set_ylabel(carotenoid_col.replace("_", " ") + " (a.u.)")
+    ax.set_title("Descriptive ratio median groups")
     ax.legend(fontsize=8, loc="best")
     fig.tight_layout()
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
@@ -258,7 +248,7 @@ def run_feature_coupling(
     output_dir: str | Path | None = None,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
-    """Phase Q orchestrator: coupling matrix + biochemical regimes + figures."""
+    """Phase Q orchestrator: coupling matrix + descriptive ratio groups + figures."""
     if cfg is None:
         cfg = config
     panel = panel_cfg(cfg)
@@ -298,12 +288,12 @@ def run_feature_coupling(
     write_csv_atomic(coupling, coupling_path, index=False)
 
     regime_input_cols = ["subject_id"] + feature_cols if "subject_id" in frame.columns else feature_cols
-    regimes = assign_biochemical_regimes(
+    regimes = assign_ratio_groups(
         frame[[c for c in regime_input_cols if c in frame.columns]],
-        oxidative_col=_OXIDATIVE_COL,
-        membrane_col=_MEMBRANE_COL,
+        carotenoid_col=_CAROTENOID_COL,
+        ch_bulk_col=_CH_BULK_COL,
     )
-    regime_out_cols = [c for c in ["subject_id", _OXIDATIVE_COL, _MEMBRANE_COL, _PROTEIN_COL, "biochemical_regime"]
+    regime_out_cols = [c for c in ["subject_id", _CAROTENOID_COL, _CH_BULK_COL, _TRYPTOPHAN_RATIO_COL, "ratio_group"]
                        if c in regimes.columns]
     regimes_path = target_dir / "ratio_ratio_regimes.csv"
     write_csv_atomic(regimes[regime_out_cols], regimes_path, index=False)
@@ -312,7 +302,7 @@ def run_feature_coupling(
     _plot_coupling_heatmap(coupling, output_path=heatmap_path)
 
     regime_plot_path = figures_dir / "ratio_ratio_regime_plot.png"
-    _plot_regime_scatter(regimes, oxidative_col=_OXIDATIVE_COL, membrane_col=_MEMBRANE_COL, output_path=regime_plot_path)
+    _plot_regime_scatter(regimes, carotenoid_col=_CAROTENOID_COL, ch_bulk_col=_CH_BULK_COL, output_path=regime_plot_path)
 
     logger.info("Phase Q outputs written to %s", target_dir)
     return {

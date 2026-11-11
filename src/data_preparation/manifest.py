@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 MANIFEST_VERSION = 1
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def iso_utc_now() -> str:

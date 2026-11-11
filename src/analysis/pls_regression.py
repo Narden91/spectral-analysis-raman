@@ -83,21 +83,21 @@ def _tune_pls_components(
     random_state: int,
 ) -> int:
     """Tune n_components using an inner cross-validation."""
-    max_comps = min(max(component_grid), X_train.shape[1], X_train.shape[0] - 2)
-    valid_grid = [c for c in component_grid if c <= max_comps and c > 0]
+    inner_cv = KFold(n_splits=min(3, X_train.shape[0]), shuffle=True, random_state=random_state)
+    folds = list(inner_cv.split(X_train))
+    max_comps = min(X_train.shape[1], min(len(train) - 1 for train, _ in folds))
+    valid_grid = [c for c in component_grid if 1 <= c <= max_comps]
     if not valid_grid:
-        return 1
-
+        raise ValueError("PLS component grid has no candidate supported by every inner training fold")
     if len(valid_grid) == 1:
         return valid_grid[0]
 
-    inner_cv = KFold(n_splits=min(3, X_train.shape[0]), shuffle=True, random_state=random_state)
     best_mse = float("inf")
     best_c = valid_grid[0]
 
     for c in valid_grid:
         mse_sum = 0.0
-        for in_tr, in_te in inner_cv.split(X_train):
+        for in_tr, in_te in folds:
             scaler = StandardScaler()
             X_in_tr = scaler.fit_transform(X_train[in_tr])
             X_in_te = scaler.transform(X_train[in_te])
@@ -183,7 +183,7 @@ def _permuted_pls_r2(
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 
-        model = PLSRegression(n_components=min(best_c, X_train.shape[0] - 2), scale=False)
+        model = PLSRegression(n_components=best_c, scale=False)
         model.fit(X_train_scaled, y_train)
         y_pred[test_idx] = model.predict(X_test_scaled).ravel()
 

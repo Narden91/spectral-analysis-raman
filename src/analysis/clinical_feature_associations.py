@@ -115,6 +115,29 @@ def bc_feature_columns(frame: pd.DataFrame) -> list[str]:
     return [column for column in frame.columns if column.startswith(BC_FEATURE_PREFIXES)]
 
 
+
+def load_disease_feature_frame_with_bc(
+    *,
+    feature_matrix_path: str | Path | None = None,
+    bc_feature_matrix_path: str | Path | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Join the pre-normalization companion by subject without changing row order."""
+    frame, metadata = load_disease_feature_frame(feature_matrix_path=feature_matrix_path)
+    if bc_feature_matrix_path is None and feature_matrix_path is not None:
+        path = Path(feature_matrix_path)
+        bc_feature_matrix_path = path.with_name(f"{path.stem}_bc{path.suffix}")
+    companion = load_subject_bc_feature_matrix(feature_matrix_path=bc_feature_matrix_path)
+    columns = bc_feature_columns(companion)
+    if not columns:
+        raise ValueError("The pre-normalization companion has no baseline-corrected feature columns")
+    joined = frame.merge(
+        companion[["subject_id", *columns]], on="subject_id", how="left", validate="one_to_one", indicator=True,
+    )
+    if joined["_merge"].ne("both").any():
+        raise ValueError("The pre-normalization companion is missing requested subjects")
+    joined.index = frame.index
+    return joined.drop(columns="_merge"), metadata, columns
+
 def feature_metadata(columns: list[str]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for column in columns:

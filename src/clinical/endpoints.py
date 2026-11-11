@@ -9,16 +9,19 @@ import pandas as pd
 
 from src import get_run_metadata_dir, resolve_project_path
 from src import resolve_cfg as _cfg
-from src.metadata.clinical import resolve_clinical_csv_path
+from src.metadata.clinical import _build_master_subject_table, resolve_clinical_csv_path
+from src.metadata.clinical_master import is_clinical_master, load_master_for_linkage
 
 _ENDPOINT_ALIASES: dict[str, tuple[str, ...]] = {
     "subject_id": ("subject_id", "participant_id"),
     "moca_baseline": (
+        "moca_baseline",
         "moca_baseline_total",
         "moca_total_baseline",
         "moca baseline total [test]",
     ),
     "moca_3m": (
+        "moca_3m",
         "moca_3m_total",
         "moca_total_3m",
         "moca +3 months total [test]",
@@ -31,10 +34,10 @@ _ENDPOINT_ALIASES: dict[str, tuple[str, ...]] = {
         "rbans_total_3_months",
     ),
     "age": ("age", "age_years"),
-    "aspects_score": ("aspects_score", "aspects scale", "aspects_scale_value"),
+    "aspects_score": ("aspects_score", "aspects", "aspects scale", "aspects_scale_value"),
     "sex": ("sex", "gender"),
     "diagnosis": ("diagnosis_category", "diagnosis_text", "diagnosis", "diagnosis_raw"),
-    "lesion_location": ("lesion_location", "diagnosis_category", "diagnosis_text"),
+    "lesion_location": ("stroke_location", "lesion_location", "diagnosis_category", "diagnosis_text"),
 }
 
 _REQUIRED_ENDPOINT_COLUMNS = (
@@ -252,7 +255,16 @@ def build_clinical_endpoints(
     endpoint_cfg = _endpoint_cfg(cfg)
     source_path = resolve_clinical_csv_path(clinical_csv or endpoint_cfg.get("clinical_table"), cfg)
 
-    data = pd.read_csv(source_path, encoding="utf-8-sig")
+    data = pd.read_csv(source_path, encoding="utf-8-sig", dtype={"subject_id": "string"})
+    if is_clinical_master(data.columns):
+        from src.data_preparation.loaders import load_clinical_subjects
+
+        inventory = load_clinical_subjects()
+        required = ["subject_id", "subject_id_raw", "is_control", "gender", "condition"]
+        missing = sorted(set(required).difference(inventory.columns))
+        if missing:
+            raise ValueError(f"Store subject inventory is missing clinical identity columns: {', '.join(missing)}")
+        data = _build_master_subject_table(inventory[required], load_master_for_linkage(source_path))
     resolved_columns = {
         endpoint_name: _resolve_column_name(data, endpoint_name, endpoint_cfg)
         for endpoint_name in _REQUIRED_ENDPOINT_COLUMNS
@@ -271,6 +283,9 @@ def build_clinical_endpoints(
             "lesion_location": data[resolved_columns["lesion_location"]].astype("string").str.strip(),
         }
     )
+    for column in ("participant_key", "identity_verified", "spectral_link_status", "qc_flags"):
+        if column in data:
+            subject_table[column] = data[column].to_numpy()
     subject_table = subject_table.dropna(subset=["subject_id"]).copy()
     subject_table = subject_table[subject_table["subject_id"].str.len() > 0].copy()
     if subject_table["subject_id"].duplicated().any():

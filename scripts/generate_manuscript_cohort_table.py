@@ -1,15 +1,13 @@
 """Generate the cohort-characteristics and endpoint-missingness source tables.
 
 Reads only archived analysis outputs and writes two CSVs plus a LaTeX fragment
-under ``manuscript/paper``.  The stroke cohort is defined as the intersection
+under the explicitly selected private output directory.  The stroke cohort is defined as the intersection
 of the clinical subject table with the participants retained by the spectral
-QC gate, so every count here matches the ``n`` reported by the within-stroke
-models.
+QC gate. Endpoint-specific model cohorts can differ because of missing values.
 
-Sex is taken from the spectral subject table, which is the covariate the
-classification analyses actually used.  The clinical export disagrees with it
-for five participants; that discrepancy is reported by
-``--check`` rather than silently reconciled.
+Sex summaries use the spectral subject table, with observed clinical/spectral
+record disagreements reported by ``--check``. Missing or unrecognized values
+remain missing rather than being inferred as another category.
 """
 
 from __future__ import annotations
@@ -25,6 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.source_provenance import write_source_provenance  # noqa: E402
+from src.data_preparation.manifest import hash_file  # noqa: E402
+
 CLINICAL_SUBJECTS = (
     ROOT
     / "Results_intra_disease"
@@ -39,8 +40,6 @@ SUBJECT_SPECTRA = (
     / "01_subject_features"
     / "subject_spectra.csv"
 )
-OUT_DIR = ROOT / "manuscript" / "paper" / "figure_data"
-TEX_DIR = ROOT / "manuscript" / "paper"
 
 CONTINUOUS = [
     ("age", "Age (years)"),
@@ -62,12 +61,12 @@ ENDPOINT_LABELS = {
 
 def load_cohort() -> pd.DataFrame:
     """Return the stroke participants that have both spectra and clinical data."""
-    clinical = pd.read_csv(CLINICAL_SUBJECTS)
+    clinical = pd.read_csv(CLINICAL_SUBJECTS, dtype={"subject_id": "string"})
     spectra = pd.read_csv(
-        SUBJECT_SPECTRA, usecols=["subject_id", "condition", "gender"]
+        SUBJECT_SPECTRA, usecols=["subject_id", "condition", "gender"], dtype={"subject_id": "string"}
     )
     disease = spectra.loc[spectra["condition"] == "disease"]
-    merged = clinical.merge(disease[["subject_id", "gender"]], on="subject_id")
+    merged = clinical.merge(disease[["subject_id", "gender"]], on="subject_id", validate="one_to_one")
     return merged
 
 
@@ -83,13 +82,14 @@ def build_characteristics(cohort: pd.DataFrame) -> pd.DataFrame:
             "n_missing": 0,
         }
     )
-    female = int((cohort["gender"] == "female").sum())
+    female = int(cohort["gender"].eq("female").sum())
+    male = int(cohort["gender"].eq("male").sum())
     rows.append(
         {
             "characteristic": "Female / male",
-            "summary": f"{female} / {n_total - female}",
-            "n_observed": n_total,
-            "n_missing": 0,
+            "summary": f"{female} / {male}",
+            "n_observed": female + male,
+            "n_missing": n_total - female - male,
         }
     )
     for column, label in CONTINUOUS:
@@ -121,14 +121,13 @@ def build_characteristics(cohort: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_missingness(cohort: pd.DataFrame) -> pd.DataFrame:
-    """Compare observed against missing cases for each clinical endpoint.
+    """Compare available age, sex and lesion-side records by endpoint missingness.
 
-    Lesion side is tested because a left-hemisphere infarct impairs language
-    and can make a verbally administered cognitive scale unadministrable,
-    which would make the endpoint missing for a reason related to the
-    participant's condition.
+    These descriptive comparisons do not establish why a value is missing.
     """
-    cohort = cohort.assign(is_left=cohort["lesion_location_group"] == "left")
+    lesion = cohort["lesion_location_group"].astype("string")
+    is_left = lesion.eq("left").where(lesion.isin(["left", "right", "posterior", "other"]))
+    cohort = cohort.assign(is_left=is_left)
     rows: list[dict[str, object]] = []
     for endpoint in ENDPOINTS:
         observed_mask = cohort[endpoint].notna()
@@ -136,7 +135,14 @@ def build_missingness(cohort: pd.DataFrame) -> pd.DataFrame:
         missing = cohort.loc[~observed_mask]
         if missing.empty:
             continue
-        _, age_p = stats.mannwhitneyu(observed["age"], missing["age"])
+        observed_age = observed["age"].dropna()
+        missing_age = missing["age"].dropna()
+        age_p = (
+            stats.mannwhitneyu(observed_age, missing_age).pvalue
+            if not observed_age.empty and not missing_age.empty else float("nan")
+        )
+        observed_sex = observed.loc[observed["gender"].isin(["female", "male"]), "gender"]
+        missing_sex = missing.loc[missing["gender"].isin(["female", "male"]), "gender"]
         sex_table = pd.crosstab(observed_mask, cohort["gender"])
         sex_p = (
             stats.fisher_exact(sex_table)[1] if sex_table.shape == (2, 2) else float("nan")
@@ -155,11 +161,11 @@ def build_missingness(cohort: pd.DataFrame) -> pd.DataFrame:
                 "age_observed": observed["age"].median(),
                 "age_missing": missing["age"].median(),
                 "age_p": age_p,
-                "female_pct_observed": 100 * (observed["gender"] == "female").mean(),
-                "female_pct_missing": 100 * (missing["gender"] == "female").mean(),
+                "female_pct_observed": 100 * observed_sex.eq("female").mean() if not observed_sex.empty else float("nan"),
+                "female_pct_missing": 100 * missing_sex.eq("female").mean() if not missing_sex.empty else float("nan"),
                 "sex_p": sex_p,
-                "left_pct_observed": 100 * observed["is_left"].mean(),
-                "left_pct_missing": 100 * missing["is_left"].mean(),
+                "left_pct_observed": 100 * observed["is_left"].dropna().mean() if observed["is_left"].notna().any() else float("nan"),
+                "left_pct_missing": 100 * missing["is_left"].dropna().mean() if missing["is_left"].notna().any() else float("nan"),
                 "left_p": left_p,
             }
         )
@@ -173,12 +179,12 @@ def format_p(value: float) -> str:
     return "$<$0.001" if value < 0.001 else f"{value:.3f}"
 
 
-def write_latex(characteristics: pd.DataFrame, missingness: pd.DataFrame) -> None:
+def write_latex(characteristics: pd.DataFrame, missingness: pd.DataFrame, *, n_subjects: int, output_path: Path) -> None:
     """Emit the two-panel Table 1 as a standalone LaTeX fragment."""
     lines = [
         r"\begin{table}[htbp]",
         r"\centering",
-        r"\caption{Stroke-cohort characteristics (Panel A; $n=97$, median and",
+        rf"\caption{{Stroke-cohort characteristics (Panel A; $n={n_subjects}$, median and",
         r"interquartile range) and observed-versus-missing comparison per clinical",
         r"endpoint (Panel B).}",
         r"\label{tab:cohort}",
@@ -228,15 +234,13 @@ def write_latex(characteristics: pd.DataFrame, missingness: pd.DataFrame) -> Non
         r"\end{table}",
         "",
     ]
-    (TEX_DIR / "table_cohort.tex").write_text("\n".join(lines), encoding="utf-8")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def check_sex_consistency(cohort: pd.DataFrame) -> int:
     """Report participants whose clinical and spectral sex records disagree."""
     disagree = cohort.loc[cohort["sex"] != cohort["gender"]]
     print(f"sex disagreements between clinical and spectral tables: {len(disagree)}")
-    if not disagree.empty:
-        print(disagree[["subject_id", "sex", "gender"]].to_string(index=False))
     return len(disagree)
 
 
@@ -247,19 +251,31 @@ def main() -> None:
         action="store_true",
         help="report clinical/spectral sex disagreements and exit",
     )
+    parser.add_argument("--output-dir", type=Path, help="Private Results directory for source tables and LaTeX")
+    parser.add_argument("--source-run-metadata", action="append", type=Path, default=[],
+                        help="Archived source-run metadata directory; may be repeated")
     args = parser.parse_args()
+    if args.output_dir is None and not args.check:
+        parser.error("--output-dir is required unless --check is selected")
 
     cohort = load_cohort()
     if args.check:
         check_sex_consistency(cohort)
         return
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
     characteristics = build_characteristics(cohort)
     missingness = build_missingness(cohort)
-    characteristics.to_csv(OUT_DIR / "cohort_characteristics.csv", index=False)
-    missingness.to_csv(OUT_DIR / "cohort_endpoint_missingness.csv", index=False)
-    write_latex(characteristics, missingness)
+    characteristics.to_csv(output_dir / "cohort_characteristics.csv", index=False)
+    missingness.to_csv(output_dir / "cohort_endpoint_missingness.csv", index=False)
+    write_latex(characteristics, missingness, n_subjects=len(cohort), output_path=output_dir / "table_cohort.tex")
+    write_source_provenance(
+        output_dir, source_files=[CLINICAL_SUBJECTS, SUBJECT_SPECTRA], source_metadata_dirs=args.source_run_metadata,
+        rendering_settings={"renderer_sha256": hash_file(Path(__file__)), "continuous_columns": CONTINUOUS,
+                            "endpoints": ENDPOINTS, "sex_summary_source": "spectral_subject_table",
+                            "pandas_version": pd.__version__},
+    )
     print(f"stroke participants: {len(cohort)}")
     print(characteristics.to_string(index=False))
     print()
