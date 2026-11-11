@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src import config, resolve_project_path
-from src.io.file_crawler import build_file_index, disambiguate_subject_ids
+from src import resolve_cfg, resolve_project_path
+from src.io.file_crawler import disambiguate_subject_ids
 
 logger = logging.getLogger(__name__)
 
@@ -93,99 +93,38 @@ _MISSING_TOKENS = {
 }
 
 
-def resolve_clinical_csv_path(explicit_path: str | Path | None = None) -> Path | None:
-    """Resolve the clinical CSV path using explicit, config, and fallback locations."""
-    candidates: list[Path] = []
-    if explicit_path:
-        path = Path(explicit_path)
-        candidates.append(path)
-        resolved = resolve_project_path(path)
-        if resolved != path:
-            candidates.append(resolved)
+def resolve_clinical_csv_path(
+    explicit_path: str | Path | None = None,
+    cfg: dict | None = None,
+) -> Path:
+    """Return the explicit clinical CSV, else ``data.clinical_data_path``.
 
-    cfg_path = config.get("data", {}).get("clinical_csv")
-    if not cfg_path:
-        cfg_path = config.get("data", {}).get("clinical_data_path")
-    if cfg_path:
-        path = Path(cfg_path)
-        candidates.append(path)
-        resolved = resolve_project_path(path)
-        if resolved != path:
-            candidates.append(resolved)
-
-    for candidate in [
-        Path("data/clinical_data.csv"),
-        Path("data_raw/clinical_data.csv"),
-        Path("data_old/clinical_data.csv"),
-    ]:
-        candidates.append(candidate)
-        resolved = resolve_project_path(candidate)
-        if resolved != candidate:
-            candidates.append(resolved)
-
-    seen: set[Path] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        if candidate.is_file():
-            return candidate
-
-    return None
-
-
-def resolve_curated_clinical_paths() -> dict[str, Path]:
-    """Return configured output paths for curated subject metadata artifacts."""
-    data_cfg = config.get("data", {})
-    cleaned_dir = resolve_project_path(data_cfg.get("cleaned_dir", "data_cleaned"))
-    return {
-        "curated": resolve_project_path(
-            data_cfg.get(
-                "curated_clinical_csv",
-                cleaned_dir / "clinical" / "clinical_data_curated.csv",
-            )
-        ),
-        "subject_metadata": resolve_project_path(
-            data_cfg.get(
-                "subject_metadata_csv",
-                cleaned_dir / "clinical" / "subject_metadata.csv",
-            )
-        ),
-        "audit": resolve_project_path(
-            data_cfg.get(
-                "clinical_audit_csv",
-                cleaned_dir / "clinical" / "clinical_mismatch_audit.csv",
-            )
-        ),
-        "missing_clinical": resolve_project_path(
-            data_cfg.get(
-                "missing_clinical_subjects_csv",
-                cleaned_dir / "clinical" / "subjects_missing_clinical.csv",
-            )
-        ),
-    }
+    A missing file raises instead of returning None: a silent fallback once
+    let analyses run against the wrong clinical table or without one.
+    """
+    raw_path = explicit_path or resolve_cfg(cfg).get("data", {}).get("clinical_data_path")
+    if not raw_path:
+        raise FileNotFoundError("No clinical CSV configured: set data.clinical_data_path.")
+    path = resolve_project_path(raw_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Clinical CSV not found: {path}")
+    return path
 
 
 def load_clinical_data(
     clinical_csv: str | Path | None = None,
-    data_index: pd.DataFrame | None = None,
-    write_curated: bool = False,
+    *,
+    data_index: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Load and normalize clinical metadata into a subject-level canonical table."""
+    """Load clinical metadata and reconcile it with the file index into a subject-level table."""
     path = resolve_clinical_csv_path(clinical_csv)
     clinical = _load_raw_clinical_data(path)
-
-    should_reconcile = data_index is not None or clinical_csv is None
-    if not should_reconcile:
-        return clinical
 
     subject_inventory = build_subject_inventory(data_index=data_index)
     if subject_inventory.empty:
         return clinical
 
     curated = _build_curated_subject_table(subject_inventory, clinical)
-    if write_curated:
-        _write_curated_outputs(curated, clinical)
 
     logger.info(
         "Loaded canonical clinical metadata: %d subjects, %d columns",
@@ -195,15 +134,8 @@ def load_clinical_data(
     return curated
 
 
-def build_subject_inventory(data_index: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_subject_inventory(data_index: pd.DataFrame) -> pd.DataFrame:
     """Summarize the reorganized data tree into one row per subject."""
-    if data_index is None:
-        try:
-            data_index = disambiguate_subject_ids(build_file_index(measurement="all"))
-        except Exception as exc:
-            logger.warning("Could not build subject inventory from data folder: %s", exc)
-            return pd.DataFrame(columns=["subject_id"])
-
     if data_index.empty:
         return pd.DataFrame(columns=["subject_id"])
 
@@ -276,11 +208,7 @@ def merge_index_with_clinical(
     return merged
 
 
-def _load_raw_clinical_data(path: Path | None) -> pd.DataFrame:
-    if path is None:
-        logger.warning("No clinical CSV found; clinical merge will be skipped.")
-        return pd.DataFrame(columns=["subject_id"])
-
+def _load_raw_clinical_data(path: Path) -> pd.DataFrame:
     clinical = pd.read_csv(path, encoding="utf-8-sig")
     if clinical.empty:
         logger.warning("Clinical CSV is empty: %s", path)
@@ -360,86 +288,6 @@ def _build_curated_subject_table(
     return curated[ordered + tail]
 
 
-def _write_curated_outputs(curated: pd.DataFrame, clinical_df: pd.DataFrame) -> None:
-    paths = resolve_curated_clinical_paths()
-    for path in paths.values():
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-    out = curated.copy()
-    out.to_csv(paths["curated"], index=False)
-
-    subject_cols = [
-        col
-        for col in _CURATED_COLUMNS
-        if col in curated.columns and col not in {"gender_matches_data", "group_matches_data", "clinical_condition"}
-    ]
-    curated[subject_cols].to_csv(paths["subject_metadata"], index=False)
-
-    audit = _build_clinical_audit(curated, clinical_df)
-    audit.to_csv(paths["audit"], index=False)
-
-    missing = curated.loc[~curated["clinical_present"].astype(bool)].copy()
-    missing.to_csv(paths["missing_clinical"], index=False)
-
-
-def _build_clinical_audit(curated: pd.DataFrame, clinical_df: pd.DataFrame) -> pd.DataFrame:
-    audit_cols = [
-        col
-        for col in [
-            "subject_id",
-            "condition",
-            "gender",
-            "clinical_present",
-            "gender_clinical_raw",
-            "gender_matches_data",
-            "diagnosis_raw",
-            "clinical_condition",
-            "group_matches_data",
-        ]
-        if col in curated.columns
-    ]
-    audit = curated[audit_cols].copy()
-    audit["audit_status"] = np.where(
-        ~audit.get("clinical_present", False).astype(bool),
-        "missing_from_clinical",
-        np.where(
-            (~audit.get("gender_matches_data", pd.Series(True, index=audit.index)).fillna(True))
-            | (~audit.get("group_matches_data", pd.Series(True, index=audit.index)).fillna(True)),
-            "mismatch",
-            "matched",
-        ),
-    )
-
-    if clinical_df.empty or "subject_id" not in clinical_df.columns:
-        return audit
-
-    matched_clinical_ids = _matched_clinical_ids(curated)
-    clinical_only = clinical_df.loc[~clinical_df["subject_id"].astype(str).isin(matched_clinical_ids)].copy()
-    if clinical_only.empty:
-        return audit
-
-    if "gender" in clinical_only.columns and "gender_clinical_raw" not in clinical_only.columns:
-        clinical_only = clinical_only.rename(columns={"gender": "gender_clinical_raw"})
-    if "Diagnosis" in clinical_only.columns and "diagnosis_raw" not in clinical_only.columns:
-        clinical_only["diagnosis_raw"] = clinical_only["Diagnosis"]
-    clinical_only = clinical_only.assign(
-        condition=pd.NA,
-        gender=pd.NA,
-        clinical_present=True,
-        gender_matches_data=pd.NA,
-        clinical_condition=_infer_clinical_condition(clinical_only),
-        group_matches_data=pd.NA,
-        audit_status="clinical_only",
-    )
-    clinical_only_audit = pd.DataFrame(index=clinical_only.index)
-    for col in audit.columns:
-        if col == "audit_status":
-            continue
-        clinical_only_audit[col] = clinical_only[col] if col in clinical_only.columns else pd.NA
-    clinical_only_audit["audit_status"] = "clinical_only"
-    return pd.concat([audit, clinical_only_audit], ignore_index=True, sort=False)
-
-
 def _prune_duplicate_clinical_matches(curated: pd.DataFrame, clinical_cols: list[str]) -> pd.DataFrame:
     if "subject_id_raw" not in curated.columns:
         return curated
@@ -493,14 +341,6 @@ def _quarantine_group_mismatched_clinical_rows(curated: pd.DataFrame, clinical_c
     return out
 
 
-def _matched_clinical_ids(curated: pd.DataFrame) -> set[str]:
-    id_column = "subject_id_raw" if "subject_id_raw" in curated.columns else "subject_id"
-    if id_column not in curated.columns:
-        return set()
-    present_mask = curated.get("clinical_present", False).astype(bool)
-    return set(curated.loc[present_mask, id_column].astype(str))
-
-
 def _resolve_duplicate_clinical_match(dup_df: pd.DataFrame) -> object | None:
     candidates = pd.Index(dup_df.index)
 
@@ -542,9 +382,6 @@ def _clinical_gender_series(df: pd.DataFrame) -> pd.Series:
         return raw.map(_normalize_gender_value)
     if "gender_binary_clinical_raw" in df.columns:
         numeric = pd.to_numeric(df["gender_binary_clinical_raw"], errors="coerce")
-        return numeric.map({0.0: "female", 1.0: "male"})
-    if "sex_binary_clinical_raw" in df.columns:
-        numeric = pd.to_numeric(df["sex_binary_clinical_raw"], errors="coerce")
         return numeric.map({0.0: "female", 1.0: "male"})
     return pd.Series(pd.NA, index=df.index, dtype="object")
 

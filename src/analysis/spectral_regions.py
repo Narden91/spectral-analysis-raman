@@ -77,7 +77,7 @@ def build_candidate_regions(
                 "max_abs_effect": float(window[effect_column].abs().max()),
                 "mean_abs_effect": float(window[effect_column].abs().mean()),
                 "integrated_abs_effect": float(
-                    np.trapz(
+                    np.trapezoid(
                         window[effect_column].abs().to_numpy(dtype=float),
                         window["wavenumber"].to_numpy(dtype=float),
                     )

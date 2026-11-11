@@ -7,6 +7,7 @@ import pandas as pd
 from sklearn.decomposition import PCA
 
 from src.analysis.statistics import run_pca
+from src.analysis.whole_spectra import _validate_split_index
 
 
 def _validate_spectra(spectra: np.ndarray) -> np.ndarray:
@@ -14,13 +15,6 @@ def _validate_spectra(spectra: np.ndarray) -> np.ndarray:
     if spectra.ndim != 2:
         raise ValueError("spectra must be a 2D array")
     return spectra
-
-
-def _validate_split_index(split_index: int, n_features: int) -> int:
-    split_index = int(split_index)
-    if split_index <= 0 or split_index >= n_features:
-        raise ValueError("split_index must fall strictly inside the feature axis")
-    return split_index
 
 
 def _first_eigenvalue(block: np.ndarray) -> float:

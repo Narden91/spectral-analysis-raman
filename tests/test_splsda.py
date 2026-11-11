@@ -14,7 +14,7 @@ def test_splsda_permutation_test_rejects_all_undefined_scores() -> None:
     with patch("src.analysis.splsda._permuted_splsda_score", return_value=np.nan):
         with pytest.raises(ValueError, match="Permutation scores must be finite"):
             _permutation_test(
-                np.ones((4, 2)), np.array([0, 0, 1, 1]), None, None,
+                np.ones((4, 2)), np.array([0, 0, 1, 1]), None,
                 [1], [1.0], 2, 0.75, 200, 42, n_jobs=1,
             )
 
@@ -37,7 +37,6 @@ def mock_splsda_cfg():
                 "min_subjects_per_group": 3,
                 "n_permutations": 5,
                 "random_state": 42,
-                "emit_oplsda": True,
             }
         }
     }
@@ -104,8 +103,8 @@ def test_splsda_produces_expected_outputs(mock_load, synthetic_feature_matrix, m
         cfg=mock_splsda_cfg,
     )
 
-    assert len(outputs) == 4
-    for key in ["pls_l1da_cv_performance", "pls_l1da_selected_bands", "pls_l1da_permutation_results", "oplsda_results"]:
+    assert len(outputs) == 3
+    for key in ["pls_l1da_cv_performance", "pls_l1da_selected_bands", "pls_l1da_permutation_results"]:
         assert key in outputs
         assert outputs[key].exists()
 
@@ -119,9 +118,6 @@ def test_splsda_produces_expected_outputs(mock_load, synthetic_feature_matrix, m
     bands_df = pd.read_csv(outputs["pls_l1da_selected_bands"])
     assert {"estimation_scope", "validated", "selection_frequency", "sign_stability"}.issubset(bands_df.columns)
     assert not bands_df["validated"].any()
-
-    oplsda_df = pd.read_csv(outputs["oplsda_results"])
-    assert len(oplsda_df) == 2
 
 
 @patch("src.analysis.splsda.load_disease_feature_frame")
@@ -195,7 +191,6 @@ def test_splsda_permutation_test_stops_early_on_unambiguous_null():
         X,
         y,
         cv,
-        None,
         [1, 2],
         [0.1, 1.0],
         2,
@@ -219,7 +214,6 @@ def test_splsda_permutation_test_returns_full_budget_when_never_resolved():
         X,
         y,
         cv,
-        None,
         [1, 2],
         [0.1, 1.0],
         2,

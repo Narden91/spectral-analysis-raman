@@ -2,27 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 MANIFEST_VERSION = 1
 SCHEMA_VERSION = 4
-
-
-@dataclass(frozen=True)
-class FileSignature:
-    sha256: str
-    size: int
-    mtime_ns: int
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "sha256": self.sha256,
-            "size": self.size,
-            "mtime_ns": self.mtime_ns,
-        }
 
 
 def iso_utc_now() -> str:
@@ -42,14 +27,14 @@ def hash_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def file_signature(path: str | Path) -> FileSignature:
+def file_signature(path: str | Path) -> dict[str, Any]:
     file_path = Path(path)
     stat = file_path.stat()
-    return FileSignature(
-        sha256=hash_file(file_path),
-        size=int(stat.st_size),
-        mtime_ns=int(stat.st_mtime_ns),
-    )
+    return {
+        "sha256": hash_file(file_path),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
 
 
 def hash_json(payload: Any) -> str:

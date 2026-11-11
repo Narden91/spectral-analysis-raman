@@ -187,85 +187,6 @@ def _expected_whole_spectra_boundary() -> tuple[float, float]:
 
 
 # ---------------------------------------------------------------------------
-# Normality testing
-# ---------------------------------------------------------------------------
-
-
-def test_normality(data: np.ndarray, alpha: float = 0.05) -> dict:
-    """
-    Test normality per feature (wavenumber) using Shapiro-Wilk.
-
-    When n_features exceeds the configured subsample threshold, only a
-    random subset of wavenumbers is tested to save computation time.
-
-    Parameters
-    ----------
-    data : np.ndarray
-        2D array (n_samples, n_features).
-    alpha : float
-        Significance level.
-
-    Returns
-    -------
-    dict
-        Keys: 'is_normal' (bool array, valid only where 'p_values' is finite),
-              'p_values' (float array, NaN for untested/under-sampled channels),
-              'fraction_normal' (float, fraction normal among channels with a
-              finite p-value; NaN if none were tested), 'n_tested' (int,
-              channels selected for testing), 'n_tested_finite' (int, of those,
-              channels with a valid Shapiro p-value).
-    """
-    n_features = data.shape[1]
-    max_test = int(
-        config.get("analysis", {}).get("normality_subsample_wavenumbers", n_features)
-    )
-
-    if max_test < n_features:
-        rng = np.random.default_rng(
-            int(config.get("analysis", {}).get("random_state", 42))
-        )
-        test_idx = rng.choice(n_features, size=max_test, replace=False)
-        test_idx.sort()
-    else:
-        test_idx = np.arange(n_features)
-
-    p_values = np.full(n_features, np.nan)
-
-    for j in test_idx:
-        col = data[:, j]
-        col_clean = col[~np.isnan(col)]
-        if len(col_clean) < 8:
-            p_values[j] = np.nan
-        else:
-            _, p_values[j] = stats.shapiro(col_clean)
-
-    # is_normal is only meaningful where a p-value was actually computed; NaN-p
-    # channels (untested, or tested but under n=8) evaluate to False here and
-    # must not be mixed into fraction_normal, or under-sampled channels would
-    # silently count as non-normal.
-    is_normal = p_values > alpha
-    tested_in_idx = np.isfinite(p_values[test_idx])
-    n_tested_finite = int(tested_in_idx.sum())
-    fraction = float(np.mean(is_normal[test_idx][tested_in_idx])) if n_tested_finite else float("nan")
-
-    logger.debug(
-        "Normality test (%d/%d requested, %d with valid p-value): %.1f%% are normal (alpha=%.3f)",
-        len(test_idx),
-        n_features,
-        n_tested_finite,
-        fraction * 100 if np.isfinite(fraction) else float("nan"),
-        alpha,
-    )
-    return {
-        "is_normal": is_normal,
-        "p_values": p_values,
-        "fraction_normal": fraction,
-        "n_tested": len(test_idx),
-        "n_tested_finite": n_tested_finite,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Multiple comparison correction (standalone)
 # ---------------------------------------------------------------------------
 
@@ -636,8 +557,7 @@ def compare_band_intensities_between_groups(
             continue
 
         # Test selection heuristic: n>=20 → Welch t-test; n<20 → Mann-Whitney U.
-        # The Shapiro-Wilk normality test (computed separately by check_normality)
-        # is NOT wired into this selection.  Rationale: in small Raman cohorts
+        # A Shapiro-Wilk normality test is NOT part of this selection.  Rationale: in small Raman cohorts
         # n is typically <20 so Mann-Whitney is chosen anyway, and FDR correction
         # is applied across bands.  Note that adjacent wavenumber bands are
         # correlated; the FDR correction does not account for this dependency.

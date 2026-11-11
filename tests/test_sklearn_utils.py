@@ -7,7 +7,6 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from src.analysis.sklearn_utils import (
-    covariate_logistic_model,
     fit_with_convergence_capture,
     l1_logistic_model,
 )
@@ -44,11 +43,6 @@ def test_l1_logistic_model_produces_sparse_coefficients() -> None:
     coef = model.coef_.ravel()
     assert coef.shape[0] == n_informative + n_noise
     assert (coef == 0).mean() > 0.5
-
-
-def test_covariate_logistic_model_uses_high_max_iter() -> None:
-    model = covariate_logistic_model(random_state=0)
-    assert model.max_iter == 10_000
 
 
 def test_fit_with_convergence_capture_suppresses_warning_output(capsys) -> None:

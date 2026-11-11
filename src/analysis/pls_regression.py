@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.model_selection import GroupKFold, KFold, LeaveOneGroupOut, LeaveOneOut
+from sklearn.model_selection import KFold, LeaveOneOut
 from sklearn.preprocessing import StandardScaler
 
 from src import get_classification_phase_dir
@@ -26,6 +26,7 @@ from src.analysis.phase_status import (
     STATUS_OK,
     PhaseStatus,
 )
+from src.statistics.cluster_permutation import normalize_n_jobs
 from src.statistics.multiple_testing import holm_adjust_series
 from src.statistics.sequential_permutation import (
     resolve_sequential_stopping_config,
@@ -63,14 +64,12 @@ def _get_cv_strategy(
     n_splits: int,
     random_state: int,
 ) -> tuple[object, str, bool]:
-    """Determine the optimal CV strategy based on sample size and repeated rows."""
-    n_subjects = frame["subject_id"].nunique()
-    n_rows = len(frame)
+    """Determine the CV strategy from the subject count.
 
-    if n_rows > n_subjects:
-        if n_subjects < 15:
-            return LeaveOneGroupOut(), "LeaveOneGroupOut", True
-        return GroupKFold(n_splits=min(n_splits, n_subjects)), "GroupKFold", False
+    `load_subject_feature_matrix` rejects repeated subject IDs, so each row is
+    one subject and no grouped split is needed.
+    """
+    n_subjects = frame["subject_id"].nunique()
 
     if n_subjects < 15:
         return LeaveOneOut(), "LeaveOneOut", True
@@ -121,7 +120,6 @@ def _permutation_test(
     X: np.ndarray,
     y: np.ndarray,
     cv_strategy: object,
-    groups: np.ndarray | None,
     component_grid: list[int],
     tune_inside_cv: bool,
     observed_r2: float,
@@ -138,14 +136,14 @@ def _permutation_test(
     `n_permutations` is the ceiling on draws, not necessarily the count
     actually run — returns the draws actually used as the fourth element.
     """
-    n_jobs = 1 if n_jobs == 0 else n_jobs
+    n_jobs = normalize_n_jobs(n_jobs)
     stopping = resolve_sequential_stopping_config(pls_cfg or {}, default_max=n_permutations)
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)
 
     null_r2 = run_curtailed_permutation_draws(
         lambda seed: _permuted_pls_r2(
-            X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, seed
+            X, y, cv_strategy, component_grid, tune_inside_cv, random_state, seed
         ),
         [(int(seed),) for seed in seeds],
         observed=observed_r2,
@@ -153,46 +151,26 @@ def _permutation_test(
         n_jobs=n_jobs,
     )
 
+    # run_curtailed_permutation_draws raises on non-finite scores and always
+    # runs at least one draw, so every value here is finite.
     null_r2_arr = np.array(null_r2)
-    finite_null = null_r2_arr[np.isfinite(null_r2_arr)]
-    if len(finite_null) == 0:
-        return np.nan, np.nan, np.nan, len(null_r2)
-
-    p_value = float((1 + np.sum(finite_null >= observed_r2)) / (len(finite_null) + 1))
-    return p_value, float(np.mean(finite_null)), float(np.std(finite_null)), len(null_r2)
+    p_value = float((1 + np.sum(null_r2_arr >= observed_r2)) / (len(null_r2_arr) + 1))
+    return p_value, float(np.mean(null_r2_arr)), float(np.std(null_r2_arr)), len(null_r2)
 
 
 def _permuted_pls_r2(
     X: np.ndarray,
     y: np.ndarray,
     cv_strategy: object,
-    groups: np.ndarray | None,
     component_grid: list[int],
     tune_inside_cv: bool,
     random_state: int,
     seed: int,
 ) -> float:
-    rng = np.random.default_rng(seed)
-    return _permuted_pls_r2_with_rng(
-        X, y, cv_strategy, groups, component_grid, tune_inside_cv, random_state, rng
-    )
-
-
-def _permuted_pls_r2_with_rng(
-    X: np.ndarray,
-    y: np.ndarray,
-    cv_strategy: object,
-    groups: np.ndarray | None,
-    component_grid: list[int],
-    tune_inside_cv: bool,
-    random_state: int,
-    rng: np.random.Generator,
-) -> float:
-    y_perm = rng.permutation(y)
+    y_perm = np.random.default_rng(seed).permutation(y)
     y_pred = np.zeros_like(y, dtype=float)
 
-    cv_kwargs = {"groups": groups} if groups is not None and not isinstance(cv_strategy, (KFold, LeaveOneOut)) else {}
-    for train_idx, test_idx in cv_strategy.split(X, y_perm, **cv_kwargs):
+    for train_idx, test_idx in cv_strategy.split(X, y_perm):
         X_train, y_train = X[train_idx], y_perm[train_idx]
         X_test = X[test_idx]
 
@@ -228,6 +206,7 @@ def run_pls_regression(
 
     disease_only, feature_meta = load_disease_feature_frame(feature_matrix_path=feature_matrix_path)
     all_feature_columns = feature_columns(disease_only)
+    feature_meta_by_name = feature_meta.set_index("feature_name")
 
     target_dir = Path(output_dir) if output_dir is not None else get_classification_phase_dir("pls_regression")
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -261,7 +240,6 @@ def run_pls_regression(
         frame = disease_only.loc[valid_mask].copy()
         X = frame[all_feature_columns].to_numpy(dtype=float)
         y = pd.to_numeric(frame[target]).to_numpy(dtype=float)
-        groups = frame["subject_id"].to_numpy()
 
         cv_strategy, cv_name, high_variance = _get_cv_strategy(frame, n_cv_splits, random_state)
 
@@ -270,8 +248,7 @@ def run_pls_regression(
         fold_vip_selected: list[np.ndarray] = []
         fold_coefficient_signs: list[np.ndarray] = []
 
-        cv_kwargs = {"groups": groups} if not isinstance(cv_strategy, (KFold, LeaveOneOut)) else {}
-        for train_idx, test_idx in cv_strategy.split(X, y, **cv_kwargs):
+        for train_idx, test_idx in cv_strategy.split(X, y):
             X_train, y_train = X[train_idx], y[train_idx]
             X_test = X[test_idx]
 
@@ -313,7 +290,7 @@ def run_pls_regression(
         sign_stability = np.abs(np.mean(np.vstack(fold_coefficient_signs), axis=0))
 
         for i, col in enumerate(all_feature_columns):
-            meta = feature_meta[feature_meta["feature_name"] == col].iloc[0]
+            meta = feature_meta_by_name.loc[col]
             vip_rows.append({
                 "target": target,
                 "feature_name": col,
@@ -346,7 +323,6 @@ def run_pls_regression(
             X,
             y,
             cv_strategy,
-            groups,
             component_grid,
             tune_inside_cv,
             observed_r2,
@@ -444,8 +420,6 @@ def run_pls_regression(
     write_csv_atomic(perf_df, perf_path, index=False)
     write_parquet_atomic(feature_df, effects_path, index=False)
     write_csv_atomic(perm_df, perm_path, index=False)
-    for obsolete_path in (target_dir / "pls_vip_bands.csv", target_dir / "pls_coefficients.csv"):
-        obsolete_path.unlink(missing_ok=True)
 
     logger.info("PLS1 regression outputs written to %s", target_dir)
     evidence_status = (

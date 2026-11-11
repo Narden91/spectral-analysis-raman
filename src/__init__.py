@@ -2,16 +2,8 @@ import logging
 import os
 from pathlib import Path
 
-import numpy as np
 import yaml
-
-if not hasattr(np, "trapz") and hasattr(np, "trapezoid"):
-    np.trapz = np.trapezoid
-if not hasattr(np, "in1d") and hasattr(np, "isin"):
-    np.in1d = np.isin
-
-
-__version__ = "0.1.0"
+from rich.logging import RichHandler
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -202,25 +194,16 @@ def setup_logging(
     root_logger.handlers.clear()
     root_logger.setLevel(level)
 
-    try:
-        from rich.logging import RichHandler
-
-        handler = RichHandler(
-            rich_tracebacks=True,
-            show_time=True,
-            show_level=True,
-            show_path=False,
-            markup=False,
-        )
-        handler.setLevel(console_level)
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        root_logger.addHandler(handler)
-    except Exception:
-        log_fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-        handler = logging.StreamHandler()
-        handler.setLevel(console_level)
-        handler.setFormatter(logging.Formatter(log_fmt, datefmt="%Y-%m-%d %H:%M:%S"))
-        root_logger.addHandler(handler)
+    handler = RichHandler(
+        rich_tracebacks=True,
+        show_time=True,
+        show_level=True,
+        show_path=False,
+        markup=False,
+    )
+    handler.setLevel(console_level)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    root_logger.addHandler(handler)
 
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
@@ -229,20 +212,14 @@ def get_output_root(track: str) -> Path:
     """Return the default output root for a pipeline track."""
     out_cfg = config.get("output", {})
     if track == "eda":
-        return Path(out_cfg.get("eda_root", out_cfg.get("project_name", "outputs")))
+        return Path(out_cfg.get("eda_root", "outputs"))
     raise ValueError(f"Unknown output track: {track}")
 
 
 def _output_dir(subdir_key: str) -> Path:
-    """
-    Build an output path from config.
-
-    EDA-related keys resolve relative to ``output.eda_root``. Other callers
-    fall back to the legacy shared root when a dedicated track root is not used.
-    """
+    """Build an output path relative to ``output.eda_root`` from config."""
     out_cfg = config.get("output", {})
-    eda_keys = {"eda_subdir"}
-    base_dir = get_output_root("eda") if subdir_key in eda_keys else Path(out_cfg.get("project_name", "outputs"))
+    base_dir = get_output_root("eda")
     subdir = out_cfg.get(subdir_key, "")
     if subdir in {"", ".", None}:
         return base_dir
@@ -321,7 +298,6 @@ _SPECTRAL_INTERPRETABILITY_SUBDIRS = {
     "discriminant": "04_discriminant_signatures",
     "coupling": "05_feature_coupling",
     "consistency": "06_endpoint_consistency",
-    "index_clustering": "07_index_clustering",  # opt-in, disabled by default
     "figures": "08_figures",
 }
 

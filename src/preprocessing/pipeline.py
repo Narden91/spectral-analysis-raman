@@ -8,11 +8,9 @@ instrument artefacts, and make every step configurable from YAML.
 
 from __future__ import annotations
 
-import json
 import logging
 import warnings
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -23,7 +21,6 @@ from pybaselines.whittaker import arpls, asls
 from scipy.interpolate import interp1d
 from scipy.ndimage import median_filter
 from scipy.signal import find_peaks, savgol_filter
-from scipy.spatial import ConvexHull
 
 from src import config
 
@@ -435,17 +432,6 @@ def _apply_initial_qc(
     return spectra[valid_mask], valid_mask, flags_df
 
 
-def compute_qc_metrics(spectra: np.ndarray) -> pd.DataFrame:
-    """Public, stable entry point for QC metric computation.
-
-    Delegates to the internal helper so downstream modules do not depend on
-    the private function name.
-    """
-    return _compute_qc_metrics(np.asarray(spectra, dtype=float))
-
-
-
-
 def _local_cosmic_detection(
     spectra: np.ndarray,
     z_threshold: float,
@@ -751,7 +737,6 @@ def _resolve_anchor_index(
     spectra: np.ndarray,
     wavenumbers: Optional[np.ndarray],
     region: Optional[str],
-    peak_window: int,
     cfg: dict | None = None,
 ) -> int:
     """Resolve a deterministic SNR anchor channel from fixed wavenumber windows.
@@ -799,7 +784,7 @@ def spectral_quality_mask(
     if configured_floor is None:
         configured_floor = qf_cfg.get("min_integrated_signal")
 
-    anchor_idx = _resolve_anchor_index(spectra, wavenumbers, region, pwin, cfg=cfg)
+    anchor_idx = _resolve_anchor_index(spectra, wavenumbers, region, cfg=cfg)
     lo = max(0, anchor_idx - pwin)
     hi = min(spectra.shape[1], anchor_idx + pwin + 1)
     signal = np.nanmax(spectra[:, lo:hi], axis=1)
@@ -818,81 +803,6 @@ def spectral_quality_mask(
         "signal_area_median": float(np.nanmedian(area)),
         "n_valid": float(mask.sum()),
     }
-    return mask, stats
-
-
-
-
-def _resolve_preview_trim_slice(
-    wavenumbers: np.ndarray,
-    trim: Optional[int] = None,
-    trim_cm: Optional[float] = None,
-    cfg: dict | None = None,
-) -> tuple[int, int]:
-    """Return a (start, stop) slice that previews the edge trim that will be applied."""
-    n = wavenumbers.size
-    if n == 0:
-        return 0, 0
-
-    if trim_cm is not None:
-        if float(trim_cm) <= 0:
-            return 0, n
-        wn_min = float(np.nanmin(wavenumbers))
-        wn_max = float(np.nanmax(wavenumbers))
-        keep = (wavenumbers >= wn_min + float(trim_cm)) & (wavenumbers <= wn_max - float(trim_cm))
-        if int(keep.sum()) < 2:
-            return 0, n
-        start = int(np.argmax(keep))
-        stop = n - int(np.argmax(keep[::-1]))
-        return start, stop
-
-    if trim is not None:
-        t = int(trim)
-        if t <= 0 or 2 * t >= n:
-            return 0, n
-        return t, n - t
-
-    edge_cfg = _pre_cfg(cfg=cfg).get("edge_trim", {})
-    edge_trim_cm = edge_cfg.get("edge_trim_cm", None)
-    if edge_trim_cm is not None and float(edge_trim_cm) > 0:
-        return _resolve_preview_trim_slice(wavenumbers, trim_cm=float(edge_trim_cm), cfg=cfg)
-
-    trim_val = edge_cfg.get("trim", 0)
-    if trim_val is not None and int(trim_val) > 0:
-        return _resolve_preview_trim_slice(wavenumbers, trim=int(trim_val), cfg=cfg)
-
-    return 0, n
-
-
-def _spectral_quality_mask_with_edge_guard(
-    spectra: np.ndarray,
-    wavenumbers: np.ndarray,
-    region: Optional[str] = None,
-    trim: Optional[int] = None,
-    trim_cm: Optional[float] = None,
-    cfg: dict | None = None,
-) -> tuple[np.ndarray, dict[str, float]]:
-    """Compute the spectral-quality mask using a trim-aware preview.
-
-    When the edge-artifact guard is enabled, SNR and area statistics are
-    computed on the subset of channels that will remain after edge trimming,
-    so transient edge corruption cannot be the sole reason for rejecting a
-    spectrum.
-    """
-    qf_cfg = _spectral_quality_cfg(cfg=cfg)
-    use_guard = bool(qf_cfg.get("use_trim_aware_preview", True))
-    if not use_guard or wavenumbers.size == 0:
-        return spectral_quality_mask(spectra, wavenumbers=wavenumbers, region=region, cfg=cfg)
-
-    start, stop = _resolve_preview_trim_slice(wavenumbers, trim=trim, trim_cm=trim_cm, cfg=cfg)
-    if start == 0 and stop == wavenumbers.size:
-        return spectral_quality_mask(spectra, wavenumbers=wavenumbers, region=region, cfg=cfg)
-
-    preview_spectra = spectra[:, start:stop]
-    preview_wavenumbers = wavenumbers[start:stop]
-    mask, stats = spectral_quality_mask(preview_spectra, wavenumbers=preview_wavenumbers, region=region, cfg=cfg)
-    stats["edge_guard_preview_start"] = float(start)
-    stats["edge_guard_preview_stop"] = float(stop)
     return mask, stats
 
 
@@ -1023,10 +933,6 @@ def _flag_outliers(
     metrics_df["is_outlier"] = is_outlier
 
     flags_df = flags_df.copy()
-    if "qc_warning" not in flags_df.columns:
-        flags_df["qc_warning"] = False
-        flags_df["qc_warning_reason"] = ""
-        flags_df["qc_warning_metrics"] = ""
 
     current_rows = metrics_df["row_index"].to_numpy(dtype=int)
     warning_rows = current_rows[is_outlier]
@@ -1053,14 +959,12 @@ def _apply_quality_filter(
     *,
     wavenumbers: np.ndarray,
     region_key: str,
-    trim: Optional[int],
-    trim_cm: Optional[float],
     cfg: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, pd.DataFrame, dict[str, float]]:
     qf_cfg = _spectral_quality_cfg(cfg=cfg)
     peak_window = int(qf_cfg.get("peak_window", 5))
     noise_channels = int(qf_cfg.get("noise_channels", 20))
-    anchor_index = _resolve_anchor_index(result, wavenumbers, region_key, peak_window, cfg=cfg)
+    anchor_index = _resolve_anchor_index(result, wavenumbers, region_key, cfg=cfg)
     lower = max(0, anchor_index - peak_window)
     upper = min(result.shape[1], anchor_index + peak_window + 1)
     signal = np.nanmax(result[:, lower:upper], axis=1)
@@ -1068,14 +972,7 @@ def _apply_quality_filter(
     noise[noise == 0] = 1e-10
     metrics_df.loc[:, "post_baseline_snr"] = signal / noise
     metrics_df.loc[:, "post_baseline_signal_area"] = np.trapezoid(np.abs(result), axis=1)
-    quality_mask, quality_stats = _spectral_quality_mask_with_edge_guard(
-        result,
-        wavenumbers=wavenumbers,
-        region=region_key,
-        trim=trim,
-        trim_cm=trim_cm,
-        cfg=cfg,
-    )
+    quality_mask, quality_stats = spectral_quality_mask(result, wavenumbers=wavenumbers, region=region_key, cfg=cfg)
     kept_indices = np.where(retained_mask)[0]
     dropped = kept_indices[~quality_mask]
     flags_df.loc[dropped, "qc_flag"] = True
@@ -1335,8 +1232,6 @@ def run_preprocessing(
             flags_df,
             wavenumbers=wn,
             region_key=region_key,
-            trim=0,
-            trim_cm=0.0,
             cfg=cfg,
         )
     else:
@@ -1380,207 +1275,3 @@ def run_preprocessing(
         spike_repair_enabled=False,
         cfg=cfg,
     )
-
-
-def preprocess_spectra(
-    spectra: np.ndarray,
-    wavenumbers: np.ndarray,
-    screen_dead: bool = True,
-    suppress_cosmic: Optional[bool] = None,
-    correct_bl: bool = True,
-    smooth: Optional[bool] = None,
-    interpolate: bool = False,
-    filter_quality: Optional[bool] = None,
-    normalize: bool = True,
-    trim: Optional[int] = None,
-    trim_cm: Optional[float] = None,
-    norm_for: Optional[str] = None,
-    region: Optional[str] = None,
-    pixel_coords: np.ndarray | None = None,
-    cfg: dict | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    result = run_preprocessing(
-        spectra,
-        wavenumbers,
-        region=region,
-        pixel_coords=pixel_coords,
-        screen_dead=screen_dead,
-        suppress_cosmic=suppress_cosmic,
-        correct_bl=correct_bl,
-        smooth=smooth,
-        interpolate=interpolate,
-        filter_quality=filter_quality,
-        normalize=normalize,
-        trim=trim,
-        trim_cm=trim_cm,
-        norm_for=norm_for,
-        record_stages=False,
-        cfg=cfg,
-    )
-    return result.spectra, result.wavenumbers
-
-
-def sample_baseline_qc_artifacts(
-    result: PreprocessResult,
-    output_dir: str | Path,
-    stem: str,
-    n_samples: int = 5,
-    seed: int = 42,
-    condition_labels: dict[int, str] | None = None,
-) -> dict[str, str]:
-    """Write representative raw/baseline/corrected/residual baseline QC artifacts.
-
-    Sampling is deterministic, seeded, and bounded.  When ``condition_labels``
-    maps row index to condition, the sampler attempts to pick at least one
-    spectrum per observed condition up to ``n_samples``.
-    """
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    written: dict[str, str] = {}
-
-    raw = result.stage_arrays.get("baseline_input")
-    baselines = result.stage_arrays.get("baseline")
-    corrected = result.stage_arrays.get("baseline_corrected")
-    wn = result.wavenumbers
-    if raw is None or baselines is None or corrected is None or wn.size == 0:
-        return written
-
-    n_rows = raw.shape[0]
-    if n_rows == 0:
-        return written
-
-    retained_indices = np.where(result.retained_mask)[0]
-    if retained_indices.size == 0:
-        return written
-
-    rng = np.random.default_rng(seed)
-    if condition_labels:
-        indices_by_condition: dict[str, list[int]] = {}
-        for idx in retained_indices:
-            label = str(condition_labels.get(int(idx), "unknown"))
-            indices_by_condition.setdefault(label, []).append(int(idx))
-        selected_global: list[int] = []
-        for label in sorted(indices_by_condition):
-            pool = indices_by_condition[label]
-            k = max(1, min(len(pool), n_samples // max(1, len(indices_by_condition))))
-            selected_global.extend(sorted(rng.choice(pool, size=k, replace=False).tolist()))
-        selected_global = sorted(set(selected_global))
-        if len(selected_global) > n_samples:
-            selected_global = sorted(rng.choice(selected_global, size=n_samples, replace=False).tolist())
-    else:
-        k = min(int(retained_indices.size), n_samples)
-        selected_global = sorted(rng.choice(retained_indices, size=k, replace=False).tolist())
-
-    local_index_map = {int(global_idx): int(local_idx) for local_idx, global_idx in enumerate(retained_indices)}
-    for sample_global in selected_global:
-        local_idx = local_index_map[sample_global]
-        base = output_path / f"{stem}_sample{sample_global}"
-        np.savez_compressed(
-            f"{base}_baseline_qc.npz",
-            wavenumbers=wn,
-            raw=raw[local_idx],
-            baseline=baselines[local_idx],
-            corrected=corrected[local_idx],
-            residual=raw[local_idx] - baselines[local_idx],
-        )
-        written[f"baseline_qc_sample_{sample_global}"] = str(f"{base}_baseline_qc.npz")
-
-    return written
-
-
-def save_preprocessing_artifacts(
-    result: PreprocessResult,
-    output_dir: str | Path,
-    stem: str,
-) -> dict[str, str]:
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    written: dict[str, str] = {}
-
-    if bool(_artifacts_cfg().get("save_qc_tables", True)):
-        qc_metrics_path = output_path / f"{stem}_qc_metrics.csv"
-        qc_flags_path = output_path / f"{stem}_qc_flags.csv"
-        manifest_path = output_path / f"{stem}_preprocessing_manifest.json"
-        result.qc_metrics.to_csv(qc_metrics_path, index=False)
-        result.qc_flags.to_csv(qc_flags_path, index=False)
-        manifest_path.write_text(json.dumps(result.metadata, indent=2, default=str), encoding="utf-8")
-        written["qc_metrics_csv"] = str(qc_metrics_path)
-        written["qc_flags_csv"] = str(qc_flags_path)
-        written["preprocessing_manifest_json"] = str(manifest_path)
-
-    if bool(_artifacts_cfg().get("save_stage_arrays", False)) and result.stage_arrays:
-        arrays_path = output_path / f"{stem}_stage_arrays.npz"
-        payload = {"wavenumbers": result.wavenumbers, "retained_mask": result.retained_mask}
-        payload.update({name: np.asarray(values, dtype=float) for name, values in result.stage_arrays.items()})
-        np.savez_compressed(arrays_path, **payload)
-        written["stage_arrays_npz"] = str(arrays_path)
-
-    return written
-
-
-def coffee_ring_mask(
-    pixel_coords: np.ndarray,
-    spectra: np.ndarray,
-    valid_mask: np.ndarray,
-    intensity_ratio_threshold: Optional[float] = None,
-    min_surviving_pixels: Optional[int] = None,
-) -> np.ndarray:
-    cr_cfg = _pre_cfg().get("quality_filter", {}).get("coffee_ring", {})
-    ratio_thr = float(
-        intensity_ratio_threshold if intensity_ratio_threshold is not None else cr_cfg.get("intensity_ratio_threshold", 2.0)
-    )
-    min_pix = int(min_surviving_pixels if min_surviving_pixels is not None else cr_cfg.get("min_surviving_pixels", 4))
-
-    valid_idx = np.where(valid_mask)[0]
-    if valid_idx.size < 4:
-        logger.warning("Coffee-ring filter skipped: only %d valid pixels", valid_idx.size)
-        return valid_mask.copy()
-
-    valid_coords = pixel_coords[valid_idx]
-    try:
-        hull = ConvexHull(valid_coords)
-        hull_vertex_local = set(hull.vertices)
-    except Exception:
-        logger.warning("Coffee-ring filter skipped: ConvexHull construction failed")
-        return valid_mask.copy()
-
-    is_border_local = np.array([i in hull_vertex_local for i in range(valid_idx.size)], dtype=bool)
-    is_interior_local = ~is_border_local
-    interior_idx = valid_idx[is_interior_local]
-    border_idx = valid_idx[is_border_local]
-    if interior_idx.size == 0:
-        logger.warning("Coffee-ring filter skipped: no interior pixels")
-        return valid_mask.copy()
-
-    pixel_areas = np.trapezoid(np.abs(spectra), axis=1, dx=1.0)
-    interior_median = float(np.median(pixel_areas[interior_idx]))
-    if interior_median == 0:
-        interior_median = 1e-10
-    flagged_global_idx = border_idx[pixel_areas[border_idx] > ratio_thr * interior_median]
-    n_surviving = int(valid_mask.sum() - flagged_global_idx.size)
-    if n_surviving < min_pix:
-        logger.warning("Coffee-ring filter skipped: only %d pixels would survive (min=%d)", n_surviving, min_pix)
-        return valid_mask.copy()
-
-    updated_mask = valid_mask.copy()
-    updated_mask[flagged_global_idx] = False
-    return updated_mask
-
-
-def resolve_region_key(region: str) -> str:
-    """Public, stable entry point mapping a range alias to its canonical region key."""
-    return _resolve_region_key(np.array([]), region)
-
-
-def retention_guard_config() -> dict[str, int]:
-    ret_cfg = _pre_cfg().get("retention", {})
-    return {
-        "min_pixels_per_area": int(ret_cfg.get("min_pixels_per_area", 4)),
-        "min_pixels_per_subject": int(ret_cfg.get("min_pixels_per_subject", 10)),
-    }
-
-
-def intersect_region_masks(mask_1300: np.ndarray, mask_2850: np.ndarray) -> np.ndarray:
-    if mask_1300.shape != mask_2850.shape:
-        raise ValueError(f"Region masks must have the same shape; got {mask_1300.shape} and {mask_2850.shape}")
-    return np.asarray(mask_1300, dtype=bool) & np.asarray(mask_2850, dtype=bool)

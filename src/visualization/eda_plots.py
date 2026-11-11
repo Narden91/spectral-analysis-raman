@@ -116,42 +116,6 @@ def plot_group_mean_spectra(
     return fig, ax
 
 
-def plot_difference_spectra(
-    wavenumbers: np.ndarray,
-    disease: np.ndarray,
-    control: np.ndarray,
-    label: str = "Disease - Control",
-    title: str = "Difference Spectrum",
-    color: str = "#CC3311",
-) -> tuple[plt.Figure, plt.Axes]:
-    """Plot the mean difference spectrum with a propagated confidence band."""
-    fig, ax = plt.subplots(figsize=(12, 5))
-
-    mean_g = np.nanmean(disease, axis=0)
-    mean_c = np.nanmean(control, axis=0)
-    diff = mean_g - mean_c
-
-    sem_g = _standard_error(disease)
-    sem_c = _standard_error(control)
-    sem_diff = np.sqrt(sem_g**2 + sem_c**2)
-    ci = 1.96 * sem_diff
-
-    ax.plot(wavenumbers, diff, color=color, linewidth=1.5, label=label)
-    if np.any(ci > 0):
-        ax.fill_between(wavenumbers, diff - ci, diff + ci, color=color, alpha=0.2)
-    ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
-
-    _finalize_axis(
-        ax,
-        title=title,
-        xlabel="Raman Shift (cm$^{-1}$)",
-        ylabel="Intensity Difference (a.u.)",
-        xlim=(float(wavenumbers.min()), float(wavenumbers.max())),
-    )
-
-    return fig, ax
-
-
 def _standard_error(spectra: np.ndarray) -> np.ndarray:
     if spectra.shape[0] <= 1:
         return np.zeros(spectra.shape[1], dtype=float)

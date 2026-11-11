@@ -54,17 +54,14 @@ from src.analysis.statistics import (
     extract_band_intensities,
     rank_wavenumbers_per_pc,
     run_pca,
-    test_normality,
 )
 from src.data_preparation.loaders import load_clinical_subjects, load_file_index
 from src.metadata.clinical import merge_index_with_clinical
 from src.preprocessing.pipeline import apply_region_weights
 from src.visualization.advanced_plots import plot_all_bands_raincloud
 from src.visualization.eda_plots import (
-    GROUP_COLORS,
     plot_band_boxplots,
     plot_correlation_spectrum,
-    plot_difference_spectra,
     plot_group_mean_spectra,
     plot_intra_disease_correlation_overview,
     plot_intra_disease_top_regions,
@@ -484,22 +481,6 @@ def _plot_group_comparisons(
         )
         _save_fig(fig, "group_mean_spectra.png", gc_dir)
 
-    # Difference spectra (Disease - control) per gender
-    if _figure_flag("emit_difference_spectra", default=False):
-        for gender in ["female", "male"]:
-            g_key = f"{gender}_disease"
-            c_key = f"{gender}_control"
-            if g_key in groups and c_key in groups:
-                fig, _ = plot_difference_spectra(
-                    wavenumbers,
-                    groups[g_key],
-                    groups[c_key],
-                    label=f"{gender.capitalize()} (Disease âˆ’ Control)",
-                    title=f"Difference Spectrum - {gender.capitalize()} ({range_title})",
-                    color=GROUP_COLORS.get(g_key, "#CC3311"),
-                )
-                _save_fig(fig, f"difference_spectrum_{gender}.png", gc_dir)
-
 
 def _export_area_pca(
     pca_result: dict,
@@ -776,16 +757,6 @@ def _run_variance_phase(
         ]
     ).to_csv(var_dir / "variance_components.csv", index=False)
 
-    _log_phase("PHASE 4b: Normality assessment")
-
-    for key, spectra in groups.items():
-        norm = test_normality(spectra)
-        logger.debug(
-            "  %s: %.1f%% of wavenumbers pass normality (Shapiro-Wilk, alpha=0.05)",
-            key,
-            norm["fraction_normal"] * 100,
-        )
-
 
 def _run_region_robustness_phase(
     groups: dict[str, np.ndarray],
@@ -844,10 +815,9 @@ def _run_region_robustness_phase(
 
 def _run_single_range_eda(
     spectral_range: str = "1300",
-    skip_preprocess: bool = False,
     max_subjects: int | None = None,
 ):
-    """Run EDA from the prepared store; skip_preprocess is kept for callers."""
+    """Run EDA from the prepared store."""
     df_index, clinical_df, cohort_summary, analysis_mode, phase_dirs = _load_eda_cohort()
 
     def phase_dir(key: str) -> Path:
@@ -862,8 +832,6 @@ def _run_single_range_eda(
 
         return _run_whole_spectra_eda(df_index, groups, wavenumbers, group_ids, range_title)
 
-    _log_phase("PHASE 0.5: Preprocessing Consistency Checks (PCS)")
-    logger.info("PCS is a build-time synthetic/reference validation, not an analysis-time raw reload.")
     rw_cfg = config.get("analysis", {}).get("region_weighting", {})
     apply_to = set(rw_cfg.get("apply_to", []) if rw_cfg.get("enabled", False) else [])
     _plot_group_comparisons(groups, wavenumbers, range_title, phase_dir("group_comp"))

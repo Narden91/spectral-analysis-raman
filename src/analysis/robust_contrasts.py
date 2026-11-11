@@ -28,6 +28,7 @@ from src.analysis.statistics import (
     partial_spearman_residuals,
     variance_homogeneity_test,
 )
+from src.statistics.cluster_permutation import normalize_n_jobs
 from src.statistics.sequential_permutation import (
     resolve_sequential_stopping_config,
     run_curtailed_permutation_draws,
@@ -178,7 +179,7 @@ def _bootstrap_ci(
         return np.nan, np.nan
 
     rng = np.random.default_rng(random_state)
-    n_jobs = 1 if n_jobs == 0 else n_jobs
+    n_jobs = normalize_n_jobs(n_jobs)
     if n_jobs != 1:
         seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_bootstrap, dtype=np.int64)
         estimates = np.array(
@@ -217,7 +218,7 @@ def _bootstrap_partial_spearman_ci(
         return np.nan, np.nan
 
     rng = np.random.default_rng(random_state)
-    n_jobs = 1 if n_jobs == 0 else n_jobs
+    n_jobs = normalize_n_jobs(n_jobs)
     if n_jobs != 1:
         seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_bootstrap, dtype=np.int64)
         estimates = np.array(
@@ -271,7 +272,7 @@ def _permutation_p_value(
     observed = abs(cliffs_delta(left, right))
     pooled = np.concatenate([left, right])
     n_left = left.size
-    n_jobs = 1 if n_jobs == 0 else n_jobs
+    n_jobs = normalize_n_jobs(n_jobs)
     stopping = resolve_sequential_stopping_config(stopping_cfg or {}, default_max=n_permutations)
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)
@@ -315,7 +316,7 @@ def _permutation_partial_spearman_p_value(
         return np.nan
     observed = abs(float(np.corrcoef(feature_residual, endpoint_residual)[0, 1]))
 
-    n_jobs = 1 if n_jobs == 0 else n_jobs
+    n_jobs = normalize_n_jobs(n_jobs)
     stopping = resolve_sequential_stopping_config(stopping_cfg or {}, default_max=n_permutations)
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)

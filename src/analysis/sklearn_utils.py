@@ -28,15 +28,6 @@ def l1_logistic_model(*, c: float, random_state: int) -> LogisticRegression:
     )
 
 
-def covariate_logistic_model(*, random_state: int) -> LogisticRegression:
-    return LogisticRegression(
-        solver="liblinear",
-        random_state=random_state,
-        max_iter=LOGISTIC_MAX_ITER,
-        tol=LOGISTIC_TOL,
-    )
-
-
 def fit_with_convergence_capture(
     model: Any,
     X: Any,

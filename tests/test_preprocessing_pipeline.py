@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 import src
 from src.preprocessing.pipeline import (
+    _compute_qc_metrics,
     _detect_cosmic_spikes,
-    compute_qc_metrics,
     interpolate_spectra,
     normalize_spectra,
     run_preprocessing,
-    sample_baseline_qc_artifacts,
     smooth_spectra,
     spectral_quality_mask,
 )
@@ -40,7 +38,7 @@ def test_spectral_quality_uses_trailing_noise_channels(preprocessing_config_guar
     spectra[0, 20] = 100.0
     spectra[1, 20] = 80.0
 
-    metrics = compute_qc_metrics(spectra)
+    metrics = _compute_qc_metrics(spectra)
     assert float(metrics.loc[0, "snr"]) > 30.0
 
     mask, _ = spectral_quality_mask(
@@ -100,42 +98,6 @@ def test_preprocessing_uses_supplied_config_without_changing_defaults() -> None:
     rejected = run_preprocessing(spectra, axis, screen_dead=True, **options)
     assert not rejected.retained_mask.any()
     assert src.config == original
-
-
-def test_baseline_qc_artifacts_use_consistent_trimmed_shapes(tmp_path: Path, preprocessing_config_guard: None) -> None:
-    wavenumbers = np.arange(1200.0, 1212.0, dtype=float)
-    spectra = np.vstack(
-        [
-            np.linspace(1.0, 6.0, 12),
-            np.linspace(2.0, 7.0, 12),
-            np.linspace(3.0, 8.0, 12),
-        ]
-    )
-
-    result = run_preprocessing(
-        spectra,
-        wavenumbers,
-        region="fingerprint",
-        screen_dead=False,
-        suppress_cosmic=False,
-        correct_bl=True,
-        smooth=False,
-        interpolate=False,
-        filter_quality=False,
-        normalize=False,
-        trim=2,
-        record_stages=True,
-    )
-    written = sample_baseline_qc_artifacts(result, tmp_path, "baseline_case", n_samples=1, seed=0)
-
-    assert written
-    artifact_path = Path(next(iter(written.values())))
-    with np.load(artifact_path, allow_pickle=False) as data:
-        expected_shape = np.asarray(data["wavenumbers"]).shape
-        assert np.asarray(data["raw"]).shape == expected_shape
-        assert np.asarray(data["baseline"]).shape == expected_shape
-        assert np.asarray(data["corrected"]).shape == expected_shape
-        assert np.asarray(data["residual"]).shape == expected_shape
 
 
 def test_smooth_spectra_skips_tiny_channel_counts() -> None:

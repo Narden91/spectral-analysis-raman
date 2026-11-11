@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 from pathlib import Path
 
 import pandas as pd
 
 from src.analysis.io_utils import write_json_atomic, write_text_atomic
+from src.data_preparation.manifest import hash_file
 
 # The exporter is deliberately opt-in: files not named here never cross the
 # private-run/public-bundle boundary, even if they look aggregate after a scan.
@@ -65,14 +65,6 @@ def _assert_aggregate_csv(path: Path) -> None:
         raise ValueError(f"Refusing to export {path.name}: direct identifier/clinical columns {forbidden}")
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def export_publication_bundle(source_dir: str | Path, output_dir: str | Path) -> list[Path]:
     """Copy an allowlisted, identifier-free aggregate bundle for publication.
 
@@ -104,7 +96,7 @@ def export_publication_bundle(source_dir: str | Path, output_dir: str | Path) ->
         "bundle_type": "aggregate_only_publication_bundle",
         "n_files": len(exported),
         "files": [
-            {"path": str(path.relative_to(output)).replace("\\", "/"), "sha256": _sha256(path)}
+            {"path": str(path.relative_to(output)).replace("\\", "/"), "sha256": hash_file(path)}
             for path in exported
         ],
     }

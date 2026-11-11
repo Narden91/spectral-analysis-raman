@@ -155,6 +155,12 @@ def test_build_endpoints_rejects_duplicate_subject_ids(tmp_path: Path) -> None:
         build_clinical_endpoints(cfg=_cfg(), clinical_csv=clinical_csv, output_dir=tmp_path / "out")
 
 
+def test_build_endpoints_fails_on_missing_clinical_csv(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.csv"
+    with pytest.raises(FileNotFoundError, match="missing.csv"):
+        build_clinical_endpoints(cfg=_cfg(), clinical_csv=missing, output_dir=tmp_path / "out")
+
+
 def test_build_endpoints_rejects_missing_required_column_mapping(tmp_path: Path) -> None:
     clinical_csv = _write_csv(
         tmp_path,

@@ -1,13 +1,6 @@
-from src.preprocessing.pipeline import (
-    PreprocessResult,
-    preprocess_spectra,
-    run_preprocessing,
-    save_preprocessing_artifacts,
-)
+from src.preprocessing.pipeline import PreprocessResult, run_preprocessing
 
 __all__ = [
     "PreprocessResult",
-    "preprocess_spectra",
     "run_preprocessing",
-    "save_preprocessing_artifacts",
 ]

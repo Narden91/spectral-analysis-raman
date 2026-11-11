@@ -61,7 +61,7 @@ def band_integral(
     if values.shape[1] == 1:
         integrated = values[:, 0]
     else:
-        integrated = np.trapz(values, wavenumbers, axis=1)
+        integrated = np.trapezoid(values, wavenumbers, axis=1)
     return pd.Series(integrated, index=frame.index, dtype=float)
 
 

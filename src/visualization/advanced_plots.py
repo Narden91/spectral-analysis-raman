@@ -1,10 +1,8 @@
 """
 Advanced visualization tools for Raman spectroscopy data.
 
-Includes Raincloud plots for deep distribution analysis and manifold learning visualizations.
+Includes Raincloud plots for distribution analysis.
 """
-
-import logging
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,8 +10,6 @@ import pandas as pd
 import seaborn as sns
 
 from src.visualization.theme import GROUP_COLORS, GROUP_LABELS
-
-logger = logging.getLogger(__name__)
 
 
 def plot_raincloud(
@@ -25,10 +21,10 @@ def plot_raincloud(
     ax: plt.Axes = None,
 ) -> tuple[plt.Figure, plt.Axes]:
     """
-    Creates a Raincloud plot (combination of Half-Violin, Box-plot, and Jittered Stripplot).
+    Creates a Raincloud plot (combination of Violin, Box-plot, and Jittered Stripplot).
 
     This visualization is highly effective for scientific data as it shows the RAW data,
-    the summary statistics (box), and the full density distribution (half-violin)
+    the summary statistics (box), and the full density distribution (violin)
     simultaneously, revealing bimodal distributions or outliers.
 
     Parameters
@@ -51,10 +47,7 @@ def plot_raincloud(
     unique_groups = sorted(df[group_col].unique())
     group_labels = [GROUP_LABELS.get(g, g) for g in unique_groups]
 
-    # 1. Half-Violin (Kernel Density Estimate)
-    # Using 'split=True' and 'inner=None' and manual clipping to get "half"
-    # Note: Modern Seaborn doesn't have a direct "Half" violin.
-    # We use 'violplot' from seaborn but customize it.
+    # 1. Violin (Kernel Density Estimate), drawn as a full violin.
 
     sns.violinplot(
         data=df,

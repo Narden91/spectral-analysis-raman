@@ -28,18 +28,14 @@ from scipy import stats
 from sklearn.metrics import roc_curve
 
 from src import load_config
-from src.analysis.clinical_correlation_matrix import _plot_correlation_heatmap
 from src.analysis.io_utils import load_csv_or_empty
-from src.analysis.journal_figures import (
-    _fig4_nmf_entropy,
-    _fig6_moca_association_landscape,
-    _plot_block_panel,
-)
+from src.analysis.journal_figures import _plot_block_panel
 from src.analysis.raman_bands import RAMAN_BANDS
 from src.reporting.candidate_region_report import _classify_candidate
 from src.visualization.spectral_summary_plots import (
     BAND_CATEGORY_COLORS,
     BAND_CATEGORY_LABELS,
+    CONDITION_COLORS,
     _add_raman_band_spans,
     _annotate_peaks,
     _set_spectrum_limits,
@@ -141,13 +137,6 @@ PANEL_CONTRAST_TESTS = (
     / "05_confirmatory_panel"
     / "panel_contrast_tests.csv"
 )
-NMF_COMPONENTS = (
-    ROOT
-    / "Results_intra_disease"
-    / "06_spectral_interpretability"
-    / "02_nmf_decomposition"
-    / "nmf_components.csv"
-)
 SPECTRAL_ENTROPY = (
     ROOT
     / "Results_intra_disease"
@@ -155,16 +144,9 @@ SPECTRAL_ENTROPY = (
     / "03_spectral_entropy"
     / "spectral_entropy.csv"
 )
-DELTA_MOCA_ASSOCIATIONS = (
-    ROOT
-    / "Results_intra_disease"
-    / "04_cross_region_summary"
-    / "04_longitudinal_moca"
-    / "delta_moca_associations.csv"
-)
 
-CONTROL = "#0072B2"
-DISEASE = "#D55E00"
+CONTROL = CONDITION_COLORS["control"]
+DISEASE = CONDITION_COLORS["disease"]
 NEUTRAL = "#4D4D4D"
 SEED = 20260724
 N_BOOTSTRAP = 2_000
@@ -233,42 +215,24 @@ BAND_SHORT_LABELS = {
     "ch3_asym_stretch_2937": r"CH$_3$ asym 2937",
 }
 
-BAND_WINDOWS = {
-    "cytosine_786": (773, 796),
-    "o_p_o_821": (812, 832),
-    "tyrosine_851": (836, 874),
-    "c_o_c_sugar_925": (900, 938),
-    "beta_sheet_980": (965, 995),
-    "c_o_c_n_1060": (1044, 1078),
-    "lipid_cc_1089": (1082, 1098),
-    "po2_cn_1112": (1105, 1120),
-    "carotenoid_1156": (1145, 1165),
-    "amide_iii_1258": (1240, 1280),
-    "ch2_twist_1301": (1290, 1325),
-    "ch2_ch3_scissor_1440": (1430, 1445),
-    "ch2_ch3_bend_1465": (1450, 1475),
-    "carotenoid_1525": (1510, 1535),
-    "tryptophan_1555": (1550, 1560),
-    "amide_i_1657": (1640, 1675),
-    "lipid_carbonyl_1721": (1710, 1730),
-    "lipid_ester_1744": (1735, 1755),
-    "ch2_sym_stretch_2853": (2845, 2860),
-    "ch2_asym_stretch_2890": (2870, 2910),
-    "ch3_asym_stretch_2937": (2925, 2945),
-}
+BAND_WINDOWS = {key: band.bounds for key, band in RAMAN_BANDS.items()}
 
 
-def bootstrap_mean_interval(
-    values: np.ndarray, rng: np.random.Generator
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return the mean and participant-bootstrap 95% interval by channel."""
-    mean = values.mean(axis=0)
-    draws = np.empty((N_BOOTSTRAP, values.shape[1]), dtype=np.float32)
-    for draw in range(N_BOOTSTRAP):
-        indices = rng.integers(0, values.shape[0], size=values.shape[0])
-        draws[draw] = values[indices].mean(axis=0)
-    low, high = np.percentile(draws, [2.5, 97.5], axis=0)
-    return mean, low, high
+def advance_rng_past_subject_spectra(rng: np.random.Generator) -> None:
+    """Replay the draws of the removed subject-spectra bootstrap figure.
+
+    That figure ran before the band-effect bootstrap on the same ``rng``. The
+    published ``case_control_band_effects_bootstrap.csv`` depends on the
+    stream position, so the removed figure's calls are repeated with the same
+    order, bounds, and sizes: 2 regions x (control, disease) x N_BOOTSTRAP.
+    The values are discarded; only the generator state matters.
+    """
+    condition = pd.read_csv(SUBJECT_SPECTRA, usecols=["condition"])["condition"]
+    for _region in ("1300", "2850"):
+        for group in ("control", "disease"):
+            n_subjects = int(condition.eq(group).sum())
+            for _ in range(N_BOOTSTRAP):
+                rng.integers(0, n_subjects, size=n_subjects)
 
 
 def spectral_columns(
@@ -280,64 +244,6 @@ def spectral_columns(
         [float(column.split("__", maxsplit=1)[1]) for column in columns]
     )
     return columns, wavenumbers
-
-
-def make_subject_spectra_figure(rng: np.random.Generator) -> None:
-    frame = pd.read_csv(SUBJECT_SPECTRA)
-    regions = (
-        ("1300__", "Fingerprint region", "SNV-normalized intensity"),
-        ("2850__", r"C--H stretching region", "Area-normalized intensity"),
-    )
-    fig, axes = plt.subplots(
-        1, 2, figsize=(7.2, 3.35), constrained_layout=True
-    )
-
-    legend_handles: list = []
-    legend_labels: list[str] = []
-    for ax, (prefix, title, ylabel) in zip(axes, regions, strict=True):
-        columns, wavenumbers = spectral_columns(frame, prefix)
-        for condition, color, label in (
-            ("control", CONTROL, "Control"),
-            ("disease", DISEASE, "Ischemic stroke"),
-        ):
-            values = frame.loc[frame["condition"] == condition, columns].to_numpy(
-                dtype=float
-            )
-            mean, low, high = bootstrap_mean_interval(values, rng)
-            (line,) = ax.plot(
-                wavenumbers,
-                mean,
-                color=color,
-                linewidth=1.25,
-            )
-            ax.fill_between(
-                wavenumbers, low, high, color=color, alpha=0.18, linewidth=0
-            )
-            if ax is axes[0]:
-                legend_handles.append(line)
-                legend_labels.append(f"{label} ($n={values.shape[0]}$)")
-
-        ax.set_title(title, loc="left", fontweight="bold")
-        ax.set_xlabel(r"Raman shift (cm$^{-1}$)")
-        ax.set_ylabel(ylabel)
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.tick_params(direction="out", length=3)
-
-    fig.legend(
-        legend_handles,
-        legend_labels,
-        loc="lower center",
-        bbox_to_anchor=(0.5, -0.06),
-        ncol=2,
-        frameon=False,
-        handlelength=1.8,
-        columnspacing=1.6,
-    )
-
-    for stem in ("subject_level_group_spectra",):
-        fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
-        fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
-    plt.close(fig)
 
 
 def _manuscript_plot_cfg(max_peaks: int | None = None) -> dict:
@@ -611,56 +517,14 @@ def make_band_effect_figure(rng: np.random.Generator) -> None:
         FIGURE_DATA_DIR / "case_control_band_effects_bootstrap.csv", index=False
     )
 
-    y = np.arange(result.shape[0])
-    effects = result["rank_biserial"].to_numpy()
-    colors = np.where(effects >= 0, DISEASE, CONTROL)
-    fig, ax = plt.subplots(
-        figsize=(FIGURE_WIDTH_IN, 6.6), constrained_layout=True
-    )
-    for index, row in result.iterrows():
-        effect = float(row["rank_biserial"])
-        ax.errorbar(
-            effect,
-            index,
-            xerr=np.asarray(
-                [
-                    [effect - float(row["ci_low"])],
-                    [float(row["ci_high"]) - effect],
-                ]
-            ),
-            fmt="o",
-            color=colors[index],
-            ecolor=colors[index],
-            markersize=4.0,
-            elinewidth=1.1,
-            capsize=2.0,
-        )
-    ax.axvline(0, color=NEUTRAL, linestyle="--", linewidth=0.9)
-    ax.set_yticks(y, result["label"])
-    ax.invert_yaxis()
-    ax.set_xlim(-0.7, 0.7)
-    ax.set_xlabel(
-        "Rank-biserial correlation\n"
-        r"$\leftarrow$ lower in stroke     higher in stroke $\rightarrow$"
-    )
-    ax.spines[["top", "right", "left"]].set_visible(False)
-    ax.tick_params(axis="y", length=0)
-    ax.grid(axis="x", color="#D9D9D9", linewidth=0.6)
-
-    for stem in ("case_control_band_effects",):
-        fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
-        fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
-    plt.close(fig)
-
     make_band_effect_figure_landscape(result)
 
 
 def make_band_effect_figure_landscape(result: pd.DataFrame) -> None:
-    """Landscape variant of the band-effect figure: bands on the x-axis.
+    """Band-effect figure with bands on the x-axis.
 
-    Same data and statistics as ``make_band_effect_figure``; only the axis
-    orientation and label rotation change, so the two figures are
-    interchangeable evidence, not independent analyses.
+    Plots the bootstrap table that ``make_band_effect_figure`` writes, so the
+    figure and the CSV always show the same estimates.
     """
     x = np.arange(result.shape[0])
     effects = result["rank_biserial"].to_numpy()
@@ -813,75 +677,6 @@ def make_biopca_loading_figure() -> None:
     _save_exact(fig, "biopca_loadings")
 
 
-def make_clinical_correlation_heatmap_figure() -> None:
-    """Redraw the intra-disease clinical correlation heatmap as a vector PDF.
-
-    Calls the production renderer directly on the already-materialized
-    correlation table; matplotlib infers PDF output from the file extension.
-    """
-    correlations = load_csv_or_empty(CLINICAL_CORRELATION_MATRIX)
-    if not correlations.empty:
-        # The archived CSV round-trips `spectral_block` as int64; the renderer
-        # compares it against the string block labels "1300"/"2850", so it
-        # must be cast back to string here (matches the dtype the live
-        # pipeline DataFrame carries in-memory before it is ever written out).
-        correlations["spectral_block"] = correlations["spectral_block"].astype(str)
-    _plot_correlation_heatmap(
-        correlations, FIGURE_DIR / "clinical_correlation_heatmap.pdf"
-    )
-
-
-def make_candidate_region_overview_figure() -> None:
-    """Redraw the intra-disease candidate-region overview as a vector PDF.
-
-    Reimplements the production ``_plot_overview`` body (which hardcodes a
-    PNG output path) against the already-materialized integrated candidate
-    table, using the same classification rule, colors, and layout.
-    """
-    candidates = load_csv_or_empty(INTEGRATED_CANDIDATE_REGIONS)
-    if candidates.empty:
-        return
-    candidates = candidates.copy()
-    candidates["report_class"] = candidates.apply(_classify_candidate, axis=1)
-
-    class_order = ("robust", "exploratory", "unstable", "confounded")
-    colors = {
-        "robust": "#2A9D8F",
-        "exploratory": "#E9C46A",
-        "unstable": "#F4A261",
-        "confounded": "#E76F51",
-    }
-    fig, axes = plt.subplots(2, 1, figsize=(16, 8), sharex=False)
-    for axis, block in zip(axes, ("1300", "2850")):
-        block_df = candidates.loc[candidates["spectral_block"].astype(str) == block]
-        axis.axhline(0.0, color="black", linewidth=0.6)
-        for class_name in class_order:
-            sub = block_df.loc[block_df["report_class"] == class_name]
-            if sub.empty:
-                continue
-            axis.scatter(
-                sub["start_cm-1"].to_numpy(dtype=float),
-                sub["max_abs_effect"].to_numpy(dtype=float),
-                c=colors[class_name],
-                s=60,
-                label=class_name,
-                edgecolors="white",
-                linewidths=0.6,
-            )
-        axis.set_xlabel("Raman shift (cm⁻¹)")
-        axis.set_ylabel("Max |effect|")
-        axis.set_title(f"{block} candidate-region overview")
-        handles, labels = axis.get_legend_handles_labels()
-        if handles:
-            axis.legend(handles, labels, loc="upper right", fontsize=8)
-    fig.tight_layout()
-
-    for stem in ("candidate_region_overview",):
-        fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
-        fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
-    plt.close(fig)
-
-
 # The SI float assembles the severity contrast from one PDF per panel, two per
 # row at 0.48 of the text block, so LaTeX supplies the panel letters.
 DIFFERENCE_PANEL_FRACTION = 0.48
@@ -993,22 +788,6 @@ def make_panel_effect_sizes_figure() -> None:
         fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
         fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
     plt.close(fig)
-
-
-def make_nmf_entropy_figure() -> None:
-    """Redraw the NMF/spectral-entropy robustness-check figure as a vector PDF."""
-    _fig4_nmf_entropy(
-        NMF_COMPONENTS, SPECTRAL_ENTROPY, FIGURE_DIR / "nmf_components_entropy.pdf"
-    )
-
-
-def make_moca_landscape_figure() -> None:
-    """Redraw the within-stroke MoCA association-landscape figure as a PDF."""
-    _fig6_moca_association_landscape(
-        DELTA_MOCA_ASSOCIATIONS,
-        MOCA_PLS_PERFORMANCE,
-        FIGURE_DIR / "exploratory_moca_association_landscape.pdf",
-    )
 
 
 # Figure 5 is assembled in LaTeX from one PDF per panel, at 0.48 + 0.02 +
@@ -1559,82 +1338,18 @@ def make_cvd_classifier_figure() -> None:
     _save_exact(fig_null, "ml_classification_permutation_null")
 
 
-def make_moca_prediction_figure() -> None:
-    """Observed CV R^2 against its permutation reference distribution for each MoCA endpoint.
-
-    Sources only the saved PLS-regression performance and permutation reference
-    summary tables; no fold-level predictions are re-derived because none
-    were persisted for these unsupported models.
-    """
-    performance = pd.read_csv(MOCA_PLS_PERFORMANCE).set_index("target")
-    permutation = pd.read_csv(MOCA_PLS_PERMUTATION).set_index("target")
-
-    endpoints = list(MOCA_ENDPOINT_LABELS)
-    fig, ax = plt.subplots(figsize=(4.6, 3.15), constrained_layout=True)
-
-    rng = np.random.default_rng(SEED)
-    for position, endpoint in enumerate(endpoints):
-        null_mean = permutation.loc[endpoint, "null_distribution_mean"]
-        null_std = permutation.loc[endpoint, "null_distribution_std"]
-        null_draws = rng.normal(null_mean, null_std, size=2000)
-        violin = ax.violinplot(
-            null_draws, positions=[position], widths=0.7, showextrema=False
-        )
-        for body in violin["bodies"]:
-            body.set_facecolor("#B0B0B0")
-            body.set_alpha(0.55)
-            body.set_edgecolor("none")
-        observed = performance.loc[endpoint, "r2"]
-        p_holm = performance.loc[endpoint, "permutation_p_value_holm"]
-        ax.scatter(
-            [position], [observed], color=DISEASE, s=42, zorder=5,
-            label="Observed CV $R^2$" if position == 0 else None,
-        )
-        ax.annotate(
-            f"$p_{{\\mathrm{{Holm}}}}={p_holm:.3f}$",
-            (position, observed),
-            textcoords="offset points",
-            xytext=(0, -13),
-            ha="center",
-            va="top",
-            fontsize=6.8,
-        )
-
-    ax.axhline(0, color=NEUTRAL, linestyle="--", linewidth=0.9)
-    ax.set_xticks(range(len(endpoints)))
-    ax.set_xticklabels([MOCA_ENDPOINT_LABELS[endpoint] for endpoint in endpoints])
-    ax.set_ylabel("Cross-validated $R^2$")
-    ax.set_title(
-        "Within-stroke MoCA: permutation comparison", loc="left",
-        fontweight="bold", fontsize=8.5,
-    )
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.tick_params(direction="out", length=3)
-    ax.legend(frameon=False, loc="lower left", fontsize=7.2)
-
-    for stem in ("intra_disease_moca_prediction",):
-        fig.savefig(FIGURE_DIR / f"{stem}.pdf", bbox_inches="tight")
-        fig.savefig(FIGURE_DIR / f"{stem}.png", dpi=600, bbox_inches="tight")
-    plt.close(fig)
-
-
 def main() -> None:
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
     FIGURE_DATA_DIR.mkdir(parents=True, exist_ok=True)
     set_manuscript_theme()
     rng = np.random.default_rng(SEED)
-    make_subject_spectra_figure(rng)
+    advance_rng_past_subject_spectra(rng)
     make_global_spectra_figures()
     make_band_effect_figure(rng)
     make_biopca_loading_figure()
-    make_clinical_correlation_heatmap_figure()
-    make_candidate_region_overview_figure()
     make_difference_spectrum_figure()
     make_panel_effect_sizes_figure()
-    make_nmf_entropy_figure()
-    make_moca_landscape_figure()
     make_cvd_classifier_figure()
-    make_moca_prediction_figure()
     make_clinical_null_figures()
     make_graphical_abstract()
 

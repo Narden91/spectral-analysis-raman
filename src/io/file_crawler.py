@@ -1,10 +1,9 @@
 import logging
 from pathlib import Path
-from typing import Literal
 
 import pandas as pd
 
-from src import config, resolve_project_path
+from src import config
 from src.metadata.parser import parse_filename
 
 logger = logging.getLogger(__name__)
@@ -14,7 +13,7 @@ def _is_reorganized_measurement_file(file_path: Path) -> bool:
     """Return True for canonical reorganized Raman exports only.
 
     Matches mode-free (_range_meas) and legacy mode-tagged
-    (_range_SS_meas, _range_FP_meas) stems; the mode token is discarded.
+    (_range_SS_meas, _range_FP_meas) stems; the mode token is kept as acquisition_mode.
     """
     stem = file_path.stem
     return "_range" in stem and "meas" in stem
@@ -72,21 +71,16 @@ def disambiguate_subject_ids(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _deduplicate_measurements(
-    df: pd.DataFrame,
-    sort_cols: list[str] | None = None,
-) -> pd.DataFrame:
-    """Renumber measurements when duplicate keys exist after ignoring mode.
+def _deduplicate_measurements(df: pd.DataFrame) -> pd.DataFrame:
+    """Raise when two files share one measurement identity.
 
-    Within each (subject_id, slide_number, spectral_range_cm-1) group, if
-    multiple rows share the same measurement_number, sort by ``sort_cols`` and
-    assign sequential measurement numbers starting at 1 so all files are
-    retained without using acquisition mode as a key.
+    The identity is (subject_id, slide_number, spectral_range_cm-1,
+    measurement_number) plus acquisition_mode when present. Duplicates mean the
+    raw provenance is wrong, so the function never renumbers or drops files.
     """
     if df.empty or "measurement_number" not in df.columns:
         return df.copy()
 
-    sort_cols = [c for c in (sort_cols or ["filepath"]) if c in df.columns] or None
     group_cols = [
         c for c in ["subject_id", "slide_number", "spectral_range_cm-1"] if c in df.columns
     ]
@@ -109,38 +103,20 @@ def _deduplicate_measurements(
 
 
 
-def build_file_index(
-    data_dir: str | Path = None,
-    measurement: int | Literal["all"] = 1,
-) -> pd.DataFrame:
+def build_file_index(data_dir: str | Path) -> pd.DataFrame:
     """
-    Crawl the reorganized `data/` directory and index measurement files.
+    Crawl the reorganized raw data tree and index measurement files.
 
     Parameters
     ----------
-    data_dir : path-like, optional
-        Root of the reorganized data tree. Defaults to ``config.data.root_dir``.
-    measurement : int or "all", default 1
-        Which measurement replicate to include.
-        - 1, 2, or 3 → return only files matching ``_meas{N}.txt``
-        - "all"       → return all 3 replicates
-
-    The default of ``measurement=1`` remains available for callers that want
-    exactly one replicate per (subject, slide, spectral_range). Current EDA,
-    ML entrypoints explicitly request ``measurement="all"`` when they
-    need the full replicate set.
+    data_dir : path-like
+        Root of the reorganized raw tree (``data.raw_text_dir`` in the config).
 
     Returns
     -------
     pd.DataFrame
-        Structured index of measurement files.
+        Structured index with one row per measurement file, all replicates included.
     """
-    if data_dir is None:
-        data_cfg = config.get("data", {})
-        data_dir = resolve_project_path(
-            data_cfg.get("raw_text_dir", data_cfg.get("root_dir", "data/raw"))
-        )
-
     data_dir = Path(data_dir)
     ext = config["data"]["file_extension"].lower()
 
@@ -178,39 +154,17 @@ def build_file_index(
     if "slide_number" in df.columns:
         df["slide_number"] = df["slide_number"].astype(str)
 
-    # Renumber measurements when duplicate keys exist after ignoring mode.
-    df = _deduplicate_measurements(df, sort_cols=["filepath"])
-
-    # Apply measurement filter
-    if measurement != "all":
-        meas_int = int(measurement)
-        if "measurement_number" in df.columns:
-            df = df[df["measurement_number"] == meas_int].reset_index(drop=True)
-        else:
-            logger.warning(
-                "measurement_number column missing — returning all files unfiltered"
-            )
+    # Duplicate measurement identities raise instead of being renumbered.
+    df = _deduplicate_measurements(df)
 
     # Derive area_id: unique per (subject, slide, measurement) across regions.
-    # Format: "{slide_number}_meas{measurement_number}" — stable key for the
-    # area-level hierarchy (pixels → area → slide → subject).
-    if "slide_number" in df.columns and "measurement_number" in df.columns:
-        nan_slide = df["slide_number"].isna()
-        if nan_slide.any():
-            logger.warning(
-                "%d file(s) have a missing slide_number; their area_id will be 'nan_meas...' — "
-                "check parser output for: %s",
-                nan_slide.sum(),
-                df.loc[nan_slide, "filename"].tolist()[:5],
-            )
-        df["area_id"] = (
-            df["slide_number"].astype(str)
-            + "_"
-            + "meas"
-            + df["measurement_number"].fillna(1).astype(int).astype(str)
-        )
-    else:
-        df["area_id"] = "unknown"
+    # Format: "{slide_number}_meas{measurement_number}" - stable key for the
+    # area-level hierarchy (pixels -> area -> slide -> subject).
+    df["area_id"] = (
+        df["slide_number"]
+        + "_meas"
+        + df["measurement_number"].fillna(1).astype(int).astype(str)
+    )
 
     # Enforce subject_id as first column
     cols = df.columns.tolist()
@@ -221,10 +175,5 @@ def build_file_index(
             cols.insert(0, col)
     df = df[cols]
 
-    logger.info(
-        "Indexed %d files from %d subjects (measurement=%s)",
-        len(df),
-        df["subject_id"].nunique(),
-        measurement,
-    )
+    logger.info("Indexed %d files from %d subjects", len(df), df["subject_id"].nunique())
     return df

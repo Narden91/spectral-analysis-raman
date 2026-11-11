@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.constants import CANONICAL_REGION_BOUNDS
+from src.constants import CANONICAL_REGION_BOUNDS, SPECTRAL_RANGES
 from src.data_preparation.manifest import (
     MANIFEST_VERSION,
     SCHEMA_VERSION,
@@ -19,14 +19,11 @@ from src.data_preparation.manifest import (
     load_manifest,
 )
 
-RANGES = ("1300", "2850")
-
 
 @dataclass
 class ValidationResult:
     is_valid: bool
     errors: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
     manifest: dict[str, Any] | None = None
     manifest_hash: str | None = None
     is_stale: bool = False
@@ -34,14 +31,14 @@ class ValidationResult:
 
 def _required_files(store_type: str) -> tuple[str, ...]:
     tables = ("measurements.parquet", "subjects.parquet", "areas.parquet", "cohort")
-    axes = tuple(f"wavenumbers_{code}.npy" for code in RANGES)
+    axes = tuple(f"wavenumbers_{code}.npy" for code in SPECTRAL_RANGES)
     if store_type == "parsed":
         return tables + ("pixels.parquet",) + tuple(
-            name for code in RANGES for name in (f"raw_spectra_{code}.npy", f"native_wavenumbers_{code}.npy")
+            name for code in SPECTRAL_RANGES for name in (f"raw_spectra_{code}.npy", f"native_wavenumbers_{code}.npy")
         )
     if store_type == "preprocessed":
         return tables + ("qc.parquet",) + axes + tuple(
-            f"{basis}_{code}.npy" for basis in ("normalized", "pre_normalization") for code in RANGES
+            f"{basis}_{code}.npy" for basis in ("normalized", "pre_normalization") for code in SPECTRAL_RANGES
         )
     raise ValueError(f"Unsupported store type: {store_type}")
 
@@ -106,7 +103,7 @@ def _validate_preprocessed_invariants(store_path: Path, code: str, config: dict,
     if spectra.size and method == "area":
         areas = np.trapezoid(np.abs(spectra), axis, axis=1)
         if areas.size and not np.allclose(areas, 1.0, rtol=1e-6, atol=1e-6):
-            errors.append("2850 normalized spectra violate absolute-area normalization")
+            errors.append(f"{code} normalized spectra violate absolute-area normalization")
 
 
 def _validate_qc_reasons(qc: pd.DataFrame, errors: list[str]) -> None:
@@ -153,7 +150,7 @@ def _validate_relations(store_type: str, store_path: Path, errors: list[str]) ->
         _require_columns(pixels, ("measurement_id", "spectral_range", "pixel_index", "raw_row", "x", "y"), "pixels", errors)
         if pixels.duplicated(["measurement_id", "pixel_index"]).any():
             errors.append("Duplicate pixel identity in pixels")
-        for code in RANGES:
+        for code in SPECTRAL_RANGES:
             _validate_native_axes(store_path, measurements, code, errors)
     else:
         qc = pd.read_parquet(store_path / "qc.parquet")
@@ -162,7 +159,7 @@ def _validate_relations(store_type: str, store_path: Path, errors: list[str]) ->
             errors.append("Duplicate pixel identity in qc")
         retained = qc.loc[qc.get("retained", pd.Series(False, index=qc.index)).astype(bool)]
         _validate_qc_reasons(qc, errors)
-        for code in RANGES:
+        for code in SPECTRAL_RANGES:
             subset = retained.loc[retained["spectral_range"].astype(str) == code]
             for column in ("normalized_row", "pre_normalization_row"):
                 rows = subset[column].to_numpy(dtype=int)
@@ -188,7 +185,6 @@ def _validate_cohorts(store_path: Path, subjects: pd.DataFrame, errors: list[str
 def validate_store(path: str | Path, expected_store_type: str, config: dict, *, strict: bool = False) -> ValidationResult:
     store_path = Path(path)
     errors: list[str] = []
-    warnings: list[str] = []
     manifest_path = store_path / "manifest.json"
     if not manifest_path.is_file():
         return ValidationResult(False, errors=["Missing manifest.json"])
@@ -205,10 +201,10 @@ def validate_store(path: str | Path, expected_store_type: str, config: dict, *, 
         if not (store_path / name).exists():
             errors.append(f"Missing required artifact: {name}")
     if errors:
-        return ValidationResult(False, errors=errors, warnings=warnings, manifest=manifest, manifest_hash=manifest.get("manifest_hash"))
+        return ValidationResult(False, errors=errors, manifest=manifest, manifest_hash=manifest.get("manifest_hash"))
 
     _validate_relations(expected_store_type, store_path, errors)
-    for code in RANGES:
+    for code in SPECTRAL_RANGES:
         if expected_store_type == "preprocessed":
             _validate_axis(store_path / f"wavenumbers_{code}.npy", store_path / f"normalized_{code}.npy", errors)
             _validate_axis(store_path / f"wavenumbers_{code}.npy", store_path / f"pre_normalization_{code}.npy", errors)
@@ -238,4 +234,4 @@ def validate_store(path: str | Path, expected_store_type: str, config: dict, *, 
         if not source_path.is_file() or not _matches_signature(source_path, signature, strict=strict):
             stale = True
             errors.append(f"Store is stale relative to input {raw_path}")
-    return ValidationResult(not errors, errors, warnings, manifest, manifest.get("manifest_hash"), stale)
+    return ValidationResult(not errors, errors, manifest, manifest.get("manifest_hash"), stale)

@@ -16,6 +16,7 @@ from src import get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     compute_spearman_feature_tests,
+    empty_spearman_association_table,
     endpoint_missingness_report,
     load_disease_feature_frame,
 )
@@ -46,26 +47,6 @@ TARGET_LABELS = {
 
 def _matrix_cfg(cfg: dict) -> dict:
     return cfg.get("analysis", {}).get("clinical_correlation_matrix", {})
-
-
-def _empty_correlation_table() -> pd.DataFrame:
-    return pd.DataFrame(
-        columns=[
-            "target",
-            "feature_name",
-            "spectral_block",
-            "wavenumber",
-            "rho",
-            "p_value",
-            "fdr_q",
-            "significant_fdr",
-            "n",
-            "status",
-            "cluster_id",
-            "cluster_mass",
-            "cluster_p_value",
-        ]
-    )
 
 
 def _plot_placeholder(path: Path, title: str) -> None:
@@ -184,7 +165,7 @@ def run_clinical_correlation_matrix(
     correlations = (
         pd.concat(correlation_frames, ignore_index=True, sort=False)
         if correlation_frames
-        else _empty_correlation_table()
+        else empty_spearman_association_table()
     )
     if not correlations.empty:
         correlations = correlations.merge(
@@ -220,12 +201,6 @@ def run_clinical_correlation_matrix(
     matrix_path = target_dir / "clinical_correlation_matrix.csv"
     heatmap_path = target_dir / "clinical_correlation_heatmap.png"
     candidate_path = target_dir / "clinical_correlation_candidate_regions.csv"
-    obsolete_paths = [
-        target_dir / "endpoint_missingness_report.csv",
-    ]
-    for obsolete_path in obsolete_paths:
-        if obsolete_path.exists():
-            obsolete_path.unlink()
 
     correlations.to_csv(matrix_path, index=False)
     candidate_regions.to_csv(candidate_path, index=False)

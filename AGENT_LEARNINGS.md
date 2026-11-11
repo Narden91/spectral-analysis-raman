@@ -136,6 +136,18 @@ This was a targeted literature and implementation review, not a systematic novel
 - Failure: the readiness audit passed on file presence and a clinical count, but the cohort join returned 0 participants. `not_available` made pandas read `spectral_subject_id` as float, so "7.0" never matched store id "7". All tests used synthetic cohorts.
 - Prevention: read identifier columns with an explicit string dtype. Before calling a pipeline experiment-ready, run the real-data join as a counts-only dry run and gate on the expected counts.
 
+## 2026-11-10: Dead-code scans miss indirect loading
+
+- Failure: an import-and-name scan marked `src/cli_util.py` as unreachable. Three scripts load it by file path with `importlib.util.spec_from_file_location`, so no `import` line names it. A shell edit through a Bash heredoc also collapsed `\\` to `\` and silently skipped a fix.
+- Prevention: before deleting a module or function marked dead, grep for its file name and for `spec_from_file_location`, `importlib`, `getattr`, and string dispatch. Check `git diff` after any scripted byte-level edit.
+- Config-key removal is not a free cleanup. `config_hash(cfg_in)` in `control_vs_disease_ml.py` hashes the whole analysis config into the `--resume-ml` checkpoint key, and any `preprocessing:` key change makes the preprocessed store stale. Batch such edits and rebuild once.
+
+## 2026-11-10: Dummy-outcome checks of the EDA pipeline
+
+- Failure: a dummy clinical CSV alone did not hide the real outcomes. `data/preprocessed/subjects.parquet` already holds real moca, delta_moca, aspects and rbans columns, and `subject_features._clinical_table` drops the CSV columns that overlap with the store, so the store wins. Case-control labels also enter at three places (store tables, `_single_range` Phase 3, the Biological PCA feature matrix), not only at `control_vs_disease_ml.load_subject_feature_matrix`.
+- Prevention: patch outcomes and labels at `loaders._cached_table` (one patch for all store tables), permute once per subject within sex, and assert in each consumer that it saw the dummy values. Set `PYTHONUTF8=1 PYTHONIOENCODING=utf-8` for redirected runs, because the rich spinner raises `UnicodeEncodeError` otherwise.
+- Floating-point noise in the `PCA_whole` outputs is about 1e-14 between identical runs. Compare against a before-versus-before spread, not against exact equality.
+
 ## 2026-11-09: Clinical source and verification data
 
 - `data/clinical_data.csv` is deprecated. The clinical sources are `data/clinical_master.csv` and `data/clinical_master_dictionary.csv`. The paired-lipid code never reads `clinical_data.csv`, so a strict store-validation error about it does not block manuscript ML runs.

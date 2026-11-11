@@ -250,9 +250,7 @@ def build_clinical_endpoints(
 ) -> ClinicalEndpointResult:
     cfg = _cfg(cfg)
     endpoint_cfg = _endpoint_cfg(cfg)
-    source_path = resolve_clinical_csv_path(clinical_csv or endpoint_cfg.get("clinical_table"))
-    if source_path is None:
-        raise ValueError("Clinical endpoint input CSV could not be resolved.")
+    source_path = resolve_clinical_csv_path(clinical_csv or endpoint_cfg.get("clinical_table"), cfg)
 
     data = pd.read_csv(source_path, encoding="utf-8-sig")
     resolved_columns = {

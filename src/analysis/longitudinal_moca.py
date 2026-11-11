@@ -13,6 +13,7 @@ from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     compute_binary_group_feature_tests,
     compute_spearman_feature_tests,
+    empty_spearman_association_table,
     load_disease_feature_frame,
 )
 from src.analysis.spectral_regions import build_candidate_regions
@@ -87,11 +88,6 @@ def run_longitudinal_moca(
         else get_cross_region_phase_dir("longitudinal_moca")
     )
     target_dir.mkdir(parents=True, exist_ok=True)
-    stale_scatter_dir = target_dir / "delta_moca_scatterplots"
-    if stale_scatter_dir.exists():
-        for stale_plot in stale_scatter_dir.glob("*.png"):
-            stale_plot.unlink()
-        stale_scatter_dir.rmdir()
     logger.info(
         "Longitudinal Delta MoCA: %d disease subjects, %d whole-spectrum features",
         len(disease_only),
@@ -123,23 +119,7 @@ def run_longitudinal_moca(
             n_jobs=n_jobs,
         )
     else:
-        delta_associations = pd.DataFrame(
-            columns=[
-                "target",
-                "feature_name",
-                "spectral_block",
-                "wavenumber",
-                "rho",
-                "p_value",
-                "fdr_q",
-                "significant_fdr",
-                "n",
-                "status",
-                "cluster_id",
-                "cluster_mass",
-                "cluster_p_value",
-            ]
-        )
+        delta_associations = empty_spearman_association_table()
     logger.info("Longitudinal Delta MoCA: Delta-MoCA association model complete")
 
     group_comparison, _group_counts = compute_binary_group_feature_tests(
@@ -233,12 +213,6 @@ def run_longitudinal_moca(
     )
     association_path = target_dir / "delta_moca_associations.csv"
     candidate_path = target_dir / "delta_moca_candidate_regions.csv"
-    obsolete_paths = [
-        target_dir / "delta_moca_group_comparison.csv",
-    ]
-    for obsolete_path in obsolete_paths:
-        if obsolete_path.exists():
-            obsolete_path.unlink()
 
     combined_results.to_csv(association_path, index=False)
     candidate_regions.to_csv(candidate_path, index=False)

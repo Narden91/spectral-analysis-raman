@@ -37,7 +37,7 @@ def _analysis_mode(cfg: dict[str, Any]) -> str:
     return str(cfg.get("analysis", {}).get("mode", "disease_vs_control"))
 
 
-def _classify_candidate(row: pd.Series, *, robust_requires: list[str] | None = None) -> str:
+def _classify_candidate(row: pd.Series) -> str:
     evidence = str(row.get("evidence_status", "effect_only_fallback"))
     if evidence == "independently_validated":
         return "robust"
@@ -244,33 +244,6 @@ def _plot_overview(
     return path
 
 
-def _plot_forest(
-    robust_df: pd.DataFrame,
-    figures_dir: Path,
-) -> Path | None:
-    if robust_df.empty:
-        return None
-
-    robust_df = robust_df.sort_values("integrated_abs_effect", ascending=True).copy()
-    labels = robust_df.apply(_format_region, axis=1)
-    effects = robust_df["max_abs_effect"].to_numpy(dtype=float)
-
-    fig, ax = plt.subplots(figsize=(10, max(4, len(robust_df) * 0.5)))
-    ax.scatter(effects, np.arange(len(robust_df)), color="#2A9D8F")
-    ax.set_yticks(np.arange(len(robust_df)))
-    ax.set_yticklabels(labels, fontsize=8)
-    ax.set_xlabel("Max |effect|")
-    ax.set_title("Robust candidate regions")
-    ax.axvline(0.0, color="black", linewidth=0.6)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    fig.tight_layout()
-    path = figures_dir / "robust_candidate_forest.png"
-    fig.savefig(path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    return path
-
-
 def _class_summary(candidates: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for class_name in _CLASS_ORDER:
@@ -465,16 +438,11 @@ def run_candidate_region_report(
     if "selection_basis" not in integrated.columns:
         integrated["selection_basis"] = pd.NA
 
-    robust_requires = [str(item) for item in report_cfg.get("robust_requires", [])]
-    integrated["report_class"] = integrated.apply(
-        lambda row: _classify_candidate(row, robust_requires=robust_requires),
-        axis=1,
-    )
+    integrated["report_class"] = integrated.apply(_classify_candidate, axis=1)
 
     summary = _class_summary(integrated)
     figures: dict[str, Path | None] = {
         "overview": _plot_overview(integrated, figures_dir),
-        "robust_forest": _plot_forest(integrated.loc[integrated["report_class"] == "robust"].copy(), figures_dir),
     }
 
     report_text = _build_report(

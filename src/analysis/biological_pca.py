@@ -580,7 +580,7 @@ def _extract_loading_regions_for_series(
         signed = (
             float(value_slice[0])
             if axis_slice.size == 1
-            else float(np.trapz(value_slice, axis_slice))
+            else float(np.trapezoid(value_slice, axis_slice))
         )
         absolute = abs(signed)
         rows.append(

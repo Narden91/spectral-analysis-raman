@@ -125,15 +125,8 @@ def _fast_top1_eigvalsh(xp: Any, G_batch: Any, sw: Any, Q0: Any) -> Any:
     return xp.linalg.eigvalsh(H)[:, -1]
 
 
-def _mixed_prec_top_k_eigh(
-    xp: Any,
-    G_batch: Any,
-    max_k: int,
-    sw: Any = None,
-    Q0_comb: Any = None,
-    exact_fp64: bool = False,
-) -> tuple[Any, Any]:
-    """Extract top-max_k eigenpairs via active-sample LAPACK dsyevr or m=32 warp-resident RR."""
+def _top_k_eigh(xp: Any, G_batch: Any, max_k: int, sw: Any) -> tuple[Any, Any]:
+    """Exact fp64 top-max_k eigenpairs: active-sample LAPACK dsyevr on CPU, batched eigh on GPU."""
     G_sym = G_batch + xp.swapaxes(G_batch, -1, -2)
     G_sym *= 0.5  # in place: same result as 0.5 * (G + G^T), one (B, n_s, n_s) temporary fewer
     if xp is np:
@@ -141,7 +134,7 @@ def _mixed_prec_top_k_eigh(
         ev_out = np.zeros((B, max_k), dtype=np.float64)
         u_out = np.zeros((B, n_s, max_k), dtype=np.float64)
         for b in range(B):
-            act = np.flatnonzero(sw[b] > 0) if sw is not None else np.arange(n_s)
+            act = np.flatnonzero(sw[b] > 0)
             n_act = act.size
             k_b = min(max_k, n_act)
             if k_b <= 0:
@@ -157,27 +150,7 @@ def _mixed_prec_top_k_eigh(
             u_out[b, act, :k_b] = u_b[:, ::-1]
         return ev_out, u_out
 
-    if exact_fp64:
-        if sw is not None:
-            return _exact_top_k_eigh_active(xp, G_sym, max_k, sw)
-        ev, u = xp.linalg.eigh(G_sym)
-        return xp.maximum(ev[:, -max_k:][:, ::-1], 0.0), u[:, :, -max_k:][:, :, ::-1]
-
-    if sw is not None and Q0_comb is not None:
-        Y = G_sym @ (sw[:, :, None] * Q0_comb[None, :, :])
-        YtY = xp.swapaxes(Y, -1, -2) @ Y
-        YtY = 0.5 * (YtY + xp.swapaxes(YtY, -1, -2))
-        d, V = xp.linalg.eigh(YtY)
-        inv_s = xp.where(d > 1e-24, 1.0 / xp.sqrt(xp.maximum(d, 1e-30)), 0.0)
-        Q = Y @ (V * inv_s[:, None, :])
-        GQ = G_sym @ Q
-        H = xp.swapaxes(Q, -1, -2) @ GQ
-        H = 0.5 * (H + xp.swapaxes(H, -1, -2))
-        evals, U = xp.linalg.eigh(H)
-        return xp.maximum(evals[:, -max_k:][:, ::-1], 0.0), Q @ U[:, :, -max_k:][:, :, ::-1]
-
-    ev, u = xp.linalg.eigh(G_sym)
-    return xp.maximum(ev[:, -max_k:][:, ::-1], 0.0), u[:, :, -max_k:][:, :, ::-1]
+    return _exact_top_k_eigh_active(xp, G_sym, max_k, sw)
 
 
 def _exact_top_k_eigh_active(xp: Any, G_sym: Any, max_k: int, sw: Any) -> tuple[Any, Any]:
@@ -253,23 +226,17 @@ def _precompute_division_constants(
     m1_0 = xp.sum(w_s0 * k1_0)
     G1_0 = (K1_div - k1_0[:, None] - k1_0[None, :] + m1_0) * (sw0[:, None] * sw0[None, :])
     G1_0 = 0.5 * (G1_0 + G1_0.T)
-    ev1_0, U1_0 = xp.linalg.eigh(G1_0)
+    _, U1_0 = xp.linalg.eigh(G1_0)
 
     k2_0 = w_s0 @ K2_div
     m2_0 = xp.sum(w_s0 * k2_0)
     G2_0 = (K2_div - k2_0[:, None] - k2_0[None, :] + m2_0) * (sw0[:, None] * sw0[None, :])
     G2_0 = 0.5 * (G2_0 + G2_0.T)
-    ev2_0, U2_0 = xp.linalg.eigh(G2_0)
+    _, U2_0 = xp.linalg.eigh(G2_0)
 
     q_dim_1 = min(8, s_div.size)
     Q0_1 = U1_0[:, -q_dim_1:] / xp.maximum(sw0[:, None], 1e-12)
     Q0_2 = U2_0[:, -q_dim_1:] / xp.maximum(sw0[:, None], 1e-12)
-
-    G_comb_0 = G1_0 / xp.maximum(ev1_0[-1], 1e-12) + G2_0 / xp.maximum(ev2_0[-1], 1e-12)
-    G_comb_0 = 0.5 * (G_comb_0 + G_comb_0.T)
-    _, U_comb_0 = xp.linalg.eigh(G_comb_0)
-    q_dim_comb = min(32, s_div.size)
-    Q0_comb = U_comb_0[:, -q_dim_comb:] / xp.maximum(sw0[:, None], 1e-12)
 
     paired_in_tr = np.isin(dataset.paired_participant_indices, tr_p)
     p_pair_tr = dataset.paired_participant_indices[paired_in_tr]
@@ -301,7 +268,6 @@ def _precompute_division_constants(
         "DK2_pair_div": DK2_pair_div,
         "Q0_1": Q0_1,
         "Q0_2": Q0_2,
-        "Q0_comb": Q0_comb,
         "p_pair_tr": p_pair_tr,
         "idx_a_tr": idx_a_tr,
         "idx_b_tr": idx_b_tr,
@@ -325,7 +291,6 @@ def batched_division_prep(
     *,
     compute_pca_suff: bool = True,
     compute_cov_preds: bool = False,
-    exact_fp64_eigh: bool = True,
 ) -> dict[str, Any]:
     """Compute batched MFA-PCA coordinates, paired moments, and 15x15 Schur sufficient statistics."""
     tr_p = dconst["tr_p"]
@@ -396,9 +361,7 @@ def batched_division_prep(
     gram += gram2
     del gram2
     max_k = max(cfg.pca_dimensions)
-    eigvals_top, eigvecs_top = _mixed_prec_top_k_eigh(
-        xp, gram, max_k, sw=sqrt_w, Q0_comb=dconst.get("Q0_comb"), exact_fp64=exact_fp64_eigh
-    )
+    eigvals_top, eigvecs_top = _top_k_eigh(xp, gram, max_k, sqrt_w)
     del gram
     s_kept = xp.sqrt(eigvals_top)
 
@@ -513,7 +476,6 @@ def batched_division_prep(
         out.update(
             {
                 "sse_0": sse_0,
-                "preds_cov": preds_cov,
                 "Sigma_p": Sigma_p,
                 "Schur_p": Schur_p,
                 "g_tilde_p": g_tilde_p,
@@ -818,13 +780,8 @@ def _run_batched_multiplicity_draws(
     *,
     use_gpu: bool | None = None,
     batch_size: int | None = None,
-    exact_fp64_eigh: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Evaluate multiplicity bootstrap draws in batches on GPU (CuPy) or CPU (NumPy).
-
-    ``exact_fp64_eigh=False`` uses a mixed-precision warm-start eigensolver: about 4x faster on GPU,
-    but it changed 200/200 draws by up to 3e-2 versus the sequential procedure (n=92, compact grid).
-    """
+    """Evaluate multiplicity bootstrap draws in batches on GPU (CuPy) or CPU (NumPy)."""
     n_sub, n_p = M_sub.shape
     cp_mod = _get_gpu_xp() if use_gpu is not False else None
     xp = cp_mod if (cp_mod is not None and (use_gpu is True or (use_gpu is None and n_sub >= 32))) else np
@@ -880,7 +837,6 @@ def _run_batched_multiplicity_draws(
                     alphas_xp,
                     cfg,
                     compute_pca_suff=True,
-                    exact_fp64_eigh=exact_fp64_eigh,
                 )
                 inner_divs.append(div)
                 total_val_w = total_val_w + xp.sum(div["w_val"], axis=1)
@@ -974,7 +930,6 @@ def _run_batched_multiplicity_draws(
                 cfg,
                 compute_pca_suff=False,
                 compute_cov_preds=True,
-                exact_fp64_eigh=exact_fp64_eigh,
             )
             preds_cov_np = _to_np(xp, outer_div["preds_cov"])
             pca_otr = outer_div["part_pca_max"][:, tr_idx, :]

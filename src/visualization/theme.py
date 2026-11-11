@@ -53,7 +53,6 @@ WHOLE_SPECTRA_RANGE_COLORS = {
 }
 
 WHOLE_SPECTRA_NEUTRAL = "#4B5563"
-WHOLE_SPECTRA_TEXT = "#1F2933"
 
 
 def finalize_axis(
@@ -169,7 +168,7 @@ def set_gallery_theme():
 MANUSCRIPT_WIDTH_PT = 390.0
 MANUSCRIPT_WIDTH_IN = MANUSCRIPT_WIDTH_PT / 72.27
 
-# Manuscript floats are placed at 0.8	extwidth, so figures are authored at
+# Manuscript floats are placed at 0.8\textwidth, so figures are authored at
 # that printed width and included at scale 1.0: the point sizes below stay the
 # point sizes on the page.
 FIGURE_SCALE = 0.8
@@ -206,7 +205,7 @@ def set_manuscript_theme() -> None:
             "figure.facecolor": "#ffffff",
             "savefig.facecolor": "#ffffff",
             # set_gallery_theme() pads 0.1 in on every side, which widens the
-            # saved PDF past 	extwidth and reintroduces the scaling this
+            # saved PDF past \textwidth and reintroduces the scaling this
             # theme exists to remove.
             "savefig.bbox": "tight",
             "savefig.pad_inches": 0.01,

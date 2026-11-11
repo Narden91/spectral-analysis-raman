@@ -4,7 +4,7 @@ Quantifies coupling between band integrals and named indices via pairwise
 Spearman correlation with bootstrap CIs, then assigns per-subject biochemical
 regimes using the oxidative_index × membrane_integrity_index ratio-ratio plane.
 
-Outputs go to ``06_spectral_interpretability/feature_coupling/``.
+Outputs go to ``06_spectral_interpretability/05_feature_coupling/``.
 """
 
 from __future__ import annotations

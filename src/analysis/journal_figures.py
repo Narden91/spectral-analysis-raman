@@ -9,7 +9,7 @@ Assembles 6 publication-quality figures from Tier-1 and Tier-2 outputs:
   fig5 — Feature coupling heatmap + ratio–ratio regimes
   fig6 — ΔMoCA whole-spectrum association landscape + PLS permutation check
 
-All figures are written to ``06_spectral_interpretability/figures/``.
+All figures are written to ``06_spectral_interpretability/08_figures/``.
 Captions use region-overlapping language; no diagnostic or causal claims.
 """
 

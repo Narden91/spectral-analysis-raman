@@ -31,7 +31,6 @@ PHASE_FUNCTIONS = {
     "spectral_descriptors": "run_spectral_descriptors",
     "discriminant_spectra": "run_discriminant_spectra",
     "feature_coupling": "run_feature_coupling",
-    "index_clustering": "run_index_clustering",
     "journal_figures": "run_journal_figures",
 }
 
@@ -64,7 +63,7 @@ def phase_calls(monkeypatch, tmp_path):
 
 
 def test_phase_dependencies_and_config_are_preserved(phase_calls, tmp_path):
-    cfg = {"analysis": {"index_clustering": {"enabled": True}, "minimal_panel": {"min_subjects": 17}}}
+    cfg = {"analysis": {"minimal_panel": {"min_subjects": 17}}}
     original_cfg = deepcopy(cfg)
     feature_matrix = tmp_path / "features.parquet"
     outputs = pipeline.run_disease_only_cross_region_pipeline(feature_matrix_path=feature_matrix, cfg=cfg)
@@ -104,11 +103,11 @@ def test_phase_dependencies_and_config_are_preserved(phase_calls, tmp_path):
 
 
 def test_disabled_panel_skips_dependent_phases(phase_calls, tmp_path):
-    cfg = {"analysis": {"preregistered_panel": {"enabled": False}, "index_clustering": {"enabled": True}}}
+    cfg = {"analysis": {"preregistered_panel": {"enabled": False}}}
     outputs = pipeline.run_disease_only_cross_region_pipeline(feature_matrix_path=None, cfg=cfg)
     blocked = {
         "preregistered_panel", "confirmatory_panel", "endpoint_consistency", "robustness_ranking",
-        "panel_cluster_summary", "panel_minimal_model", "panel_report", "feature_coupling", "index_clustering",
+        "panel_cluster_summary", "panel_minimal_model", "panel_report", "feature_coupling",
     }
     assert blocked.isdisjoint(outputs)
     by_phase = {phase: kwargs for phase, kwargs in phase_calls}

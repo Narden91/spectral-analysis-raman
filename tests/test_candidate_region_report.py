@@ -5,12 +5,25 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
+import src.reporting.candidate_region_report as candidate_region_report
 from src.reporting.candidate_region_report import (
     build_panel_report_section,
     run_candidate_region_report,
     run_panel_report_section,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cross_region_dir(monkeypatch, tmp_path: Path) -> None:
+    # Without this, tests that omit paths resolve into the real Results_* tree.
+    def _phase_dir(key: str) -> Path:
+        path = tmp_path / "cross_region" / key
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr(candidate_region_report, "get_cross_region_phase_dir", _phase_dir)
 
 
 def _integrated_candidates() -> pd.DataFrame:

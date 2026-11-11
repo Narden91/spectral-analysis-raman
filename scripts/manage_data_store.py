@@ -24,9 +24,9 @@ from src.data_preparation import (
     build_preprocessed_store,
     data_source_summary,
     prepare_data_stores,
-    resolve_data_source,
 )
-from src.data_preparation.store import _store_dir, _validated_source
+from src.data_preparation.materialize import store_dir
+from src.data_preparation.store import _validated_source
 from src.data_preparation.validation import validate_store
 from src.terminal_output import print_kv_table
 
@@ -67,7 +67,7 @@ def _build(source: str, force: bool, dry_run: bool) -> None:
 
 
 def _validate(source: str, strict: bool) -> None:
-    result = validate_store(_store_dir(source, config), source, config, strict=strict)
+    result = validate_store(store_dir(source, config), source, config, strict=strict)
     if not result.is_valid:
         for error in result.errors:
             logger.error("%s", error)
@@ -107,7 +107,7 @@ def _prepare(force: bool, dry_run: bool) -> None:
         prepare_data_stores(config, force=force, progress_callback=update)
         validation_task = progress.add_task("Strict validation", total=2)
         for completed, source in enumerate(("parsed", "preprocessed"), start=1):
-            result = validate_store(_store_dir(source, config), source, config, strict=True)
+            result = validate_store(store_dir(source, config), source, config, strict=True)
             if not result.is_valid:
                 raise RuntimeError(f"{source} store validation failed: {'; '.join(result.errors)}")
             progress.update(validation_task, completed=completed)
@@ -123,12 +123,13 @@ def _prepare(force: bool, dry_run: bool) -> None:
 
 
 def _info(source: str) -> None:
-    resolved = resolve_data_source(config, source_override=source)
+    # Read-only: report the named store without the analysis-source auto-build.
+    resolved = _validated_source(source, config, was_built=False)
     print_kv_table("Store Summary", data_source_summary(resolved))
 
 
 def _clean(source: str, dry_run: bool) -> None:
-    target = _store_dir(source, config)
+    target = store_dir(source, config)
     if dry_run:
         logger.info("Dry-run: clean %s", target)
         return

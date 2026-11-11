@@ -4,14 +4,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.metadata.parser import parse_filename
-
 logger = logging.getLogger(__name__)
 
 
 def read_txt_spectrum(
     filepath: str | Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Reads a Renishaw exported .txt file containing Raman mapping data.
 
@@ -23,7 +21,6 @@ def read_txt_spectrum(
         x_coords (np.ndarray): 1D array of length N (unique X positions)
         y_coords (np.ndarray): 1D array of length M (unique Y positions)
         spectra (np.ndarray): 3D array of shape (N, M, W) or 2D (N*M, W)
-        metadata (dict): Extracted metadata from filename
     """
     try:
         df = pd.read_csv(filepath, sep=r"\s+", engine="c", dtype=np.float64, encoding="utf-8")
@@ -96,7 +93,7 @@ def read_txt_spectrum(
         spectra_grid = spectra_flat.reshape(
             len(x_unique), len(y_unique), num_wavenumbers
         )
-        return wavenumbers, x_unique, y_unique, spectra_grid, parse_filename(filepath)
+        return wavenumbers, x_unique, y_unique, spectra_grid
 
     logger.warning(
         "Non-rectangular spatial grid in '%s' (%d x_unique × %d y_unique ≠ %d points); "
@@ -106,10 +103,4 @@ def read_txt_spectrum(
         len(y_unique),
         num_points,
     )
-    return (
-        wavenumbers,
-        x_coords_full,
-        y_coords_full,
-        spectra_flat,
-        parse_filename(filepath),
-    )
+    return wavenumbers, x_coords_full, y_coords_full, spectra_flat

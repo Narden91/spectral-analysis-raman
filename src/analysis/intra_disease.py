@@ -304,7 +304,7 @@ def summarize_correlation_regions(
                     "start_cm-1": start_cm,
                     "end_cm-1": end_cm,
                     "width_cm-1": width,
-                    "integrated_abs_rho": float(np.trapz(window["rho"].abs().to_numpy(dtype=float), window["wavenumber"].to_numpy(dtype=float))),
+                    "integrated_abs_rho": float(np.trapezoid(window["rho"].abs().to_numpy(dtype=float), window["wavenumber"].to_numpy(dtype=float))),
                     "max_abs_rho": float(window["rho"].abs().max()),
                     "mean_abs_rho": float(window["rho"].abs().mean()),
                     "min_fdr_q": float(window["fdr_q"].min()),

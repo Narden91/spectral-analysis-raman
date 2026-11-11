@@ -202,8 +202,6 @@ class WeightedSpectralPreprocessor:
     mean_2850: np.ndarray
     scale_1300: float
     scale_2850: float
-    eig1_1300: float
-    eig1_2850: float
     pca_components: np.ndarray
     pca_singular_values: np.ndarray
     numerical_rank: int
@@ -294,8 +292,6 @@ class WeightedSpectralPreprocessor:
             mean_2850=mean2,
             scale_1300=scale1,
             scale_2850=scale2,
-            eig1_1300=eig1_1300,
-            eig1_2850=eig1_2850,
             pca_components=comps,
             pca_singular_values=s_kept,
             numerical_rank=rank,

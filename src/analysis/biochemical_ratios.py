@@ -83,7 +83,6 @@ def _spearman_associations(
     targets: tuple[str, ...],
     feature_source: str,
     min_subjects: int,
-    fdr_alpha: float,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for target in targets:
@@ -148,9 +147,6 @@ def _spearman_associations(
             "status",
         ],
     )
-    if associations.empty:
-        return associations
-
     return associations
 
 
@@ -196,7 +192,6 @@ def run_biochemical_ratios(
         targets=targets,
         feature_source="band_integral",
         min_subjects=min_subjects,
-        fdr_alpha=fdr_alpha,
     )
     ratio_associations = _spearman_associations(
         disease_only,
@@ -204,7 +199,6 @@ def run_biochemical_ratios(
         targets=targets,
         feature_source="band_ratio",
         min_subjects=min_subjects,
-        fdr_alpha=fdr_alpha,
     )
     associations = pd.concat(
         [band_associations, ratio_associations],

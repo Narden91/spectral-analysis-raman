@@ -17,9 +17,8 @@ import numpy as np
 import pandas as pd
 
 from src import resolve_cfg as _cfg
-from src import resolve_project_path
 from src.data_preparation import loaders
-from src.data_preparation.materialize import ProgressCallback, prepare_data_stores
+from src.data_preparation.materialize import ProgressCallback, prepare_data_stores, store_dir
 from src.data_preparation.store import DataSource, resolve_data_source
 from src.data_preparation.validation import validate_store
 
@@ -229,8 +228,7 @@ class AnalysisRamanDataset:
 
 def _open(source_name: str, cfg: dict | None, *, strict: bool) -> DataSource:
     config = _cfg(cfg)
-    key = {"parsed": "parsed_dir", "preprocessed": "preprocessed_dir"}[source_name]
-    source_path = resolve_project_path(config.get("data", {}).get(key, f"data/{source_name}"))
+    source_path = store_dir(source_name, config)
 
     if not source_path.exists():
         raise FileNotFoundError(f"{source_name} store missing at {source_path}; run prepare_dataset() first")

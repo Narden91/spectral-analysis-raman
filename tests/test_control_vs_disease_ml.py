@@ -31,7 +31,6 @@ from src.analysis.control_vs_disease_ml import (
     _run_repeated_nested_cv,
     _sex_only_baseline,
     _sex_stratified_refit,
-    _single_split_balanced_accuracy,
     _stream_parallel,
     _tune_threshold,
     _tune_threshold_and_score,
@@ -423,6 +422,7 @@ def test_permutation_test_rejects_undefined_scores(score: float, base_ml_cfg: di
             run_permutation_test(
                 "pls_da", X, y, observed_balanced_accuracy=0.75, strata=None,
                 ml_cfg=_small_permutation_cfg(base_ml_cfg), n_jobs=1, random_state=42,
+                outer_split_plan=[[]],  # unused: _permuted_score is patched
             )
 
 
@@ -434,6 +434,7 @@ def test_permutation_resume_rejects_undefined_checkpoint_score(tmp_path: Path, b
             "pls_da", np.ones((4, 2)), np.array([0, 0, 1, 1]), observed_balanced_accuracy=0.75,
             strata=None, ml_cfg=_small_permutation_cfg(base_ml_cfg), n_jobs=1, random_state=42,
             checkpoint_path=path, resume=True,
+            outer_split_plan=[[]],  # unused: the checkpoint is rejected before any draw
         )
 
 
@@ -637,6 +638,18 @@ def _small_permutation_cfg(base_ml_cfg: dict) -> dict:
     return ml_cfg
 
 
+def _locked_plan(y: np.ndarray, ml_cfg: dict, strata: np.ndarray | None = None):
+    """One locked outer repeat, as the production entry point builds it."""
+    joint = np.zeros(len(y), dtype=int) if strata is None else strata
+    return _locked_joint_stratified_split_plan(
+        y, joint, n_outer_splits=ml_cfg["n_outer_splits"], n_outer_repeats=1, random_state=42
+    )
+
+
+def _observed_score(model_name: str, X: np.ndarray, y: np.ndarray, ml_cfg: dict, plan) -> float:
+    return _fixed_plan_balanced_accuracy(model_name, X, y, ml_cfg=ml_cfg, outer_cv=plan[0])
+
+
 def test_permute_labels_unrestricted_preserves_class_counts() -> None:
     rng = np.random.default_rng(0)
     y = np.array([0] * 20 + [1] * 10)
@@ -660,7 +673,8 @@ def test_permutation_p_value_bounded(base_ml_cfg: dict) -> None:
     y = _labels(frame)
     ml_cfg = _small_permutation_cfg(base_ml_cfg)
 
-    observed = _single_split_balanced_accuracy("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
+    plan = _locked_plan(y, ml_cfg)
+    observed = _observed_score("l1_logistic", X, y, ml_cfg, plan)
     p_value, null_dist = run_permutation_test(
         "l1_logistic",
         X,
@@ -670,6 +684,7 @@ def test_permutation_p_value_bounded(base_ml_cfg: dict) -> None:
         ml_cfg=ml_cfg,
         n_jobs=1,
         random_state=42,
+        outer_split_plan=plan,
     )
     assert 0.0 < p_value <= 1.0
     assert len(null_dist) == ml_cfg["n_permutations"]
@@ -686,7 +701,8 @@ def test_permutation_null_centers_near_chance_on_pure_noise(base_ml_cfg: dict) -
     ml_cfg = _small_permutation_cfg(base_ml_cfg)
     ml_cfg["n_permutations"] = 40
 
-    observed = _single_split_balanced_accuracy("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
+    plan = _locked_plan(y, ml_cfg)
+    observed = _observed_score("l1_logistic", X, y, ml_cfg, plan)
     p_value, null_dist = run_permutation_test(
         "l1_logistic",
         X,
@@ -696,6 +712,7 @@ def test_permutation_null_centers_near_chance_on_pure_noise(base_ml_cfg: dict) -
         ml_cfg=ml_cfg,
         n_jobs=1,
         random_state=42,
+        outer_split_plan=plan,
     )
     # Not a strict guarantee (this is a stochastic test on noise data), but a
     # complete false positive (p < 0.05 on pure noise) should be rare given
@@ -717,7 +734,8 @@ def test_permutation_test_stops_early_on_clearly_unresolved_null(base_ml_cfg: di
     ml_cfg["permutation_min"] = 50
     ml_cfg["permutation_check_interval"] = 25
 
-    observed = _single_split_balanced_accuracy("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
+    plan = _locked_plan(y, ml_cfg)
+    observed = _observed_score("l1_logistic", X, y, ml_cfg, plan)
     p_value, null_dist = run_permutation_test(
         "l1_logistic",
         X,
@@ -727,6 +745,7 @@ def test_permutation_test_stops_early_on_clearly_unresolved_null(base_ml_cfg: di
         ml_cfg=ml_cfg,
         n_jobs=1,
         random_state=42,
+        outer_split_plan=plan,
     )
     assert len(null_dist) < 2000
     assert 0.0 < p_value <= 1.0
@@ -747,7 +766,8 @@ def test_permutation_test_runs_full_budget_when_never_resolved(base_ml_cfg: dict
     ml_cfg["permutation_check_interval"] = 40
     ml_cfg["permutation_confidence"] = 0.999999
 
-    observed = _single_split_balanced_accuracy("l1_logistic", X, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
+    plan = _locked_plan(y, ml_cfg)
+    observed = _observed_score("l1_logistic", X, y, ml_cfg, plan)
     p_value, null_dist = run_permutation_test(
         "l1_logistic",
         X,
@@ -757,6 +777,7 @@ def test_permutation_test_runs_full_budget_when_never_resolved(base_ml_cfg: dict
         ml_cfg=ml_cfg,
         n_jobs=1,
         random_state=42,
+        outer_split_plan=plan,
     )
     assert len(null_dist) == 40
     assert 0.0 < p_value <= 1.0
@@ -801,7 +822,8 @@ def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> N
     ml_cfg = _small_permutation_cfg(base_ml_cfg)
     ml_cfg["n_permutations"] = 60
 
-    observed = _single_split_balanced_accuracy("l1_logistic", Xw, y, ml_cfg=ml_cfg, n_jobs=1, random_state=42)
+    plan = _locked_plan(y, ml_cfg, strata=sex)
+    observed = _observed_score("l1_logistic", Xw, y, ml_cfg, plan)
     assert observed > 0.9, "sanity check: sex-driven signal should be trivially separable"
 
     p_unrestricted, _null_u = run_permutation_test(
@@ -813,6 +835,7 @@ def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> N
         ml_cfg=ml_cfg,
         n_jobs=1,
         random_state=1,
+        outer_split_plan=plan,
     )
     p_sex_stratified, _null_s = run_permutation_test(
         "l1_logistic",
@@ -823,6 +846,7 @@ def test_sex_stratified_null_is_mandatory_confound_guard(base_ml_cfg: dict) -> N
         ml_cfg=ml_cfg,
         n_jobs=1,
         random_state=2,
+        outer_split_plan=plan,
     )
 
     assert p_unrestricted < 0.05, (
@@ -897,6 +921,7 @@ def test_permutation_resume_reuses_seeded_checkpoint(
         ml_cfg=ml_cfg,
         n_jobs=1,
         random_state=9,
+        outer_split_plan=[[]],  # unused: _permuted_score is patched
         checkpoint_path=checkpoint,
     )
     monkeypatch.setattr(
@@ -912,6 +937,7 @@ def test_permutation_resume_reuses_seeded_checkpoint(
         ml_cfg=ml_cfg,
         n_jobs=1,
         random_state=9,
+        outer_split_plan=[[]],  # unused: _permuted_score is patched
         checkpoint_path=checkpoint,
         resume=True,
     )
@@ -946,6 +972,7 @@ def test_permutation_resume_from_already_resolved_checkpoint_draws_nothing_new(
         ml_cfg=ml_cfg,
         n_jobs=1,
         random_state=9,
+        outer_split_plan=[[]],  # unused: _permuted_score is patched
         checkpoint_path=checkpoint,
     )
     checkpointed = pd.read_parquet(checkpoint)
@@ -964,6 +991,7 @@ def test_permutation_resume_from_already_resolved_checkpoint_draws_nothing_new(
         ml_cfg=ml_cfg,
         n_jobs=1,
         random_state=9,
+        outer_split_plan=[[]],  # unused: _permuted_score is patched
         checkpoint_path=checkpoint,
         resume=True,
     )

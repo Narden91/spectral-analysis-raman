@@ -39,13 +39,6 @@ SUBJECT_SPECTRA = (
     / "01_subject_features"
     / "subject_spectra.csv"
 )
-SUBJECT_REGION_COUNTS = (
-    ROOT
-    / "Results_control_vs_disease"
-    / "04_cross_region_summary"
-    / "01_subject_features"
-    / "subject_region_counts.csv"
-)
 OUT_DIR = ROOT / "manuscript" / "paper" / "figure_data"
 TEX_DIR = ROOT / "manuscript" / "paper"
 

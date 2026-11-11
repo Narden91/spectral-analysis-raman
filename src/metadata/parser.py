@@ -13,8 +13,8 @@ def clean_subject_id(raw_id: str) -> str:
     """Normalise a raw subject ID to a plain numeric string.
 
     Strips:
-    - Unicode right/left single quotation marks (U+2019/U+2018) — second-slide markers
-    - ASCII apostrophes — same purpose
+    - Unicode right/left single quotation marks (U+2019/U+2018) - second-slide markers
+    - ASCII apostrophes - same purpose
     - Trailing letters (e.g. ``K`` in ``10K`` for Control subjects)
     """
     cleaned = (
@@ -30,14 +30,10 @@ def clean_subject_id(raw_id: str) -> str:
     return result
 
 
-# Matches the measurement number at the end of a reorganized stem:
-# e.g. "109_66_1300_range_meas2"  →  group(1) = "2"
-_MEAS_SUFFIX_RE = re.compile(r"_meas(\d+)$")
-
 # Schema-aware regex for reorganized stems.
 # Format: {Subject}_{Slide}_{Range}_range_meas{M}
 # Legacy mode-tagged filenames ({Subject}_{Slide}_{Range}_range_SS_meas{M}) still
-# parse for backward compatibility, but the mode token is discarded.
+# parse for backward compatibility; the mode token is stored as acquisition_mode.
 _REORG_STEM_RE = re.compile(
     r"^(?P<subject_id>[^_]+)"
     r"_(?P<slide>[^_]+)"
@@ -69,7 +65,7 @@ def parse_filename(filepath: str | Path) -> dict[str, Any]:
         {Subject}_{Slide}_{Range}_range_meas{M}.txt
 
     Legacy mode-tagged filenames ({Subject}_{Slide}_{Range}_range_SS_meas{M}.txt)
-    still parse for backward compatibility, but the mode token is discarded.
+    still parse for backward compatibility; the mode token is stored as ``acquisition_mode``.
 
     Example:
         109_66_1300_range_meas1.txt        (mode-free)

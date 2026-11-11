@@ -23,13 +23,6 @@ run:
   ranges: ["1300", "2850", "both"]
 
 # ---------------------------------------------------------------------------
-# EDA-owned output persistence toggles
-# ---------------------------------------------------------------------------
-output:
-  keep_preprocessing_artifacts: false  # bool: save per-area QC/manifests during EDA only
-  keep_whole_spectra_cache: false  # bool: save paired-area whole-spectrum cache during EDA only
-
-# ---------------------------------------------------------------------------
 # Analysis parameters
 # ---------------------------------------------------------------------------
 analysis:
@@ -55,8 +48,6 @@ analysis:
   random_state: 42  # int: reproducibility seed
   expected_files_per_subject: 12  # int: expected spectrum files per subject
   noise_sample_subjects: 20  # int: subjects sampled to estimate noise distribution
-  normality_subsample_wavenumbers: 100  # int: wavenumber subsample size for normality tests
-  io_workers: 12  # int: parallel workers for I/O-bound tasks (<= CPU cores)
   pca:
     top_k_wavenumbers: 20  # int: number of top loading wavenumbers to export
     n_components_exported: 10  # int: number of components to export/plot
@@ -64,7 +55,6 @@ analysis:
     emit_group_mean_spectra: true  # bool: plot mean spectra by group
     emit_band_boxplots: false  # bool: plot per-band boxplots (superseded by rainclouds)
     emit_band_rainclouds: true  # bool: plot per-band rainclouds
-    emit_cluster_mean_spectra: true  # bool: plot mean spectra per cluster
   region_weighting:
     enabled: true  # bool: apply region masks/weights (exclude CH-stretch silent region ~2670)
     apply_to: ["pca", "robustness"]  # list[str]: affected analyses ["pca", "robustness"]
@@ -73,13 +63,8 @@ analysis:
     # Reviewer concern: PC2 of CH-stretch block driven by ~2670 cm-1 (silent region, noise not biology)
     # Robustness comparison is also enabled to document the effect quantitatively.
   advanced:
-    dimred:
-      tsne_perplexity: 30  # float: t-SNE perplexity, typically 5-50
-      tsne_n_iter: 1000  # int: t-SNE optimization iterations
-
     intra_disease:
       enabled: false  # bool: per-wavenumber Spearman correlations vs clinical targets, disease subjects only
-      clinical_csv: "data/clinical_data.csv"  # str: disease-only curated clinical CSV
     robustness:
       enabled: true  # bool: compare baseline vs region-masked PCA to document silent-region influence on PC2
       suspect_windows: [[2655, 2685]]  # list[list[float]]: regions to downweight/exclude
@@ -123,14 +108,12 @@ analysis:
     enabled: true  # bool: run covariate-adjusted models on candidate regions and configured ratios
     covariates: [age, sex]
     min_subjects: 30  # int: lower bound; design-aware parameter/event rules are stricter
-    random_state: 42  # int: reproducibility seed for deterministic logistic fits
   whole_spectra:
     emit_mfa: false  # bool: write MFA to whole_spectra/exploratory_multiblock/MFA/
   pls_regression:
     enabled: true
     targets: [moca_baseline, moca_3m, delta_moca]
     component_grid: [1, 2, 3, 4, 5]
-    max_components: 5
     tune_components_inside_cv: true
     n_cv_splits: 5       # used when n >= 15; LOO when n < 15
     min_subjects: 10
@@ -149,16 +132,13 @@ analysis:
     targets:
       - group_variable: moca_severity_group
         ordered_groups: [low_moca, high_moca]
-        label: "cognitive-severity classifier"
       - group_variable: delta_moca_group
         ordered_groups: [decline, stable_or_improved]
-        label: "disease-trajectory classifier"
     component_grid: [1, 2, 3, 4, 5]
     c_range: [0.01, 0.1, 1.0, 10.0]
     n_outer_splits: 5
     n_inner_splits: 3
     min_subjects_per_group: 10
-    min_subjects_continuous: 20
     n_permutations: 500  # ceiling; adaptive stopping (below) usually draws fewer
     permutation_min: 200
     permutation_check_interval: 100
@@ -166,7 +146,6 @@ analysis:
     permutation_alpha: 0.05
     n_jobs: -1
     random_state: 42
-    emit_oplsda: false
   biochemical_ratios:
     enabled: true
     targets: [moca_baseline, moca_3m, delta_moca]
@@ -197,7 +176,6 @@ analysis:
     permutation_alpha: 0.05
     n_bootstrap: 200
     n_jobs: -1
-    detect_gpu: true
     random_state: 42
     continuous_targets: [moca_baseline, moca_3m, delta_moca]
     binary_targets:
@@ -205,8 +183,6 @@ analysis:
         ordered_groups: [low_moca, high_moca]
       - group_variable: delta_moca_group
         ordered_groups: [decline, stable_or_improved]
-    vip_threshold: 1.0
-    require_pls_gate: true
     feature_source: candidate_regions
   panel_minimal_model:
     enabled: true
@@ -221,10 +197,6 @@ analysis:
     enabled: true
   publication_report:
     enabled: true
-    robust_requires:
-      - fdr_significant
-      - cluster_permutation
-      - covariate_persisted
 
   # ---------------------------------------------------------------------------
   # Control-vs-disease ML classification (disease_vs_control mode only).
@@ -290,15 +262,6 @@ analysis:
     # fixed-panel indices/integrals; ratio-ratio spectral regime map.
     enabled: true
     n_bootstrap: 500  # int: bootstrap replicates for coupling CI estimation
-    random_state: 42  # int: reproducibility seed
-
-  index_clustering:
-    # Phase R: agglomerative Ward clustering of panel indices; Gap-statistic
-    # k selection; bootstrap ARI stability. Disabled by default — opt-in only.
-    enabled: false
-    max_k: 4        # int: maximum number of clusters to evaluate
-    n_gap_refs: 20  # int: null-distribution reference samples for Gap stat
-    n_bootstrap: 100  # int: bootstrap ARI replicates
     random_state: 42  # int: reproducibility seed
 
   journal_figures:
@@ -390,7 +353,6 @@ biological_pca:
   n_components: 3
   aggregation: "median"
   scale: false
-  output_subdir: "biological_pca"
   loading_region_quantile: 0.9
   loading_region_min_width_cm: 8.0
   loading_region_merge_gap_cm: 6.0

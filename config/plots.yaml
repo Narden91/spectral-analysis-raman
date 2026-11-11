@@ -44,7 +44,3 @@ plotting:
       - saturation_fraction
       - baseline_fraction
       - fraction_corrected
-    band_images:
-      enabled: false  # bool: render per-band intensity images
-  n_top_for_ratios: 6  # int: top peaks used for ratio plots
-  canonical_bin_width: 5  # int: cm^-1 bin width for peak binning

@@ -37,7 +37,7 @@ def test_band_integral_uses_trapezoidal_rule() -> None:
     frame = _frame()
     columns = list(frame.columns)
     integral = band_integral(frame, columns, block="1300", lower=1240.0, upper=1250.0)
-    manual = np.trapz(frame[["1300__1240.0", "1300__1245.0", "1300__1250.0"]].iloc[0], [1240.0, 1245.0, 1250.0])
+    manual = np.trapezoid(frame[["1300__1240.0", "1300__1245.0", "1300__1250.0"]].iloc[0], [1240.0, 1245.0, 1250.0])
     assert np.isclose(float(integral.iloc[0]), float(manual))
 
 

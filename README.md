@@ -139,14 +139,13 @@ uv run scripts/run_eda.py --config config/eda_disease_control.yaml --range both 
 # Disease-only exploratory clinical workflow.
 uv run scripts/run_eda.py --config config/eda_disease_only.yaml --range both
 
-# Generate only plot images or only plot data exports.
-uv run scripts/run_spectral_plots.py --no-export-data
-uv run scripts/run_spectral_plots.py --no-plots
+# Spectral comparison and QC plots.
+uv run scripts/run_spectral_plots.py --config config/plots.yaml
 ```
 
 `--analysis-mode {disease_vs_control,disease_only}` overrides `analysis.mode`.
 Set `data.source: preprocessed` in the configuration for analysis. The
-`--source` override is deprecated. Parsed data keeps native acquisition axes
+analysis scripts have no `--source` override. Parsed data keeps native acquisition axes
 and cannot be treated as a globally aligned matrix.
 
 ## Outputs
@@ -229,7 +228,7 @@ uv run python -m compileall -q src scripts
 | `config/` | YAML configuration and fast development overlays |
 | `scripts/manage_data_store.py` | Store build, validation, information, and deliberate cleanup |
 | `scripts/run_eda.py` | Main EDA, Biological PCA, and ML entry point |
-| `scripts/run_spectral_plots.py` | Spectral plots, QC plots, and CSV export |
+| `scripts/run_spectral_plots.py` | Spectral plots and QC plots |
 | `src/data_preparation/` | Materialization, manifests, validation, and loaders |
 | `src/preprocessing/` | QC and preprocessing implementation |
 | `src/analysis/` | EDA phase runners, PCA, and exploratory modelling |

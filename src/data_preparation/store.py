@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,9 +9,8 @@ from typing import Any
 import yaml
 
 from src import resolve_cfg as _cfg
-from src import resolve_project_path
 from src.data_preparation.manifest import config_hash, iso_utc_now
-from src.data_preparation.materialize import build_parsed_store, build_preprocessed_store
+from src.data_preparation.materialize import build_parsed_store, build_preprocessed_store, store_dir
 from src.data_preparation.validation import validate_store
 
 logger = logging.getLogger(__name__)
@@ -39,17 +37,8 @@ def get_active_data_source() -> DataSource | None:
     return _ACTIVE_DATA_SOURCE
 
 
-def _store_dir(source_name: str, cfg: dict) -> Path:
-    data_cfg = cfg.get("data", {})
-    if source_name == "parsed":
-        return resolve_project_path(data_cfg.get("parsed_dir", "data/parsed"))
-    if source_name == "preprocessed":
-        return resolve_project_path(data_cfg.get("preprocessed_dir", "data/preprocessed"))
-    raise ValueError(f"Unsupported data source: {source_name}")
-
-
 def _validated_source(source_name: str, cfg: dict, *, was_built: bool) -> DataSource:
-    source_path = _store_dir(source_name, cfg)
+    source_path = store_dir(source_name, cfg)
     validation = validate_store(source_path, source_name, cfg)
     if not validation.is_valid:
         raise RuntimeError("; ".join(validation.errors))
@@ -62,41 +51,19 @@ def _validated_source(source_name: str, cfg: dict, *, was_built: bool) -> DataSo
     )
 
 
-def reject_parsed_source_override(source_override: str | None, *, entry_point: str) -> None:
-    """Reject '--source parsed' at a CLI boundary, before any output is created.
-
-    'parsed' retains per-measurement native axes and raw pixel intensities;
-    EDA/plots/Biological PCA/ML must consume the frozen-grid preprocessed
-    store, not raw spectra.
-    """
-    if str(source_override or "").strip() == "parsed":
-        raise ValueError(
-            f"--source parsed is not supported for {entry_point}: analysis requires the preprocessed "
-            "store. Use src.data_preparation.dataset.open_ingested_dataset() for raw-view work instead."
-        )
-
-
 def resolve_data_source(
     cfg: dict | None = None,
     *,
-    source_override: str | None = None,
     force: bool = False,
 ) -> DataSource:
     config = _cfg(cfg)
-    source_name = str(source_override or config.get("data", {}).get("source", "preprocessed")).strip()
+    source_name = str(config.get("data", {}).get("source", "preprocessed")).strip()
     auto_build = bool(config.get("data", {}).get("auto_build", True))
 
     if source_name == "raw_text":
         raise ValueError("raw_text is ingestion-only; build the parsed store before analysis")
-    if source_override is not None and source_name == "preprocessed":
-        warnings.warn(
-            "Passing --source/source_override explicitly is deprecated; preprocessed is now the only "
-            "supported analysis source and the override will be removed in a future release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
 
-    source_path = _store_dir(source_name, config)
+    source_path = store_dir(source_name, config)
     if force:
         from src.data_preparation.loaders import clear_loader_caches
 

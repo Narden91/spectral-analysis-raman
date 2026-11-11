@@ -4,7 +4,7 @@ Decomposes the fingerprint block (``1300__*`` columns) into ``n_components``
 non-negative latent profiles using multi-seed NMF. Component stability is
 assessed by matching component spectra across seeded random initializations. Subject
 weights are correlated with clinical endpoints (Spearman + partial Spearman,
-BH-FDR). All outputs go to ``06_spectral_interpretability/nmf_decomposition/``.
+BH-FDR). All outputs go to ``06_spectral_interpretability/02_nmf_decomposition/``.
 
 Components are labeled by the band windows they overlap (using config
 ``whole_spectra.bands``). Labels use "carotenoid-like / lipoprotein-associated"

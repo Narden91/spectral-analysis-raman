@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score
-from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from src import get_classification_phase_dir
@@ -20,6 +20,7 @@ from src.analysis.clinical_feature_associations import (
 )
 from src.analysis.phase_status import STATUS_NOT_TESTED_GATE, PhaseStatus
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
+from src.statistics.cluster_permutation import normalize_n_jobs
 from src.statistics.sequential_permutation import (
     resolve_sequential_stopping_config,
     run_curtailed_permutation_draws,
@@ -33,40 +34,6 @@ def _splsda_cfg(cfg: dict) -> dict:
     return cfg.get("analysis", {}).get("splsda", {})
 
 
-def _remove_orthogonal_component(X: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Exploratory Orthogonal Projections to Latent Structures (OPLS)."""
-    y_c = y - np.mean(y)
-
-    w = np.dot(X.T, y_c) / (np.dot(y_c.T, y_c) + 1e-10)
-    w_norm = np.linalg.norm(w)
-    if w_norm < 1e-10:
-        return X.copy()
-    w /= w_norm
-
-    t = np.dot(X, w)
-    t_norm_sq = np.dot(t.T, t)
-    if t_norm_sq < 1e-10:
-        return X.copy()
-
-    p = np.dot(X.T, t) / t_norm_sq
-
-    w_ortho = p - np.dot(w.T, p) * w
-    w_ortho_norm = np.linalg.norm(w_ortho)
-    if w_ortho_norm < 1e-10:
-        return X.copy()
-    w_ortho /= w_ortho_norm
-
-    t_ortho = np.dot(X, w_ortho)
-    t_ortho_norm_sq = np.dot(t_ortho.T, t_ortho)
-    if t_ortho_norm_sq < 1e-10:
-        return X.copy()
-
-    p_ortho = np.dot(X.T, t_ortho) / t_ortho_norm_sq
-
-    X_ortho_removed = X - np.outer(t_ortho, p_ortho)
-    return X_ortho_removed
-
-
 def _tune_pls_l1da(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -74,7 +41,6 @@ def _tune_pls_l1da(
     c_range: list[float],
     n_inner_splits: int,
     random_state: int,
-    groups: np.ndarray | None = None
 ) -> tuple[int, float]:
     best_n_comp = component_grid[0]
     best_c = c_range[0]
@@ -85,14 +51,8 @@ def _tune_pls_l1da(
     if n_splits < 2:
         return best_n_comp, best_c
 
-    if groups is not None:
-        inner_cv = StratifiedGroupKFold(n_splits=n_splits)
-        cv_splitter = inner_cv.split(X_train, y_train, groups=groups)
-    else:
-        inner_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-        cv_splitter = inner_cv.split(X_train, y_train)
-
-    folds = list(cv_splitter)
+    inner_cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    folds = list(inner_cv.split(X_train, y_train))
 
     for n_comp in component_grid:
         if n_comp > X_train.shape[0] - 2 or n_comp > X_train.shape[1] or n_comp < 1:
@@ -132,7 +92,6 @@ def _permutation_test(
     X: np.ndarray,
     y: np.ndarray,
     cv_strategy: object,
-    groups: np.ndarray | None,
     component_grid: list[int],
     c_range: list[float],
     n_inner_splits: int,
@@ -149,14 +108,14 @@ def _permutation_test(
     on draws, not necessarily the count actually run — returns the draws
     actually used alongside the p-value.
     """
-    n_jobs = 1 if n_jobs == 0 else n_jobs
+    n_jobs = normalize_n_jobs(n_jobs)
     stopping = resolve_sequential_stopping_config(splsda_cfg or {}, default_max=n_permutations)
     rng = np.random.default_rng(random_state)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=stopping.permutation_max, dtype=np.int64)
 
     null_scores = run_curtailed_permutation_draws(
         lambda seed: _permuted_splsda_score(
-            X, y, cv_strategy, groups, component_grid, c_range, n_inner_splits, random_state, seed
+            X, y, cv_strategy, component_grid, c_range, n_inner_splits, random_state, seed
         ),
         [(int(seed),) for seed in seeds],
         observed=observed_bal_acc,
@@ -165,7 +124,8 @@ def _permutation_test(
     )
 
     successes = sum(1 for value in null_scores if value >= observed_bal_acc)
-    p_value = float((1 + successes) / (len(null_scores) + 1)) if null_scores else float("nan")
+    # run_curtailed_permutation_draws always runs at least one draw, so null_scores is non-empty.
+    p_value = float((1 + successes) / (len(null_scores) + 1))
     return p_value, len(null_scores)
 
 
@@ -173,43 +133,16 @@ def _permuted_splsda_score(
     X: np.ndarray,
     y: np.ndarray,
     cv_strategy: object,
-    groups: np.ndarray | None,
     component_grid: list[int],
     c_range: list[float],
     n_inner_splits: int,
     random_state: int,
     seed: int,
 ) -> float:
-    rng = np.random.default_rng(seed)
-    return _permuted_splsda_score_with_rng(
-        X,
-        y,
-        cv_strategy,
-        groups,
-        component_grid,
-        c_range,
-        n_inner_splits,
-        random_state,
-        rng,
-    )
-
-
-def _permuted_splsda_score_with_rng(
-    X: np.ndarray,
-    y: np.ndarray,
-    cv_strategy: object,
-    groups: np.ndarray | None,
-    component_grid: list[int],
-    c_range: list[float],
-    n_inner_splits: int,
-    random_state: int,
-    rng: np.random.Generator,
-) -> float:
-    y_perm = rng.permutation(y)
+    y_perm = np.random.default_rng(seed).permutation(y)
     y_pred = np.zeros_like(y, dtype=int)
 
-    cv_kwargs = {"groups": groups} if groups is not None else {}
-    for train_idx, test_idx in cv_strategy.split(X, y_perm, **cv_kwargs):
+    for train_idx, test_idx in cv_strategy.split(X, y_perm):
         X_train, y_train = X[train_idx], y_perm[train_idx]
         X_test = X[test_idx]
 
@@ -220,7 +153,6 @@ def _permuted_splsda_score_with_rng(
             c_range,
             n_inner_splits,
             random_state,
-            groups[train_idx] if groups is not None else None,
         )
 
         scaler = StandardScaler()
@@ -341,6 +273,7 @@ def run_splsda_classifier(
 
     disease_only, feature_meta = load_disease_feature_frame(feature_matrix_path=feature_matrix_path)
     all_feature_columns = feature_columns(disease_only)
+    feature_meta_by_name = feature_meta.set_index("feature_name")
 
     targets = splsda_cfg.get("targets", [
         {"group_variable": "moca_severity_group", "ordered_groups": ["low_moca", "high_moca"]},
@@ -354,12 +287,10 @@ def run_splsda_classifier(
     n_permutations = int(splsda_cfg.get("n_permutations", 500))
     n_jobs = int(splsda_cfg.get("n_jobs", 1))
     random_state = int(splsda_cfg.get("random_state", 42))
-    emit_oplsda = bool(splsda_cfg.get("emit_oplsda", False))
 
     perf_rows: list[dict[str, object]] = []
     bands_rows: list[dict[str, object]] = []
     perm_rows: list[dict[str, object]] = []
-    oplsda_rows: list[dict[str, object]] = []
 
     for target_def in targets:
         group_var = target_def["group_variable"]
@@ -401,26 +332,18 @@ def run_splsda_classifier(
         y = (frame[group_var] == ordered_groups[1]).astype(int).to_numpy()
         X = frame[all_feature_columns].to_numpy(dtype=float)
 
-        groups = None
-        if frame["subject_id"].nunique() < len(frame):
-            groups = frame["subject_id"].to_numpy()
-
+        # load_subject_feature_matrix rejects repeated subject IDs, so rows are
+        # independent subjects and no grouped split is needed.
         n_splits = min(n_outer_splits, class_counts.min())
-        if groups is not None:
-            cv_strategy = StratifiedGroupKFold(n_splits=n_splits)
-            cv_name = "StratifiedGroupKFold"
-        else:
-            cv_strategy = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-            cv_name = "StratifiedKFold"
+        cv_strategy = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+        cv_name = "StratifiedKFold"
 
         y_pred = np.zeros_like(y, dtype=int)
         y_prob = np.zeros_like(y, dtype=float)
         fold_selected: list[np.ndarray] = []
         fold_signs: list[np.ndarray] = []
 
-        cv_kwargs = {"groups": groups} if groups is not None else {}
-
-        for train_idx, test_idx in cv_strategy.split(X, y, **cv_kwargs):
+        for train_idx, test_idx in cv_strategy.split(X, y):
             X_train, y_train = X[train_idx], y[train_idx]
             X_test = X[test_idx]
 
@@ -428,8 +351,7 @@ def run_splsda_classifier(
             X_train_scaled = scaler.fit_transform(X_train)
             X_test_scaled = scaler.transform(X_test)
 
-            best_n, best_c = _tune_pls_l1da(X_train, y_train, component_grid, c_range, n_inner_splits, random_state,
-                                            groups[train_idx] if groups is not None else None)
+            best_n, best_c = _tune_pls_l1da(X_train, y_train, component_grid, c_range, n_inner_splits, random_state)
 
             pls = PLSRegression(n_components=best_n, scale=False)
             pls.fit(X_train_scaled, y_train)
@@ -458,7 +380,7 @@ def run_splsda_classifier(
         # Final model fit for feature extraction
         final_scaler = StandardScaler()
         X_scaled = final_scaler.fit_transform(X)
-        final_n, final_c = _tune_pls_l1da(X, y, component_grid, c_range, n_inner_splits, random_state, groups)
+        final_n, final_c = _tune_pls_l1da(X, y, component_grid, c_range, n_inner_splits, random_state)
 
         final_pls = PLSRegression(n_components=final_n, scale=False)
         final_pls.fit(X_scaled, y)
@@ -474,7 +396,7 @@ def run_splsda_classifier(
         sign_stability = np.abs(np.mean(np.vstack(fold_signs), axis=0))
 
         for i, col in enumerate(all_feature_columns):
-            meta = feature_meta[feature_meta["feature_name"] == col].iloc[0]
+            meta = feature_meta_by_name.loc[col]
             bands_rows.append({
                 "group_variable": group_var,
                 "feature_name": col,
@@ -492,7 +414,6 @@ def run_splsda_classifier(
             X,
             y,
             cv_strategy,
-            groups,
             component_grid,
             c_range,
             n_inner_splits,
@@ -527,27 +448,6 @@ def run_splsda_classifier(
             "status": "ok",
         })
 
-        if emit_oplsda:
-            logger.info("Running optional OPLS-DA for target %s", group_var)
-            X_ortho = _remove_orthogonal_component(X_scaled, y)
-            opls_model = PLSRegression(n_components=final_n, scale=False)
-            opls_model.fit(X_ortho, y)
-            y_pred_opls = np.round(np.clip(opls_model.predict(X_ortho).ravel(), 0, 1))
-            opls_acc = np.mean(y == y_pred_opls)
-
-            ss_res = np.sum((y - opls_model.predict(X_ortho).ravel())**2)
-            ss_tot = np.sum((y - np.mean(y))**2)
-            r2y = 1 - ss_res/ss_tot if ss_tot > 0 else 0
-
-            oplsda_rows.append({
-                "group_variable": group_var,
-                "accuracy": opls_acc,
-                "Q2": np.nan,  # Too expensive to do nested CV for OPLS here
-                "R2X": np.nan,
-                "R2Y": r2y,
-                "n_orthogonal_components": 1
-            })
-
     res: dict[str, Path] = {}
     if perf_rows:
         perf_df = pd.DataFrame(perf_rows)
@@ -572,12 +472,6 @@ def run_splsda_classifier(
             perm_path = target_dir / "pls_l1da_permutation_results.csv"
             perm_df.to_csv(perm_path, index=False)
             res["pls_l1da_permutation_results"] = perm_path
-
-        if emit_oplsda and oplsda_rows:
-            oplsda_df = pd.DataFrame(oplsda_rows)
-            oplsda_path = target_dir / "oplsda_results.csv"
-            oplsda_df.to_csv(oplsda_path, index=False)
-            res["oplsda_results"] = oplsda_path
 
         logger.info("PLS-L1DA outputs written to %s", target_dir)
 

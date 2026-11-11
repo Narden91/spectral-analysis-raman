@@ -16,9 +16,7 @@ from src import get_classification_phase_dir, get_cross_region_phase_dir
 from src import resolve_cfg as _cfg
 from src.analysis.clinical_feature_associations import (
     feature_columns,
-    filter_disease_subjects,
     load_disease_feature_frame,
-    load_subject_feature_matrix,
 )
 from src.analysis.discriminant_spectra import run_subgroup_mean_spectra
 from src.analysis.io_utils import write_csv_atomic
@@ -381,8 +379,7 @@ def run_disease_subgroups(
     # Emit per-subgroup mean spectra (reviewer request: "show the average spectrum per ML group")
     subgroup_cfg_emit = bool(subgroup_cfg.get("emit_cluster_mean_spectra", True))
     if subgroup_cfg_emit:
-        full_frame = filter_disease_subjects(load_subject_feature_matrix(feature_matrix_path=feature_matrix_path))
-        annotated = full_frame.merge(
+        annotated = disease_only.merge(
             assignments[["subject_id", "subgroup_label"]],
             on="subject_id",
             how="inner",

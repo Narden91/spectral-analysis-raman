@@ -8,10 +8,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.constants import SPECTRAL_RANGES
 from src.data_preparation.manifest import load_manifest
 from src.data_preparation.store import DataSource, get_active_data_source, resolve_data_source
-
-SPECTRAL_RANGES = ("1300", "2850")
 
 # Per-process cache of derived reads, keyed by data-source identity so a
 # rebuilt store (new manifest_hash) never serves stale entries. Cache scope is
@@ -41,10 +40,6 @@ def _source(data_source: DataSource | None = None) -> DataSource:
 
 
 def _parsed_path(source: DataSource) -> Path:
-    if source.source_name == "parsed":
-        return source.source_path
-    if source.source_name != "preprocessed":
-        raise RuntimeError("Only parsed and preprocessed stores are supported")
     source_manifest = source.manifest or load_manifest(source.source_path / "manifest.json")
     return Path(source_manifest["source"]["path"])
 
@@ -84,53 +79,21 @@ def _pixel_rows(source: DataSource, spectral_range: str, *, retained_only: bool)
     return rows
 
 
-def _spectra_filename(source: DataSource, spectral_range: str, basis: str) -> str:
-    code = str(spectral_range)
-    return f"raw_spectra_{code}.npy" if source.source_name == "parsed" else f"{basis}_{code}.npy"
-
-
-def _row_column(source: DataSource, basis: str) -> str:
-    return "raw_row" if source.source_name == "parsed" else f"{basis}_row"
-
-
 def _load_array(source: DataSource, spectral_range: str, basis: str) -> tuple[np.ndarray, np.ndarray]:
     code = str(spectral_range)
     if source.source_name == "parsed":
         raise RuntimeError(
             "Parsed spectra retain measurement-specific native axes. "
-            "Use load_parsed_measurement_spectra() or the canonical preprocessed store."
+            "Use open_ingested_dataset() or the canonical preprocessed store."
         )
     key = (*_source_key(source), code, basis)
     cached = _ARRAY_CACHE.get(key)
     if cached is None:
-        spectra = np.load(source.source_path / _spectra_filename(source, code, basis), mmap_mode="r")
+        spectra = np.load(source.source_path / f"{basis}_{code}.npy", mmap_mode="r")
         axis = np.load(source.source_path / f"wavenumbers_{code}.npy", mmap_mode="r")
         cached = (spectra, axis)
         _ARRAY_CACHE[key] = cached
     return cached
-
-
-def load_parsed_measurement_spectra(
-    data_source: DataSource | None,
-    measurement_id: str,
-) -> dict[str, np.ndarray]:
-    """Return raw pixels and their unmodified native axis for one acquisition."""
-    source = _source(data_source)
-    if source.source_name != "parsed":
-        raise RuntimeError("load_parsed_measurement_spectra requires the parsed data source")
-    measurements = load_file_index(source).set_index("measurement_id")
-    row = measurements.loc[str(measurement_id)]
-    if isinstance(row, pd.DataFrame):
-        raise RuntimeError(f"Duplicate parsed measurement_id: {measurement_id}")
-    code = str(row["spectral_range"])
-    raw = np.load(source.source_path / f"raw_spectra_{code}.npy", mmap_mode="r")
-    axes = np.load(source.source_path / f"native_wavenumbers_{code}.npy", mmap_mode="r")
-    start, stop = int(row["raw_start"]), int(row["raw_stop"])
-    return {
-        "spectra": raw[start:stop],
-        "wavenumbers": np.asarray(axes[int(row["native_axis_row"])], dtype=float),
-        "measurement_id": np.asarray([str(measurement_id)]),
-    }
 
 
 def _feature_names(spectral_range: str, axis: np.ndarray) -> np.ndarray:
@@ -200,11 +163,11 @@ def load_area_summaries(data_source: DataSource | None, spectral_range: str) -> 
     rows = _pixel_rows(source, code, retained_only=source.source_name == "preprocessed")
     measurements = load_file_index(source).set_index("measurement_id")
     spectra, axis = _load_array(source, code, basis="normalized")
-    payload = _summary_payload(rows, spectra, axis, _row_column(source, "normalized"), measurements)
+    payload = _summary_payload(rows, spectra, axis, "normalized_row", measurements)
     if source.source_name == "preprocessed":
         baseline_corrected, _ = _load_array(source, code, basis="pre_normalization")
         payload["area_summary_bc"] = _summarize_rows(
-            rows, baseline_corrected, _row_column(source, "pre_normalization")
+            rows, baseline_corrected, "pre_normalization_row"
         )[1]
     _SUMMARY_CACHE[key] = payload
     return payload
@@ -256,12 +219,6 @@ def load_whole_area_store(data_source: DataSource | None = None) -> dict[str, np
     if cached is not None:
         return cached
 
-    if source.source_name != "preprocessed":
-        left, right = load_area_summaries(source, "1300"), load_area_summaries(source, "2850")
-        result = _concatenate_area_summaries(left, right)
-        _WHOLE_AREA_CACHE[key] = result
-        return result
-
     measurements = load_file_index(source).copy()
     measurements["pair_key"] = _pair_key(measurements)
     spectral_data = {code: _load_array(source, code, basis="normalized") for code in SPECTRAL_RANGES}
@@ -307,21 +264,6 @@ def load_whole_area_store(data_source: DataSource | None = None) -> dict[str, np
     }
     _WHOLE_AREA_CACHE[key] = result
     return result
-
-
-def _concatenate_area_summaries(left: dict[str, np.ndarray], right: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    left_rows = {(str(subject), str(area)): index for index, (subject, area) in enumerate(zip(left["subject_ids"], left["area_ids"]))}
-    right_rows = {(str(subject), str(area)): index for index, (subject, area) in enumerate(zip(right["subject_ids"], right["area_ids"]))}
-    keys = sorted(set(left_rows) & set(right_rows))
-    values = [np.concatenate((left["area_summary"][left_rows[key]], right["area_summary"][right_rows[key]])) for key in keys]
-    features = np.concatenate((_feature_names("1300", left["feature_names"].astype(float)), _feature_names("2850", right["feature_names"].astype(float))))
-    return {
-        "values": np.vstack(values) if values else np.empty((0, len(features))),
-        "area_ids": np.asarray([key[1] for key in keys], dtype=str),
-        "measurement_ids": np.asarray([f"{left['measurement_ids'][left_rows[key]]}|{right['measurement_ids'][right_rows[key]]}" for key in keys], dtype=str),
-        "subject_ids": np.asarray([key[0] for key in keys], dtype=str),
-        "feature_names": features,
-    }
 
 
 def load_cohort(data_source: DataSource | None, cohort_kind: str, cohort_name: str) -> pd.DataFrame:

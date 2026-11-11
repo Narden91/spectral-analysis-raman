@@ -12,12 +12,9 @@ import pandas as pd
 from src import get_confirmatory_panel_dir, get_spectral_interpretability_dir
 from src import resolve_cfg as _cfg
 from src.analysis.io_utils import load_csv_or_empty, write_csv_atomic
+from src.analysis.preregistered_panel import panel_cfg
 
 logger = logging.getLogger(__name__)
-
-
-def _panel_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
-    return cfg.get("analysis", {}).get("preregistered_panel", {})
 
 
 def _empty_evidence_flags() -> pd.DataFrame:
@@ -109,7 +106,7 @@ def run_robustness_ranking(
     if not bool(phase_cfg.get("enabled", True)):
         return {}
 
-    panel = _panel_cfg(cfg)
+    panel = panel_cfg(cfg)
     robustness = panel.get("robustness", {})
     target_dir = Path(output_dir) if output_dir is not None else get_confirmatory_panel_dir()
     target_dir.mkdir(parents=True, exist_ok=True)

@@ -58,9 +58,10 @@ def run_readiness_audit(
     # The store the loaders read (data.preprocessed_dir in the project config). Check presence
     # first: resolve_data_source() would build a missing store, which an audit must never do.
     from src import resolve_cfg
-    from src.data_preparation.store import _store_dir, get_active_data_source, resolve_data_source
+    from src.data_preparation.materialize import store_dir
+    from src.data_preparation.store import get_active_data_source, resolve_data_source
 
-    store_path = _store_dir("preprocessed", resolve_cfg())
+    store_path = store_dir("preprocessed", resolve_cfg())
     store_manifest_exists = (store_path / "manifest.json").is_file()
 
     # Dry-run the cohort join (counts only, no model fit): file presence alone once hid a join that

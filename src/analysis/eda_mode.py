@@ -1,18 +1,12 @@
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import pandas as pd
 
 from src.statistics.sequential_permutation import validate_sequential_stopping_config
 
-logger = logging.getLogger(__name__)
-
 EDA_ANALYSIS_MODES = ("disease_vs_control", "disease_only")
-_LEGACY_SUBJECT_GROUP_MAP = {
-    "disease_only": "disease_only",
-}
 
 
 def _normalize_mode(value: str | None) -> str | None:
@@ -28,52 +22,17 @@ def _normalize_mode(value: str | None) -> str | None:
     return normalized
 
 
-def _legacy_mode_from_subject_group(cfg: dict[str, Any]) -> str | None:
-    subject_group = cfg.get("data", {}).get("subject_group")
-    if subject_group is None:
-        return None
-    normalized = str(subject_group).strip().lower()
-    if not normalized:
-        return None
-    mapped = _LEGACY_SUBJECT_GROUP_MAP.get(normalized)
-    if mapped is None:
-        raise ValueError(
-            "Unsupported legacy data.subject_group value "
-            f"'{subject_group}'. Use analysis.mode instead."
-        )
-    return mapped
-
-
 def resolve_eda_analysis_mode(
     cfg: dict[str, Any],
     override: str | None = None,
 ) -> str:
     resolved_override = _normalize_mode(override)
     configured_mode = _normalize_mode(cfg.get("analysis", {}).get("mode"))
-    legacy_mode = _legacy_mode_from_subject_group(cfg)
 
     if resolved_override is not None:
-        if legacy_mode is not None and legacy_mode != resolved_override:
-            raise ValueError(
-                "Conflicting EDA mode configuration: "
-                f"--analysis-mode={resolved_override} but data.subject_group implies {legacy_mode}"
-            )
         return resolved_override
-
     if configured_mode is None:
-        if legacy_mode is not None:
-            logger.warning(
-                "data.subject_group is deprecated for EDA mode selection; "
-                "set analysis.mode explicitly."
-            )
-            return legacy_mode
         return "disease_vs_control"
-
-    if legacy_mode is not None and legacy_mode != configured_mode:
-        raise ValueError(
-            "Conflicting EDA mode configuration: "
-            f"analysis.mode={configured_mode} but data.subject_group implies {legacy_mode}"
-        )
     return configured_mode
 
 
@@ -96,26 +55,15 @@ def validate_eda_mode_config(
 ) -> None:
     intra_disease_cfg = cfg.get("analysis", {}).get("advanced", {}).get("intra_disease", {})
     intra_enabled = bool(intra_disease_cfg.get("enabled", False))
-    group_configs = group_configs_for_eda_mode(mode)
-    has_control_group = any(bool(group.get("is_control")) for group in group_configs.values())
-    has_disease_group = any(not bool(group.get("is_control")) for group in group_configs.values())
 
     if mode == "disease_only" and not intra_enabled:
         raise ValueError(
             "EDA mode 'disease_only' requires analysis.advanced.intra_disease.enabled=true."
         )
-    if mode == "disease_only" and has_control_group:
-        raise ValueError(
-            "EDA mode 'disease_only' must not define control cohorts in its group routing."
-        )
     if mode == "disease_vs_control" and intra_enabled:
         raise ValueError(
             "EDA mode 'disease_vs_control' requires "
             "analysis.advanced.intra_disease.enabled=false."
-        )
-    if mode == "disease_vs_control" and (not has_control_group or not has_disease_group):
-        raise ValueError(
-            "EDA mode 'disease_vs_control' requires both control and disease cohorts in group routing."
         )
 
     if df_index is None:

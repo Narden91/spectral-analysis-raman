@@ -31,6 +31,7 @@ from src.analysis.clinical_feature_associations import (
 from src.analysis.io_utils import write_csv_atomic
 from src.analysis.phase_status import STATUS_MISSING_REQUIRED_DATA, STATUS_NOT_TESTED_GATE, PhaseStatus
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
+from src.statistics.cluster_permutation import normalize_n_jobs
 from src.statistics.sequential_permutation import (
     resolve_sequential_stopping_config,
     run_curtailed_permutation_draws,
@@ -174,11 +175,9 @@ def _build_feature_pool(
     return pd.DataFrame(pool, index=frame.index)
 
 
-def _cv_strategy(n_samples: int, n_splits: int, random_state: int, stratified: bool = False, y: np.ndarray | None = None):
+def _cv_strategy(n_samples: int, n_splits: int, random_state: int):
     if n_samples < 15:
         return LeaveOneOut()
-    if stratified and y is not None:
-        return StratifiedKFold(n_splits=min(n_splits, min(np.bincount(y))), shuffle=True, random_state=random_state)
     return KFold(n_splits=min(n_splits, n_samples), shuffle=True, random_state=random_state)
 
 
@@ -316,10 +315,6 @@ def _fit_tuned_logistic(
     model = l1_logistic_model(c=best_c, random_state=random_state)
     fit_with_convergence_capture(model, X_scaled, y, context=context)
     return scaler, model, best_c
-
-
-def _normalize_n_jobs(n_jobs: int) -> int:
-    return 1 if n_jobs == 0 else n_jobs
 
 
 def _parallel_values(n_jobs: int, calls: list[Any]) -> list[Any]:
@@ -548,16 +543,6 @@ def _bootstrap_stability_sample(
     )
 
 
-def _optional_gpu_status() -> str:
-    try:
-        import cupy as cp  # type: ignore[import-not-found]
-
-        count = int(cp.cuda.runtime.getDeviceCount())
-        return f"cupy_available:{count}_cuda_device(s)" if count else "cupy_available:no_cuda_device"
-    except Exception:
-        return "not_available"
-
-
 def _permutation_test_continuous(
     X: np.ndarray,
     y: np.ndarray,
@@ -589,12 +574,10 @@ def _permutation_test_continuous(
     null_r2 = run_curtailed_permutation_draws(
         _permuted_continuous_r2, seed_args, observed=observed_r2, config=stopping, n_jobs=n_jobs
     )
+    # Curtailed draws raise on non-finite scores and always run at least one draw.
     null_arr = np.array(null_r2)
-    finite = null_arr[np.isfinite(null_arr)]
-    if len(finite) == 0:
-        return np.nan, np.nan, np.nan, len(null_r2)
-    p_value = float((1 + np.sum(finite >= observed_r2)) / (len(finite) + 1))
-    return p_value, float(np.mean(finite)), float(np.std(finite)), len(null_r2)
+    p_value = float((1 + np.sum(null_arr >= observed_r2)) / (len(null_arr) + 1))
+    return p_value, float(np.mean(null_arr)), float(np.std(null_arr)), len(null_r2)
 
 
 def _permutation_test_binary(
@@ -636,12 +619,10 @@ def _permutation_test_binary(
         config=stopping,
         n_jobs=n_jobs,
     )
+    # Curtailed draws raise on non-finite scores and always run at least one draw.
     null_arr = np.array(null_scores)
-    finite = null_arr[np.isfinite(null_arr)]
-    if len(finite) == 0:
-        return np.nan, np.nan, np.nan, len(null_scores)
-    p_value = float((1 + np.sum(finite >= observed_balanced_accuracy)) / (len(finite) + 1))
-    return p_value, float(np.mean(finite)), float(np.std(finite)), len(null_scores)
+    p_value = float((1 + np.sum(null_arr >= observed_balanced_accuracy)) / (len(null_arr) + 1))
+    return p_value, float(np.mean(null_arr)), float(np.std(null_arr)), len(null_scores)
 
 
 def _bootstrap_stability_summary(
@@ -850,9 +831,7 @@ def run_minimal_panel(
     n_permutations = int(panel_cfg.get("n_permutations", 1000))
     n_bootstrap = int(panel_cfg.get("n_bootstrap", 200))
     random_state = int(panel_cfg.get("random_state", 42))
-    n_jobs = _normalize_n_jobs(int(panel_cfg.get("n_jobs", -1)))
-    gpu_status = _optional_gpu_status() if bool(panel_cfg.get("detect_gpu", True)) else "not_checked"
-    logger.debug("Minimal panel compute backend: sklearn_cpu; optional GPU status: %s", gpu_status)
+    n_jobs = normalize_n_jobs(int(panel_cfg.get("n_jobs", -1)))
 
     continuous_targets = [str(t) for t in panel_cfg.get("continuous_targets", ["moca_baseline", "moca_3m", "delta_moca"])]
     binary_targets = panel_cfg.get("binary_targets", _DEFAULT_BINARY_TARGETS)
@@ -951,8 +930,6 @@ def run_minimal_panel(
             "permutation_p_value": p_value,
             "n_permutations": n_permutations_used,
             "cv_strategy": cv_info["cv_strategy"],
-            "compute_backend": "sklearn_cpu",
-            "gpu_status": gpu_status,
             "inference_role": "exploratory",
             "status": "ok",
         })
@@ -965,8 +942,6 @@ def run_minimal_panel(
             "permutation_p_value": pd.NA,
             "n_permutations": pd.NA,
             "cv_strategy": cv_info["cv_strategy"],
-            "compute_backend": "sklearn_cpu",
-            "gpu_status": gpu_status,
             "inference_role": "exploratory",
             "status": "ok",
         })
@@ -1076,8 +1051,6 @@ def run_minimal_panel(
             "permutation_p_value": p_value,
             "n_permutations": n_permutations_used,
             "cv_strategy": cv_info["cv_strategy"],
-            "compute_backend": "sklearn_cpu",
-            "gpu_status": gpu_status,
             "inference_role": "exploratory",
             "status": "ok",
         })
@@ -1090,8 +1063,6 @@ def run_minimal_panel(
             "permutation_p_value": pd.NA,
             "n_permutations": pd.NA,
             "cv_strategy": cv_info["cv_strategy"],
-            "compute_backend": "sklearn_cpu",
-            "gpu_status": gpu_status,
             "inference_role": "exploratory",
             "status": "ok",
         })
@@ -1121,7 +1092,7 @@ def run_minimal_panel(
         perf_rows,
         columns=[
             "endpoint", "endpoint_type", "metric", "value", "n_subjects", "permutation_p_value",
-            "n_permutations", "cv_strategy", "compute_backend", "gpu_status", "inference_role", "status",
+            "n_permutations", "cv_strategy", "inference_role", "status",
         ],
     )
     coef_df = pd.DataFrame(

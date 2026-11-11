@@ -79,8 +79,6 @@ class SampleRecord:
     parsed_label: float
     spec_1300: np.ndarray
     spec_2850: np.ndarray
-    n_maps_1300: int
-    n_maps_2850: int
 
 
 @dataclass
@@ -194,7 +192,6 @@ def build_paired_cohort_dataset(
     *,
     cfg: PairedLipidConfig = PairedLipidConfig(),
     subset_mode: SubsetMode = "all_eligible",
-    endpoint: str | None = None,
 ) -> CohortDataset:
     """Construct the participant -> sample -> map hierarchy and covariate table.
 
@@ -209,7 +206,7 @@ def build_paired_cohort_dataset(
         ``retained`` (bool). Acquisition modes (FP/SS) are pooled as equivalent (investigator
         decision, 2026-11-09), so they enter no covariate.
     """
-    target_col = endpoint or cfg.primary_endpoint
+    target_col = cfg.primary_endpoint
     min_maps = 3 if subset_mode == "three_map_complete" else cfg.min_maps_per_block
 
     clin = clinical_df.copy()
@@ -294,8 +291,6 @@ def build_paired_cohort_dataset(
                 parsed_label=parsed_lbl,
                 spec_1300=med_1300,
                 spec_2850=med_2850,
-                n_maps_1300=int(idx_1300.size),
-                n_maps_2850=int(idx_2850.size),
             )
         )
 
@@ -477,7 +472,6 @@ def load_paired_cohort_from_store(
     data_source: Any | None = None,
     cfg: PairedLipidConfig = PairedLipidConfig(),
     subset_mode: SubsetMode = "all_eligible",
-    endpoint: str | None = None,
 ) -> tuple[CohortDataset, dict[str, Any]]:
     """Load the stroke cohort hierarchy from the canonical preprocessed store and clinical master."""
     from src.data_preparation.loaders import load_area_summaries, load_file_index
@@ -537,7 +531,6 @@ def load_paired_cohort_from_store(
         wn_2850,
         cfg=cfg,
         subset_mode=subset_mode,
-        endpoint=endpoint,
     )
     return dataset, clin_audit
 

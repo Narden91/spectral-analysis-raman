@@ -21,6 +21,7 @@ import pandas as pd
 
 from src import resolve_cfg as _cfg
 from src import resolve_project_path
+from src.constants import SPECTRAL_RANGES
 from src.data_preparation.cohorts import build_materialized_cohorts, write_cohort_tables
 from src.data_preparation.manifest import (
     MANIFEST_VERSION,
@@ -38,7 +39,6 @@ from src.metadata.clinical import load_clinical_data, merge_index_with_clinical
 from src.preprocessing.pipeline import flatten_spectra_rows, run_preprocessing
 
 logger = logging.getLogger(__name__)
-RANGES = ("1300", "2850")
 ProgressCallback = Callable[[str, int, int], None]
 
 
@@ -64,12 +64,12 @@ def _data_cfg(cfg: dict) -> dict:
     return cfg.get("data", {})
 
 
-def _store_dir(store_type: str, cfg: dict) -> Path:
-    key = {"parsed": "parsed_dir", "preprocessed": "preprocessed_dir"}.get(store_type)
+def store_dir(source_name: str, cfg: dict) -> Path:
+    """Return the configured directory of the ``parsed`` or ``preprocessed`` store."""
+    key = {"parsed": "parsed_dir", "preprocessed": "preprocessed_dir"}.get(source_name)
     if key is None:
-        raise ValueError(f"Unsupported store_type: {store_type}")
-    default = f"data/{store_type}"
-    return resolve_project_path(_data_cfg(cfg).get(key, default))
+        raise ValueError(f"Unsupported data source: {source_name}")
+    return resolve_project_path(_data_cfg(cfg).get(key, f"data/{source_name}"))
 
 
 def _raw_text_dir(cfg: dict) -> Path:
@@ -104,7 +104,7 @@ def _measurement_ids(frame: pd.DataFrame) -> pd.Series:
 
 
 def _prepare_file_index(cfg: dict) -> pd.DataFrame:
-    frame = disambiguate_subject_ids(build_file_index(data_dir=_raw_text_dir(cfg), measurement="all")).copy()
+    frame = disambiguate_subject_ids(build_file_index(data_dir=_raw_text_dir(cfg))).copy()
     if frame.empty:
         raise FileNotFoundError(f"No canonical Raman measurement files found in {_raw_text_dir(cfg)}")
     frame["filepath"] = frame["filepath"].map(lambda value: str(Path(value)))
@@ -185,10 +185,10 @@ def _write_parsed_payload(
     measurements: pd.DataFrame,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
-    spectra_parts: dict[str, list[np.ndarray]] = {code: [] for code in RANGES}
+    spectra_parts: dict[str, list[np.ndarray]] = {code: [] for code in SPECTRAL_RANGES}
     pixel_parts: list[pd.DataFrame] = []
-    source_axes: dict[str, list[np.ndarray]] = {code: [] for code in RANGES}
-    starts: dict[str, int] = {code: 0 for code in RANGES}
+    source_axes: dict[str, list[np.ndarray]] = {code: [] for code in SPECTRAL_RANGES}
+    starts: dict[str, int] = {code: 0 for code in SPECTRAL_RANGES}
     indexed = measurements.copy()
     indexed["raw_start"] = 0
     indexed["raw_stop"] = 0
@@ -199,7 +199,7 @@ def _write_parsed_payload(
 
     for position, (idx, row) in enumerate(indexed.iterrows(), start=1):
         code = str(row["spectral_range"])
-        axis, x, y, spectra, _ = read_txt_spectrum(row["filepath"])
+        axis, x, y, spectra = read_txt_spectrum(row["filepath"])
         axis = _assert_same_axis(None, axis, code)
         values, coords = _flatten_with_coordinates(spectra, x, y)
         start = starts[code]
@@ -227,7 +227,7 @@ def _write_parsed_payload(
         if progress_callback is not None:
             progress_callback("Raw ingestion", position, len(indexed))
 
-    for code in RANGES:
+    for code in SPECTRAL_RANGES:
         axes = source_axes[code]
         if not axes:
             raise ValueError(f"Raw dataset does not contain required {code} range")
@@ -238,7 +238,7 @@ def _write_parsed_payload(
         _write_npy(store_dir / f"native_wavenumbers_{code}.npy", np.vstack(axes))
     pixels = pd.concat(pixel_parts, ignore_index=True)
     pixels.to_parquet(store_dir / "pixels.parquet", index=False)
-    return indexed, {code: int(starts[code]) for code in RANGES}
+    return indexed, {code: int(starts[code]) for code in SPECTRAL_RANGES}
 
 
 def _append_reason(values: pd.Series, reason: str, mask: np.ndarray) -> pd.Series:
@@ -311,12 +311,12 @@ def _process_measurements(
             key = (str(item.row["subject_id"]), item.range_code)
             subject_counts[key] = subject_counts.get(key, 0) + int(item.retained_mask.sum())
 
-    arrays: dict[str, list[np.ndarray]] = {f"normalized_{code}": [] for code in RANGES}
-    arrays.update({f"pre_normalization_{code}": [] for code in RANGES})
+    arrays: dict[str, list[np.ndarray]] = {f"normalized_{code}": [] for code in SPECTRAL_RANGES}
+    arrays.update({f"pre_normalization_{code}": [] for code in SPECTRAL_RANGES})
     qc_parts: list[pd.DataFrame] = []
     area_rows: list[dict[str, Any]] = []
-    expected_axis: dict[str, np.ndarray | None] = {code: None for code in RANGES}
-    offsets = {code: 0 for code in RANGES}
+    expected_axis: dict[str, np.ndarray | None] = {code: None for code in SPECTRAL_RANGES}
+    offsets = {code: 0 for code in SPECTRAL_RANGES}
 
     for item in processed:
         row = item.row
@@ -362,7 +362,7 @@ def _process_measurements(
         )
 
     result_arrays: dict[str, np.ndarray] = {}
-    for code in RANGES:
+    for code in SPECTRAL_RANGES:
         width = int(expected_axis[code].size) if expected_axis[code] is not None else 0
         for basis in ("normalized", "pre_normalization"):
             chunks = arrays[f"{basis}_{code}"]
@@ -382,14 +382,14 @@ def _write_cohorts(store_dir: Path, measurements: pd.DataFrame, subjects: pd.Dat
 
 def _generated_signatures(root: Path) -> dict[str, dict[str, Any]]:
     return {
-        str(path.relative_to(root)): file_signature(path).to_dict()
+        str(path.relative_to(root)): file_signature(path)
         for path in sorted(root.rglob("*"))
         if path.is_file() and path.name != "manifest.json"
     }
 
 
 def _input_signatures(cfg: dict, measurements: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    signatures = {str(_clinical_data_path(cfg)): file_signature(_clinical_data_path(cfg)).to_dict()}
+    signatures = {str(_clinical_data_path(cfg)): file_signature(_clinical_data_path(cfg))}
     for row in measurements[["filepath", "raw_file_signature"]].itertuples(index=False):
         path = Path(str(row.filepath))
         stat = path.stat()
@@ -456,17 +456,17 @@ def build_parsed_store(
     progress_callback: ProgressCallback | None = None,
 ) -> MaterializedStore:
     config = _cfg(cfg)
-    store_dir = _store_dir("parsed", config)
-    if store_dir.exists() and not force and validate_store(store_dir, "parsed", config).is_valid:
+    store_path = store_dir("parsed", config)
+    if store_path.exists() and not force and validate_store(store_path, "parsed", config).is_valid:
         from src.data_preparation.manifest import load_manifest
         if progress_callback is not None:
             progress_callback("Raw ingestion", 1, 1)
-        return MaterializedStore("parsed", store_dir, load_manifest(store_dir / "manifest.json"))
+        return MaterializedStore("parsed", store_path, load_manifest(store_path / "manifest.json"))
 
     def write(staging: Path) -> MaterializedStore:
         measurements = _prepare_file_index(config)
         subjects = load_clinical_data(
-            clinical_csv=_clinical_data_path(config), data_index=measurements, write_curated=False,
+            clinical_csv=_clinical_data_path(config), data_index=measurements,
         )
         measurements, pixel_counts = _write_parsed_payload(staging, measurements, progress_callback)
         measurements.to_parquet(staging / "measurements.parquet", index=False)
@@ -474,10 +474,10 @@ def build_parsed_store(
         areas = measurements[["measurement_id", "file_id", "subject_id", "sample_id", "spot_id", "area_id", "spectral_range", "slide_number", "measurement_number", "acquisition_mode"]].copy()
         areas.to_parquet(staging / "areas.parquet", index=False)
         _write_cohorts(staging, measurements, subjects)
-        manifest = _build_manifest("parsed", staging, {"type": "raw_text", "path": str(_raw_text_dir(config)), "manifest_hash": None}, config, measurements, subjects, areas, {f"pixels_{code}": pixel_counts[code] for code in RANGES})
-        return MaterializedStore("parsed", store_dir, write_manifest(staging / "manifest.json", manifest))
+        manifest = _build_manifest("parsed", staging, {"type": "raw_text", "path": str(_raw_text_dir(config)), "manifest_hash": None}, config, measurements, subjects, areas, {f"pixels_{code}": pixel_counts[code] for code in SPECTRAL_RANGES})
+        return MaterializedStore("parsed", store_path, write_manifest(staging / "manifest.json", manifest))
 
-    return _atomic_replace(store_dir, write)
+    return _atomic_replace(store_path, write)
 
 
 def build_preprocessed_store(
@@ -487,14 +487,14 @@ def build_preprocessed_store(
     progress_callback: ProgressCallback | None = None,
 ) -> MaterializedStore:
     config = _cfg(cfg)
-    parsed_dir = _store_dir("parsed", config)
+    parsed_dir = store_dir("parsed", config)
     parsed = build_parsed_store(config, force=False, progress_callback=progress_callback)
-    store_dir = _store_dir("preprocessed", config)
-    if store_dir.exists() and not force and validate_store(store_dir, "preprocessed", config).is_valid:
+    store_path = store_dir("preprocessed", config)
+    if store_path.exists() and not force and validate_store(store_path, "preprocessed", config).is_valid:
         from src.data_preparation.manifest import load_manifest
         if progress_callback is not None:
             progress_callback("Preprocessing", 1, 1)
-        return MaterializedStore("preprocessed", store_dir, load_manifest(store_dir / "manifest.json"))
+        return MaterializedStore("preprocessed", store_path, load_manifest(store_path / "manifest.json"))
 
     def write(staging: Path) -> MaterializedStore:
         measurements = pd.read_parquet(parsed_dir / "measurements.parquet")
@@ -507,12 +507,12 @@ def build_preprocessed_store(
         areas.to_parquet(staging / "areas.parquet", index=False)
         qc.to_parquet(staging / "qc.parquet", index=False)
         _write_cohorts(staging, measurements, subjects)
-        counts = {f"pixels_{code}": int((qc["spectral_range"] == code).sum()) for code in RANGES}
-        counts.update({f"retained_pixels_{code}": int((qc[(qc["spectral_range"] == code) & qc["retained"]]).shape[0]) for code in RANGES})
+        counts = {f"pixels_{code}": int((qc["spectral_range"] == code).sum()) for code in SPECTRAL_RANGES}
+        counts.update({f"retained_pixels_{code}": int((qc[(qc["spectral_range"] == code) & qc["retained"]]).shape[0]) for code in SPECTRAL_RANGES})
         manifest = _build_manifest("preprocessed", staging, {"type": "parsed", "path": str(parsed_dir), "manifest_hash": parsed.manifest.get("manifest_hash")}, config, measurements, subjects, areas, counts)
-        return MaterializedStore("preprocessed", store_dir, write_manifest(staging / "manifest.json", manifest))
+        return MaterializedStore("preprocessed", store_path, write_manifest(staging / "manifest.json", manifest))
 
-    return _atomic_replace(store_dir, write)
+    return _atomic_replace(store_path, write)
 
 
 def prepare_data_stores(

@@ -14,4 +14,3 @@ analysis:
   advanced:
     intra_disease:
       enabled: true
-      clinical_csv: "data/clinical_data.csv"

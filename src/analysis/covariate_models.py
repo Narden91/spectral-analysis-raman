@@ -155,8 +155,6 @@ def _fit_logistic(
     outcome: pd.Series,
     predictor: pd.Series,
     covariates: pd.DataFrame,
-    *,
-    random_state: int,
 ) -> tuple[float, float, float, float]:
     design = pd.concat([predictor.rename("predictor"), covariates], axis=1)
     design = design.dropna()
@@ -308,7 +306,6 @@ def run_covariate_region_models(
 
     requested_covariates = [str(item) for item in model_cfg.get("covariates", ["age", "sex"])]
     min_subjects = int(model_cfg.get("min_subjects", 8))
-    random_state = int(model_cfg.get("random_state", 42))
     ratio_frame = _ratio_predictors(disease_only, all_feature_columns, cfg)
 
     model_rows: list[dict[str, object]] = []
@@ -405,7 +402,6 @@ def run_covariate_region_models(
                             design["outcome"],
                             design["predictor"],
                             design.drop(columns=["outcome", "predictor"]),
-                            random_state=random_state,
                         )
                         r_squared = np.nan
                         n_events = int(design["outcome"].sum())

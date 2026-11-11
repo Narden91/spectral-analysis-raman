@@ -25,7 +25,7 @@ from src.analysis.clinical_feature_associations import (
 )
 from src.analysis.spectral_regions import build_candidate_regions
 from src.analysis.statistics import fdr_correction
-from src.statistics.cluster_permutation import apply_binary_cluster_permutation
+from src.statistics.cluster_permutation import apply_binary_cluster_permutation, rank_biserial_effect
 
 logger = logging.getLogger(__name__)
 
@@ -64,44 +64,6 @@ def _stratification_cfg(cfg: dict) -> dict:
     return cfg.get("analysis", {}).get("disease_stratification", {})
 
 
-def _rank_biserial_effect(
-    left: np.ndarray,
-    right: np.ndarray,
-    u_statistic: float | np.ndarray,
-) -> float | np.ndarray:
-    denominator = float(len(left) * len(right))
-    if denominator == 0:
-        if np.ndim(u_statistic) == 0:
-            return float("nan")
-        return np.full(np.asarray(u_statistic).shape, np.nan, dtype=float)
-    effect = (2.0 * np.asarray(u_statistic, dtype=float) / denominator) - 1.0
-    if np.ndim(effect) == 0:
-        return float(effect)
-    return effect
-
-
-def _apply_cluster_permutation(
-    tests: pd.DataFrame,
-    frame: pd.DataFrame,
-    spec: StratificationSpec,
-    *,
-    n_permutations: int,
-    cluster_alpha: float,
-    random_state: int,
-    n_jobs: int = 1,
-) -> pd.DataFrame:
-    return apply_binary_cluster_permutation(
-        tests,
-        frame,
-        group_column=spec.variable,
-        ordered_groups=(spec.ordered_groups[0], spec.ordered_groups[1]),
-        n_permutations=n_permutations,
-        cluster_alpha=cluster_alpha,
-        random_state=random_state,
-        n_jobs=n_jobs,
-    )
-
-
 def _kruskal_effect_size(h_statistic: float, n_subjects: int, n_groups: int) -> float:
     denominator = n_subjects - n_groups
     if denominator <= 0:
@@ -114,24 +76,14 @@ def _multigroup_feature_tests(
     feature_meta: pd.DataFrame,
     spec: StratificationSpec,
     min_subjects_per_group: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> pd.DataFrame:
     subset = frame.loc[frame[spec.variable].notna()].copy()
     subset[spec.variable] = subset[spec.variable].astype(str)
     present_groups = [
         group for group in spec.ordered_groups if group in subset[spec.variable].unique()
     ]
-    counts = (
-        subset[spec.variable]
-        .value_counts()
-        .reindex(present_groups, fill_value=0)
-        .rename_axis("group_name")
-        .reset_index(name="n_subjects")
-    )
-    counts["group_variable"] = spec.variable
-    counts["contrast_name"] = spec.label
-    insufficient = counts["n_subjects"].lt(min_subjects_per_group).any() or len(present_groups) < 2
-    counts["status"] = np.where(insufficient, "insufficient sample size", "ok")
-    counts["min_subjects_per_group"] = min_subjects_per_group
+    group_sizes = subset[spec.variable].value_counts().reindex(present_groups, fill_value=0)
+    insufficient = group_sizes.lt(min_subjects_per_group).any() or len(present_groups) < 2
 
     if insufficient:
         return pd.DataFrame(
@@ -143,7 +95,7 @@ def _multigroup_feature_tests(
                     "status": "insufficient sample size",
                 }
             ]
-        ), counts
+        )
 
     group_arrays = {
         group: subset.loc[subset[spec.variable] == group, feature_meta["feature_name"]].to_numpy(dtype=float)
@@ -187,7 +139,7 @@ def _multigroup_feature_tests(
             )
             u_statistics = np.asarray(test_result.statistic, dtype=float)
             p_values = np.asarray(test_result.pvalue, dtype=float)
-            effects = np.asarray(_rank_biserial_effect(left, right, u_statistics), dtype=float)
+            effects = np.asarray(rank_biserial_effect(left, right, u_statistics), dtype=float)
             for feature_index, feature_row in feature_meta.iterrows():
                 pairwise_rows.append(
                     {
@@ -214,7 +166,7 @@ def _multigroup_feature_tests(
         pairwise["fdr_q"] = q_values
         pairwise["significant_fdr"] = significant
         tests = pd.concat([tests, pairwise], ignore_index=True, sort=False)
-    return tests, counts
+    return tests
 
 
 def _plot_effects(tests: pd.DataFrame, output_dir: Path) -> None:
@@ -282,10 +234,9 @@ def run_disease_stratification(
     random_state = int(strat_cfg.get("random_state", 42))
 
     test_frames: list[pd.DataFrame] = []
-    count_frames: list[pd.DataFrame] = []
 
     for spec in BINARY_SPECS:
-        tests, counts = compute_binary_group_feature_tests(
+        tests, _ = compute_binary_group_feature_tests(
             disease_only,
             feature_meta,
             group_column=spec.variable,
@@ -294,31 +245,29 @@ def run_disease_stratification(
             min_subjects_per_group=min_subjects,
             fdr_alpha=0.05,
         )
-        tests = _apply_cluster_permutation(
+        tests = apply_binary_cluster_permutation(
             tests,
             disease_only,
-            spec,
+            group_column=spec.variable,
+            ordered_groups=(spec.ordered_groups[0], spec.ordered_groups[1]),
             n_permutations=n_permutations,
             cluster_alpha=cluster_alpha,
             random_state=random_state,
             n_jobs=n_jobs,
         )
         test_frames.append(tests)
-        count_frames.append(counts)
         logger.info("Disease stratification: %s complete", spec.label)
 
-    lesion_tests, lesion_counts = _multigroup_feature_tests(
+    lesion_tests = _multigroup_feature_tests(
         disease_only,
         feature_meta,
         LESION_SPEC,
         min_subjects,
     )
     test_frames.append(lesion_tests)
-    count_frames.append(lesion_counts)
     logger.info("Disease stratification: %s complete", LESION_SPEC.label)
 
     tests = pd.concat(test_frames, ignore_index=True, sort=False)
-    counts = pd.concat(count_frames, ignore_index=True, sort=False)
     candidate_regions = build_candidate_regions(
         tests,
         group_columns=("contrast_name", "group_variable"),
@@ -340,12 +289,6 @@ def run_disease_stratification(
 
     tests_path = target_dir / "stratification_wavenumber_tests.csv"
     candidates_path = target_dir / "stratification_candidate_regions.csv"
-    obsolete_paths = [
-        target_dir / "stratification_group_counts.csv",
-    ]
-    for obsolete_path in obsolete_paths:
-        if obsolete_path.exists():
-            obsolete_path.unlink()
     tests.to_csv(tests_path, index=False)
     candidate_regions.to_csv(candidates_path, index=False)
     _plot_effects(tests, plots_dir)

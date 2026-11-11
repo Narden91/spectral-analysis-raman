@@ -22,7 +22,6 @@ Output map:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import time
@@ -70,7 +69,8 @@ from src.analysis.pls_regression import _calculate_vip
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
 from src.analysis.statistics import fdr_correction
 from src.data_preparation import resolve_data_source, write_analysis_provenance
-from src.data_preparation.manifest import config_hash
+from src.data_preparation.manifest import config_hash, hash_file
+from src.statistics.cluster_permutation import normalize_n_jobs
 from src.statistics.sequential_permutation import (
     resolve_sequential_stopping_config,
     should_stop,
@@ -139,19 +139,11 @@ def _n_permutations(ml_cfg: dict[str, Any]) -> int:
     return int(ml_cfg.get("n_permutations", 1000))
 
 
-def _normalize_n_jobs(n_jobs: int) -> int:
-    return 1 if n_jobs == 0 else n_jobs
-
-
 def _file_sha256(path: str | Path | None) -> str:
     """Return a content fingerprint for a feature matrix used by resumable work."""
     if path is None:
         return "default_feature_matrix"
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return hash_file(path)
 
 
 @dataclass(frozen=True)
@@ -161,7 +153,6 @@ class _CheckpointStore:
     directory: Path
     identity: dict[str, object]
     resume: bool
-    legacy_compatible: bool
 
     @classmethod
     def create(
@@ -172,7 +163,6 @@ class _CheckpointStore:
         feature_matrix_path: str | Path | None,
         data_manifest_hash: str | None,
         resume: bool,
-        legacy_run_manifest: dict[str, object] | None,
     ) -> "_CheckpointStore":
         if resume and feature_matrix_path is None:
             raise ValueError("Resuming ML requires an explicit subject feature matrix path")
@@ -187,12 +177,6 @@ class _CheckpointStore:
         directory = metadata_dir / "control_vs_disease_ml_checkpoints" / fingerprint
         metadata_path = directory / "checkpoint_manifest.json"
         preexisting = metadata_path.exists()
-        legacy_compatible = bool(
-            legacy_run_manifest
-            and legacy_run_manifest.get("analysis_config_hash") == identity["analysis_config_hash"]
-            and legacy_run_manifest.get("data_manifest_hash") == identity["data_manifest_hash"]
-            and legacy_run_manifest.get("analysis_mode") == "disease_vs_control"
-        )
 
         if resume and preexisting:
             stored = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -203,7 +187,7 @@ class _CheckpointStore:
                 )
         directory.mkdir(parents=True, exist_ok=True)
         write_json_atomic(metadata_path, identity)
-        return cls(directory=directory, identity=identity, resume=resume, legacy_compatible=legacy_compatible)
+        return cls(directory=directory, identity=identity, resume=resume)
 
     def resampling_path(self, kind: str, model_name: str, representation: str, label: str) -> Path:
         return self.directory / f"{kind}_{model_name}_{representation}_{label}.parquet"
@@ -780,11 +764,6 @@ def _cv_predict(
     return y_pred, y_score
 
 
-def _outer_splits(y: np.ndarray, n_outer_splits: int, random_state: int) -> StratifiedKFold:
-    n_splits = min(n_outer_splits, int(np.bincount(y).min()))
-    return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-
-
 def _locked_joint_stratified_split_plan(
     y: np.ndarray,
     strata: np.ndarray,
@@ -870,45 +849,6 @@ def _run_repeated_nested_cv(
     return pd.DataFrame(rows)
 
 
-def _single_split_balanced_accuracy(
-    model_name: str,
-    X: np.ndarray,
-    y: np.ndarray,
-    *,
-    ml_cfg: dict[str, Any],
-    n_jobs: int,
-    random_state: int,
-) -> float:
-    """Run one un-repeated outer StratifiedKFold pass; return balanced accuracy.
-
-    This is the permutation-test workhorse. Permutation only needs a point
-    estimate per permutation draw — the reference distribution's spread across draws
-    already captures Monte Carlo noise, so repeating the outer CV per
-    permutation (as the observed estimate does) would multiply
-    cost by n_outer_repeats for no statistical benefit. This mirrors the
-    single-split-per-permutation convention already used by
-    `splsda._permuted_splsda_score` and `pls_regression._permuted_pls_r2`
-    elsewhere in this repo.
-    """
-    n_outer_splits = _n_outer_splits(ml_cfg)
-    n_inner_splits = _n_inner_splits(ml_cfg)
-    threshold_metric = _threshold_metric(ml_cfg)
-    outer_cv = list(_outer_splits(y, n_outer_splits, random_state).split(X, y))
-    # Parallelism is applied across permutations by the caller, not within one.
-    y_pred, _y_score = _cv_predict(
-        model_name,
-        X,
-        y,
-        outer_cv,
-        ml_cfg=ml_cfg,
-        n_inner_splits=n_inner_splits,
-        threshold_metric=threshold_metric,
-        random_state=random_state,
-        n_jobs=1,
-    )
-    return float(balanced_accuracy_score(y, y_pred))
-
-
 def _fixed_plan_balanced_accuracy(
     model_name: str,
     X: np.ndarray,
@@ -966,14 +906,12 @@ def _permuted_score(
     strata: np.ndarray | None,
     ml_cfg: dict[str, Any],
     seed: int,
-    outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]] | None = None,
+    outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]],
 ) -> float:
     rng = np.random.default_rng(seed)
     y_perm = _permute_labels(y, rng, strata)
     if len(np.unique(y_perm)) < 2:
         return np.nan
-    if outer_split_plan is None:
-        return _single_split_balanced_accuracy(model_name, X, y_perm, ml_cfg=ml_cfg, n_jobs=1, random_state=seed)
     return _fixed_plan_balanced_accuracy(model_name, X, y_perm, ml_cfg=ml_cfg, outer_cv=outer_split_plan[0])
 
 
@@ -1053,7 +991,7 @@ def run_permutation_test(
     ml_cfg: dict[str, Any],
     n_jobs: int,
     random_state: int,
-    outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]] | None = None,
+    outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]],
     checkpoint_path: Path | None = None,
     resume: bool = False,
     progress: Progress | None = None,
@@ -1616,30 +1554,6 @@ def _sex_stratified_refit(
 # ---------------------------------------------------------------------------
 
 
-def _legacy_observed_outputs_are_compatible(
-    model_dir: Path,
-    model_name: str,
-    representation: str,
-    *,
-    n_subjects: int,
-    n_outer_repeats: int,
-) -> bool:
-    """Allow one-time reuse of pre-checkpoint observed outputs from this run root."""
-    paths = (
-        model_dir / f"{model_name}_{representation}_cv_predictions.csv",
-        model_dir / f"{model_name}_{representation}_feature_importance_outer_folds.csv",
-        model_dir / f"{model_name}_{representation}_feature_importance.csv",
-    )
-    if not all(path.exists() for path in paths):
-        return False
-    try:
-        oof = pd.read_csv(paths[0])
-        importance = pd.read_csv(paths[2])
-    except (OSError, pd.errors.ParserError):
-        return False
-    return len(oof) == n_subjects * n_outer_repeats and not importance.empty
-
-
 def _append_null_distribution_rows(
     rows: list[dict[str, object]],
     *,
@@ -1700,16 +1614,7 @@ def _run_observed_model_phase(
     cv_path = model_dir / f"{model_name}_{representation}_cv_predictions.csv"
     importance_folds_path = model_dir / f"{model_name}_{representation}_feature_importance_outer_folds.csv"
     importance_path = model_dir / f"{model_name}_{representation}_feature_importance.csv"
-    observed_complete = checkpoints.stage_complete(model_name, representation, "observed") or (
-        checkpoints.legacy_compatible
-        and _legacy_observed_outputs_are_compatible(
-            model_dir,
-            model_name,
-            representation,
-            n_subjects=len(y_valid),
-            n_outer_repeats=len(outer_split_plan),
-        )
-    )
+    observed_complete = checkpoints.stage_complete(model_name, representation, "observed")
     with phase(f"{model_name}_{representation}", f"{model_name} ({representation}) nested CV"):
         if (
             observed_complete
@@ -1719,7 +1624,7 @@ def _run_observed_model_phase(
         ):
             oof = pd.read_csv(cv_path)
             metrics = _aggregate_repeat_metrics(oof)
-            logger.info("Reused compatible observed ML outputs for %s (%s)", model_name, representation)
+            logger.info("Reused checkpointed observed ML outputs for %s (%s)", model_name, representation)
         else:
             with _progress_task(
                 progress,
@@ -1887,7 +1792,6 @@ def run_control_vs_disease_ml_pipeline(
     cfg: dict[str, Any] | None = None,
     resume: bool = False,
     data_manifest_hash: str | None = None,
-    legacy_run_manifest: dict[str, object] | None = None,
 ) -> dict[str, Path]:
     cfg_in = _cfg(cfg)
     ml_cfg = _ml_cfg(cfg_in)
@@ -1908,13 +1812,12 @@ def run_control_vs_disease_ml_pipeline(
         feature_matrix_path=feature_matrix_path,
         data_manifest_hash=data_manifest_hash,
         resume=resume,
-        legacy_run_manifest=legacy_run_manifest,
     )
     phase_timings: list[dict[str, object]] = []
     outputs: dict[str, Path] = {}
 
     representations = list(ml_cfg.get("representations", ["whole", "band_panel"]))
-    n_jobs = _normalize_n_jobs(int(ml_cfg.get("n_jobs", -1)))
+    n_jobs = normalize_n_jobs(int(ml_cfg.get("n_jobs", -1)))
     random_state = _random_state(ml_cfg)
     comparison_rows: list[dict[str, object]] = []
     confounder_rows: list[dict[str, object]] = []

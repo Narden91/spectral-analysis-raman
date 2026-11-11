@@ -228,7 +228,7 @@ def test_prepare_store_callbacks_report_raw_and_preprocessing_progress(
 
 def test_resolve_preprocessed_source_and_group_matrix(configured_store_paths: dict[str, Path]) -> None:
     build_preprocessed_store(src.config, force=True)
-    resolved = resolve_data_source(src.config, source_override="preprocessed")
+    resolved = resolve_data_source(src.config)
     assert resolved.source_name == "preprocessed"
     assert get_active_data_source() is not None
 
@@ -248,7 +248,7 @@ def test_resolve_preprocessed_source_and_group_matrix(configured_store_paths: di
 
 def test_store_readers_share_canonical_arrays(configured_store_paths: dict[str, Path]) -> None:
     build_preprocessed_store(src.config, force=True)
-    source = resolve_data_source(src.config, source_override="preprocessed")
+    source = resolve_data_source(src.config)
 
     spectra = load_spectra(source, "1300")
     summaries = load_area_summaries(source, "1300")
@@ -265,8 +265,10 @@ def test_stale_manifest_fails_after_raw_input_change(configured_store_paths: dic
     target_file = configured_store_paths["raw_dir"] / "Disease" / "Male" / "2" / "sample_1" / "2_1_1300_range_meas1.txt"
     target_file.write_text(target_file.read_text(encoding="utf-8") + "\n0.0\t0.0\t1250.000\t99.000", encoding="utf-8")
 
+    parsed_cfg = deepcopy(src.config)
+    parsed_cfg["data"]["source"] = "parsed"
     with pytest.raises(RuntimeError, match="stale"):
-        resolve_data_source(src.config, source_override="parsed")
+        resolve_data_source(parsed_cfg)
 
 
 def test_validation_fails_when_required_file_missing(configured_store_paths: dict[str, Path]) -> None:
@@ -319,7 +321,7 @@ def test_load_area_summaries_hits_cache_on_repeated_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     build_preprocessed_store(src.config, force=True)
-    source = resolve_data_source(src.config, source_override="preprocessed")
+    source = resolve_data_source(src.config)
     clear_loader_caches()
 
     calls = {"count": 0}
@@ -345,7 +347,7 @@ def test_load_whole_area_store_hits_cache_on_repeated_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     build_preprocessed_store(src.config, force=True)
-    source = resolve_data_source(src.config, source_override="preprocessed")
+    source = resolve_data_source(src.config)
     clear_loader_caches()
 
     calls = {"count": 0}
@@ -367,10 +369,10 @@ def test_load_whole_area_store_hits_cache_on_repeated_calls(
 
 def test_forced_rebuild_invalidates_loader_cache(configured_store_paths: dict[str, Path]) -> None:
     build_preprocessed_store(src.config, force=True)
-    source_before = resolve_data_source(src.config, source_override="preprocessed", force=True)
+    source_before = resolve_data_source(src.config, force=True)
     summary_before = load_area_summaries(source_before, "1300")
 
-    source_after = resolve_data_source(src.config, source_override="preprocessed", force=True)
+    source_after = resolve_data_source(src.config, force=True)
     summary_after = load_area_summaries(source_after, "1300")
 
     assert source_before.manifest_hash != source_after.manifest_hash

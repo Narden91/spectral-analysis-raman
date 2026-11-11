@@ -131,7 +131,6 @@ def resolve_experiment_dataset(
     approve_cohort_evaluation: bool = False,
     clinical_master_path: str | Path = PROJECT_ROOT / "data" / "clinical_master.csv",
     subset_mode: SubsetMode = "all_eligible",
-    endpoint: str | None = None,
     synthetic_participants: int = 92,
     synthetic_seed: int = 42,
     compact_grid: bool = False,
@@ -152,7 +151,6 @@ def resolve_experiment_dataset(
         use_synthetic,
         str(Path(clinical_master_path).resolve()),
         subset_mode,
-        endpoint,
         synthetic_participants,
         synthetic_seed,
         compact_grid,
@@ -170,7 +168,6 @@ def _resolve_experiment_dataset_cached(
     use_synthetic: bool,
     clinical_master_path: str,
     subset_mode: str,
-    endpoint: str | None,
     synthetic_participants: int,
     synthetic_seed: int,
     compact_grid: bool,
@@ -189,7 +186,6 @@ def _resolve_experiment_dataset_cached(
                 seed=synthetic_seed,
                 compact_grid=compact_grid,
                 subset_mode=subset_mode,
-                endpoint=endpoint,
                 cfg=cfg,
             )
         meta = {
@@ -208,7 +204,6 @@ def _resolve_experiment_dataset_cached(
         data_source=source,
         cfg=cfg,
         subset_mode=subset_mode,
-        endpoint=endpoint,
     )
     return dataset, {
         "data_mode": "cohort",
@@ -224,7 +219,6 @@ def _rebuild_synthetic_with_mode(
     seed: int,
     compact_grid: bool,
     subset_mode: SubsetMode,
-    endpoint: str | None,
     cfg: PairedLipidConfig,
 ) -> tuple[CohortDataset, dict[str, Any]]:
     """Helper to generate a synthetic cohort and apply a specific subset_mode.
@@ -280,6 +274,5 @@ def _rebuild_synthetic_with_mode(
         base_ds.wavenumbers_2850,
         cfg=cfg,
         subset_mode=subset_mode,
-        endpoint=endpoint,
     )
     return ds, truth

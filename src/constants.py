@@ -1,15 +1,9 @@
 from __future__ import annotations
 
+# Spectral-range codes used as store keys and file-name suffixes.
+SPECTRAL_RANGES = ("1300", "2850")
+
 CANONICAL_REGION_BOUNDS = {
     "fingerprint": (734.0, 1788.0),
     "ch_stretch": (2451.0, 3197.0),
-}
-
-CANONICAL_FP_CHANNELS = 1055
-CANONICAL_CH_CHANNELS = 747
-CANONICAL_TOTAL_CHANNELS = CANONICAL_FP_CHANNELS + CANONICAL_CH_CHANNELS
-
-CANONICAL_REGION_CHANNELS = {
-    "fingerprint": CANONICAL_FP_CHANNELS,
-    "ch_stretch": CANONICAL_CH_CHANNELS,
 }

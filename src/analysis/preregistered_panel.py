@@ -147,7 +147,7 @@ def _resolve_lipid_carbonyl_window(
     columns: list[str],
     panel: dict[str, Any],
     runtime_notes: list[str],
-) -> tuple[str, str, float, float]:
+) -> tuple[str, float, float]:
     primary_name = "lipid_carbonyl_1721"
     fallback_name = "lipid_carbonyl_1721_fallback"
     integrals = panel.get("integrals", {})
@@ -156,20 +156,20 @@ def _resolve_lipid_carbonyl_window(
 
     _, block, lower, upper = _integral_spec(primary_name, integrals[primary_name])
     if count_window_channels(columns, block=block, lower=lower, upper=upper) >= 3:
-        return primary_name, block, lower, upper
+        return block, lower, upper
 
     if fallback_name not in integrals:
         runtime_notes.append(
             f"{primary_name} window [{lower}, {upper}] has <3 channels and no fallback is configured."
         )
-        return primary_name, block, lower, upper
+        return block, lower, upper
 
     _, fb_block, fb_lower, fb_upper = _integral_spec(fallback_name, integrals[fallback_name])
     runtime_notes.append(
         f"{primary_name} narrow window [{lower}, {upper}] had <3 channels; "
         f"using fallback [{fb_lower}, {fb_upper}]."
     )
-    return primary_name, fb_block, fb_lower, fb_upper
+    return fb_block, fb_lower, fb_upper
 
 
 def build_panel_matrix(
@@ -186,7 +186,7 @@ def build_panel_matrix(
 
     integrals_cfg: dict[str, list[Any]] = dict(panel.get("integrals", {}))
     resolved_integrals: dict[str, pd.Series] = {}
-    lipid_name, lipid_block, lipid_lo, lipid_hi = _resolve_lipid_carbonyl_window(columns, panel, notes)
+    lipid_block, lipid_lo, lipid_hi = _resolve_lipid_carbonyl_window(columns, panel, notes)
 
     for integral_name, spec in integrals_cfg.items():
         if integral_name == "lipid_carbonyl_1721_fallback":
@@ -214,10 +214,7 @@ def build_panel_matrix(
     }
     index_columns: dict[str, pd.Series] = {}
     for index_name, components in index_specs.items():
-        remapped = list(components)
-        if "lipid_carbonyl_1721" in remapped and lipid_name in resolved_integrals:
-            remapped = [lipid_name if item == "lipid_carbonyl_1721" else item for item in remapped]
-        index_series = build_named_index(resolved_integrals, remapped)
+        index_series = build_named_index(resolved_integrals, components)
         if index_series.notna().any():
             index_columns[index_name] = index_series
 

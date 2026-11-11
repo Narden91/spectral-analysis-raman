@@ -2,7 +2,7 @@
 
 All features are subject-level (one row per subject), read from the
 subject Biological-PCA feature matrix (block columns ``1300__*`` /
-``2850__*``). Outputs land in ``06_spectral_interpretability/peak_shape/``;
+``2850__*``). Outputs land in ``06_spectral_interpretability/01_peak_shape/``;
 a summary copy goes to ``05_confirmatory_panel/panel_peak_shape_features.csv``.
 
 Shifts below the instrument calibration floor (``calibration_floor_cm``) are

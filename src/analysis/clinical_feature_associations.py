@@ -12,6 +12,11 @@ from scipy import stats
 
 from src import get_cross_region_phase_dir
 from src.analysis.statistics import fdr_correction
+from src.statistics.cluster_permutation import (
+    prepare_ranked_features,
+    prepared_spearman,
+    rank_biserial_effect,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,76 +176,25 @@ def endpoint_missingness_report(
     return pd.DataFrame(rows)
 
 
-def _rank_biserial_effect(
-    left: np.ndarray,
-    right: np.ndarray,
-    u_statistic: float | np.ndarray,
-) -> float | np.ndarray:
-    denominator = float(len(left) * len(right))
-    if denominator == 0:
-        if np.ndim(u_statistic) == 0:
-            return float("nan")
-        return np.full(np.asarray(u_statistic).shape, np.nan, dtype=float)
-    effect = (2.0 * np.asarray(u_statistic, dtype=float) / denominator) - 1.0
-    if np.ndim(effect) == 0:
-        return float(effect)
-    return effect
-
-
-def _correlation_p_values(rho: np.ndarray, n_subjects: int) -> np.ndarray:
-    out = np.full_like(rho, np.nan, dtype=float)
-    if n_subjects < 3:
-        return out
-
-    finite = np.isfinite(rho)
-    if not finite.any():
-        return out
-
-    clipped = np.clip(rho[finite], -1.0 + 1e-12, 1.0 - 1e-12)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        t_stat = clipped * np.sqrt((n_subjects - 2) / np.clip(1.0 - clipped**2, 1e-12, None))
-    p_values = 2.0 * stats.t.sf(np.abs(t_stat), df=n_subjects - 2)
-    p_values[np.abs(rho[finite]) >= 1.0] = 0.0
-    out[finite] = p_values
-    return out
-
-
-def _prepare_ranked_features(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    valid_columns = np.all(np.isfinite(values), axis=0)
-    centered = np.empty((values.shape[0], int(valid_columns.sum())), dtype=float)
-    denoms = np.empty(int(valid_columns.sum()), dtype=float)
-    for output_index, column_index in enumerate(np.flatnonzero(valid_columns)):
-        ranked = stats.rankdata(values[:, column_index], method="average")
-        centered_column = ranked - float(np.mean(ranked))
-        centered[:, output_index] = centered_column
-        denoms[output_index] = float(np.linalg.norm(centered_column))
-    return valid_columns, centered, denoms
-
-
-def _prepared_spearman(
-    prepared_columns: np.ndarray,
-    centered_features: np.ndarray,
-    feature_denoms: np.ndarray,
-    centered_target: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    rho = np.full(prepared_columns.shape[0], np.nan, dtype=float)
-    if centered_features.size == 0:
-        return rho, np.full_like(rho, np.nan)
-
-    target_denom = float(np.linalg.norm(centered_target))
-    if target_denom == 0:
-        return rho, np.full_like(rho, np.nan)
-
-    usable = feature_denoms > 0
-    if not usable.any():
-        return rho, np.full_like(rho, np.nan)
-
-    numerators = centered_features[:, usable].T @ centered_target
-    rho_values = numerators / (feature_denoms[usable] * target_denom)
-    full_indices = np.flatnonzero(prepared_columns)[usable]
-    rho[full_indices] = rho_values
-    p_values = _correlation_p_values(rho, len(centered_target))
-    return rho, p_values
+def empty_spearman_association_table() -> pd.DataFrame:
+    """Header-only frame matching the columns of a cluster-tested Spearman screen."""
+    return pd.DataFrame(
+        columns=[
+            "target",
+            "feature_name",
+            "spectral_block",
+            "wavenumber",
+            "rho",
+            "p_value",
+            "fdr_q",
+            "significant_fdr",
+            "n",
+            "status",
+            "cluster_id",
+            "cluster_mass",
+            "cluster_p_value",
+        ]
+    )
 
 
 def compute_spearman_feature_tests(
@@ -273,10 +227,10 @@ def compute_spearman_feature_tests(
 
     feature_names = feature_meta["feature_name"].tolist()
     values = frame.loc[valid_rows, feature_names].to_numpy(dtype=float)
-    prepared_columns, centered_features, feature_denoms = _prepare_ranked_features(values)
+    prepared_columns, centered_features, feature_denoms = prepare_ranked_features(values)
     ranked_target = stats.rankdata(target_values.loc[valid_rows].to_numpy(dtype=float), method="average")
     centered_target = ranked_target - float(np.mean(ranked_target))
-    rho, p_values = _prepared_spearman(
+    rho, p_values = prepared_spearman(
         prepared_columns,
         centered_features,
         feature_denoms,
@@ -363,7 +317,7 @@ def compute_binary_group_feature_tests(
     )
     u_statistics = np.asarray(test_result.statistic, dtype=float)
     p_values = np.asarray(test_result.pvalue, dtype=float)
-    effect_sizes = _rank_biserial_effect(left, right, u_statistics)
+    effect_sizes = rank_biserial_effect(left, right, u_statistics)
 
     rows: list[dict[str, object]] = []
     for feature_index, feature_row in feature_meta.iterrows():

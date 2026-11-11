@@ -153,6 +153,8 @@ def test_journal_figure_phase_reports_partial_output(monkeypatch, tmp_path: Path
     fig_path = _phase_dir("figures") / "fig1.png"
     monkeypatch.setattr(journal_figures, "get_confirmatory_panel_dir", lambda: _phase_dir("panel"))
     monkeypatch.setattr(journal_figures, "get_spectral_interpretability_dir", _phase_dir)
+    monkeypatch.setattr(journal_figures, "get_cross_region_phase_dir", _phase_dir)
+    monkeypatch.setattr(journal_figures, "get_classification_phase_dir", _phase_dir)
     monkeypatch.setattr(
         journal_figures,
         "_try_figure",

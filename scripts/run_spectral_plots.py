@@ -22,7 +22,6 @@ from src import config, setup_logging
 from src.analysis.spectral_plot_runner import _parse_args, run_spectral_plots
 from src.data_preparation import (
     data_source_summary,
-    reject_parsed_source_override,
     resolve_data_source,
     write_analysis_provenance,
 )
@@ -34,14 +33,12 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     setup_logging()
     args = _parse_args()
-    reject_parsed_source_override(args.source, entry_point="spectral plots")
-    data_source = resolve_data_source(config, source_override=args.source)
+    data_source = resolve_data_source(config)
     print_kv_table("Active Data Source", data_source_summary(data_source))
     outputs = run_spectral_plots(
         outdir=args.outdir,
         max_subjects=args.max_subjects,
         generate_plots=args.plots,
-        export_data=args.export_data,
         data_source=data_source,
     )
     write_analysis_provenance(
@@ -52,8 +49,6 @@ def main() -> None:
     )
     logger.info("QC plots: %s", outputs["qc_dir"])
     logger.info("Spectral plots: %s", outputs["spectral_plot_dir"])
-    if "data_output_dir" in outputs:
-        logger.info("Data export: %s", outputs["data_output_dir"])
 
 
 if __name__ == "__main__":

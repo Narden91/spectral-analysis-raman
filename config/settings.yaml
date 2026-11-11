@@ -5,18 +5,6 @@
 # config/eda.yaml and config/plots.yaml.
 
 # ---------------------------------------------------------------------------
-# Experiment tracking - controls multi-run iteration
-# ---------------------------------------------------------------------------
-experiment:
-  # Number of independent pipeline runs to execute.
-  # int >= 1: 1 -> single run (output root), >1 -> run_001/, run_002/, ...
-  n_runs: 1
-
-  # Seed for run 0. Run i uses base_seed + i.
-  # int: override with --base-seed on the CLI.
-  base_seed: 42
-
-# ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
 data:
@@ -26,16 +14,6 @@ data:
   clinical_data_path: "data/clinical_data.csv"  # str: source clinical CSV
   parsed_dir: "data/parsed"     # str: validated materialized store before preprocessing
   preprocessed_dir: "data/preprocessed"  # str: materialized store after preprocessing
-  require_valid_manifest: true  # bool: reject missing or invalid manifests for derived stores
-  stale_manifest_policy: "error"  # str: "error" or "rebuild"
-  root_dir: "data/raw"              # str: legacy alias for reorganized canonical dataset
-  raw_dir: "data_raw"           # str: original Renishaw exports (reorganize step only)
-  cleaned_dir: "data_cleaned"   # str: intermediate cleaned copy (reorganize step only)
-  clinical_csv: "data/clinical_data.csv"  # str: legacy alias for source clinical CSV
-  curated_clinical_csv: "data_cleaned/clinical/clinical_data_curated.csv"  # str: reconciled subject table written by load_clinical_data
-  subject_metadata_csv: "data_cleaned/clinical/subject_metadata.csv"  # str: per-subject metadata output
-  clinical_audit_csv: "data_cleaned/clinical/clinical_mismatch_audit.csv"  # str: mismatch audit log
-  missing_clinical_subjects_csv: "data_cleaned/clinical/subjects_missing_clinical.csv"  # str: subjects without clinical data
   file_extension: ".txt"        # str: spectrum file suffix
 
 # ---------------------------------------------------------------------------
@@ -197,22 +175,8 @@ output:
   #   disease_vs_control  -> Results_control_vs_disease
   eda_root: "Results_control_vs_disease"  # str: EDA output directory
 
-  # Whether to persist per-area preprocessing artifacts (QC tables + manifests)
-  # under <eda_root>/processed/preprocessing_artifacts.
-  # bool: false reduces disk use when only aggregate outputs are needed.
-  keep_preprocessing_artifacts: false
-
-  # Whether to persist the paired-area whole-spectrum cache under
-  # <eda_root>/processed/whole_spectra.
-  # bool: false keeps whole-spectrum intermediates in-memory only.
-  keep_whole_spectra_cache: false
-
-  # Legacy shared root kept only as a fallback for older code paths.
-  project_name: "outputs"  # str: fallback output directory name
-
   # Subdirectory names relative to eda_root.
   eda_subdir: ""  # str: main EDA subdirectory (empty = eda_root itself)
-  processed_subdir: "processed"  # str: analysis-owned processed artifacts subdirectory
 
   # Human-readable subdirectory names per spectral range.
   range_labels:

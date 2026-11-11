@@ -49,7 +49,6 @@ from src.analysis.io_utils import write_text_atomic
 from src.clinical.endpoints import build_and_write_clinical_endpoints
 from src.data_preparation import (
     data_source_summary,
-    reject_parsed_source_override,
     resolve_data_source,
     write_analysis_provenance,
 )
@@ -157,11 +156,6 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--skip-preprocess",
-        action="store_true",
-        help="Skip preprocessing (use raw spectra)",
-    )
-    parser.add_argument(
         "--max-subjects",
         type=int,
         default=None,
@@ -190,12 +184,6 @@ def _parse_args() -> argparse.Namespace:
         help="Skip the subject-level Biological PCA layer.",
     )
     parser.add_argument(
-        "--source",
-        type=str,
-        default=None,
-        help="Override data.source with one of: parsed, preprocessed.",
-    )
-    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Show detailed INFO logs in the terminal. Detailed logs are always written to run.log.",
@@ -217,18 +205,6 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
-
-
-def _reject_skip_preprocess(args: argparse.Namespace) -> None:
-    """--skip-preprocess has no valid production meaning: nothing in the EDA
-    path branches on it, so it silently ran the normal preprocessed pipeline
-    while implying raw spectra were used. Reject it everywhere rather than
-    let it lie about what ran."""
-    if args.skip_preprocess:
-        raise ValueError(
-            "--skip-preprocess is not supported: EDA always analyzes the preprocessed store; "
-            "there is no raw-spectra analysis path. Remove the flag."
-        )
 
 
 def _validate_publication_run(args: argparse.Namespace, ranges: list[str]) -> None:
@@ -311,8 +287,6 @@ def _main() -> None:
     if analysis_mode == "disease_vs_control":
         validate_control_vs_disease_ml_config(config)
     ranges = _requested_ranges(args.range)
-    _reject_skip_preprocess(args)
-    reject_parsed_source_override(args.source, entry_point="EDA")
     if args.resume_ml and (
         analysis_mode != "disease_vs_control" or not _should_run_biological_pca(ranges, args.skip_biological_pca)
     ):
@@ -321,16 +295,8 @@ def _main() -> None:
     config.setdefault("analysis", {})["publication_run"] = bool(args.publication_run)
     _set_analysis_output_root(analysis_mode)
     metadata_dir = get_run_metadata_dir()
-    legacy_run_manifest: dict[str, object] | None = None
-    if args.resume_ml:
-        prior_manifest = metadata_dir / "run_manifest.json"
-        if prior_manifest.exists():
-            try:
-                legacy_run_manifest = json.loads(prior_manifest.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Cannot resume ML: prior run manifest is invalid JSON: {prior_manifest}") from exc
     _attach_run_log_file(metadata_dir / "run.log")
-    data_source = resolve_data_source(config, source_override=args.source)
+    data_source = resolve_data_source(config)
     print_kv_table("Active Data Source", data_source_summary(data_source))
     print_status(
         f"Running EDA mode={analysis_mode} ranges={', '.join(ranges)} "
@@ -357,12 +323,10 @@ def _main() -> None:
             }
             logger.info("Clinical endpoints written to %s", endpoint_result.output_dir)
 
-        results: dict[str, dict] = {}
         for spectral_range in ranges:
             print_status(f"Starting {spectral_range} EDA")
-            results[spectral_range] = run_eda(
+            run_eda(
                 spectral_range=spectral_range,
-                skip_preprocess=args.skip_preprocess,
                 max_subjects=args.max_subjects,
             )
             print_status(f"Finished {spectral_range} EDA")
@@ -390,13 +354,12 @@ def _main() -> None:
                     cfg=config,
                     resume=args.resume_ml,
                     data_manifest_hash=data_source.manifest_hash,
-                    legacy_run_manifest=legacy_run_manifest,
                 )
                 print_status("Finished control-vs-disease ML classification")
         warnings = _write_warning_summaries(_output_dir("eda_subdir")) if biological_ran else []
         _log_final_summary(ranges, biological_ran, warnings)
         print_status(f"EDA complete. Outputs: {_output_dir('eda_subdir')}")
-    except (ValueError, RuntimeError) as exc:
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
         logger.error("%s", exc)
         sys.exit(1)
     except KeyboardInterrupt:

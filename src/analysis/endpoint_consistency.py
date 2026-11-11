@@ -12,12 +12,9 @@ import pandas as pd
 from src import get_confirmatory_panel_dir, get_spectral_interpretability_dir
 from src import resolve_cfg as _cfg
 from src.analysis.io_utils import load_csv_or_empty, write_csv_atomic
+from src.analysis.preregistered_panel import panel_cfg
 
 logger = logging.getLogger(__name__)
-
-
-def _panel_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
-    return cfg.get("analysis", {}).get("preregistered_panel", {})
 
 
 def _empty_consistency() -> pd.DataFrame:
@@ -100,7 +97,7 @@ def run_endpoint_consistency(
 ) -> dict[str, Path]:
     """Write endpoint-consistency summary for Phase L consumption."""
     cfg = _cfg(cfg)
-    panel = _panel_cfg(cfg)
+    panel = panel_cfg(cfg)
     phase_cfg = cfg.get("analysis", {}).get("endpoint_consistency", {})
     if not bool(phase_cfg.get("enabled", True)):
         return {}

@@ -36,13 +36,6 @@ from src.analysis.paired_lipid.batched import (
 )
 
 
-ESTABLISHED_COMPARATORS: tuple[str, ...] = (
-    "fixed_band_ridge",
-    "pca_ridge",
-    "pls_regression",
-)
-
-
 def make_participant_splits(
     n_participants: int,
     paired_mask: np.ndarray,
@@ -409,7 +402,6 @@ def _select_inner_fast(
             alphas_np,
             cfg,
             compute_pca_suff=True,
-            exact_fp64_eigh=True,
         )
         inner_divs.append(div)
         total_val_weight += float(np.sum(div["w_val"]))
@@ -1186,7 +1178,6 @@ def run_multiplicity_bootstrap(
     endpoint: str | None = None,
     use_gpu: bool | None = None,
     batch_size: int | None = None,
-    exact_fp64_eigh: bool = True,
 ) -> dict[str, Any]:
     """Participant-level multiplicity bootstrap keeping original fold memberships fixed."""
     target_col = endpoint or cfg.primary_endpoint
@@ -1236,7 +1227,6 @@ def run_multiplicity_bootstrap(
             gcache,
             use_gpu=use_gpu,
             batch_size=batch_size,
-            exact_fp64_eigh=exact_fp64_eigh,
         )
         if base_elig:
             point_est_delta = float(dp_fast[0])

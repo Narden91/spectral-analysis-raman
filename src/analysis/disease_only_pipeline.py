@@ -24,7 +24,6 @@ from src.analysis.disease_stratification import run_disease_stratification
 from src.analysis.disease_subgroups import run_disease_subgroups
 from src.analysis.endpoint_consistency import run_endpoint_consistency
 from src.analysis.feature_coupling import run_feature_coupling
-from src.analysis.index_clustering import run_index_clustering
 from src.analysis.integrated_candidates import run_integrated_candidates
 from src.analysis.io_utils import write_csv_atomic
 from src.analysis.journal_figures import run_journal_figures
@@ -95,9 +94,9 @@ def _write_phase_status_manifest(outputs: dict[str, dict[str, object]]) -> Path 
 
     Phases that skip their CSV writes because the whole-phase input was empty
     (see ``src.analysis.phase_status``) report a ``"_status"`` row directly.
-    Phases that ran normally are synthesized as ``ok``; phases absent from
-    ``outputs`` (disabled via config, or never reached) are synthesized as
-    ``disabled_or_skipped``.
+    Phases that ran normally are synthesized as ``ok``; phases whose output
+    dict is empty (for example, disabled via config) are synthesized as
+    ``disabled_or_skipped``. Phases with no key in ``outputs`` get no row.
     """
     if not outputs:
         return None
@@ -437,13 +436,6 @@ def _run_spectral_structure_phases(
                 cfg=cfg,
             )
 
-    if preregistered_outputs and _phase_enabled(cfg, "index_clustering", default=False):
-        with phase("index_clustering", "Index-space clustering"):
-            outputs["index_clustering"] = run_index_clustering(
-                panel_matrix_path=preregistered_outputs.get("panel_feature_matrix"),
-                cfg=cfg,
-            )
-
     if _phase_enabled(cfg, "journal_figures"):
         with phase("journal_figures", "Journal figure set"):
             outputs["journal_figures"] = run_journal_figures(
@@ -499,8 +491,8 @@ def run_disease_only_cross_region_pipeline(
         TimeElapsedColumn(),
         transient=False,
     )
-    # 22 = total possible phase blocks in this pipeline
-    _task = _progress.add_task("Disease-only cross-region phases", total=22)
+    # 25 = number of `with phase(...)` blocks; config-disabled phases never advance the bar.
+    _task = _progress.add_task("Disease-only cross-region phases", total=25)
 
     phase = partial(_phase_timer, phase_timings, progress=_progress, task_id=_task)
     with _progress:

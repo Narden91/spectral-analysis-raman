@@ -8,11 +8,11 @@ from joblib import Parallel, delayed
 from scipy import stats
 
 
-def _normalize_n_jobs(n_jobs: int) -> int:
+def normalize_n_jobs(n_jobs: int) -> int:
     return 1 if n_jobs == 0 else n_jobs
 
 
-def _rank_biserial_effect(
+def rank_biserial_effect(
     left: np.ndarray,
     right: np.ndarray,
     u_statistic: float | np.ndarray,
@@ -28,7 +28,7 @@ def _rank_biserial_effect(
     return effect
 
 
-def _correlation_p_values(rho: np.ndarray, n_subjects: int) -> np.ndarray:
+def correlation_p_values(rho: np.ndarray, n_subjects: int) -> np.ndarray:
     out = np.full_like(rho, np.nan, dtype=float)
     if n_subjects < 3:
         return out
@@ -46,7 +46,7 @@ def _correlation_p_values(rho: np.ndarray, n_subjects: int) -> np.ndarray:
     return out
 
 
-def _prepare_ranked_features(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def prepare_ranked_features(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     valid_columns = np.all(np.isfinite(values), axis=0)
     centered = np.empty((values.shape[0], int(valid_columns.sum())), dtype=float)
     denoms = np.empty(int(valid_columns.sum()), dtype=float)
@@ -58,7 +58,7 @@ def _prepare_ranked_features(values: np.ndarray) -> tuple[np.ndarray, np.ndarray
     return valid_columns, centered, denoms
 
 
-def _prepared_spearman(
+def prepared_spearman(
     prepared_columns: np.ndarray,
     centered_features: np.ndarray,
     feature_denoms: np.ndarray,
@@ -80,7 +80,7 @@ def _prepared_spearman(
     rho_values = numerators / (feature_denoms[usable] * target_denom)
     full_indices = np.flatnonzero(prepared_columns)[usable]
     rho[full_indices] = rho_values
-    p_values = _correlation_p_values(rho, len(centered_target))
+    p_values = correlation_p_values(rho, len(centered_target))
     return rho, p_values
 
 
@@ -124,7 +124,7 @@ def _binary_cluster_maxima(
     rng: np.random.Generator,
     n_jobs: int = 1,
 ) -> np.ndarray:
-    n_jobs = _normalize_n_jobs(n_jobs)
+    n_jobs = normalize_n_jobs(n_jobs)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
     if n_jobs != 1:
         return np.array(
@@ -163,7 +163,7 @@ def _binary_cluster_mass_for_order(
     )
     p_values = np.asarray(test_result.pvalue, dtype=float)
     effects = np.asarray(
-        _rank_biserial_effect(left, right, np.asarray(test_result.statistic, dtype=float)),
+        rank_biserial_effect(left, right, np.asarray(test_result.statistic, dtype=float)),
         dtype=float,
     )
     clusters = find_signed_clusters(effects, p_values, alpha=cluster_alpha)
@@ -179,11 +179,11 @@ def _spearman_cluster_maxima(
     rng: np.random.Generator,
     n_jobs: int = 1,
 ) -> np.ndarray:
-    prepared_columns, centered_features, feature_denoms = _prepare_ranked_features(values)
+    prepared_columns, centered_features, feature_denoms = prepare_ranked_features(values)
     ranked_target = stats.rankdata(target_values, method="average")
     centered_target = ranked_target - float(np.mean(ranked_target))
 
-    n_jobs = _normalize_n_jobs(n_jobs)
+    n_jobs = normalize_n_jobs(n_jobs)
     seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_permutations, dtype=np.int64)
     if n_jobs != 1:
         return np.array(
@@ -243,7 +243,7 @@ def _spearman_cluster_mass_for_target(
     permuted_target: np.ndarray,
     cluster_alpha: float,
 ) -> float:
-    rho, p_values = _prepared_spearman(
+    rho, p_values = prepared_spearman(
         prepared_columns,
         centered_features,
         feature_denoms,

@@ -54,7 +54,9 @@ def _runtime_endpoint_table(cfg: dict) -> pd.DataFrame:
 
     try:
         return build_clinical_endpoints(cfg=cfg).clinical_subject_table
-    except ValueError as exc:
+    # A missing clinical table is expected in case-control runs (controls carry no
+    # endpoints); keep enrichment optional there instead of aborting the export.
+    except (ValueError, FileNotFoundError) as exc:
         logger.warning("Subject feature export skipped endpoint enrichment: %s", exc)
         return pd.DataFrame(columns=["subject_id", *RUNTIME_ENDPOINT_COLUMNS])
 

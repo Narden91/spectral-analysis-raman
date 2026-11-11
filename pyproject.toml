@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "adjusttext>=1.4.0",
-    "markdown>=3.5",
     "matplotlib>=3.10.8",
     "numpy>=2.4.2",
     "pandas>=3.0.1",
@@ -36,7 +35,6 @@ dev = [
     "ruff>=0.15.0",
 ]
 notebook = [
-    "dash>=4.0.0",
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
 ]

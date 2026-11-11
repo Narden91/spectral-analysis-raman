@@ -9,7 +9,7 @@ noted in the output.
 Entropy formula: H = −Σ p_i · ln(p_i),  p_i = I_i / Σ I_i   (after shifting
 per-subject minimum to zero so all intensities ≥ 0).
 
-Outputs go to ``06_spectral_interpretability/spectral_entropy/``.
+Outputs go to ``06_spectral_interpretability/03_spectral_entropy/``.
 """
 
 from __future__ import annotations
