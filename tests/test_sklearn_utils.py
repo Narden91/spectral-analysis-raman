@@ -19,7 +19,7 @@ def test_l1_logistic_model_uses_high_max_iter() -> None:
 
 def test_l1_logistic_model_is_l1_penalty() -> None:
     model = l1_logistic_model(c=1.0, random_state=0)
-    assert model.penalty == "l1"
+    assert model.l1_ratio == 1.0
     assert model.solver == "liblinear"
     assert model.dual is False
     assert model.class_weight == "balanced"
@@ -57,3 +57,19 @@ def test_fit_with_convergence_capture_suppresses_warning_output(capsys) -> None:
 
     captured = capsys.readouterr()
     assert "ConvergenceWarning" not in captured.err
+
+
+def test_fit_preserves_other_warnings_and_reports_convergence(caplog) -> None:
+    import logging
+
+    import pytest
+    from sklearn.exceptions import ConvergenceWarning
+
+    class WarningModel:
+        def fit(self, X, y):
+            warnings.warn("fit did not converge", ConvergenceWarning)
+            warnings.warn("check the input", UserWarning)
+
+    with caplog.at_level(logging.WARNING), pytest.warns(UserWarning, match="check the input"):
+        fit_with_convergence_capture(WarningModel(), [], [], context="test fit")
+    assert "test fit convergence warning: fit did not converge" in caplog.text

@@ -82,12 +82,19 @@ def _clinical_data_path(cfg: dict) -> Path:
 
 def _code_version() -> str:
     """Commit plus working-tree hash; a bare commit is insufficient when dirty."""
+    repo_root = Path(__file__).resolve().parents[2]
     try:
-        head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, check=True, text=True).stdout.strip()
-        diff = subprocess.run(["git", "diff", "--no-ext-diff", "HEAD"], capture_output=True, check=True).stdout
-        return f"{head}+dirty:{hashlib.sha256(diff).hexdigest()[:16]}" if diff else head
-    except Exception:
-        return "unknown"
+        head = subprocess.run(
+            ["git", "log", "-1", "--format=%H"], cwd=repo_root, capture_output=True, check=True, text=True,
+        ).stdout.strip()
+        diff = subprocess.run(
+            ["git", "diff", "--no-ext-diff", "HEAD"], cwd=repo_root, capture_output=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("Cannot record the repository version for store provenance") from exc
+    if not head:
+        raise RuntimeError("Repository version is empty; cannot record store provenance")
+    return f"{head}+dirty:{hashlib.sha256(diff).hexdigest()[:16]}" if diff else head
 
 
 def hash_file_id(value: str) -> str:

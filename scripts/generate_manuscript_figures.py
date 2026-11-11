@@ -45,6 +45,7 @@ from src.visualization.theme import (
     FIGURE_WIDTH_IN,
     MANUSCRIPT_WIDTH_IN,
     panel_width_in,
+    set_gallery_theme,
     set_manuscript_theme,
 )
 
@@ -1341,6 +1342,7 @@ def make_cvd_classifier_figure() -> None:
 def main() -> None:
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
     FIGURE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    set_gallery_theme()
     set_manuscript_theme()
     rng = np.random.default_rng(SEED)
     advance_rng_past_subject_spectra(rng)

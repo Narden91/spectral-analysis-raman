@@ -394,3 +394,44 @@ def test_write_analysis_provenance_records_analysis_mode(tmp_path: Path) -> None
 
     run_manifest = json.loads((tmp_path / "provenance" / "run_manifest.json").read_text(encoding="utf-8"))
     assert run_manifest["analysis_mode"] == "disease_only"
+
+
+def test_code_version_fails_when_git_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.data_preparation import materialize
+
+    def fail(*args, **kwargs):
+        raise FileNotFoundError("git is unavailable")
+
+    monkeypatch.setattr(materialize.subprocess, "run", fail)
+    with pytest.raises(RuntimeError, match="Cannot record the repository version"):
+        materialize._code_version()
+
+
+def test_code_version_uses_repository_directory_and_hashes_dirty_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hashlib
+    from types import SimpleNamespace
+
+    from src.data_preparation import materialize
+
+    calls = []
+    diff = b"local changes"
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(stdout="a" * 40 + "\n" if command[1] == "log" else diff)
+
+    monkeypatch.setattr(materialize.subprocess, "run", run)
+
+    assert materialize._code_version() == "a" * 40 + "+dirty:" + hashlib.sha256(diff).hexdigest()[:16]
+    assert len(calls) == 2
+    assert all(kwargs["cwd"] == Path(materialize.__file__).resolve().parents[2] for _, kwargs in calls)
+
+
+def test_code_version_rejects_empty_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from src.data_preparation import materialize
+
+    monkeypatch.setattr(materialize.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=""))
+    with pytest.raises(RuntimeError, match="Repository version is empty"):
+        materialize._code_version()

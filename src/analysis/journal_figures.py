@@ -609,7 +609,7 @@ def _try_figure(
     fn: Callable[..., bool],
     *args: Any,
 ) -> tuple[str, Path] | None:
-    """Call fn(*args, path) → bool; return (key, path) on success, None on failure/skip.
+    """Return (key, path) when written, None for skipped inputs; raise builder errors.
 
     All figure builders accept output_path as their final positional argument.
     """
@@ -617,8 +617,8 @@ def _try_figure(
     try:
         if fn(*args, path):
             return key, path
-    except Exception:
-        logger.exception("Phase U: %s failed", key)
+    except Exception as exc:
+        raise RuntimeError(f"Phase U: {key} failed") from exc
     return None
 
 

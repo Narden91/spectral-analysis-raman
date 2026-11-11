@@ -160,6 +160,8 @@ def run_primary_evaluation(
             "n_bootstraps_succeeded": boot_res["n_bootstraps_succeeded"],
             "n_failed_refits": boot_res["n_failed_refits"],
             "n_fallback_draws": boot_res["n_fallback_draws"],
+            "execution": boot_res["execution"],
+            "failure_reasons": boot_res["failure_reasons"],
             "interval_procedure_succeeded": boot_res["interval_procedure_succeeded"],
             "ci_95_delta_mse": boot_res["ci_95_delta_mse"],
             "ci_95_vs_comparator": boot_res["ci_95_vs_comparator"],
@@ -169,18 +171,18 @@ def run_primary_evaluation(
     comp_df = pd.DataFrame(comp_rows)
     rep_df = _flatten_repeatability_rows(eval_res["fold_repeatability"])
 
-    manifest_path = write_json_atomic(manifest_payload, target_dir / "eligibility_and_split_manifest.json")
+    manifest_path = write_json_atomic(target_dir / "eligibility_and_split_manifest.json", manifest_payload)
     preds_path = target_dir / "nested_held_out_predictions.csv"
     comp_path = target_dir / "comparator_errors_and_differences.csv"
     settings_path = target_dir / "fold_selected_settings.csv"
     rep_path = target_dir / "baseline_repeatability_report.csv"
     angles_path = target_dir / "subspace_principal_angles.csv"
 
-    write_csv_atomic(pred_df, preds_path)
-    write_csv_atomic(comp_df, comp_path)
-    write_csv_atomic(eval_res["fold_settings"], settings_path)
-    write_csv_atomic(rep_df, rep_path)
-    write_csv_atomic(eval_res["subspace_angles"], angles_path)
+    write_csv_atomic(pred_df, preds_path, index=False)
+    write_csv_atomic(comp_df, comp_path, index=False)
+    write_csv_atomic(eval_res["fold_settings"], settings_path, index=False)
+    write_csv_atomic(rep_df, rep_path, index=False)
+    write_csv_atomic(eval_res["subspace_angles"], angles_path, index=False)
     prov_path = write_run_provenance(
         target_dir,
         "primary_evaluation",

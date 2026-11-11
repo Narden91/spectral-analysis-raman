@@ -9,16 +9,6 @@ from src.metadata.parser import parse_filename
 logger = logging.getLogger(__name__)
 
 
-def _is_reorganized_measurement_file(file_path: Path) -> bool:
-    """Return True for canonical reorganized Raman exports only.
-
-    Matches mode-free (_range_meas) and legacy mode-tagged
-    (_range_SS_meas, _range_FP_meas) stems; the mode token is kept as acquisition_mode.
-    """
-    stem = file_path.stem
-    return "_range" in stem and "meas" in stem
-
-
 def disambiguate_subject_ids(df: pd.DataFrame) -> pd.DataFrame:
     """Split conflicting bare subject IDs into stable cohort-aware subject IDs."""
     if df.empty or "subject_id" not in df.columns:
@@ -127,16 +117,13 @@ def build_file_index(data_dir: str | Path) -> pd.DataFrame:
             continue
         if "test measurements" in [p.lower() for p in file_path.parts]:
             continue
-        if not _is_reorganized_measurement_file(file_path):
-            continue
-
         metadata = parse_filename(file_path)
 
         if "subject_id" in metadata and "slide_number" in metadata:
             all_records.append(metadata)
         else:
-            logger.warning(
-                "Skipping file (missing subject_id or slide_number): %s", file_path
+            raise ValueError(
+                f"Invalid measurement filename (missing subject_id or slide_number): {file_path}"
             )
 
     if not all_records:

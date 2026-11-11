@@ -20,13 +20,10 @@ from src.visualization.theme import (
     WHOLE_SPECTRA_NEUTRAL,
     WHOLE_SPECTRA_RANGE_COLORS,
     WHOLE_SPECTRA_RANGE_LABELS,
-    set_gallery_theme,
 )
 from src.visualization.theme import (
     finalize_axis as _finalize_axis,
 )
-
-set_gallery_theme()
 
 logging.getLogger("adjustText").setLevel(logging.ERROR)
 
@@ -200,7 +197,7 @@ def plot_pca_scores(
 
                 try:
                     from adjustText import adjust_text
-                    adjust_text(texts, ax=ax, force_points=0.2, force_text=0.2, arrowprops=dict(arrowstyle="-", color='red', alpha=0.4))
+                    adjust_text(texts, ax=ax, force_static=0.2, force_text=0.2, arrowprops=dict(arrowstyle="-", color='red', alpha=0.4))
                 except ImportError:
                     pass
 

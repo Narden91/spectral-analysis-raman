@@ -1335,3 +1335,47 @@ def test_runner_disabled_returns_empty(small_matrix_path: Path, base_ml_cfg: dic
         cfg=base_ml_cfg,
     )
     assert outputs == {}
+
+
+def test_permutation_phase_reports_actual_counts(base_ml_cfg):
+    from contextlib import nullcontext
+
+    from rich.progress import Progress
+
+    from src.analysis.control_vs_disease_ml import _run_model_permutation_phase
+
+    rows = []
+    scores = [(0.5, np.array([0.2, 0.3, 0.4])), (0.25, np.array([0.1, 0.2]))]
+    with patch("src.analysis.control_vs_disease_ml.run_permutation_test", side_effect=scores):
+        result = _run_model_permutation_phase(
+            model_name="l1_logistic", representation="whole",
+            X_valid=np.zeros((4, 2)), y_valid=np.array([0, 0, 1, 1]),
+            strata=np.array(["female"] * 4), permutation_observed_score=0.7,
+            ml_cfg=base_ml_cfg["analysis"]["control_vs_disease_ml"], n_jobs=1,
+            random_state=42, outer_split_plan=[[(np.array([0, 2]), np.array([1, 3]))]],
+            checkpoints=MagicMock(), resume=False, null_distribution_rows=rows,
+            phase=lambda *args: nullcontext(), progress=Progress(disable=True),
+        )
+    assert result == (0.5, 0.25, 3, 2)
+    assert len(rows) == 5
+
+
+def test_validate_config_rejects_unknown_permutation_stratum(base_ml_cfg):
+    base_ml_cfg["analysis"]["control_vs_disease_ml"]["stratify_permutation_by"] = "sexx"
+    with pytest.raises(ValueError, match="stratify_permutation_by"):
+        validate_control_vs_disease_ml_config(base_ml_cfg)
+
+
+def test_resume_rejects_changed_checkpoint_identity(tmp_path, base_ml_cfg):
+    from src.analysis.control_vs_disease_ml import _CheckpointStore
+
+    features = tmp_path / "features.parquet"
+    features.write_bytes(b"small checkpoint fixture")
+    kwargs = dict(metadata_dir=tmp_path, cfg_in=base_ml_cfg, feature_matrix_path=features,
+                  data_manifest_hash="fixture-v1")
+    original = _CheckpointStore.create(**kwargs, resume=False)
+    assert _CheckpointStore.create(**kwargs, resume=True).directory == original.directory
+    kwargs["data_manifest_hash"] = "fixture-v2"
+    with pytest.raises(ValueError, match="No ML resume checkpoint matches"):
+        _CheckpointStore.create(**kwargs, resume=True)
+    assert list(original.directory.parent.iterdir()) == [original.directory]

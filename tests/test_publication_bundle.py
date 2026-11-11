@@ -35,5 +35,28 @@ def test_export_publication_bundle_rejects_allowlisted_file_with_identifier_colu
     source.mkdir()
     pd.DataFrame({"subject_id": ["S01"], "status": ["ok"]}).to_csv(source / "phase_status.csv", index=False)
 
+    pd.DataFrame({"status": ["ok"]}).to_csv(source / "candidate_region_summary.csv", index=False)
+    output = tmp_path / "publication_bundle"
     with pytest.raises(ValueError, match="direct identifier"):
-        export_publication_bundle(source, tmp_path / "publication_bundle")
+        export_publication_bundle(source, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("failure_step", ["copy2", "write_json_atomic", "write_text_atomic"])
+def test_export_publication_bundle_failure_leaves_no_destination(tmp_path: Path, monkeypatch, failure_step: str) -> None:
+    import src.reporting.publication_bundle as bundle
+
+    source = tmp_path / "private_results"
+    source.mkdir()
+    pd.DataFrame({"status": ["ok"]}).to_csv(source / "phase_status.csv", index=False)
+    output = tmp_path / "publication_bundle"
+
+    def fail(*args, **kwargs):
+        raise OSError("simulated export failure")
+
+    target = bundle.shutil if failure_step == "copy2" else bundle
+    monkeypatch.setattr(target, failure_step, fail)
+    with pytest.raises(OSError, match="simulated export failure"):
+        export_publication_bundle(source, output)
+    assert not output.exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["private_results"]

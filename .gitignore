@@ -18,8 +18,6 @@ coverage.xml
 # Virtual environments
 .venv
 
-# plan*
-
 data/
 Output_plot*/
 output*/
@@ -57,7 +55,7 @@ CLAUDE.md
 *.pdf
 *.spl
 *.csv
-plan*
+# plan*
 *.png
 
 # Manuscript LaTeX artifacts

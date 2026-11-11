@@ -370,6 +370,7 @@ def _run_variance_context_phase(
             for idx, (subject_id, spectrum) in enumerate(zip(all_sids, all_spectra))
         }
         regional_variance_df = regional_snv_residual_variance(subject_spectra, split_index)
+        regional_variance_df["subject_id"] = all_sids
         regional_variance_df.insert(1, "group", all_labels)
         regional_variance_df.to_csv(
             variance_dir / "regional_snv_residual_variance.csv",

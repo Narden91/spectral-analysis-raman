@@ -91,3 +91,14 @@ def test_group_axis_mismatch_is_rejected(prepared_cohort, monkeypatch):
     monkeypatch.setattr(runner, "build_group_matrix", load)
     with pytest.raises(ValueError, match="Wavenumber axis mismatch"):
         runner._run_single_range_eda("1300")
+
+
+def test_unavailable_sampling_variance_remains_missing(monkeypatch):
+    monkeypatch.setattr(runner, "load_subject_spectra", lambda *args: (np.arange(3), np.empty((0, 3))))
+    groups = {"group_a": np.array([[0., 1., 2.], [1., 2., 3.]])}
+    noise, biological, between = runner._estimate_variance_decomposition(
+        pd.DataFrame({"subject_id": ["s1", "s2"]}), "1300", groups,
+    )
+    assert np.isnan(noise)
+    assert np.isnan(biological)
+    assert between == pytest.approx(0.)

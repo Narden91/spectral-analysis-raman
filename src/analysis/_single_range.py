@@ -216,7 +216,7 @@ def _estimate_variance_decomposition(
         )
 
     # Estimate finite technical/spatial sampling variance from canonical pixels.
-    noise_var = 0.0
+    noise_var = np.nan
     try:
         rng = np.random.default_rng(42)
         sample_sids = rng.choice(
@@ -239,7 +239,7 @@ def _estimate_variance_decomposition(
         if pix_vars:
             raw_noise_var = float(np.mean(pix_vars))
             if not np.isfinite(raw_noise_var):
-                raw_noise_var = 0.0
+                raw_noise_var = np.nan
             if raw_noise_var > inter_subject_var:
                 logger.warning(
                     "Estimated measurement noise variance (%.2e) exceeds inter-subject variance (%.2e). "
@@ -351,9 +351,7 @@ def _run_intra_disease_correlation_phase(
             summary_df.shape[0],
         )
     except Exception as exc:
-        if bool(config.get("analysis", {}).get("publication_run", False)):
-            raise RuntimeError("Intra-disease correlation phase failed") from exc
-        logger.warning("Intra-disease correlation phase failed: %s", exc)
+        raise RuntimeError("Intra-disease correlation phase failed") from exc
 
 
 def _load_eda_cohort() -> tuple[pd.DataFrame, pd.DataFrame, dict, str, dict[str, str]]:
@@ -808,9 +806,7 @@ def _run_region_robustness_phase(
                 robust_dir / f"region_influence_{spectral_range}.md",
             )
         except Exception as exc:
-            if bool(config.get("analysis", {}).get("publication_run", False)):
-                raise RuntimeError("Region robustness phase failed") from exc
-            logger.warning("Region robustness phase failed: %s", exc, exc_info=True)
+            raise RuntimeError("Region robustness phase failed") from exc
 
 
 def _run_single_range_eda(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pandas as pd
 
@@ -82,30 +83,36 @@ def export_publication_bundle(source_dir: str | Path, output_dir: str | Path) ->
     if not selected:
         raise ValueError("No allowlisted aggregate publication artifacts were found")
 
-    exported: list[Path] = []
     for path in selected:
         if path.suffix.lower() == ".csv":
             _assert_aggregate_csv(path)
-        relative = path.relative_to(source)
-        destination = output / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, destination)
-        exported.append(destination)
 
-    manifest = {
-        "bundle_type": "aggregate_only_publication_bundle",
-        "n_files": len(exported),
-        "files": [
-            {"path": str(path.relative_to(output)).replace("\\", "/"), "sha256": hash_file(path)}
-            for path in exported
-        ],
-    }
-    write_json_atomic(output / "publication_bundle_manifest.json", manifest)
-    write_text_atomic(
-        output / "README.md",
-        "# Aggregate-only publication bundle\n\n"
-        "This bundle intentionally excludes raw spectra, subject-level feature matrices, "
-        "direct identifiers, clinical subject tables, run logs, and source-data paths. "
-        "It is derived from a private analysis run and contains allowlisted aggregate tables and figures only.\n",
-    )
-    return exported
+    output.parent.mkdir(parents=True, exist_ok=True)
+    exported: list[Path] = []
+    with TemporaryDirectory(prefix=f".{output.name}-", dir=output.parent) as staging_dir:
+        staging = Path(staging_dir)
+        for path in selected:
+            relative = path.relative_to(source)
+            destination = staging / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+            exported.append(destination)
+
+        manifest = {
+            "bundle_type": "aggregate_only_publication_bundle",
+            "n_files": len(exported),
+            "files": [
+                {"path": str(path.relative_to(staging)).replace("\\", "/"), "sha256": hash_file(path)}
+                for path in exported
+            ],
+        }
+        write_json_atomic(staging / "publication_bundle_manifest.json", manifest)
+        write_text_atomic(
+            staging / "README.md",
+            "# Aggregate-only publication bundle\n\n"
+            "This bundle intentionally excludes raw spectra, subject-level feature matrices, "
+            "direct identifiers, clinical subject tables, run logs, and source-data paths. "
+            "It is derived from a private analysis run and contains allowlisted aggregate tables and figures only.\n",
+        )
+        staging.rename(output)
+    return [output / path.relative_to(staging) for path in exported]

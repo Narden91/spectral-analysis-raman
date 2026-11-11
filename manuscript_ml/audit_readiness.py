@@ -146,9 +146,9 @@ def run_readiness_audit(
     }
 
     limitations_df = build_limitations_table(clin_audit if master_path.is_file() else None)
-    manifest_file = write_json_atomic(manifest, target_dir / "readiness_manifest.json")
+    manifest_file = write_json_atomic(target_dir / "readiness_manifest.json", manifest)
     limitations_file = target_dir / "limitations_table.csv"
-    write_csv_atomic(limitations_df, limitations_file)
+    write_csv_atomic(limitations_df, limitations_file, index=False)
     prov_path = write_run_provenance(
         target_dir,
         "readiness_audit",

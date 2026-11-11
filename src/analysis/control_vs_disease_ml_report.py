@@ -24,11 +24,9 @@ from sklearn.metrics import auc, precision_recall_curve, roc_curve
 from src import get_ml_classification_phase_dir
 from src.analysis._reporting import dataframe_to_markdown
 from src.analysis.io_utils import write_text_atomic
-from src.visualization.theme import finalize_axis, pastelize_color, set_gallery_theme
+from src.visualization.theme import finalize_axis, pastelize_color
 
 logger = logging.getLogger(__name__)
-
-set_gallery_theme()
 
 # Mirrors control_vs_disease_ml.POSITIVE_CLASS_LABEL / NEGATIVE_CLASS_LABEL.
 # Duplicated (not imported) to avoid a circular import: the core module

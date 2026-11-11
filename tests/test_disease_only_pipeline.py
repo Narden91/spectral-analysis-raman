@@ -121,3 +121,34 @@ def test_all_disabled_phases_produce_no_phase_artifacts(phase_calls, tmp_path):
     assert pipeline.run_disease_only_cross_region_pipeline(feature_matrix_path=None, cfg=cfg) == {}
     assert phase_calls == []
     assert list(tmp_path.iterdir()) == []
+
+
+def test_failed_phase_preserves_status_and_timing(phase_calls, monkeypatch, tmp_path):
+    def fail(**kwargs):
+        raise RuntimeError("phase input cannot be read")
+
+    monkeypatch.setattr(pipeline, "run_longitudinal_moca", fail)
+    with pytest.raises(RuntimeError, match="phase input cannot be read"):
+        pipeline.run_disease_only_cross_region_pipeline(feature_matrix_path=None, cfg={})
+
+    status = pd.read_csv(tmp_path / "phase_status.csv").set_index("phase_key")
+    assert status.loc["longitudinal_moca", "status"] == pipeline.STATUS_FAILED_EXECUTION
+    assert "phase input cannot be read" in status.loc["longitudinal_moca", "reason"]
+    timings = pd.read_csv(tmp_path / "disease_only_cross_region_phase_timing.csv").set_index("phase_key")
+    assert timings.loc["longitudinal_moca", "status"] == "failed"
+
+
+def test_corrupt_multiplicity_input_is_not_silently_omitted(tmp_path):
+    malformed = tmp_path / "malformed.csv"
+    malformed.write_text('cluster_p_value\n"unterminated', encoding="utf-8")
+    with pytest.raises(pd.errors.ParserError):
+        pipeline._collect_cross_phase_multiplicity({
+            "clinical_correlation_matrix": {"clinical_correlation_matrix": malformed},
+        })
+
+
+def test_missing_multiplicity_artifact_is_not_silently_omitted(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        pipeline._collect_cross_phase_multiplicity({
+            "clinical_correlation_matrix": {"clinical_correlation_matrix": tmp_path / "missing.csv"},
+        })

@@ -26,6 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.analysis.io_utils import write_json_atomic  # noqa: E402
 from src.analysis.paired_lipid.cohort import (
     PRE_EVENT_RISK_FACTORS,
     CohortDataset,
@@ -76,12 +77,24 @@ def write_run_provenance(
 ) -> Path:
     """Save the resolved configuration, code version and data identity next to a stage's outputs."""
     cfg_file = Path(config_path or DEFAULT_CONFIG_PATH)
+    config_bytes = cfg_file.read_bytes()
+    source = dict(source_meta) if source_meta is not None else {}
+    store_path = source.get("store_path") or source.get("preprocessed_dir")
+    manifest_path = Path(store_path) / "manifest.json" if store_path is not None else None
+    data_manifest = (
+        json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest_path is not None and manifest_path.is_file()
+        else None
+    )
     payload = {
         "stage": stage,
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "argv": sys.argv,
         "config_path": str(cfg_file),
-        "config_sha256": hashlib.sha256(cfg_file.read_bytes()).hexdigest(),
+        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "config_text": config_bytes.decode("utf-8"),
+        "data_manifest": data_manifest,
+        "data_manifest_status": "saved" if data_manifest is not None else "not_available",
         "resolved_paired_lipid_config": asdict(cfg),
         "pre_event_risk_factors": list(PRE_EVENT_RISK_FACTORS),
         "stage_settings": dict(settings),
@@ -91,7 +104,7 @@ def write_run_provenance(
         "packages": _package_versions(),
         "data": dict(source_meta) if source_meta is not None else None,
     }
-    return write_json_atomic(payload, target_dir / f"run_provenance_{stage}.json")
+    return write_json_atomic(target_dir / f"run_provenance_{stage}.json", payload)
 
 
 def add_cohort_stage_args(parser: argparse.ArgumentParser) -> None:
@@ -112,16 +125,6 @@ def ensure_output_dir(output_dir: str | Path | None = None) -> Path:
     """Resolve and create the target output directory."""
     target = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT_DIR
     target.mkdir(parents=True, exist_ok=True)
-    return target
-
-
-def write_json_atomic(data: Mapping | dict[str, Any], path: str | Path) -> Path:
-    """Write JSON atomically via a temporary sibling file."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = target.with_suffix(target.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(target)
     return target
 
 

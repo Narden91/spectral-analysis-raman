@@ -6,6 +6,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 from src import load_config
 from src.analysis.raman_bands import RAMAN_BANDS, validate_configured_bands
@@ -17,6 +18,7 @@ from src.visualization.spectral_summary_plots import (
     plot_cohort_mean_spectra_grid,
     plot_condition_region,
     plot_global_comparison,
+    plot_qc_metric_distribution,
     plot_region_mean_spectrum,
 )
 from src.visualization.theme import GROUP_COLORS
@@ -139,9 +141,24 @@ def test_global_individual_traces_can_skip_fill_but_keep_mean_fill() -> None:
             {"label": "Control mean", "color": "#0072B2", "segments": {"1300": peak}},
         ],
         "Individual global",
-        _plot_cfg(),
+        _plot_cfg(band_style=True),
+        show_band_spans=False,
     )
 
     assert len(ax.collections) == 1
+    assert not ax.patches
     assert any(text.get_text() == "Cytosine" for text in ax.texts)
+    plt.close(fig)
+
+
+def test_qc_axes_distinguish_cohort_values_from_histogram_counts() -> None:
+    frame = pd.DataFrame({"condition": ["control", "disease"], "gender": ["female", "male"], "snr": [3.0, 7.0]})
+    fig, ax = plot_qc_metric_distribution(frame, "snr")
+    assert ax.get_xlabel() == "Cohort"
+    assert ax.get_ylabel() == "Snr"
+    plt.close(fig)
+
+    fig, ax = plot_qc_metric_distribution(frame[["snr"]], "snr")
+    assert ax.get_xlabel() == "Snr"
+    assert ax.get_ylabel() == "Count"
     plt.close(fig)

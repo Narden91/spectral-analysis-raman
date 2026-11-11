@@ -14,9 +14,7 @@ from matplotlib.ticker import FixedLocator
 from scipy.signal import find_peaks
 
 from src.analysis.raman_bands import RAMAN_BANDS, validate_configured_bands
-from src.visualization.theme import GROUP_COLORS, set_gallery_theme
-
-set_gallery_theme()
+from src.visualization.theme import GROUP_COLORS
 
 CONDITION_COLORS = {
     "control": "#0072B2",
@@ -722,6 +720,8 @@ def plot_global_comparison(
     series: list[dict[str, object]],
     title: str,
     plot_cfg: dict,
+    *,
+    show_band_spans: bool = True,
 ) -> tuple[plt.Figure, plt.Axes]:
     fig, ax = plt.subplots(figsize=(18, 5.5))
     display_axes, gap_spans, label_positions = _build_layout(
@@ -779,8 +779,9 @@ def plot_global_comparison(
             plot_cfg.get("peak_detection", {}),
             bands=_plot_bands(plot_cfg),
         )
-    for region, axis in region_axes.items():
-        _add_raman_band_spans(ax, np.asarray(axis, dtype=float), plot_cfg, display_wavenumbers=display_axes[region])
+    if show_band_spans:
+        for region, axis in region_axes.items():
+            _add_raman_band_spans(ax, np.asarray(axis, dtype=float), plot_cfg, display_wavenumbers=display_axes[region])
     _style_wavenumber_axis(ax, region_axes, display_axes, plot_cfg.get("axis", {}))
     _decorate_regions(ax, gap_spans, label_positions)
     _finalize_axis(ax, title=title, title_pad=24.0)
@@ -943,8 +944,12 @@ def plot_qc_metric_distribution(
             ax.axvline(float(np.nanmedian(series)), color="#CC3311", linestyle="--", linewidth=1.5)
 
     ax.set_title(f"QC metric distribution: {metric_label}", fontsize=14)
-    ax.set_xlabel(metric_label, fontsize=12)
-    ax.set_ylabel("Count", fontsize=12)
+    if {"condition", "gender"}.issubset(data.columns):
+        ax.set_xlabel("Cohort", fontsize=12)
+        ax.set_ylabel(metric_label, fontsize=12)
+    else:
+        ax.set_xlabel(metric_label, fontsize=12)
+        ax.set_ylabel("Count", fontsize=12)
     ax.grid(True, linestyle="--", alpha=0.35)
     fig.tight_layout()
     return fig, ax

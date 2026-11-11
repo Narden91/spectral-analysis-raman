@@ -114,7 +114,7 @@ def test_permutation_p_value_respects_permutation_max() -> None:
     left = rng.normal(size=15)
     right = rng.normal(size=15)
 
-    p_value = _permutation_p_value(
+    p_value, draws_used = _permutation_p_value(
         left,
         right,
         n_permutations=200,
@@ -123,6 +123,7 @@ def test_permutation_p_value_respects_permutation_max() -> None:
         stopping_cfg={"permutation_min": 20, "permutation_max": 40, "permutation_check_interval": 10},
     )
     assert 0.0 < p_value <= 1.0
+    assert 0 < draws_used <= 40
 
 
 def test_permutation_p_value_full_budget_when_unresolved() -> None:
@@ -130,7 +131,7 @@ def test_permutation_p_value_full_budget_when_unresolved() -> None:
     left = rng.normal(size=15)
     right = rng.normal(size=15)
 
-    p_value = _permutation_p_value(
+    p_value, draws_used = _permutation_p_value(
         left,
         right,
         n_permutations=15,
@@ -143,6 +144,7 @@ def test_permutation_p_value_full_budget_when_unresolved() -> None:
             "permutation_confidence": 0.999999,
         },
     )
+    assert draws_used == 15
     assert np.isfinite(p_value)
     assert 0.0 < p_value <= 1.0
 
@@ -159,7 +161,7 @@ def test_permutation_partial_spearman_p_value_respects_permutation_max() -> None
         }
     )
 
-    p_value = _permutation_partial_spearman_p_value(
+    p_value, draws_used = _permutation_partial_spearman_p_value(
         frame,
         feature="feature",
         endpoint="endpoint",
@@ -213,3 +215,11 @@ def test_run_confirmatory_panel_statistics_writes_outputs(tmp_path: Path) -> Non
     }.issubset(outputs)
     assert pd.read_csv(outputs["panel_continuous_associations"])["partial_spearman_p_value"].notna().any()
     assert "brown_forsythe_p_value" in pd.read_csv(outputs["panel_variance_homogeneity"]).columns
+
+
+def test_effect_plots_skip_empty_tables(tmp_path):
+    from src.analysis.robust_contrasts import _plot_effect_sizes, _plot_raincloud_surrogate
+
+    assert _plot_effect_sizes(pd.DataFrame(), tmp_path) is None
+    assert _plot_raincloud_surrogate(pd.DataFrame(), pd.DataFrame(), tmp_path) is None
+    assert not list(tmp_path.iterdir())

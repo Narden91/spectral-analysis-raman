@@ -18,7 +18,7 @@ LOGISTIC_TOL = 1e-4
 def l1_logistic_model(*, c: float, random_state: int) -> LogisticRegression:
     return LogisticRegression(
         solver="liblinear",
-        penalty="l1",
+        l1_ratio=1.0,
         dual=False,
         C=c,
         class_weight="balanced",
@@ -39,4 +39,9 @@ def fit_with_convergence_capture(
         warnings.simplefilter("always", ConvergenceWarning)
         model.fit(X, y)
     for warning in caught:
-        logger.debug("%s convergence warning: %s", context, warning.message)
+        if issubclass(warning.category, ConvergenceWarning):
+            logger.warning("%s convergence warning: %s", context, warning.message)
+        else:
+            warnings.warn_explicit(
+                warning.message, warning.category, warning.filename, warning.lineno,
+            )

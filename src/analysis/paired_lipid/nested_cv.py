@@ -1211,6 +1211,8 @@ def run_multiplicity_bootstrap(
     d_comp_arr = np.full(n_bootstraps, np.nan, dtype=np.float64)
     failed_draws = 0
     failure_reasons: list[str] = []
+    exception_draws: set[int] = set()
+    execution: dict[str, Any] = {"device": "sequential_cpu", "gpu_requested": use_gpu}
     point_est_delta: float | None = None
     point_est_comp: float | None = None
 
@@ -1227,6 +1229,7 @@ def run_multiplicity_bootstrap(
             gcache,
             use_gpu=use_gpu,
             batch_size=batch_size,
+            execution_metadata=execution,
         )
         if base_elig:
             point_est_delta = float(dp_fast[0])
@@ -1261,6 +1264,7 @@ def run_multiplicity_bootstrap(
             )
             d_comp_arr[b] = float(b_res["paired_vs_strongest_comparator"]["delta_mse"])
         except Exception as exc:
+            exception_draws.add(int(b))
             failed_draws += 1
             failure_reasons.append(str(exc))
 
@@ -1272,7 +1276,7 @@ def run_multiplicity_bootstrap(
         if np.isfinite(dp) and np.isfinite(dc):
             delta_paired.append(dp)
             delta_vs_comp.append(dc)
-        elif b not in fallback_idx:
+        elif b not in exception_draws:
             failed_draws += 1
             failure_reasons.append("nonfinite_bootstrap_estimate")
 
@@ -1300,6 +1304,7 @@ def run_multiplicity_bootstrap(
         "n_bootstraps_succeeded": len(delta_paired),
         "n_failed_refits": failed_draws,
         "n_fallback_draws": int(fallback_idx.size),
+        "execution": execution,
         "failure_reasons": failure_reasons[:10],
         "mean_distinct_participants": float(np.mean(distinct_counts)) if distinct_counts else float("nan"),
         # SE of the bootstrap mean, not of the 2.5/97.5 percentile limits.

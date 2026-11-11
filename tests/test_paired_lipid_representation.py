@@ -399,10 +399,18 @@ def test_missing_secondary_endpoint_equals_zero_weight() -> None:
         evaluate_nested_cohort(ds_nan, endpoint="hdl_mmol_l")
 
 
-def test_manuscript_ml_scripts_and_approval_gate(tmp_path: Path) -> None:
+def test_manuscript_ml_scripts_and_approval_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import manuscript_ml.run_all as run_all_module
+    import src.data_preparation.materialize as materialize
     from manuscript_ml import resolve_experiment_dataset
+    from manuscript_ml.audit_readiness import run_readiness_audit
     from manuscript_ml.run_all import run_all_pipeline
 
+    monkeypatch.setattr(materialize, "store_dir", lambda *_args: tmp_path / "missing_store")
+    monkeypatch.setattr(
+        run_all_module, "run_readiness_audit",
+        lambda **kwargs: run_readiness_audit(clinical_master_path=tmp_path / "missing_clinical.csv", **kwargs),
+    )
     with pytest.raises(PermissionError, match="approve-cohort-evaluation"):
         resolve_experiment_dataset(use_synthetic=False, approve_cohort_evaluation=False)
 
@@ -432,5 +440,82 @@ def test_manuscript_ml_scripts_and_approval_gate(tmp_path: Path) -> None:
     assert expected_keys.issubset(set(outputs.keys()))
     for path in outputs.values():
         assert path.is_file()
+        if path.suffix == ".csv":
+            assert not any(str(column).startswith("Unnamed:") for column in pd.read_csv(path).columns)
 
 
+def test_bootstrap_counts_nonfinite_fallback_and_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    import src.analysis.paired_lipid.nested_cv as module
+
+    dataset = SimpleNamespace(n_participants=2, outcomes={"ldl_mmol_l": np.array([1.0, 2.0])})
+    monkeypatch.setattr(module, "make_nested_splits", lambda *_args: ([], []))
+    monkeypatch.setattr(module, "_get_dataset_gram_cache", lambda *_args: {})
+    monkeypatch.setattr(module, "_check_fast_batch_eligibility", lambda *_args: np.zeros(3, dtype=bool))
+    calls = 0
+
+    def evaluate(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise ValueError("refit failed")
+        value = 1.0 if calls == 1 else np.nan
+        return {
+            "comparisons_vs_covariate_ridge": {"paired_linear_ridge": {"delta_mse": value}},
+            "paired_vs_strongest_comparator": {"delta_mse": value},
+        }
+
+    monkeypatch.setattr(module, "evaluate_nested_cohort", evaluate)
+    result = module.run_multiplicity_bootstrap(dataset, n_bootstraps=2, use_gpu=False)
+    assert result["n_failed_refits"] == 2
+    assert result["n_bootstraps_succeeded"] == 0
+    assert result["interval_procedure_succeeded"] is False
+    assert set(result["failure_reasons"]) == {"refit failed", "nonfinite_bootstrap_estimate"}
+
+
+def test_bootstrap_records_requested_gpu_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    import src.analysis.paired_lipid.batched as module
+
+    monkeypatch.setattr(module, "_get_gpu_xp", lambda: None)
+    execution = {}
+    module._run_batched_multiplicity_draws(
+        SimpleNamespace(), np.array([1.0, 2.0]), [], [], np.ones((1, 2)),
+        PairedLipidConfig(), {"part_band_mat": np.ones((2, 1))},
+        use_gpu=True, execution_metadata=execution,
+    )
+    assert execution["device"] == "cpu"
+    assert execution["gpu_fallback"] is True
+    assert execution["gpu_requested"] is True
+
+
+def test_manuscript_provenance_saves_config_and_data_manifest(tmp_path: Path) -> None:
+    import json
+
+    from manuscript_ml import write_run_provenance
+
+    config_path = tmp_path / "settings.yaml"
+    config_text = "paired_lipid: {}\n"
+    config_path.write_text(config_text, encoding="utf-8")
+    store_path = tmp_path / "store"
+    store_path.mkdir()
+    manifest = {"manifest_hash": "fixture", "schema_version": 1}
+    (store_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    path = write_run_provenance(
+        tmp_path / "output", "fixture", config_path=config_path, cfg=PairedLipidConfig(),
+        settings={}, source_meta={"store_path": str(store_path)},
+    )
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["config_text"] == config_path.read_bytes().decode("utf-8")
+    assert result["data_manifest"] == manifest
+    assert result["data_manifest_status"] == "saved"
+
+
+@pytest.mark.parametrize("preset", ["primray", ""])
+def test_covariate_preprocessor_rejects_unknown_preset(preset: str) -> None:
+    from src.analysis.paired_lipid.models import CovariatePreprocessor
+
+    with pytest.raises(ValueError, match="Unknown covariate preset"):
+        CovariatePreprocessor._build_raw_design(pd.DataFrame(), preset=preset)

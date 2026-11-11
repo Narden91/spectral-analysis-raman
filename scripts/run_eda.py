@@ -53,6 +53,7 @@ from src.data_preparation import (
     write_analysis_provenance,
 )
 from src.terminal_output import print_kv_table, print_status
+from src.visualization.theme import set_gallery_theme
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +281,7 @@ def _log_final_summary(ranges: list[str], biological_ran: bool, warnings: list[s
 def _main() -> None:
     args = _parse_args()
     setup_logging(console_level=logging.INFO if args.verbose else logging.WARNING)
+    set_gallery_theme()
     analysis_mode = resolve_eda_analysis_mode(config, override=args.analysis_mode)
     apply_eda_analysis_mode(config, analysis_mode)
     _apply_analysis_mode_runtime_defaults(analysis_mode)
@@ -360,7 +362,7 @@ def _main() -> None:
         _log_final_summary(ranges, biological_ran, warnings)
         print_status(f"EDA complete. Outputs: {_output_dir('eda_subdir')}")
     except (ValueError, RuntimeError, FileNotFoundError) as exc:
-        logger.error("%s", exc)
+        logger.exception("EDA failed: %s", exc)
         sys.exit(1)
     except KeyboardInterrupt:
         logger.warning("EDA interrupted; completed ML resampling checkpoints are available for --resume-ml")

@@ -407,21 +407,17 @@ def run_covariate_region_models(
                         n_events = int(design["outcome"].sum())
                     status = "ok"
                 except ValueError as exc:
-                    status = str(exc) if str(exc) in {"rank_deficient", "separation", "insufficient_n"} else "missing_required_data"
+                    if str(exc) not in {"rank_deficient", "separation", "insufficient_n"}:
+                        raise RuntimeError(f"Covariate model failed for {outcome_label} ~ {predictor_name}") from exc
+                    status = str(exc)
                     coefficient = np.nan
                     coef_p_value = np.nan
                     intercept = np.nan
                     r_squared = np.nan
                     accuracy = np.nan
                     n_events = int(design["outcome"].sum()) if outcome_type == "binary" else np.nan
-                except Exception:
-                    status = "missing_required_data"
-                    coefficient = np.nan
-                    coef_p_value = np.nan
-                    intercept = np.nan
-                    r_squared = np.nan
-                    accuracy = np.nan
-                    n_events = int(design["outcome"].sum()) if outcome_type == "binary" else np.nan
+                except Exception as exc:
+                    raise RuntimeError(f"Covariate model failed for {outcome_label} ~ {predictor_name}") from exc
                 n_subjects = int(len(design))
 
             formula_terms = [predictor_name, *available_covariates]

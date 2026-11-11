@@ -125,6 +125,13 @@ def validate_control_vs_disease_ml_config(cfg: dict[str, Any]) -> None:
             f"({primary_representation!r}) must be one of the configured representations: {representations}"
         )
 
+    stratify_by = ml_cfg.get("stratify_permutation_by")
+    if stratify_by not in (None, "sex"):
+        raise ValueError(
+            "analysis.control_vs_disease_ml.stratify_permutation_by must be 'sex' or None, "
+            f"got {stratify_by!r}"
+        )
+
     threshold_metric = ml_cfg.get("threshold_metric")
     if threshold_metric not in _SUPPORTED_THRESHOLD_METRICS:
         raise ValueError(

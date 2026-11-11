@@ -484,6 +484,7 @@ def _write_spectral_plots(
                 series,
                 title=f"Preprocessed spectra: {condition.capitalize()} individual spectra - Global",
                 plot_cfg=plot_cfg,
+                show_band_spans=False,
             )
             _save_fig(fig, plot_root / "individual" / f"{condition.capitalize()}_global.png")
 

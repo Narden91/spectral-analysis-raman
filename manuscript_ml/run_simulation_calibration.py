@@ -200,8 +200,8 @@ def run_simulation_and_calibration(
 
     scenarios_path = target_dir / "simulation_scenarios_summary.csv"
     cal_path = target_dir / "simulation_calibration_report.csv"
-    write_csv_atomic(scenarios_df, scenarios_path)
-    write_csv_atomic(cal_df, cal_path)
+    write_csv_atomic(scenarios_df, scenarios_path, index=False)
+    write_csv_atomic(cal_df, cal_path, index=False)
     prov_path = write_run_provenance(
         target_dir,
         "simulation_calibration",

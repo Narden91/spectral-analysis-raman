@@ -56,6 +56,7 @@ def _phase_timer(
     phase_label: str,
     progress: Progress | None = None,
     task_id: int | None = None,
+    outputs: dict[str, dict[str, object]] | None = None,
 ):
     if progress is not None and task_id is not None:
         progress.update(task_id, description=f"[bold blue]{phase_label}")
@@ -63,8 +64,14 @@ def _phase_timer(
     status = "ok"
     try:
         yield
-    except Exception:
+    except BaseException as exc:
         status = "failed"
+        if outputs is not None:
+            outputs[phase_key] = {
+                "_status": PhaseStatus(
+                    phase_key=phase_key, status=STATUS_FAILED_EXECUTION, reason=str(exc),
+                ).as_row()
+            }
         raise
     finally:
         elapsed = time.perf_counter() - start
@@ -139,12 +146,9 @@ def _collect_cross_phase_multiplicity(
     for phase_output_key, file_key, phase_label in source_keys:
         phase_outputs = outputs.get(phase_output_key, {})
         csv_path = phase_outputs.get(file_key)
-        if csv_path is None or not Path(csv_path).exists():
+        if csv_path is None:
             continue
-        try:
-            df = pd.read_csv(csv_path)
-        except Exception:
-            continue
+        df = pd.read_csv(csv_path)
         if "cluster_p_value" not in df.columns:
             continue
         cluster_rows = df[df["cluster_p_value"].notna()].copy()
@@ -461,8 +465,6 @@ def _write_cross_phase_multiplicity(
                 int(multiplicity_df["cross_phase_significant_holm05"].sum()),
             )
     except Exception as exc:
-        if bool(cfg.get("analysis", {}).get("publication_run", False)):
-            raise RuntimeError("Cross-phase multiplicity summary failed") from exc
         logger.warning("Cross-phase multiplicity summary failed: %s", exc)
         outputs["cross_phase_multiplicity"] = {
             "_status": PhaseStatus(
@@ -471,6 +473,8 @@ def _write_cross_phase_multiplicity(
                 reason=str(exc),
             ).as_row()
         }
+        if bool(cfg.get("analysis", {}).get("publication_run", False)):
+            raise RuntimeError("Cross-phase multiplicity summary failed") from exc
 
 
 def run_disease_only_cross_region_pipeline(
@@ -494,29 +498,31 @@ def run_disease_only_cross_region_pipeline(
     # 25 = number of `with phase(...)` blocks; config-disabled phases never advance the bar.
     _task = _progress.add_task("Disease-only cross-region phases", total=25)
 
-    phase = partial(_phase_timer, phase_timings, progress=_progress, task_id=_task)
-    with _progress:
-        pls_outputs, splsda_outputs = _run_clinical_and_candidate_phases(
-            feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
-            phase=phase,
-        )
-        preregistered_outputs = _run_fixed_panel_phases(
-            feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
-            phase=phase,
-        )
-        _run_candidate_followup_phases(
-            feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
-            phase=phase,
-            pls_outputs=pls_outputs, splsda_outputs=splsda_outputs,
-            preregistered_outputs=preregistered_outputs,
-        )
-        _run_spectral_structure_phases(
-            feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
-            phase=phase,
-            preregistered_outputs=preregistered_outputs,
-        )
+    phase = partial(_phase_timer, phase_timings, progress=_progress, task_id=_task, outputs=outputs)
+    try:
+        with _progress:
+            pls_outputs, splsda_outputs = _run_clinical_and_candidate_phases(
+                feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
+                phase=phase,
+            )
+            preregistered_outputs = _run_fixed_panel_phases(
+                feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
+                phase=phase,
+            )
+            _run_candidate_followup_phases(
+                feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
+                phase=phase,
+                pls_outputs=pls_outputs, splsda_outputs=splsda_outputs,
+                preregistered_outputs=preregistered_outputs,
+            )
+            _run_spectral_structure_phases(
+                feature_matrix_path=feature_matrix_path, cfg=cfg, outputs=outputs,
+                phase=phase,
+                preregistered_outputs=preregistered_outputs,
+            )
 
-    _write_cross_phase_multiplicity(outputs, cfg)
-    _write_phase_status_manifest(outputs)
-    _write_phase_timings(phase_timings)
+        _write_cross_phase_multiplicity(outputs, cfg)
+    finally:
+        _write_phase_status_manifest(outputs)
+        _write_phase_timings(phase_timings)
     return outputs

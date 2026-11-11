@@ -780,11 +780,21 @@ def _run_batched_multiplicity_draws(
     *,
     use_gpu: bool | None = None,
     batch_size: int | None = None,
+    execution_metadata: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate multiplicity bootstrap draws in batches on GPU (CuPy) or CPU (NumPy)."""
     n_sub, n_p = M_sub.shape
     cp_mod = _get_gpu_xp() if use_gpu is not False else None
     xp = cp_mod if (cp_mod is not None and (use_gpu is True or (use_gpu is None and n_sub >= 32))) else np
+    if execution_metadata is not None:
+        gpu_requested = use_gpu is True or (use_gpu is None and n_sub >= 32)
+        execution_metadata.update(
+            device="gpu" if xp is not np else "cpu",
+            gpu_requested=use_gpu,
+            gpu_fallback=bool(gpu_requested and cp_mod is None),
+        )
+        if gpu_requested and cp_mod is None:
+            execution_metadata["gpu_fallback_reason"] = "CuPy/CUDA device unavailable"
     if batch_size is None:
         batch_size = 2048 if xp is not np else 128
 

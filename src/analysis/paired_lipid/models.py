@@ -160,6 +160,11 @@ class CovariatePreprocessor:
 
     @staticmethod
     def _build_raw_design(df: pd.DataFrame, *, preset: str) -> pd.DataFrame:
+        if preset not in (
+            "primary", "no_label_trend", "quadratic_label_trend",
+            "quadratic_age_and_label", "pre_event_risk_factors",
+        ):
+            raise ValueError(f"Unknown covariate preset: {preset!r}")
         out = pd.DataFrame(index=df.index)
         out["age_years"] = pd.to_numeric(df.get("age_years"), errors="coerce")
         if preset == "quadratic_age_and_label":

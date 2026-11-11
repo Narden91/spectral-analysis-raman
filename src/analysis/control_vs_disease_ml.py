@@ -174,10 +174,16 @@ class _CheckpointStore:
             "feature_matrix_sha256": _file_sha256(feature_matrix_path),
         }
         fingerprint = config_hash(identity)
-        directory = metadata_dir / "control_vs_disease_ml_checkpoints" / fingerprint
+        checkpoint_root = metadata_dir / "control_vs_disease_ml_checkpoints"
+        directory = checkpoint_root / fingerprint
         metadata_path = directory / "checkpoint_manifest.json"
         preexisting = metadata_path.exists()
 
+        if resume and not preexisting and any(checkpoint_root.glob("*/checkpoint_manifest.json")):
+            raise ValueError(
+                "No ML resume checkpoint matches current config, data manifest, or feature matrix. "
+                "Run without --resume-ml to start a new ML resampling run."
+            )
         if resume and preexisting:
             stored = json.loads(metadata_path.read_text(encoding="utf-8"))
             if stored != identity:
@@ -1686,7 +1692,7 @@ def _run_model_permutation_phase(
     null_distribution_rows: list[dict[str, object]],
     phase: Callable[..., AbstractContextManager[None]],
     progress: Progress,
-) -> tuple[float, float]:
+) -> tuple[float, float, int, int]:
     with _progress_task(
         progress,
         f"{model_name} ({representation}) unrestricted permutations",
@@ -1751,7 +1757,7 @@ def _run_model_permutation_phase(
             n_permutations=_n_permutations(ml_cfg),
             n_splits=len(outer_split_plan[0]),
         )
-    return p_unrestricted, p_sex_stratified
+    return p_unrestricted, p_sex_stratified, len(null_unrestricted), len(null_sex_stratified)
 
 
 def _write_model_comparison(
@@ -1849,6 +1855,8 @@ def run_control_vs_disease_ml_pipeline(
             outputs["cohort_summary"] = write_csv_atomic(cohort_df, cohort_dir / "cohort_summary.csv", index=False)
 
         stratify_by = ml_cfg.get("stratify_permutation_by")
+        if stratify_by not in (None, "sex"):
+            raise ValueError(f"Unsupported stratify_permutation_by: {stratify_by!r}; expected 'sex' or None")
         sex_column = _sex_column(frame)
         for representation in representations:
             with phase(f"features_{representation}", f"Build {representation} feature matrix"):
@@ -1909,7 +1917,7 @@ def run_control_vs_disease_ml_pipeline(
                     permutation_observed_score,
                 )
 
-                p_unrestricted, p_sex_stratified = _run_model_permutation_phase(
+                p_unrestricted, p_sex_stratified, n_unrestricted, n_sex_stratified = _run_model_permutation_phase(
                     model_name=model_name, representation=representation,
                     X_valid=X_valid, y_valid=y_valid, strata=strata,
                     permutation_observed_score=permutation_observed_score,
@@ -1951,7 +1959,8 @@ def run_control_vs_disease_ml_pipeline(
                         "permutation_cv_repeats": 1,
                         "permutation_p_value_unrestricted": p_unrestricted,
                         "permutation_p_value_sex_stratified": p_sex_stratified,
-                        "n_permutations": _n_permutations(ml_cfg),
+                        "n_permutations": n_unrestricted,
+                        "n_permutations_sex_stratified": n_sex_stratified,
                         "is_primary_model": model_name == ml_cfg.get("primary_model")
                         and representation == ml_cfg.get("primary_representation"),
                     }

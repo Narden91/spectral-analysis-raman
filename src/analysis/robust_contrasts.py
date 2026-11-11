@@ -258,7 +258,7 @@ def _permutation_p_value(
     random_state: int,
     n_jobs: int = 1,
     stopping_cfg: dict | None = None,
-) -> float:
+) -> tuple[float, int]:
     """Draws stop early once the Monte Carlo p-value's CI clears alpha.
 
     Besag & Clifford (1991) curtailment; see
@@ -267,7 +267,7 @@ def _permutation_p_value(
     left = left[np.isfinite(left)]
     right = right[np.isfinite(right)]
     if left.size == 0 or right.size == 0 or n_permutations <= 0:
-        return np.nan
+        return np.nan, 0
 
     observed = abs(cliffs_delta(left, right))
     pooled = np.concatenate([left, right])
@@ -285,7 +285,7 @@ def _permutation_p_value(
         n_jobs=n_jobs,
     )
     exceedances = int(sum(exceedance_flags))
-    return float((exceedances + 1) / (len(exceedance_flags) + 1))
+    return float((exceedances + 1) / (len(exceedance_flags) + 1)), len(exceedance_flags)
 
 
 def _permutation_partial_spearman_p_value(
@@ -298,7 +298,7 @@ def _permutation_partial_spearman_p_value(
     random_state: int,
     n_jobs: int = 1,
     stopping_cfg: dict | None = None,
-) -> float:
+) -> tuple[float, int]:
     """Draws stop early once the Monte Carlo p-value's CI clears alpha.
 
     Besag & Clifford (1991) curtailment; see
@@ -307,13 +307,13 @@ def _permutation_partial_spearman_p_value(
     columns = [feature, endpoint, *covariates]
     complete = frame[columns].dropna()
     if len(complete) < 3 or n_permutations <= 0:
-        return np.nan
+        return np.nan, 0
 
     feature_residual, endpoint_residual, _rank, _n = partial_spearman_residuals(
         complete[feature], complete[endpoint], complete[covariates]
     )
     if np.std(feature_residual) == 0 or np.std(endpoint_residual) == 0:
-        return np.nan
+        return np.nan, 0
     observed = abs(float(np.corrcoef(feature_residual, endpoint_residual)[0, 1]))
 
     n_jobs = normalize_n_jobs(n_jobs)
@@ -333,7 +333,7 @@ def _permutation_partial_spearman_p_value(
         n_jobs=n_jobs,
     )
     exceedances = int(sum(exceedance_flags))
-    return float((exceedances + 1) / (len(exceedance_flags) + 1))
+    return float((exceedances + 1) / (len(exceedance_flags) + 1)), len(exceedance_flags)
 
 
 def _bootstrap_two_group_statistic(
@@ -407,6 +407,7 @@ def run_anchor_test(
         "covariates": ",".join(covariates),
         "direction": primary.get("direction", "negative"),
         "status": "ok",
+        "n_permutations": 0,
     }
     required = [feature, endpoint, *covariates]
     missing = [column for column in required if column not in frame.columns]
@@ -424,7 +425,7 @@ def run_anchor_test(
         random_state=random_state,
         n_jobs=n_jobs,
     )
-    perm_p = _permutation_partial_spearman_p_value(
+    perm_p, draws_used = _permutation_partial_spearman_p_value(
         frame,
         feature=feature,
         endpoint=endpoint,
@@ -441,6 +442,7 @@ def run_anchor_test(
             "bootstrap_ci_lower": ci_lower,
             "bootstrap_ci_upper": ci_upper,
             "perm_p_value": perm_p,
+            "n_permutations": draws_used,
             "n": n,
         }
     )
@@ -497,7 +499,16 @@ def run_panel_contrasts(
                 right=right,
                 min_n=min_n,
             )
+            row["n_permutations"] = 0
             if row["status"] == "ok":
+                perm_p, draws_used = _permutation_p_value(
+                    left,
+                    right,
+                    n_permutations=n_permutations,
+                    random_state=random_state + feature_index,
+                    n_jobs=n_jobs,
+                    stopping_cfg=panel,
+                )
                 test = stats.mannwhitneyu(left, right, alternative="two-sided")
                 ci_lower, ci_upper = _bootstrap_ci(
                     left,
@@ -515,14 +526,8 @@ def run_panel_contrasts(
                         "cohens_d": cohens_d(left, right),
                         "bootstrap_ci_lower": ci_lower,
                         "bootstrap_ci_upper": ci_upper,
-                        "perm_p_value": _permutation_p_value(
-                            left,
-                            right,
-                            n_permutations=n_permutations,
-                            random_state=random_state + feature_index,
-                            n_jobs=n_jobs,
-                            stopping_cfg=panel,
-                        ),
+                        "perm_p_value": perm_p,
+                        "n_permutations": draws_used,
                         "mean_group_a": float(np.mean(left)),
                         "mean_group_b": float(np.mean(right)),
                     }
@@ -698,6 +703,8 @@ def run_variance_homogeneity(
 
 
 def _plot_effect_sizes(contrasts: pd.DataFrame, output_dir: Path) -> Path | None:
+    if contrasts.empty or "status" not in contrasts:
+        return None
     ok = contrasts.loc[contrasts.get("status", "") == "ok"].copy()
     if ok.empty or "cliffs_delta" not in ok.columns:
         return None
@@ -729,6 +736,8 @@ def _plot_effect_sizes(contrasts: pd.DataFrame, output_dir: Path) -> Path | None
 
 
 def _plot_raincloud_surrogate(frame: pd.DataFrame, contrasts: pd.DataFrame, output_dir: Path) -> Path | None:
+    if contrasts.empty or "status" not in contrasts:
+        return None
     ok = contrasts.loc[contrasts.get("status", "") == "ok"].copy()
     if ok.empty:
         return None

@@ -99,6 +99,9 @@ def test_run_biochemical_ratios_writes_expected_outputs(tmp_path: Path) -> None:
         "biochemical_ratio_associations",
     }
     assert len(bands) == 12
+    expected_subjects = feature_matrix.loc[~feature_matrix["is_control"], "subject_id"].astype(str).tolist()
+    assert bands["subject_id"].astype(str).tolist() == expected_subjects
+    assert ratios["subject_id"].astype(str).tolist() == bands["subject_id"].astype(str).tolist()
     assert "amide_iii_1258__over__ch2_sym_stretch_2853" in ratios.columns
     assert {"band_integral", "band_ratio"}.issubset(set(associations["feature_source"]))
     assert set(associations["target"]) == {"delta_moca"}

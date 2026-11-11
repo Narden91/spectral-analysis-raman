@@ -145,7 +145,7 @@ def _fit_nmf_multi_init(
             errors.append(_reconstruction_error(X, W, model.components_))
             solutions.append((W, model.components_))
         except Exception as exc:
-            logger.debug("NMF init failed (seed=%d): %s", seed, exc)
+            logger.warning("NMF init failed (seed=%d): %s", seed, exc)
 
     if not solutions:
         raise RuntimeError("All NMF initializations failed")

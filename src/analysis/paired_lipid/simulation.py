@@ -340,7 +340,9 @@ def evaluate_bootstrap_calibration(
         signal_strength=signal_strength,
     )
 
-    gpu_active = (_get_gpu_xp() is not None) and (use_gpu is True or (use_gpu is None and n_bootstraps >= 32))
+    gpu_available = _get_gpu_xp() is not None
+    gpu_requested = use_gpu is True or (use_gpu is None and n_bootstraps >= 32)
+    gpu_active = gpu_available and gpu_requested
     if not gpu_active and n_jobs != 1 and (n_repetitions * max(n_bootstraps, 1) >= 200):
         from joblib import Parallel, delayed
 
@@ -381,7 +383,6 @@ def evaluate_bootstrap_calibration(
     target_delta = float(np.mean(external_deltas))
     target_mc_se = float(np.std(external_deltas, ddof=1) / np.sqrt(n_repetitions)) if n_repetitions > 1 else float("nan")
     uncond_covered = 0
-    cond_covered = 0
     n_success = 0
     widths: list[float] = []
 
@@ -391,10 +392,9 @@ def evaluate_bootstrap_calibration(
             widths.append(hi - lo)
             if lo <= target_delta <= hi:
                 uncond_covered += 1
-                cond_covered += 1
 
     uncond_cov = float(uncond_covered) / float(n_repetitions) if n_repetitions > 0 else float("nan")
-    cond_cov = float(cond_covered) / float(n_success) if n_success > 0 else float("nan")
+    cond_cov = float(uncond_covered) / float(n_success) if n_success > 0 else float("nan")
     fail_rate = float(n_repetitions - n_success) / float(n_repetitions) if n_repetitions > 0 else float("nan")
     wilson_lo, wilson_hi = wilson_score_interval(uncond_covered, n_repetitions, confidence=0.95)
     passes_gate = bool(wilson_lo >= gate_wilson_lower_min and fail_rate < gate_max_failure_rate)
@@ -404,6 +404,9 @@ def evaluate_bootstrap_calibration(
         "gate_is_confirmatory": seed_set == "validation",
         "n_repetitions": n_repetitions,
         "n_bootstraps": n_bootstraps,
+        "gpu_requested": use_gpu,
+        "gpu_active": gpu_active,
+        "gpu_fallback": bool(gpu_requested and not gpu_available),
         "target_delta_mse": target_delta,
         "target_monte_carlo_se": target_mc_se,
         "n_test_participants": n_test_participants,

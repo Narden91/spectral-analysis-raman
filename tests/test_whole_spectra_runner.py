@@ -93,3 +93,22 @@ def test_disease_only_whole_spectra_skips_ratio_summary(
     assert not (drivers_dir / "ratio_group_tests.csv").exists()
     assert not (drivers_dir / "ratio_summary.png").exists()
     assert result["ratio_tests"].empty
+
+
+def test_regional_variance_export_preserves_subject_ids_for_repeated_areas(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(runner, "get_whole_spectra_phase_dir", lambda key: tmp_path)
+    monkeypatch.setattr(runner, "_estimate_variance_decomposition", lambda *args: (np.nan, 70.0, 30.0))
+    monkeypatch.setattr(runner, "plot_variance_decomposition", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(runner, "plot_regional_variance_qc", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(runner, "_save_fig", lambda *args: None)
+    spectra = np.array([[1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0]])
+
+    _, _, result = runner._run_variance_context_phase(
+        pd.DataFrame(), {"disease": spectra}, spectra, np.array(["disease", "disease"]),
+        ["S01", "S01"], pd.DataFrame(), {}, {}, 2, "Whole",
+    )
+
+    assert result["subject_id"].tolist() == ["S01", "S01"]
+    exported = pd.read_csv(tmp_path / "regional_snv_residual_variance.csv")
+    assert exported["subject_id"].tolist() == ["S01", "S01"]
+    assert len(exported) == spectra.shape[0]

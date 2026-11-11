@@ -11,6 +11,7 @@ WHOLE_SPECTRA_PHASE_DIRS = {
     "global_structure": "01_global_structure",
     "global_drivers": "02_global_drivers",
     "variance_context": "03_variance_context",
+    "exploratory_multiblock": "exploratory_multiblock",
 }
 
 CROSS_REGION_PHASE_DIRS = {
@@ -249,9 +250,16 @@ def get_eda_phase_dir(spectral_range: str, phase: str) -> Path:
     return phase_dir
 
 
+def _phase_suffix(phase: str, phase_dirs: dict[str, str]) -> str:
+    try:
+        return phase_dirs[phase]
+    except KeyError as exc:
+        raise ValueError(f"Unknown analysis phase: {phase}") from exc
+
+
 def get_whole_spectra_phase_dir(phase: str) -> Path:
     """Return an output directory for a whole-spectra EDA phase."""
-    return get_eda_phase_dir("both", WHOLE_SPECTRA_PHASE_DIRS.get(phase, phase))
+    return get_eda_phase_dir("both", _phase_suffix(phase, WHOLE_SPECTRA_PHASE_DIRS))
 
 
 def get_run_metadata_dir() -> Path:
@@ -270,7 +278,7 @@ def get_cross_region_summary_dir() -> Path:
 
 def get_cross_region_phase_dir(phase: str) -> Path:
     """Return a numbered phase directory under the cross-region summary root."""
-    suffix = CROSS_REGION_PHASE_DIRS.get(phase, phase)
+    suffix = _phase_suffix(phase, CROSS_REGION_PHASE_DIRS)
     path = get_cross_region_summary_dir() / suffix
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -285,7 +293,7 @@ def get_classification_dir() -> Path:
 
 def get_classification_phase_dir(phase: str) -> Path:
     """Return a phase directory under the classification root (PLS regression, sPLS-DA, minimal panel, disease subgroups)."""
-    suffix = CLASSIFICATION_PHASE_DIRS.get(phase, phase)
+    suffix = _phase_suffix(phase, CLASSIFICATION_PHASE_DIRS)
     path = get_classification_dir() / suffix
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -311,7 +319,7 @@ def get_confirmatory_panel_dir() -> Path:
 
 def get_spectral_interpretability_dir(phase: str) -> Path:
     """Return a phase subfolder under the Tier-2 spectral interpretability root."""
-    suffix = _SPECTRAL_INTERPRETABILITY_SUBDIRS.get(phase, phase)
+    suffix = _phase_suffix(phase, _SPECTRAL_INTERPRETABILITY_SUBDIRS)
     path = _output_dir("eda_subdir") / "06_spectral_interpretability" / suffix
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -331,8 +339,9 @@ def get_ml_classification_phase_dir(
     create: bool = True,
 ) -> Path:
     """Return one numbered control-vs-disease ML artifact directory."""
+    suffix = _phase_suffix(phase, CONTROL_VS_DISEASE_ML_PHASE_DIRS)
     base = Path(root) if root is not None else get_ml_classification_dir()
-    path = base / CONTROL_VS_DISEASE_ML_PHASE_DIRS.get(phase, phase)
+    path = base / suffix
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path

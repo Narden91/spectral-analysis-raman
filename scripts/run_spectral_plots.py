@@ -26,6 +26,7 @@ from src.data_preparation import (
     write_analysis_provenance,
 )
 from src.terminal_output import print_kv_table
+from src.visualization.theme import set_gallery_theme
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     setup_logging()
     args = _parse_args()
+    set_gallery_theme()
     data_source = resolve_data_source(config)
     print_kv_table("Active Data Source", data_source_summary(data_source))
     outputs = run_spectral_plots(

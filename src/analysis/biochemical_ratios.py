@@ -221,6 +221,8 @@ def run_biochemical_ratios(
     bands_path = target_dir / "biochemical_band_integrals.csv"
     ratios_path = target_dir / "biochemical_ratios.csv"
     associations_path = target_dir / "biochemical_ratio_associations.csv"
+    bands.insert(0, "subject_id", disease_only["subject_id"].to_numpy())
+    ratios.insert(0, "subject_id", disease_only["subject_id"].to_numpy())
     bands.to_csv(bands_path, index=False)
     ratios.to_csv(ratios_path, index=False)
     associations.to_csv(associations_path, index=False)

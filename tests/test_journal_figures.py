@@ -10,6 +10,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pytest
 
 import src.analysis.journal_figures as journal_figures
 from src.analysis.journal_figures import (
@@ -165,3 +166,12 @@ def test_journal_figure_phase_reports_partial_output(monkeypatch, tmp_path: Path
     assert outputs["_status"]["status"] == "missing_required_data"
     assert outputs["_status"]["n_artifacts"] == 1
     assert {"figures", "discriminant", "nmf", "entropy", "coupling"}.issubset(requested_dirs)
+
+
+def test_figure_errors_propagate_instead_of_appearing_as_missing_inputs(tmp_path: Path) -> None:
+    def fail(output_path: Path) -> bool:
+        raise ValueError("invalid figure data")
+
+    with pytest.raises(RuntimeError, match="Phase U: fig1 failed") as exc_info:
+        journal_figures._try_figure("fig1", tmp_path / "fig1.png", fail)
+    assert isinstance(exc_info.value.__cause__, ValueError)

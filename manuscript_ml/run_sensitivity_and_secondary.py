@@ -174,10 +174,10 @@ def run_sensitivity_and_secondary(
     sec_path = target_dir / "secondary_endpoints_summary.csv"
     anchor_path = target_dir / "anchor_associations_continuous.csv"
 
-    write_csv_atomic(pd.DataFrame(sens_rows), sens_path)
-    write_csv_atomic(pd.DataFrame(seed_rows), seeds_path)
-    write_csv_atomic(pd.DataFrame(sec_rows), sec_path)
-    write_csv_atomic(anchor_df, anchor_path)
+    write_csv_atomic(pd.DataFrame(sens_rows), sens_path, index=False)
+    write_csv_atomic(pd.DataFrame(seed_rows), seeds_path, index=False)
+    write_csv_atomic(pd.DataFrame(sec_rows), sec_path, index=False)
+    write_csv_atomic(anchor_df, anchor_path, index=False)
     prov_path = write_run_provenance(
         target_dir,
         "sensitivity_and_secondary",
