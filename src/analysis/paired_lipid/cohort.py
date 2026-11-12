@@ -1,23 +1,37 @@
 """Clinical-master linkage, paired cohort construction, band extraction and limitations table."""
 
 from __future__ import annotations
+
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
-import re
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
+
 import numpy as np
 import pandas as pd
+
 from src.analysis.raman_bands import RAMAN_BANDS
 from src.metadata.clinical_master import (
     IDENTITY_CONFLICT_FLAGS as IDENTITY_CONFLICT_FLAGS,
+)
+from src.metadata.clinical_master import (
     MISSING_TOKENS as MISSING_TOKENS,
+)
+from src.metadata.clinical_master import (
     load_clinical_master_verified as load_clinical_master_verified,
 )
 
-
 SubsetMode = Literal["all_eligible", "paired_only", "single_sample", "three_map_complete"]
 
+COVARIATE_PRESETS: tuple[str, ...] = (
+    "primary",
+    "no_label_trend",
+    "quadratic_label_trend",
+    "quadratic_age_and_label",
+    "pre_event_risk_factors",
+)
 
 PRE_EVENT_RISK_FACTORS: tuple[str, ...] = (
     "hypertension",
@@ -29,10 +43,7 @@ PRE_EVENT_RISK_FACTORS: tuple[str, ...] = (
     "anticoagulant",
 )
 
-
 _SAMPLE_PREFIX_RE = re.compile(r"^(?:sample[_\-\s]*)?", re.IGNORECASE)
-
-
 _NUMERIC_TOKEN_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
 
@@ -60,6 +71,26 @@ class PairedLipidConfig:
     )
     covariate_preset: str = "primary"
     local_candidate_window: int = 5
+
+    def __post_init__(self) -> None:
+        if self.covariate_preset not in COVARIATE_PRESETS:
+            raise ValueError(f"Unknown covariate preset: {self.covariate_preset!r}")
+        if not self.pca_dimensions or any(int(d) < 1 for d in self.pca_dimensions):
+            raise ValueError("pca_dimensions must contain positive integers.")
+        if not self.retained_directions or any(int(r) < 1 for r in self.retained_directions):
+            raise ValueError("retained_directions must contain positive integers.")
+        if not self.lambda_grid or any(float(lam) < 0.0 for lam in self.lambda_grid):
+            raise ValueError("lambda_grid must contain non-negative values.")
+        if not self.ridge_alpha_grid or any(float(a) <= 0.0 for a in self.ridge_alpha_grid):
+            raise ValueError("ridge_alpha_grid must contain strictly positive values.")
+        if not self.pls_component_grid or any(int(c) < 1 for c in self.pls_component_grid):
+            raise ValueError("pls_component_grid must contain positive integers.")
+        if self.n_outer_splits < 2 or self.n_inner_splits < 2:
+            raise ValueError("n_outer_splits and n_inner_splits must be at least 2.")
+        if self.min_maps_per_block < 1 or self.local_candidate_window < 1:
+            raise ValueError("min_maps_per_block and local_candidate_window must be at least 1.")
+        if self.rank_tolerance <= 0.0 or self.eigenvalue_tolerance <= 0.0:
+            raise ValueError("rank_tolerance and eigenvalue_tolerance must be positive.")
 
 
 @dataclass(frozen=True)
@@ -251,7 +282,7 @@ def build_paired_cohort_dataset(
                 )
             participant_samples[pid] = s_list[:2]
 
-    kept_clin_rows: list[pd.Series] = []
+    kept_clin_indices: list[int] = []
     flat_1300: list[np.ndarray] = []
     flat_2850: list[np.ndarray] = []
     flat_p_idx: list[int] = []
@@ -263,8 +294,8 @@ def build_paired_cohort_dataset(
     pair_b_indices: list[int] = []
     mean_labels: list[float] = []
 
-    for _, row in clin.iterrows():
-        pid = str(row[id_col])
+    for row_pos, raw_pid in enumerate(clin[id_col].tolist()):
+        pid = str(raw_pid)
         s_list = participant_samples.get(pid, [])
         if not s_list:
             exclusions.append({"participant_id": pid, "level": "participant", "reason": "no_eligible_samples"})
@@ -273,8 +304,8 @@ def build_paired_cohort_dataset(
             exclusions.append({"participant_id": pid, "level": "participant", "reason": "unpaired_in_paired_only_mode"})
             continue
 
-        p_idx = len(kept_clin_rows)
-        kept_clin_rows.append(row)
+        p_idx = len(kept_clin_indices)
+        kept_clin_indices.append(row_pos)
         sample_counts.append(len(s_list))
 
         first_sample_global_idx = len(flat_1300)
@@ -297,10 +328,10 @@ def build_paired_cohort_dataset(
         finite_lbls = [sr.parsed_label for sr in active_samples if np.isfinite(sr.parsed_label)]
         mean_labels.append(float(np.mean(finite_lbls)) if finite_lbls else float("nan"))
 
-    if not kept_clin_rows:
+    if not kept_clin_indices:
         raise ValueError("No eligible stroke participants remained after linkage and spectral checks.")
 
-    kept_df = pd.DataFrame(kept_clin_rows).reset_index(drop=True)
+    kept_df = clin.iloc[kept_clin_indices].reset_index(drop=True)
     cov_df = pd.DataFrame(index=kept_df.index)
     cov_df["age_years"] = pd.to_numeric(kept_df.get("age_years"), errors="coerce")
     cov_df["sex"] = kept_df.get("sex", pd.Series(np.nan, index=kept_df.index)).astype(object)
@@ -337,7 +368,7 @@ def build_paired_cohort_dataset(
         manifest_summary={
             "subset_mode": subset_mode,
             "min_maps_per_block": min_maps,
-            "n_eligible_participants": len(kept_clin_rows),
+            "n_eligible_participants": len(kept_clin_indices),
             "n_paired_participants": len(paired_p_indices),
             "n_single_sample_participants": int(np.sum(np.asarray(sample_counts) == 1)),
             "n_eligible_samples": len(flat_1300),
@@ -352,22 +383,26 @@ def build_paired_cohort_dataset(
 def _cached_band_slices(
     wn_1300_bytes: bytes,
     wn_2850_bytes: bytes,
-) -> tuple[tuple[str, str, np.ndarray], ...]:
-    """Memoize channel index arrays for all 21 pre-specified Raman bands."""
+) -> tuple[tuple[str, str, slice | np.ndarray], ...]:
+    """Memoize channel selectors (contiguous slices where possible) for all 21 pre-specified Raman bands."""
     wn_1300 = np.frombuffer(wn_1300_bytes, dtype=np.float64)
     wn_2850 = np.frombuffer(wn_2850_bytes, dtype=np.float64)
-    specs: list[tuple[str, str, np.ndarray]] = []
+    specs: list[tuple[str, str, slice | np.ndarray]] = []
     for name, band in RAMAN_BANDS.items():
         lower, upper = float(band.bounds[0]), float(band.bounds[1])
         block = "1300" if upper < 2000.0 else "2850"
         axis = wn_1300 if block == "1300" else wn_2850
         idx = np.flatnonzero((axis >= lower) & (axis <= upper))
-        specs.append((name, block, idx))
+        if idx.size > 0 and int(idx[-1]) - int(idx[0]) + 1 == idx.size:
+            selector: slice | np.ndarray = slice(int(idx[0]), int(idx[-1]) + 1)
+        else:
+            selector = idx
+        specs.append((name, block, selector))
     return tuple(specs)
 
 
 def extract_sample_band_matrix(dataset: CohortDataset) -> tuple[np.ndarray, list[str]]:
-    """Compute the 21-band summary matrix for all samples with memoized channel slicing."""
+    """Compute the 21-band summary matrix for all samples with memoized zero-copy channel slicing."""
     cached = dataset._cache.get("sample_band_matrix")
     if cached is not None:
         return cached
@@ -378,17 +413,48 @@ def extract_sample_band_matrix(dataset: CohortDataset) -> tuple[np.ndarray, list
 
     cols: list[np.ndarray] = []
     names: list[str] = []
-    for name, block, idx in slices:
-        if idx.size == 0:
+    for name, block, selector in slices:
+        if isinstance(selector, np.ndarray) and selector.size == 0:
             raise ValueError(f"Band '{name}' has no channels in block {block} axis.")
         source = dataset.sample_1300 if block == "1300" else dataset.sample_2850
-        cols.append(np.mean(source[:, idx], axis=1))
+        cols.append(np.mean(source[:, selector], axis=1))
         names.append(name)
 
     mat = np.column_stack(cols)
     result = (mat, names)
     dataset._cache["sample_band_matrix"] = result
     return result
+
+
+def _get_participant_aggregation_plan(dataset: CohortDataset) -> dict[str, Any]:
+    """Memoize sample-to-participant index gathers so repeated aggregations avoid unbuffered scatter."""
+    plan = dataset._cache.get("_agg_plan")
+    if plan is not None:
+        return plan
+
+    n_p = dataset.n_participants
+    p_idx = dataset.sample_participant_idx
+    counts = dataset.participant_sample_counts
+    _, first_indices = np.unique(p_idx, return_index=True)
+    single_p = np.flatnonzero(counts == 1)
+    paired_p = dataset.paired_participant_indices
+    fast_one_two = (
+        first_indices.size == n_p
+        and int(single_p.size + paired_p.size) == n_p
+        and np.all((counts == 1) | (counts == 2))
+    )
+    plan = {
+        "first_indices": first_indices,
+        "fast_one_two": bool(fast_one_two),
+        "single_p": single_p,
+        "single_s": first_indices[single_p] if first_indices.size == n_p else np.empty(0, dtype=int),
+        "paired_p": paired_p,
+        "pair_a": dataset.pair_sample_a_indices,
+        "pair_b": dataset.pair_sample_b_indices,
+        "inv_counts": (1.0 / counts.astype(float))[:, None],
+    }
+    dataset._cache["_agg_plan"] = plan
+    return plan
 
 
 def aggregate_samples_to_participants(
@@ -398,18 +464,21 @@ def aggregate_samples_to_participants(
     single_sample_only: bool = False,
 ) -> np.ndarray:
     """Vectorized participant-level equal average of eligible sample representations."""
-    n_p = dataset.n_participants
-    p_idx = dataset.sample_participant_idx
+    plan = _get_participant_aggregation_plan(dataset)
     if single_sample_only:
-        # Select first eligible sample (A) for each participant via unique first-occurrence index
-        _, first_indices = np.unique(p_idx, return_index=True)
-        return sample_matrix[first_indices].copy()
+        return sample_matrix[plan["first_indices"]].copy()
 
-    # Fast vectorized sum by participant using np.add.at
-    sums = np.zeros((n_p, sample_matrix.shape[1]), dtype=float)
-    np.add.at(sums, p_idx, sample_matrix)
-    counts = dataset.participant_sample_counts[:, None].astype(float)
-    return sums / counts
+    if plan["fast_one_two"]:
+        out = np.empty((dataset.n_participants, sample_matrix.shape[1]), dtype=float)
+        if plan["single_p"].size > 0:
+            out[plan["single_p"]] = sample_matrix[plan["single_s"]]
+        if plan["paired_p"].size > 0:
+            out[plan["paired_p"]] = 0.5 * (sample_matrix[plan["pair_a"]] + sample_matrix[plan["pair_b"]])
+        return out
+
+    sums = np.zeros((dataset.n_participants, sample_matrix.shape[1]), dtype=float)
+    np.add.at(sums, dataset.sample_participant_idx, sample_matrix)
+    return sums * plan["inv_counts"]
 
 
 def load_paired_cohort_from_store(
@@ -436,11 +505,11 @@ def load_paired_cohort_from_store(
     sum_2850 = load_area_summaries(data_source, "2850")
 
     def _extract_wn(feature_names: np.ndarray) -> np.ndarray:
-        vals: list[float] = []
-        for fn in feature_names:
-            token = str(fn).split("__")[-1]
-            vals.append(float(token))
-        return np.asarray(vals, dtype=float)
+        return np.fromiter(
+            (float(str(fn).rsplit("__", 1)[-1]) for fn in feature_names),
+            dtype=float,
+            count=len(feature_names),
+        )
 
     wn_1300 = _extract_wn(sum_1300["feature_names"])
     wn_2850 = _extract_wn(sum_2850["feature_names"])
@@ -448,29 +517,30 @@ def load_paired_cohort_from_store(
     idx_map_1300 = {str(mid): i for i, mid in enumerate(sum_1300["measurement_ids"])}
     idx_map_2850 = {str(mid): i for i, mid in enumerate(sum_2850["measurement_ids"])}
 
-    map_rows: list[dict[str, Any]] = []
-    for _, row in file_index.iterrows():
-        mid = str(row["measurement_id"])
-        rng_code = str(row["spectral_range"])
-        if rng_code == "1300" and mid in idx_map_1300:
-            r_idx = idx_map_1300[mid]
-        elif rng_code == "2850" and mid in idx_map_2850:
-            r_idx = idx_map_2850[mid]
-        else:
-            continue
-        map_rows.append(
-            {
-                "participant_id": str(row["participant_id"]),
-                "sample_id": str(row["sample_id"]),
-                "spectral_range": rng_code,
-                "row_index": int(r_idx),
-                "retained": True,
-            }
-        )
+    rng_series = file_index["spectral_range"].astype(str)
+    mid_series = file_index["measurement_id"]
+    row_idx = pd.Series(-1, index=file_index.index, dtype=int)
+    mask_1300 = rng_series == "1300"
+    mask_2850 = rng_series == "2850"
+    if mask_1300.any():
+        row_idx.loc[mask_1300] = mid_series.loc[mask_1300].map(idx_map_1300).fillna(-1).astype(int)
+    if mask_2850.any():
+        row_idx.loc[mask_2850] = mid_series.loc[mask_2850].map(idx_map_2850).fillna(-1).astype(int)
+
+    valid_rows = row_idx >= 0
+    map_df = pd.DataFrame(
+        {
+            "participant_id": file_index.loc[valid_rows, "participant_id"].to_numpy(dtype=str),
+            "sample_id": file_index.loc[valid_rows, "sample_id"].to_numpy(dtype=str),
+            "spectral_range": rng_series.loc[valid_rows].to_numpy(dtype=str),
+            "row_index": row_idx.loc[valid_rows].to_numpy(dtype=int),
+            "retained": np.ones(int(valid_rows.sum()), dtype=bool),
+        }
+    )
 
     dataset = build_paired_cohort_dataset(
         clin_df,
-        pd.DataFrame(map_rows),
+        map_df,
         np.asarray(sum_1300["area_summary"], dtype=float),
         np.asarray(sum_2850["area_summary"], dtype=float),
         wn_1300,

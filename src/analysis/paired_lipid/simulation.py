@@ -1,18 +1,20 @@
 """Synthetic cohort generator and bootstrap-interval calibration."""
 
 from __future__ import annotations
+
 import math
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any, Literal
+
 import numpy as np
 import pandas as pd
 from scipy import linalg, stats
 
+from src.analysis.paired_lipid.batched import resolve_array_backend
 from src.analysis.paired_lipid.cohort import (
     CohortDataset,
     PairedLipidConfig,
-)
-from src.analysis.paired_lipid.batched import (
-    _get_gpu_xp,
 )
 from src.analysis.paired_lipid.nested_cv import (
     evaluate_nested_cohort,
@@ -25,6 +27,10 @@ CALIBRATION_SEED_RANGES: dict[str, tuple[int, int]] = {
     "development": (10_000, 5_000_000),
     "validation": (5_000_000, 10_000_000),
 }
+_SCENARIO_RESERVED_KEYS: frozenset[str] = frozenset(
+    {"scenario", "covariate_preset", "n_participants", "seed", "compact_grid"}
+)
+_MAP_CHUNK_SAMPLES = 256
 
 
 def generate_synthetic_cohort(
@@ -104,85 +110,91 @@ def generate_synthetic_cohort(
             + rng.normal(0.0, 0.45, size=n_participants)
         )
 
-    single_set = set(range(n_participants - n_single_sample, n_participants))
-    sample_counter = 1
     # Labels span a fixed range whatever n is, so label covariates never extrapolate between cohorts.
     label_scale = LABEL_RANGE / float(2 * n_participants)
 
     n_paired = n_participants - n_single_sample
     n_samples = 2 * n_paired + n_single_sample
-    sample_1300 = np.empty((n_samples, wn_1300.size), dtype=float)
-    sample_2850 = np.empty((n_samples, wn_2850.size), dtype=float)
-    sample_p_idx = np.empty(n_samples, dtype=int)
-    sample_ids: list[str] = []
-    sample_lbls = np.empty(n_samples, dtype=float)
-    sample_counts = np.empty(n_participants, dtype=int)
     paired_p_indices = np.arange(n_paired, dtype=int)
-    pair_a_indices = 2 * np.arange(n_paired, dtype=int)
+    pair_a_indices = 2 * paired_p_indices
     pair_b_indices = pair_a_indices + 1
 
-    p_ids = np.array([str(100 + i) for i in range(n_participants)], dtype=str)
+    p_ids = np.arange(100, 100 + n_participants, dtype=int).astype(str)
     sex_arr = np.where(sex_female == 1, "female", "male").astype(object)
-    htn_arr = np.empty(n_participants, dtype=np.int64)
-    dm_arr = np.empty(n_participants, dtype=np.int64)
-    af_arr = np.empty(n_participants, dtype=np.int64)
-    cad_arr = np.empty(n_participants, dtype=np.int64)
-    smk_list: list[str] = []
-    apt_arr = np.empty(n_participants, dtype=np.int64)
-    aco_arr = np.empty(n_participants, dtype=np.int64)
+    htn_arr = rng.binomial(1, 0.6, size=n_participants).astype(np.int64)
+    dm_arr = rng.binomial(1, 0.25, size=n_participants).astype(np.int64)
+    af_arr = rng.binomial(1, 0.2, size=n_participants).astype(np.int64)
+    cad_arr = rng.binomial(1, 0.18, size=n_participants).astype(np.int64)
+    smk_arr = rng.choice(
+        np.array(["never", "former", "current"], dtype=object),
+        size=n_participants,
+        p=[0.5, 0.3, 0.2],
+    )
+    apt_arr = rng.binomial(1, 0.3, size=n_participants).astype(np.int64)
+    aco_arr = rng.binomial(1, 0.15, size=n_participants).astype(np.int64)
+
+    sample_counts = np.empty(n_participants, dtype=int)
+    sample_counts[:n_paired] = 2
+    sample_counts[n_paired:] = 1
+    sample_p_idx = np.repeat(np.arange(n_participants, dtype=int), sample_counts)
+    sample_ids = np.array([f"sample_{k}" for k in range(1, n_samples + 1)], dtype=str)
+    sample_lbls = np.arange(1, n_samples + 1, dtype=float) * label_scale
+
     mean_lbl_arr = np.empty(n_participants, dtype=float)
+    mean_lbl_arr[:n_paired] = 0.5 * (sample_lbls[pair_a_indices] + sample_lbls[pair_b_indices])
+    mean_lbl_arr[n_paired:] = sample_lbls[2 * n_paired :]
 
-    s_1300_buf = np.empty((maps_per_sample, wn_1300.size), dtype=float)
-    s_2850_buf = np.empty((maps_per_sample, wn_2850.size), dtype=float)
-    s_cursor = 0
+    ab_shifts = np.full(n_samples, -ab_shift_scale, dtype=float)
+    ab_shifts[pair_b_indices] = ab_shift_scale
+    lbl_drift = label_drift_scale * (sample_lbls / LABEL_RANGE)
+    sample_err = rng.normal(0.0, 0.65, size=n_samples) + ab_shifts + lbl_drift
+    dropout_mask = (rng.random(n_samples) < map_dropout_fraction) if map_dropout_fraction > 0.0 else None
 
-    for i in range(n_participants):
-        htn_arr[i] = int(rng.binomial(1, 0.6))
-        dm_arr[i] = int(rng.binomial(1, 0.25))
-        af_arr[i] = int(rng.binomial(1, 0.2))
-        cad_arr[i] = int(rng.binomial(1, 0.18))
-        smk_list.append(str(rng.choice(["never", "former", "current"], p=[0.5, 0.3, 0.2])))
-        apt_arr[i] = int(rng.binomial(1, 0.3))
-        aco_arr[i] = int(rng.binomial(1, 0.15))
+    z0_plus_prep = (z_bio[:, 0] + shared_prep)[sample_p_idx]
+    z1_sample = z_bio[sample_p_idx, 1]
 
-        m_i = 1 if i in single_set else 2
-        sample_counts[i] = m_i
-        lbl_sum = 0.0
-        for s_pos in range(m_i):
-            lbl_val = sample_counter * label_scale
-            sid = f"sample_{sample_counter}"
-            lbl_drift = label_drift_scale * (lbl_val / LABEL_RANGE)
-            sample_counter += 1
+    def _median_maps(maps: np.ndarray, out: np.ndarray, drop: np.ndarray | None) -> None:
+        if maps.shape[1] == 3:
+            if drop is not None and np.any(drop):
+                kept = ~drop
+                if np.any(kept):
+                    m0 = maps[kept, 0, :]
+                    m1 = maps[kept, 1, :]
+                    m2 = maps[kept, 2, :]
+                    out[kept] = np.maximum(np.minimum(m0, m1), np.minimum(np.maximum(m0, m1), m2))
+                out[drop] = 0.5 * (maps[drop, 0, :] + maps[drop, 1, :])
+            else:
+                m0, m1, m2 = maps[:, 0, :], maps[:, 1, :], maps[:, 2, :]
+                np.maximum(np.minimum(m0, m1), np.minimum(np.maximum(m0, m1), m2), out=out)
+            return
+        if drop is not None and np.any(drop):
+            kept = ~drop
+            if np.any(kept):
+                out[kept] = np.median(maps[kept], axis=1)
+            out[drop] = np.median(maps[drop, :-1, :], axis=1)
+        else:
+            out[:] = np.median(maps, axis=1)
 
-            ab_shift = ab_shift_scale if s_pos == 1 else -ab_shift_scale
-            sample_err = rng.normal(0.0, 0.65) + ab_shift + lbl_drift
-            base_1300 = (
-                (z_bio[i, 0] + shared_prep[i]) * bio_1300_1
-                + z_bio[i, 1] * bio_1300_2
-                + sample_err * tech_1300
-            )
-            base_2850 = (
-                (z_bio[i, 0] + shared_prep[i]) * bio_2850_1
-                + z_bio[i, 1] * bio_2850_2
-                + sample_err * tech_2850
-            )
-            lbl_sum += lbl_val
-
-            for map_idx in range(maps_per_sample):
-                s_1300_buf[map_idx] = base_1300 + rng.normal(0.0, 0.04, size=wn_1300.size)
-                s_2850_buf[map_idx] = base_2850 + rng.normal(0.0, 0.04, size=wn_2850.size)
-            n_kept = maps_per_sample
-            if map_dropout_fraction > 0.0 and rng.random() < map_dropout_fraction:
-                n_kept -= 1
-
-            sample_1300[s_cursor] = np.median(s_1300_buf[:n_kept], axis=0)
-            sample_2850[s_cursor] = np.median(s_2850_buf[:n_kept], axis=0)
-            sample_p_idx[s_cursor] = i
-            sample_ids.append(sid)
-            sample_lbls[s_cursor] = lbl_val
-            s_cursor += 1
-
-        mean_lbl_arr[i] = lbl_sum / float(m_i)
+    sample_1300 = np.empty((n_samples, wn_1300.size), dtype=float)
+    sample_2850 = np.empty((n_samples, wn_2850.size), dtype=float)
+    for s0 in range(0, n_samples, _MAP_CHUNK_SAMPLES):
+        s1 = min(s0 + _MAP_CHUNK_SAMPLES, n_samples)
+        c_len = s1 - s0
+        base_1300 = (
+            z0_plus_prep[s0:s1, None] * bio_1300_1[None, :]
+            + z1_sample[s0:s1, None] * bio_1300_2[None, :]
+            + sample_err[s0:s1, None] * tech_1300[None, :]
+        )
+        base_2850 = (
+            z0_plus_prep[s0:s1, None] * bio_2850_1[None, :]
+            + z1_sample[s0:s1, None] * bio_2850_2[None, :]
+            + sample_err[s0:s1, None] * tech_2850[None, :]
+        )
+        maps_1300 = base_1300[:, None, :] + rng.normal(0.0, 0.04, size=(c_len, maps_per_sample, wn_1300.size))
+        maps_2850 = base_2850[:, None, :] + rng.normal(0.0, 0.04, size=(c_len, maps_per_sample, wn_2850.size))
+        drop_local = dropout_mask[s0:s1] if dropout_mask is not None else None
+        _median_maps(maps_1300, sample_1300[s0:s1], drop_local)
+        _median_maps(maps_2850, sample_2850[s0:s1], drop_local)
 
     cov_df = pd.DataFrame(
         {
@@ -194,7 +206,7 @@ def generate_synthetic_cohort(
             "diabetes": dm_arr,
             "atrial_fibrillation": af_arr,
             "coronary_artery_disease": cad_arr,
-            "smoking_status": pd.Series(smk_list, dtype=object),
+            "smoking_status": pd.Series(smk_arr, dtype=object),
             "antiplatelet": apt_arr,
             "anticoagulant": aco_arr,
         }
@@ -213,7 +225,7 @@ def generate_synthetic_cohort(
         sample_1300=sample_1300,
         sample_2850=sample_2850,
         sample_participant_idx=sample_p_idx,
-        sample_ids=np.asarray(sample_ids, dtype=str),
+        sample_ids=sample_ids,
         sample_parsed_labels=sample_lbls,
         participant_sample_counts=sample_counts,
         paired_participant_indices=paired_p_indices,
@@ -275,18 +287,18 @@ def check_gate_attainable(n_repetitions: int, seed_set: str, wilson_lower_min: f
 def _eval_single_calibration_rep(
     rep_seed: int,
     n_participants: int,
-    signal_strength: float,
+    gen_kwargs: dict[str, Any],
     n_bootstraps: int,
     cfg: PairedLipidConfig,
     use_gpu: bool | None,
     test_ds: CohortDataset,
     compact_grid: bool,
-) -> tuple[float, float, float, bool, float]:
+) -> tuple[float, float, float, bool, float, np.ndarray]:
     ds, _ = generate_synthetic_cohort(
         n_participants=n_participants,
         seed=rep_seed,
         compact_grid=compact_grid,
-        signal_strength=signal_strength,
+        **gen_kwargs,
     )
     boot = run_multiplicity_bootstrap(
         ds,
@@ -295,13 +307,16 @@ def _eval_single_calibration_rep(
         bootstrap_seed=rep_seed + 1,
         use_gpu=use_gpu,
     )
-    external_delta = evaluate_nested_cohort(ds, cfg=cfg, external_test=test_ds)["external_delta_mse"]
+    ext_eval = evaluate_nested_cohort(
+        ds, cfg=cfg, external_test=test_ds, compute_diagnostics=False
+    )
     return (
         float(boot["point_estimate_delta_mse"]),
         float(boot["ci_95_delta_mse"][0]),
         float(boot["ci_95_delta_mse"][1]),
         bool(boot["interval_procedure_succeeded"]),
-        float(external_delta),
+        float(ext_eval["external_delta_mse"]),
+        np.asarray(ext_eval["external_participant_deltas"], dtype=float),
     )
 
 
@@ -320,6 +335,7 @@ def evaluate_bootstrap_calibration(
     compact_grid: bool = True,
     gate_wilson_lower_min: float = 0.925,
     gate_max_failure_rate: float = 0.01,
+    scenario_kwargs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate bootstrap interval coverage, width, bias, and failure rate in synthetic repetitions.
 
@@ -329,7 +345,23 @@ def evaluate_bootstrap_calibration(
     Development and validation replicates draw seeds from disjoint ranges; only the validation
     set gives a confirmatory gate result.
     """
+    min_rep_seed = CALIBRATION_SEED_RANGES["development"][0]
+    if base_seed >= min_rep_seed:
+        raise ValueError(
+            f"base_seed ({base_seed}) must be < {min_rep_seed} to stay disjoint from replicate seeds."
+        )
     gate_attainable, min_reps = check_gate_attainable(n_repetitions, seed_set, gate_wilson_lower_min)
+    eff_cfg = (
+        replace(cfg, covariate_preset=str(scenario_kwargs["covariate_preset"]))
+        if scenario_kwargs is not None and "covariate_preset" in scenario_kwargs
+        else cfg
+    )
+    gen_kwargs: dict[str, Any] = {"signal_strength": float(signal_strength)}
+    if scenario_kwargs is not None:
+        for k, v in scenario_kwargs.items():
+            if k not in _SCENARIO_RESERVED_KEYS:
+                gen_kwargs[k] = v
+
     lo_seed, hi_seed = CALIBRATION_SEED_RANGES[seed_set]
     rng = np.random.default_rng(base_seed)
     rep_seeds = rng.integers(lo_seed, hi_seed, size=n_repetitions)
@@ -337,12 +369,11 @@ def evaluate_bootstrap_calibration(
         n_participants=n_test_participants,
         seed=base_seed,
         compact_grid=compact_grid,
-        signal_strength=signal_strength,
+        **gen_kwargs,
     )
 
-    gpu_available = _get_gpu_xp() is not None
-    gpu_requested = use_gpu is True or (use_gpu is None and n_bootstraps >= 32)
-    gpu_active = gpu_available and gpu_requested
+    _, gpu_meta = resolve_array_backend(use_gpu, n_bootstraps, min_auto_draws=32)
+    gpu_active = bool(gpu_meta["gpu_active"])
     if not gpu_active and n_jobs != 1 and (n_repetitions * max(n_bootstraps, 1) >= 200):
         from joblib import Parallel, delayed
 
@@ -350,9 +381,9 @@ def evaluate_bootstrap_calibration(
             delayed(_eval_single_calibration_rep)(
                 int(rep_seeds[rep_idx]),
                 n_participants,
-                signal_strength,
+                gen_kwargs,
                 n_bootstraps,
-                cfg,
+                eff_cfg,
                 False,
                 test_ds,
                 compact_grid,
@@ -364,9 +395,9 @@ def evaluate_bootstrap_calibration(
             _eval_single_calibration_rep(
                 int(rep_seeds[rep_idx]),
                 n_participants,
-                signal_strength,
+                gen_kwargs,
                 n_bootstraps,
-                cfg,
+                eff_cfg,
                 use_gpu,
                 test_ds,
                 compact_grid,
@@ -379,14 +410,40 @@ def evaluate_bootstrap_calibration(
     ci_highs = [r[2] for r in results]
     succeeded_flags = [r[3] for r in results]
     external_deltas = np.asarray([r[4] for r in results], dtype=float)
+    n_ext = test_ds.n_participants
 
-    target_delta = float(np.mean(external_deltas))
-    target_mc_se = float(np.std(external_deltas, ddof=1) / np.sqrt(n_repetitions)) if n_repetitions > 1 else float("nan")
+    target_delta = float(np.mean(external_deltas)) if n_repetitions > 0 else float("nan")
+    target_mc_se = (
+        float(np.std(external_deltas, ddof=1) / math.sqrt(n_repetitions))
+        if n_repetitions > 1
+        else float("nan")
+    )
+    if n_repetitions > 0 and n_ext > 1:
+        D_centered = np.vstack([r[5] for r in results]) - target_delta
+        col_means = np.mean(D_centered, axis=0)
+        ss_col = float(n_repetitions * np.sum(col_means**2))
+        target_test_se = float(math.sqrt(ss_col / float(n_repetitions * n_ext * (n_ext - 1))))
+        if n_repetitions > 1:
+            row_means = np.mean(D_centered, axis=1)
+            ss_row = float(n_ext * np.sum(row_means**2))
+            ss_total = float(np.sum(D_centered**2))
+            ss_err = max(0.0, ss_total - ss_row - ss_col)
+            ms_row = ss_row / float(n_repetitions - 1)
+            ms_col = ss_col / float(n_ext - 1)
+            ms_err = ss_err / float((n_repetitions - 1) * (n_ext - 1))
+            var_total = max(0.0, (ms_row + ms_col - ms_err) / float(n_repetitions * n_ext))
+            target_total_se = float(math.sqrt(var_total))
+        else:
+            target_total_se = float("nan")
+    else:
+        target_test_se = float("nan")
+        target_total_se = float("nan")
+
     uncond_covered = 0
     n_success = 0
     widths: list[float] = []
 
-    for est, lo, hi, ok in zip(point_estimates, ci_lows, ci_highs, succeeded_flags):
+    for lo, hi, ok in zip(ci_lows, ci_highs, succeeded_flags):
         if ok and np.isfinite(lo) and np.isfinite(hi):
             n_success += 1
             widths.append(hi - lo)
@@ -404,11 +461,13 @@ def evaluate_bootstrap_calibration(
         "gate_is_confirmatory": seed_set == "validation",
         "n_repetitions": n_repetitions,
         "n_bootstraps": n_bootstraps,
-        "gpu_requested": use_gpu,
+        "gpu_requested": gpu_meta["gpu_requested"],
         "gpu_active": gpu_active,
-        "gpu_fallback": bool(gpu_requested and not gpu_available),
+        "gpu_fallback": bool(gpu_meta["gpu_fallback"]),
         "target_delta_mse": target_delta,
         "target_monte_carlo_se": target_mc_se,
+        "target_test_cohort_se": target_test_se,
+        "target_total_se": target_total_se,
         "n_test_participants": n_test_participants,
         "compact_grid": compact_grid,
         "mean_point_estimate": float(np.nanmean(point_estimates)),
@@ -423,3 +482,51 @@ def evaluate_bootstrap_calibration(
         "gate_attainable": gate_attainable,
         "min_reps_for_gate": min_reps,
     }
+
+
+def evaluate_scenario_calibration_suite(
+    *,
+    scenarios: Sequence[Mapping[str, Any]],
+    n_repetitions: int = 20,
+    n_bootstraps: int = 100,
+    n_participants: int = 92,
+    base_seed: int = 9000,
+    cfg: PairedLipidConfig = PairedLipidConfig(),
+    n_jobs: int = -1,
+    use_gpu: bool | None = None,
+    n_test_participants: int = 5000,
+    seed_set: Literal["development", "validation"] = "development",
+    compact_grid: bool = True,
+    gate_wilson_lower_min: float = 0.925,
+    gate_max_failure_rate: float = 0.01,
+) -> pd.DataFrame:
+    """Evaluate bootstrap interval calibration across multiple synthetic data-generating scenarios."""
+    rows: list[dict[str, Any]] = []
+    for s_idx, spec in enumerate(scenarios):
+        scenario_name = str(spec.get("scenario", f"scenario_{s_idx}"))
+        preset_name = str(spec.get("covariate_preset", cfg.covariate_preset))
+        sig = float(spec.get("signal_strength", 0.8))
+        summary = evaluate_bootstrap_calibration(
+            n_repetitions=n_repetitions,
+            n_bootstraps=n_bootstraps,
+            n_participants=n_participants,
+            signal_strength=sig,
+            base_seed=base_seed + s_idx,
+            cfg=cfg,
+            n_jobs=n_jobs,
+            use_gpu=use_gpu,
+            n_test_participants=n_test_participants,
+            seed_set=seed_set,
+            compact_grid=compact_grid,
+            gate_wilson_lower_min=gate_wilson_lower_min,
+            gate_max_failure_rate=gate_max_failure_rate,
+            scenario_kwargs=spec,
+        )
+        rows.append(
+            {
+                "scenario": scenario_name,
+                "covariate_preset": preset_name,
+                **summary,
+            }
+        )
+    return pd.DataFrame(rows)

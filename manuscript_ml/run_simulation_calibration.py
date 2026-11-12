@@ -8,10 +8,10 @@ bootstrap interval coverage against the provisional feasibility gate.
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 import os
-from pathlib import Path
 import sys
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -21,13 +21,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from manuscript_ml import ensure_output_dir, load_manuscript_config, write_run_provenance
-from src.analysis.io_utils import write_csv_atomic
-from src.analysis.paired_lipid.cohort import PairedLipidConfig
-from src.analysis.paired_lipid.nested_cv import evaluate_nested_cohort
-from src.analysis.paired_lipid.simulation import (
+from manuscript_ml import ensure_output_dir, load_manuscript_config, write_run_provenance  # noqa: E402
+from src.analysis.io_utils import write_csv_atomic  # noqa: E402
+from src.analysis.paired_lipid.cohort import PairedLipidConfig  # noqa: E402
+from src.analysis.paired_lipid.nested_cv import evaluate_nested_cohort  # noqa: E402
+from src.analysis.paired_lipid.simulation import (  # noqa: E402
     check_gate_attainable,
     evaluate_bootstrap_calibration,
+    evaluate_scenario_calibration_suite,
     generate_synthetic_cohort,
 )
 
@@ -154,6 +155,7 @@ def run_simulation_and_calibration(
     use_gpu: bool | None = None,
     config_path: str | Path | None = None,
     seed_set: str = "development",
+    calibrate_all_scenarios: bool = False,
 ) -> dict[str, Path]:
     """Run the synthetic scenario suite and bootstrap interval calibration (calibration uses n_participants)."""
     target_dir = ensure_output_dir(output_dir)
@@ -172,8 +174,9 @@ def run_simulation_and_calibration(
     # Fail before the scenario suite, not after it.
     check_gate_attainable(n_calibration_reps, seed_set, float(cal_cfg["gate_wilson_lower_min"]))
 
+    scenarios = list(sim_cfg["scenarios"])
     scenarios_df = run_synthetic_scenario_suite(
-        scenarios=list(sim_cfg["scenarios"]),
+        scenarios=scenarios,
         n_participants_grid=n_grid,
         n_repetitions=n_scenario_reps,
         compact_grid=compact_grid,
@@ -181,22 +184,39 @@ def run_simulation_and_calibration(
         n_jobs=n_jobs,
         cfg=cfg,
     )
-    cal_summary = evaluate_bootstrap_calibration(
-        n_repetitions=n_calibration_reps,
-        n_bootstraps=n_bootstraps,
-        n_participants=n_participants,
-        signal_strength=float(cal_cfg["signal_strength"]),
-        base_seed=int(seeds["calibration_base_seed"]),
-        cfg=cfg,
-        n_jobs=n_jobs,
-        use_gpu=use_gpu,
-        n_test_participants=int(cal_cfg["n_test_participants"]),
-        seed_set=seed_set,
-        compact_grid=compact_grid,
-        gate_wilson_lower_min=float(cal_cfg["gate_wilson_lower_min"]),
-        gate_max_failure_rate=float(cal_cfg["gate_max_failure_rate"]),
-    )
-    cal_df = pd.DataFrame([cal_summary])
+    if calibrate_all_scenarios:
+        cal_df = evaluate_scenario_calibration_suite(
+            scenarios=scenarios,
+            n_repetitions=n_calibration_reps,
+            n_bootstraps=n_bootstraps,
+            n_participants=n_participants,
+            base_seed=int(seeds["calibration_base_seed"]),
+            cfg=cfg,
+            n_jobs=n_jobs,
+            use_gpu=use_gpu,
+            n_test_participants=int(cal_cfg["n_test_participants"]),
+            seed_set=seed_set,  # type: ignore[arg-type]
+            compact_grid=compact_grid,
+            gate_wilson_lower_min=float(cal_cfg["gate_wilson_lower_min"]),
+            gate_max_failure_rate=float(cal_cfg["gate_max_failure_rate"]),
+        )
+    else:
+        cal_summary = evaluate_bootstrap_calibration(
+            n_repetitions=n_calibration_reps,
+            n_bootstraps=n_bootstraps,
+            n_participants=n_participants,
+            signal_strength=float(cal_cfg["signal_strength"]),
+            base_seed=int(seeds["calibration_base_seed"]),
+            cfg=cfg,
+            n_jobs=n_jobs,
+            use_gpu=use_gpu,
+            n_test_participants=int(cal_cfg["n_test_participants"]),
+            seed_set=seed_set,  # type: ignore[arg-type]
+            compact_grid=compact_grid,
+            gate_wilson_lower_min=float(cal_cfg["gate_wilson_lower_min"]),
+            gate_max_failure_rate=float(cal_cfg["gate_max_failure_rate"]),
+        )
+        cal_df = pd.DataFrame([cal_summary])
 
     scenarios_path = target_dir / "simulation_scenarios_summary.csv"
     cal_path = target_dir / "simulation_calibration_report.csv"
@@ -217,6 +237,7 @@ def run_simulation_and_calibration(
             "scenario_base_seed": int(seeds["scenario_base_seed"]),
             "calibration_base_seed": int(seeds["calibration_base_seed"]),
             "calibration_seed_set": seed_set,
+            "calibrate_all_scenarios": calibrate_all_scenarios,
             "use_gpu": use_gpu,
         },
     )
@@ -246,6 +267,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="development",
         help="Calibration replicate seeds; only 'validation' gives a confirmatory gate result.",
     )
+    parser.add_argument(
+        "--calibrate-all-scenarios",
+        action="store_true",
+        help="Run bootstrap interval calibration across every scenario in simulation.scenarios.",
+    )
     return parser.parse_args(argv)
 
 
@@ -262,6 +288,7 @@ def main(argv: list[str] | None = None) -> None:
         use_gpu=args.use_gpu,
         config_path=args.config,
         seed_set=args.seed_set,
+        calibrate_all_scenarios=args.calibrate_all_scenarios,
     )
     for key, path in outputs.items():
         print(f"[run_simulation_calibration] wrote {key}: {path}")

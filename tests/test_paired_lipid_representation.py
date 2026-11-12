@@ -519,3 +519,169 @@ def test_covariate_preprocessor_rejects_unknown_preset(preset: str) -> None:
 
     with pytest.raises(ValueError, match="Unknown covariate preset"):
         CovariatePreprocessor._build_raw_design(pd.DataFrame(), preset=preset)
+
+
+def test_paired_lipid_config_validates_invariants() -> None:
+    with pytest.raises(ValueError, match="Unknown covariate preset"):
+        PairedLipidConfig(covariate_preset="invalid_preset")
+    with pytest.raises(ValueError, match="pca_dimensions"):
+        PairedLipidConfig(pca_dimensions=(0, 5))
+    with pytest.raises(ValueError, match="lambda_grid"):
+        PairedLipidConfig(lambda_grid=(-0.01, 0.1))
+    with pytest.raises(ValueError, match="ridge_alpha_grid"):
+        PairedLipidConfig(ridge_alpha_grid=(-0.1, 1.0))
+    with pytest.raises(ValueError, match="n_outer_splits"):
+        PairedLipidConfig(n_outer_splits=1)
+    with pytest.raises(ValueError, match="n_inner_splits"):
+        PairedLipidConfig(n_inner_splits=1)
+
+
+def test_covariate_preprocessor_excludes_zero_weight_participants() -> None:
+    from src.analysis.paired_lipid.models import CovariatePreprocessor
+
+    df = pd.DataFrame(
+        {
+            "age_years": [60.0, 65.0, 70.0, 75.0, np.nan, 1.0e6],
+            "sex": ["female", "male", "female", "male", "female", "male"],
+            "statin": [0, 0, 0, 0, 0, 1],
+            "sample_label_trend": [10.0, 20.0, 30.0, 40.0, 50.0, -9999.0],
+        }
+    )
+    all_idx = np.arange(6, dtype=int)
+    weights = np.array([1.0, 2.0, 1.0, 1.0, 0.0, 0.0], dtype=float)
+    active_idx = np.arange(4, dtype=int)
+
+    prep_all = CovariatePreprocessor.fit(df, all_idx, weights, preset="primary")
+    prep_act = CovariatePreprocessor.fit(df, active_idx, weights[:4], preset="primary")
+
+    assert prep_all.feature_names == prep_act.feature_names
+    assert prep_all.dropped_columns == prep_act.dropped_columns
+    assert "statin" in prep_all.dropped_columns
+    assert "age_years_missing" not in prep_all.feature_names
+    np.testing.assert_allclose(
+        prep_all.transform(df, active_idx),
+        prep_act.transform(df, active_idx),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_compute_diagnostics_false_preserves_predictions_and_contributions() -> None:
+    ds, _ = generate_synthetic_cohort(n_participants=36, n_single_sample=2, seed=707, compact_grid=True)
+    res_full = evaluate_nested_cohort(ds, compute_diagnostics=True)
+    res_fast = evaluate_nested_cohort(ds, compute_diagnostics=False)
+
+    assert res_fast["fold_repeatability"] == []
+    assert res_fast["subspace_angles"].empty
+    pd.testing.assert_frame_equal(res_fast["fold_settings"], res_full["fold_settings"])
+    for model, preds in res_full["oof_predictions"].items():
+        np.testing.assert_allclose(res_fast["oof_predictions"][model], preds, rtol=0, atol=1e-12)
+    for model, contrib in res_full["oof_spectral_contributions"].items():
+        np.testing.assert_allclose(res_fast["oof_spectral_contributions"][model], contrib, rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "use_gpu",
+    [False, pytest.param(True, marks=pytest.mark.skipif(not _gpu_available(), reason="CuPy/CUDA unavailable"))],
+)
+def test_batched_chefsi_and_cpu_match_sequential_at_cohort_scale(use_gpu: bool) -> None:
+    # n=92 (~180 samples) keeps active sample Gram sizes > 32 in both inner and outer divisions,
+    # exercising the GPU CheFSI polynomial eigensolver and fused subspace projection.
+    from src.analysis.paired_lipid.batched import (
+        _check_fast_batch_eligibility,
+        _get_dataset_gram_cache,
+        _run_batched_multiplicity_draws,
+    )
+    from src.analysis.paired_lipid.nested_cv import make_nested_splits
+
+    ds, _ = generate_synthetic_cohort(n_participants=92, n_single_sample=4, seed=808, compact_grid=True)
+    cfg = PairedLipidConfig()
+    n_p = ds.n_participants
+    outer, inner = make_nested_splits(ds, cfg, cfg.primary_seed)
+    rng = np.random.default_rng(17)
+    M = np.vstack(
+        [np.ones(n_p)] + [np.bincount(rng.integers(0, n_p, n_p), minlength=n_p).astype(float) for _ in range(2)]
+    )
+    gcache = _get_dataset_gram_cache(ds, cfg)
+    assert _check_fast_batch_eligibility(ds, outer, inner, M, cfg, gcache).all()
+
+    d_pair, d_comp = _run_batched_multiplicity_draws(
+        ds, ds.outcomes[cfg.primary_endpoint], outer, inner, M, cfg, gcache, use_gpu=use_gpu
+    )
+    for b in range(M.shape[0]):
+        ref = evaluate_nested_cohort(
+            ds,
+            cfg=cfg,
+            participant_multiplicities=M[b],
+            precomputed_splits=(outer, inner),
+            include_band_paired=True,
+            compute_diagnostics=False,
+        )
+        assert d_pair[b] == pytest.approx(
+            ref["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-8
+        )
+        assert d_comp[b] == pytest.approx(ref["paired_vs_strongest_comparator"]["delta_mse"], abs=1e-8)
+
+
+def test_calibration_two_way_se_and_scenario_suite() -> None:
+    from src.analysis.paired_lipid.simulation import evaluate_scenario_calibration_suite
+
+    with pytest.raises(ValueError, match="base_seed"):
+        evaluate_bootstrap_calibration(n_repetitions=2, n_bootstraps=4, base_seed=10_000)
+
+    scenarios = [
+        {"scenario": "linear_signal", "covariate_preset": "primary", "signal_strength": 0.9},
+        {
+            "scenario": "nonlinear_proxy_quad",
+            "covariate_preset": "quadratic_age_and_label",
+            "signal_strength": 0.0,
+            "nonlinear_covariate_proxy": True,
+        },
+    ]
+    df = evaluate_scenario_calibration_suite(
+        scenarios=scenarios,
+        n_repetitions=3,
+        n_bootstraps=6,
+        n_participants=42,
+        n_test_participants=120,
+        base_seed=9100,
+        compact_grid=True,
+    )
+    assert list(df["scenario"]) == ["linear_signal", "nonlinear_proxy_quad"]
+    assert list(df["covariate_preset"]) == ["primary", "quadratic_age_and_label"]
+    assert np.all(np.isfinite(df["target_monte_carlo_se"])) and (df["target_monte_carlo_se"] >= 0.0).all()
+    assert np.all(np.isfinite(df["target_test_cohort_se"])) and (df["target_test_cohort_se"] >= 0.0).all()
+    assert np.all(np.isfinite(df["target_total_se"])) and (df["target_total_se"] >= 0.0).all()
+
+
+@pytest.mark.skipif(not _gpu_available(), reason="CuPy/CUDA unavailable")
+def test_gpu_chefsi_eigensolver_matches_exact_eigh_to_fp64_precision() -> None:
+    from src.analysis.paired_lipid.batched import _chefsi_top_k_gpu, _exact_top_k_eigh_active, _get_gpu_xp
+
+    cp = _get_gpu_xp()
+    assert cp is not None
+    rng = np.random.default_rng(2026)
+    n_s, p_dim, n_draws = 96, 128, 12
+    # Power-law spectral decay mimicking Raman covariance eigen-spectra
+    scales = np.exp(-0.12 * np.arange(p_dim))
+    X = rng.normal(size=(n_s, p_dim)) * scales[None, :]
+    K = X @ X.T
+
+    M_s = np.vstack([np.ones(n_s)] + [rng.binomial(2, 0.65, size=n_s).astype(float) for _ in range(n_draws - 1)])
+    sw = np.sqrt(M_s / np.maximum(np.sum(M_s, axis=1, keepdims=True), 1.0))
+    G_batch = K[None, :, :] * (sw[:, :, None] * sw[:, None, :])
+    G_batch = 0.5 * (G_batch + np.swapaxes(G_batch, -1, -2))
+
+    _, U0 = np.linalg.eigh(G_batch[0])
+    Q0_comb = U0[:, -32:] / np.maximum(sw[0, :, None], 1e-12)
+
+    G_gpu = cp.asarray(G_batch)
+    sw_gpu = cp.asarray(sw)
+    Q0_gpu = cp.asarray(Q0_comb)
+
+    ev_ref, u_ref = _exact_top_k_eigh_active(cp, G_gpu, 15, sw_gpu)
+    ev_chefsi, u_chefsi = _chefsi_top_k_gpu(cp, G_gpu, 15, sw_gpu, Q0_gpu)
+
+    np.testing.assert_allclose(cp.asnumpy(ev_chefsi), cp.asnumpy(ev_ref), rtol=1e-12, atol=1e-12)
+    dots = np.abs(np.sum(cp.asnumpy(u_chefsi) * cp.asnumpy(u_ref), axis=1))
+    np.testing.assert_allclose(dots, np.ones_like(dots), rtol=1e-11, atol=1e-11)

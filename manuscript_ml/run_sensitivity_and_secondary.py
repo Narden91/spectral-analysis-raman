@@ -21,27 +21,24 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from manuscript_ml import (
+from manuscript_ml import (  # noqa: E402
     add_cohort_stage_args,
     ensure_output_dir,
     load_manuscript_config,
     resolve_experiment_dataset,
     write_run_provenance,
 )
-from src.analysis.io_utils import write_csv_atomic
-from src.analysis.paired_lipid.cohort import PairedLipidConfig, SubsetMode
-from src.analysis.paired_lipid.nested_cv import (
+from src.analysis.io_utils import write_csv_atomic  # noqa: E402
+from src.analysis.paired_lipid.cohort import (  # noqa: E402
+    COVARIATE_PRESETS,
+    PairedLipidConfig,
+    SubsetMode,
+)
+from src.analysis.paired_lipid.nested_cv import (  # noqa: E402
     evaluate_nested_cohort,
     summarize_anchor_associations,
 )
 
-COVARIATE_PRESETS: tuple[str, ...] = (
-    "primary",
-    "no_label_trend",
-    "quadratic_label_trend",
-    "quadratic_age_and_label",
-    "pre_event_risk_factors",
-)
 SUBSET_MODES: tuple[SubsetMode, ...] = get_args(SubsetMode)
 
 
@@ -78,6 +75,9 @@ def run_sensitivity_and_secondary(
         # Deterministic evaluations repeat across axes (e.g. primary preset, primary seed,
         # anchors); compute each distinct (dataset, config, options) only once. The key holds
         # every option, and outer_seed=None means the primary seed, so equal runs share one entry.
+        # Step 4 tables consume held-out errors and spectral contributions, not fold repeatability
+        # or subspace principal angles, so skip unused fold diagnostics by default.
+        kwargs.setdefault("compute_diagnostics", False)
         seed = kwargs.get("outer_seed")
         options = {**kwargs, "outer_seed": cfg.primary_seed if seed is None else int(seed)}
         key = (id(ds), cfg, tuple(sorted(options.items())))

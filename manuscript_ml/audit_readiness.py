@@ -18,10 +18,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from manuscript_ml import ensure_output_dir, load_manuscript_config, write_json_atomic, write_run_provenance
-from manuscript_ml.readiness import evaluate_cohort_readiness
-from src.analysis.io_utils import write_csv_atomic
-from src.analysis.paired_lipid.cohort import (
+from manuscript_ml import (  # noqa: E402
+    ensure_output_dir,
+    load_manuscript_config,
+    write_json_atomic,
+    write_run_provenance,
+)
+from manuscript_ml.readiness import evaluate_cohort_readiness  # noqa: E402
+from src.analysis.io_utils import write_csv_atomic  # noqa: E402
+from src.analysis.paired_lipid.cohort import (  # noqa: E402
     build_limitations_table,
     load_clinical_master_verified,
     load_paired_cohort_from_store,

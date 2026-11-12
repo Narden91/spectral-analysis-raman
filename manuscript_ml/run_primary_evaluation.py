@@ -22,7 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from manuscript_ml import (
+from manuscript_ml import (  # noqa: E402
     add_cohort_stage_args,
     ensure_output_dir,
     load_manuscript_config,
@@ -30,8 +30,8 @@ from manuscript_ml import (
     write_json_atomic,
     write_run_provenance,
 )
-from src.analysis.io_utils import write_csv_atomic
-from src.analysis.paired_lipid.nested_cv import (
+from src.analysis.io_utils import write_csv_atomic  # noqa: E402
+from src.analysis.paired_lipid.nested_cv import (  # noqa: E402
     evaluate_nested_cohort,
     run_multiplicity_bootstrap,
 )

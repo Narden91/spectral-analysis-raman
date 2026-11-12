@@ -27,14 +27,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.analysis.io_utils import write_json_atomic  # noqa: E402
-from src.analysis.paired_lipid.cohort import (
+from src.analysis.paired_lipid.cohort import (  # noqa: E402
     PRE_EVENT_RISK_FACTORS,
     CohortDataset,
     PairedLipidConfig,
     SubsetMode,
     load_paired_cohort_from_store,
 )
-from src.analysis.paired_lipid.simulation import generate_synthetic_cohort
+from src.analysis.paired_lipid.simulation import generate_synthetic_cohort  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Results_manuscript_ml"
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "manuscript_ml.yaml"
@@ -276,32 +276,33 @@ def _rebuild_synthetic_with_mode(
     for ep_name, vals in base_ds.outcomes.items():
         clin_df[ep_name] = vals
 
-    map_rows: list[dict[str, Any]] = []
-    spec_1300_rows: list[np.ndarray] = []
-    spec_2850_rows: list[np.ndarray] = []
-    for s_idx in range(base_ds.n_samples):
-        pid = str(base_ds.participant_ids[base_ds.sample_participant_idx[s_idx]])
-        sid = str(base_ds.sample_ids[s_idx])
-        n_maps = 2 if map_rng.random() < 0.2 else 3
-        for m_idx in range(n_maps):
-            r_idx = len(spec_1300_rows)
-            spec_1300_rows.append(base_ds.sample_1300[s_idx] + map_rng.normal(0.0, 0.04, base_ds.sample_1300.shape[1]))
-            spec_2850_rows.append(base_ds.sample_2850[s_idx] + map_rng.normal(0.0, 0.04, base_ds.sample_2850.shape[1]))
-            for rng_code in ("1300", "2850"):
-                map_rows.append(
-                    {
-                        "participant_id": pid,
-                        "sample_id": sid,
-                        "spectral_range": rng_code,
-                        "row_index": r_idx,
-                        "retained": True,
-                    }
-                )
+    n_maps_per_sample = np.where(map_rng.random(base_ds.n_samples) < 0.2, 2, 3)
+    sample_idx_per_map = np.repeat(np.arange(base_ds.n_samples, dtype=int), n_maps_per_sample)
+    total_maps = int(sample_idx_per_map.size)
+
+    spec_1300 = base_ds.sample_1300[sample_idx_per_map] + map_rng.normal(
+        0.0, 0.04, size=(total_maps, base_ds.sample_1300.shape[1])
+    )
+    spec_2850 = base_ds.sample_2850[sample_idx_per_map] + map_rng.normal(
+        0.0, 0.04, size=(total_maps, base_ds.sample_2850.shape[1])
+    )
+    map_pids = base_ds.participant_ids[base_ds.sample_participant_idx[sample_idx_per_map]]
+    map_sids = base_ds.sample_ids[sample_idx_per_map]
+    row_indices = np.arange(total_maps, dtype=int)
+    map_df = pd.DataFrame(
+        {
+            "participant_id": np.repeat(map_pids, 2),
+            "sample_id": np.repeat(map_sids, 2),
+            "spectral_range": np.tile(np.array(["1300", "2850"], dtype=object), total_maps),
+            "row_index": np.repeat(row_indices, 2),
+            "retained": np.ones(2 * total_maps, dtype=bool),
+        }
+    )
     ds = build_paired_cohort_dataset(
         clin_df,
-        pd.DataFrame(map_rows),
-        np.vstack(spec_1300_rows),
-        np.vstack(spec_2850_rows),
+        map_df,
+        spec_1300,
+        spec_2850,
         base_ds.wavenumbers_1300,
         base_ds.wavenumbers_2850,
         cfg=cfg,

@@ -1,11 +1,21 @@
 """Nested participant-level cross-validation, repeatability metrics and the multiplicity bootstrap."""
 
 from __future__ import annotations
-from typing import Any, NamedTuple, Sequence
+
+from collections.abc import Sequence
+from typing import Any, NamedTuple
+
 import numpy as np
 import pandas as pd
-from scipy import linalg, stats
+from scipy import linalg, spatial, stats
 
+from src.analysis.paired_lipid.batched import (
+    _check_fast_batch_eligibility,
+    _get_dataset_gram_cache,
+    _precompute_division_constants,
+    _run_batched_multiplicity_draws,
+    batched_select_inner_settings,
+)
 from src.analysis.paired_lipid.cohort import (
     CohortDataset,
     PairedLipidConfig,
@@ -19,20 +29,6 @@ from src.analysis.paired_lipid.models import (
     WeightedSpectralPreprocessor,
     fit_ridge_grid,
     predict_ridge_grid,
-)
-from src.analysis.paired_lipid.batched import (
-    _argmin_last,
-    _check_fast_batch_eligibility,
-    _get_dataset_gram_cache,
-    _precompute_division_constants,
-    _run_batched_multiplicity_draws,
-    _select_paired_setting,
-    _select_pca_setting,
-    batched_division_prep,
-    batched_paired_schur_sse,
-    batched_pls_sse_and_preds,
-    batched_ridge_sse_and_preds,
-    batched_solve_directions_grid,
 )
 
 
@@ -167,27 +163,25 @@ def compute_discriminability_and_retrieval(
         }
 
     Z = np.vstack([z_a, z_b])  # 2n x r
-    diffs = Z[:, None, :] - Z[None, :, :]
-    dist_mat = np.linalg.norm(diffs, axis=2)
+    dist_mat = spatial.distance.cdist(Z, Z, metric="euclidean")
 
     # Within-participant distances: d(iA, iB) = dist_mat[i, n + i]
-    within_d = dist_mat[np.arange(n), np.arange(n) + n]
+    idx_n = np.arange(n)
+    within_d = dist_mat[idx_n, idx_n + n]
 
-    # Discriminability across all 2n samples: for each sample s of participant i,
-    # compare its distance to its partner s' against distances to all 2(n-1) other samples
-    Wins = 0.0
-    total_comparisons = 0
-    for i in range(n):
-        d_same = within_d[i]
-        other_mask = np.ones(2 * n, dtype=bool)
-        other_mask[i] = False
-        other_mask[n + i] = False
-        for anchor_idx in (i, n + i):
-            d_others = dist_mat[anchor_idx, other_mask]
-            Wins += float(np.sum(d_same < d_others) + 0.5 * np.sum(d_same == d_others))
-            total_comparisons += int(d_others.size)
-
-    discrim = Wins / float(total_comparisons) if total_comparisons > 0 else float("nan")
+    # Discriminability across all 2n samples: compare each sample's partner distance against all 2(n-1) others
+    d_same_all = np.concatenate([within_d, within_d])[:, None]
+    other_mask = np.ones((2 * n, 2 * n), dtype=bool)
+    other_mask[idx_n, idx_n] = False
+    other_mask[idx_n, idx_n + n] = False
+    other_mask[idx_n + n, idx_n] = False
+    other_mask[idx_n + n, idx_n + n] = False
+    wins = float(
+        np.sum((d_same_all < dist_mat) & other_mask)
+        + 0.5 * np.sum((d_same_all == dist_mat) & other_mask)
+    )
+    total_comparisons = 2 * n * (2 * n - 2)
+    discrim = wins / float(total_comparisons) if total_comparisons > 0 else float("nan")
 
     # Bidirectional cross-position retrieval (A -> B and B -> A)
     cross_ab = dist_mat[:n, n:]  # n x n, diagonal is true match
@@ -373,119 +367,40 @@ def _select_inner_fast(
     mult_all: np.ndarray,
     cfg: PairedLipidConfig,
 ) -> _InnerSelection:
-    """Select every comparator's settings with the closed-form batched engine (one draw)."""
-    alphas = list(cfg.ridge_alpha_grid)
-    n_alphas = len(alphas)
-    max_pls_c = max(cfg.pls_component_grid)
+    """Select every comparator's settings via the shared closed-form batched engine (B=1)."""
     gcache = _get_dataset_gram_cache(dataset, cfg)
-    M_1 = mult_all[None, :]
-    alphas_np = np.asarray(alphas, dtype=np.float64)
+    in_dconsts = [
+        _precompute_division_constants(np, gcache, dataset, outer_train_idx[in_tr_rel], outer_train_idx[in_val_rel], cfg)
+        for in_tr_rel, in_val_rel in inner_splits
+    ]
+    sel = batched_select_inner_settings(
+        np,
+        gcache,
+        in_dconsts,
+        mult_all[None, :],
+        np.asarray(y_all, dtype=np.float64),
+        np.asarray(cfg.ridge_alpha_grid, dtype=np.float64),
+        gcache["part_band_mat"],
+        cfg,
+    )
     k_list = [int(k) for k in cfg.pca_dimensions]
     lam_list = list(cfg.lambda_grid)
     r_list = list(cfg.retained_directions)
-    n_k, n_lam, n_r = len(k_list), len(lam_list), len(r_list)
-    part_band_np = gcache["part_band_mat"]
-
-    inner_divs = []
-    total_val_weight = 0.0
-    for in_tr_rel, in_val_rel in inner_splits:
-        in_tr = outer_train_idx[in_tr_rel]
-        in_val = outer_train_idx[in_val_rel]
-        dconst = _precompute_division_constants(np, gcache, dataset, in_tr, in_val, cfg)
-        div = batched_division_prep(
-            np,
-            gcache,
-            dconst,
-            M_1[:, in_tr],
-            M_1[:, in_val],
-            y_all,
-            alphas_np,
-            cfg,
-            compute_pca_suff=True,
-        )
-        inner_divs.append(div)
-        total_val_weight += float(np.sum(div["w_val"]))
-
-    cov_sse = sum(div["sse_0"][0] for div in inner_divs)
-    cov_mses = cov_sse / total_val_weight
-    best_cov_alpha_idx = int(_argmin_last(np.round(cov_mses, 12)))
-
-    band_sse = np.zeros(n_alphas, dtype=np.float64)
-    for div in inner_divs:
-        Zb_tr = part_band_np[None, div["tr_p"], :]
-        Zb_val = part_band_np[None, div["val_p"], :]
-        sse_b, _ = batched_ridge_sse_and_preds(
-            np,
-            div["X_cov_tr"],
-            div["X_cov_val"],
-            Zb_tr,
-            Zb_val,
-            div["y_tr"],
-            div["y_val"],
-            div["w_tr"],
-            div["w_val"],
-            alphas_np,
-        )
-        band_sse += sse_b[0]
-    band_mses = band_sse / total_val_weight
-    best_band_alpha_idx = int(_argmin_last(np.round(band_mses, 12)))
-    best_band_mse = float(band_mses[best_band_alpha_idx])
-
-    pca_sse = np.zeros((n_k, n_alphas), dtype=np.float64)
-    for k_idx, k in enumerate(k_list):
-        for div in inner_divs:
-            Zp_tr = div["part_pca_max"][:, div["tr_p"], :k]
-            Zp_val = div["part_pca_max"][:, div["val_p"], :k]
-            sse_p, _ = batched_ridge_sse_and_preds(
-                np,
-                div["X_cov_tr"],
-                div["X_cov_val"],
-                Zp_tr,
-                Zp_val,
-                div["y_tr"],
-                div["y_val"],
-                div["w_tr"],
-                div["w_val"],
-                alphas_np,
-            )
-            pca_sse[k_idx] += sse_p[0]
-    pca_mses = pca_sse / total_val_weight
-    pca_r = np.round(pca_mses, 12)
-    k_sel, a_sel = _select_pca_setting(pca_r[None])
-    best_pca_k_idx, best_pca_a = int(k_sel[0]), int(a_sel[0])
-    best_pca_setting = (int(k_list[best_pca_k_idx]), int(best_pca_a))
-    best_pca_mse = float(pca_r[best_pca_k_idx, best_pca_a])
-
-    pls_sse = np.zeros(max_pls_c, dtype=np.float64)
-    for div in inner_divs:
-        sse_pls, _ = batched_pls_sse_and_preds(np, div, max_pls_c)
-        pls_sse += sse_pls[0]
-    pls_mses = pls_sse / total_val_weight
-    best_pls_c = int(np.argmin(np.round(pls_mses, 12))) + 1
-    best_pls_mse = float(pls_mses[best_pls_c - 1])
-
-    pair_sse = np.zeros((n_r, n_k * n_lam, n_alphas), dtype=np.float64)
-    for div in inner_divs:
-        V_grid = batched_solve_directions_grid(np, div["W_max"], div["T_max"], k_list, lam_list)
-        pair_sse += batched_paired_schur_sse(np, div, V_grid, k_list, alphas_np)[0]
-    pair_mses = pair_sse / total_val_weight
-    sel = _select_paired_setting(np.round(pair_mses.reshape(1, n_r, n_k, n_lam, n_alphas), 12))
-    best_r_idx, best_k_idx, best_pair_l_idx, best_pair_a = (int(s[0]) for s in sel)
-    best_paired_setting: tuple[int, float, int, int] | None = (
-        int(k_list[best_k_idx]),
-        float(lam_list[best_pair_l_idx]),
-        int(r_list[best_r_idx]),
-        int(best_pair_a),
-    )
+    best_pca_k_idx = int(sel["best_pca_k_idx"][0])
+    best_pca_a = int(sel["best_pca_a"][0])
+    best_k_idx = int(sel["best_k_idx"][0])
+    best_pair_l_idx = int(sel["best_pair_l_idx"][0])
+    best_r_idx = int(sel["best_r_idx"][0])
+    best_pair_a = int(sel["best_pair_a"][0])
     return _InnerSelection(
-        best_cov_alpha_idx,
-        best_band_alpha_idx,
-        best_band_mse,
-        best_pca_setting,
-        best_pca_mse,
-        best_pls_c,
-        best_pls_mse,
-        best_paired_setting,
+        int(sel["best_cov_a"][0]),
+        int(sel["best_band_a"][0]),
+        float(sel["best_band_mse"][0]),
+        (k_list[best_pca_k_idx], best_pca_a),
+        float(sel["best_pca_mse"][0]),
+        int(sel["best_pls_c_idx"][0]) + 1,
+        float(sel["best_pls_mse"][0]),
+        (k_list[best_k_idx], float(lam_list[best_pair_l_idx]), int(r_list[best_r_idx]), best_pair_a),
         [],
     )
 
@@ -713,6 +628,7 @@ def _select_inner_models_and_fit_outer(
     single_sample_downstream: bool = False,
     include_band_paired: bool = False,
     external: tuple[CohortDataset, np.ndarray] | None = None,
+    compute_diagnostics: bool = True,
 ) -> dict[str, Any]:
     """Fit inner CV selection and outer-fold models with memoized spectral SVD & multi-alpha ridge."""
     mult_all = np.asarray(participant_multiplicities, dtype=float)
@@ -866,25 +782,28 @@ def _select_inner_models_and_fit_outer(
         "pls_regression": pred_pls_ote,
     }
 
-    repeatability_info = _outer_test_repeatability(
-        dataset,
-        cfg,
-        outer_test_idx,
-        outer_cov_prep,
-        fit_paired_outer,
-        fit_band_outer,
-        sample_paired_z,
-        sample_band_mat,
-        sample_pca_outer[:, :sel_pca_k],
-    )
-
-    subspace_basis = map_subspace_to_metric_orthonormal_basis(
-        outer_spec_prep,
-        sel_k,
-        V_outer_r,
-        dataset.wavenumbers_1300.size,
-        dataset.wavenumbers_2850.size,
-    )
+    if compute_diagnostics:
+        repeatability_info = _outer_test_repeatability(
+            dataset,
+            cfg,
+            outer_test_idx,
+            outer_cov_prep,
+            fit_paired_outer,
+            fit_band_outer,
+            sample_paired_z,
+            sample_band_mat,
+            sample_pca_outer[:, :sel_pca_k],
+        )
+        subspace_basis = map_subspace_to_metric_orthonormal_basis(
+            outer_spec_prep,
+            sel_k,
+            V_outer_r,
+            dataset.wavenumbers_1300.size,
+            dataset.wavenumbers_2850.size,
+        )
+    else:
+        repeatability_info = {}
+        subspace_basis = np.empty((0, 0), dtype=float)
 
     out = {
         "predictions": {
@@ -929,20 +848,41 @@ def _select_inner_models_and_fit_outer(
 
     if external is not None:
         # Score the already-fitted fold models on an independent cohort (calibration target); no refit.
+        # Affine spectral projection commutes with equal participant averaging, so participant-averaged
+        # test spectra are memoized once on ext_ds._cache and projected directly into r <= 3 dimensions.
         ext_ds, y_ext = external
+        ext_idx_key = "_all_participant_indices"
+        ext_all_idx = ext_ds._cache.get(ext_idx_key)
+        if ext_all_idx is None:
+            ext_all_idx = np.arange(ext_ds.n_participants, dtype=int)
+            ext_ds._cache[ext_idx_key] = ext_all_idx
         X_cov_ext = outer_cov_prep.transform(
-            ext_ds.covariate_frame, np.arange(ext_ds.n_participants), raw_cache=ext_ds._cache
+            ext_ds.covariate_frame, ext_all_idx, raw_cache=ext_ds._cache
         )
         pred_cov_ext, _ = predict_ridge_grid(fit_cov_outer, X_cov_ext, None, alpha_idx=0)
-        ext_sample_pca = outer_spec_prep.transform_pca(ext_ds.sample_1300, ext_ds.sample_2850)
-        ext_part_z = aggregate_samples_to_participants(
-            ext_sample_pca[:, :sel_k] @ V_outer_r, ext_ds, single_sample_only=single_sample_downstream
-        )
+
+        ext_spec_key = f"_part_spectra__single_{single_sample_downstream}"
+        cached_ext_spec = ext_ds._cache.get(ext_spec_key)
+        if cached_ext_spec is None:
+            cached_ext_spec = (
+                aggregate_samples_to_participants(
+                    ext_ds.sample_1300, ext_ds, single_sample_only=single_sample_downstream
+                ),
+                aggregate_samples_to_participants(
+                    ext_ds.sample_2850, ext_ds, single_sample_only=single_sample_downstream
+                ),
+            )
+            ext_ds._cache[ext_spec_key] = cached_ext_spec
+        ext_p1, ext_p2 = cached_ext_spec
+        ext_part_z = outer_spec_prep.project_linear_subspace(ext_p1, ext_p2, sel_k, V_outer_r)
         pred_pair_ext, _ = predict_ridge_grid(fit_paired_outer, X_cov_ext, ext_part_z, alpha_idx=0)
+        sq_cov_ext = (y_ext - pred_cov_ext) ** 2
+        sq_pair_ext = (y_ext - pred_pair_ext) ** 2
         out["external_mse"] = {
-            "covariate_ridge": float(np.mean((y_ext - pred_cov_ext) ** 2)),
-            "paired_linear_ridge": float(np.mean((y_ext - pred_pair_ext) ** 2)),
+            "covariate_ridge": float(np.mean(sq_cov_ext)),
+            "paired_linear_ridge": float(np.mean(sq_pair_ext)),
         }
+        out["external_participant_deltas"] = sq_cov_ext - sq_pair_ext
 
     if include_band_paired:
         out["predictions"]["band_paired_ridge"] = _band_paired_ablation_predictions(
@@ -1055,6 +995,7 @@ def evaluate_nested_cohort(
     include_band_paired: bool = False,
     external_test: CohortDataset | None = None,
     allow_missing_outcome: bool = False,
+    compute_diagnostics: bool = True,
 ) -> dict[str, Any]:
     """Execute the locked 5x3 nested cross-validation procedure on the cohort.
 
@@ -1062,6 +1003,8 @@ def evaluate_nested_cohort(
     the result then carries ``external_delta_mse``, the fold-mean of MSE_cov - MSE_paired on it.
     ``allow_missing_outcome`` keeps the dataset's population and folds and gives participants with a
     missing endpoint weight 0, which removes them from every training fit and test error.
+    ``compute_diagnostics=False`` skips repeatability ICC/discriminability and channel-space QR/SVD
+    principal angles for callers that consume only predictions and error summaries.
     """
     target_col = endpoint or cfg.primary_endpoint
     if target_col not in dataset.outcomes:
@@ -1069,6 +1012,9 @@ def evaluate_nested_cohort(
     y_all = dataset.outcomes[target_col]
     external = None if external_test is None else (external_test, external_test.outcomes[target_col])
     external_fold_deltas: list[float] = []
+    external_part_delta_sum: np.ndarray | None = (
+        np.zeros(external_test.n_participants, dtype=float) if external_test is not None else None
+    )
     fold_test_scores: list[tuple[np.ndarray, np.ndarray]] = []
     observed = np.isfinite(y_all)
     if not observed.all():
@@ -1122,10 +1068,13 @@ def evaluate_nested_cohort(
             single_sample_downstream=single_sample_downstream,
             include_band_paired=include_band_paired,
             external=external,
+            compute_diagnostics=compute_diagnostics,
         )
         if external is not None:
             ext_mse = fold_out["external_mse"]
             external_fold_deltas.append(ext_mse["covariate_ridge"] - ext_mse["paired_linear_ridge"])
+            if external_part_delta_sum is not None:
+                external_part_delta_sum += fold_out["external_participant_deltas"]
         fold_test_scores.append((te_idx, fold_out["part_paired_z"][te_idx]))
         for m in model_names:
             oof_preds[m][te_idx] = fold_out["predictions"][m]
@@ -1134,9 +1083,10 @@ def evaluate_nested_cohort(
 
         settings_row = {"outer_fold": fold_idx, **fold_out["selected_settings"]}
         fold_settings.append(settings_row)
-        rep_row = {"outer_fold": fold_idx, **fold_out["repeatability"]}
-        fold_repeatability.append(rep_row)
-        subspace_bases.append(fold_out["subspace_basis"])
+        if compute_diagnostics:
+            rep_row = {"outer_fold": fold_idx, **fold_out["repeatability"]}
+            fold_repeatability.append(rep_row)
+            subspace_bases.append(fold_out["subspace_basis"])
 
     # Compute endpoint summaries for every model relative to covariate-only ridge
     comparisons: dict[str, dict[str, float]] = {}
@@ -1150,8 +1100,13 @@ def evaluate_nested_cohort(
         y_all, oof_preds["strongest_comparator"], oof_preds["paired_linear_ridge"], weights=mult
     )
 
-    angles_df = compute_subspace_principal_angles(subspace_bases)
-    extra = {} if external is None else {"external_delta_mse": float(np.mean(external_fold_deltas))}
+    angles_df = compute_subspace_principal_angles(subspace_bases) if compute_diagnostics else pd.DataFrame()
+    extra: dict[str, Any] = {}
+    if external is not None:
+        n_folds_ext = max(len(external_fold_deltas), 1)
+        extra["external_delta_mse"] = float(np.mean(external_fold_deltas))
+        if external_part_delta_sum is not None:
+            extra["external_participant_deltas"] = external_part_delta_sum / float(n_folds_ext)
     return {
         **extra,
         "endpoint": target_col,
@@ -1242,7 +1197,7 @@ def run_multiplicity_bootstrap(
 
     if point_est_delta is None or point_est_comp is None:
         base_eval = evaluate_nested_cohort(
-            dataset, cfg=cfg, endpoint=endpoint, precomputed_splits=splits
+            dataset, cfg=cfg, endpoint=endpoint, precomputed_splits=splits, compute_diagnostics=False
         )
         point_est_delta = float(
             base_eval["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"]
@@ -1258,6 +1213,7 @@ def run_multiplicity_bootstrap(
                 endpoint=endpoint,
                 participant_multiplicities=mult,
                 precomputed_splits=splits,
+                compute_diagnostics=False,
             )
             d_pair_arr[b] = float(
                 b_res["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"]
@@ -1329,8 +1285,11 @@ def summarize_anchor_associations(
         np.arange(dataset.n_participants),
         np.ones(dataset.n_participants),
         preset=cfg.covariate_preset,
+        raw_cache=dataset._cache,
     )
-    X_cov = cov_prep.transform(dataset.covariate_frame, np.arange(dataset.n_participants))
+    X_cov = cov_prep.transform(
+        dataset.covariate_frame, np.arange(dataset.n_participants), raw_cache=dataset._cache
+    )
     rng = np.random.default_rng(seed)
 
     rows: list[dict[str, Any]] = []
@@ -1355,16 +1314,18 @@ def summarize_anchor_associations(
         partial_r = float(np.dot(s_res, y_res) / denom) if denom > 1e-12 else 0.0
         spearman_rho = float(stats.spearmanr(s_res, y_res).statistic)
 
-        boot_r: list[float] = []
         n_v = s_v.size
-        for _ in range(n_resamples):
-            idx = rng.integers(0, n_v, size=n_v)
-            sr = s_res[idx] - np.mean(s_res[idx])
-            yr = y_res[idx] - np.mean(y_res[idx])
-            dn = float(linalg.norm(sr) * linalg.norm(yr))
-            if dn > 1e-12:
-                boot_r.append(float(np.dot(sr, yr) / dn))
-        arr_r = np.asarray(boot_r, dtype=float)
+        if n_resamples > 0:
+            idx_mat = np.vstack([rng.integers(0, n_v, size=n_v) for _ in range(n_resamples)])
+            sr_mat = s_res[idx_mat]
+            yr_mat = y_res[idx_mat]
+            sr_c = sr_mat - np.mean(sr_mat, axis=1, keepdims=True)
+            yr_c = yr_mat - np.mean(yr_mat, axis=1, keepdims=True)
+            dn_vec = np.linalg.norm(sr_c, axis=1) * np.linalg.norm(yr_c, axis=1)
+            valid_dn = dn_vec > 1e-12
+            arr_r = np.sum(sr_c[valid_dn] * yr_c[valid_dn], axis=1) / dn_vec[valid_dn]
+        else:
+            arr_r = np.empty(0, dtype=float)
         sign_stability = float(np.mean(np.sign(arr_r) == np.sign(partial_r))) if arr_r.size else float("nan")
 
         rows.append(

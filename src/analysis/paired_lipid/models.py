@@ -1,17 +1,39 @@
 """Fold-local preprocessors and weighted linear models: covariate/spectral scaling, paired moments, ridge, PLS."""
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any
+
 import numpy as np
 import pandas as pd
 from scipy import linalg
 
 from src.analysis.paired_lipid.cohort import (
-    CohortDataset,
+    COVARIATE_PRESETS,
     PRE_EVENT_RISK_FACTORS,
+    CohortDataset,
     PairedLipidConfig,
 )
+
+
+def _enforce_deterministic_signs(vectors: np.ndarray, *, axis: int) -> np.ndarray:
+    """Flip each vector along ``axis`` so its largest-magnitude entry is positive."""
+    if vectors.size == 0:
+        return vectors
+    max_abs_idx = np.argmax(np.abs(vectors), axis=axis)
+    if axis == 1:
+        signs = np.sign(vectors[np.arange(vectors.shape[0]), max_abs_idx])
+        signs[signs == 0] = 1.0
+        vectors *= signs[:, None]
+    elif axis == 0:
+        signs = np.sign(vectors[max_abs_idx, np.arange(vectors.shape[1])])
+        signs[signs == 0] = 1.0
+        vectors *= signs[None, :]
+    else:
+        raise ValueError(f"Unsupported sign axis: {axis}")
+    return vectors
 
 
 @dataclass
@@ -37,8 +59,12 @@ class CovariatePreprocessor:
         raw_cache: dict[str, Any] | None = None,
     ) -> "CovariatePreprocessor":
         raw_mat, raw_cols = cls._get_raw_matrix(cov_frame, preset=preset, raw_cache=raw_cache)
-        sub_mat = raw_mat[train_indices]
-        w = np.asarray(participant_weights, dtype=float)
+        w_raw = np.asarray(participant_weights, dtype=float)
+        active = w_raw > 0
+        if not np.any(active):
+            raise ValueError("CovariatePreprocessor requires at least one positively weighted participant.")
+        sub_mat = raw_mat[np.asarray(train_indices, dtype=int)[active]]
+        w = w_raw[active]
         w = w / np.sum(w)
 
         kept_cols: list[str] = []
@@ -160,10 +186,7 @@ class CovariatePreprocessor:
 
     @staticmethod
     def _build_raw_design(df: pd.DataFrame, *, preset: str) -> pd.DataFrame:
-        if preset not in (
-            "primary", "no_label_trend", "quadratic_label_trend",
-            "quadratic_age_and_label", "pre_event_risk_factors",
-        ):
+        if preset not in COVARIATE_PRESETS:
             raise ValueError(f"Unknown covariate preset: {preset!r}")
         out = pd.DataFrame(index=df.index)
         out["age_years"] = pd.to_numeric(df.get("age_years"), errors="coerce")
@@ -286,10 +309,7 @@ class WeightedSpectralPreprocessor:
         comps = np.hstack([comps_1300, comps_2850])
 
         # Deterministic sign rule: largest-magnitude loading element in each component is positive
-        max_abs_idx = np.argmax(np.abs(comps), axis=1)
-        signs = np.sign(comps[np.arange(max_k), max_abs_idx])
-        signs[signs == 0] = 1.0
-        comps *= signs[:, None]
+        _enforce_deterministic_signs(comps, axis=1)
 
         paired_in_train = np.intersect1d(train_p, dataset.paired_participant_indices, assume_unique=False)
         return cls(
@@ -326,12 +346,20 @@ class WeightedSpectralPreprocessor:
         )
 
     def transform_pca(self, X1: np.ndarray, X2: np.ndarray, k: int | None = None) -> np.ndarray:
-        """Project spectra into top-k weighted MFA-PCA coordinates without intermediate hstack."""
+        """Project spectra into top-k weighted MFA-PCA coordinates without allocating centered copies."""
         comps = self.pca_components if k is None else self.pca_components[:k]
         p1 = self.mean_1300.size
-        proj1 = (X1 - self.mean_1300) @ (self.scale_1300 * comps[:, :p1].T)
-        proj2 = (X2 - self.mean_2850) @ (self.scale_2850 * comps[:, p1:].T)
-        return proj1 + proj2
+        w1 = self.scale_1300 * comps[:, :p1].T
+        w2 = self.scale_2850 * comps[:, p1:].T
+        return (X1 @ w1 - self.mean_1300 @ w1) + (X2 @ w2 - self.mean_2850 @ w2)
+
+    def project_linear_subspace(self, X1: np.ndarray, X2: np.ndarray, k: int, V_r: np.ndarray) -> np.ndarray:
+        """Fuse block-PCA and paired subspace weights into (p_b, r) before multiplying spectra."""
+        comps = self.pca_components[:k]
+        p1 = self.mean_1300.size
+        w1_r = self.scale_1300 * (comps[:, :p1].T @ V_r)
+        w2_r = self.scale_2850 * (comps[:, p1:].T @ V_r)
+        return (X1 @ w1_r - self.mean_1300 @ w1_r) + (X2 @ w2_r - self.mean_2850 @ w2_r)
 
     def candidate_pca_dims(self, cfg: PairedLipidConfig) -> list[int]:
         """Return deduplicated valid PCA dimensions capped by rank and n_p - 1."""
@@ -434,10 +462,7 @@ class PairedMoments:
         # Normalize in the regularized denominator metric and enforce deterministic signs
         metric_norms = np.sqrt(np.maximum(np.sum(eigvecs * (denom @ eigvecs), axis=0), 1e-15))
         eigvecs = eigvecs / metric_norms[None, :]
-        max_abs_idx = np.argmax(np.abs(eigvecs), axis=0)
-        signs = np.sign(eigvecs[max_abs_idx, np.arange(k)])
-        signs[signs == 0] = 1.0
-        eigvecs *= signs[None, :]
+        _enforce_deterministic_signs(eigvecs, axis=0)
         return eigvecs, eigvals, tau
 
 
@@ -576,10 +601,11 @@ class WeightedPLSResult:
         Xk = X - x_mean
         yk = y_train - y_mean
 
-        n_comp = max(1, min(int(max_components), X.shape[0] - 2, X.shape[1]))
-        W_list: list[np.ndarray] = []
-        P_list: list[np.ndarray] = []
-        q_list: list[float] = []
+        n_active = int(np.sum(w > 0))
+        n_comp = max(1, min(int(max_components), n_active - 2, X.shape[1]))
+        W_mat = np.empty((X.shape[1], n_comp), dtype=float)
+        P_mat = np.empty((X.shape[1], n_comp), dtype=float)
+        q_vec = np.empty(n_comp, dtype=float)
         coefs = np.zeros((n_comp, X.shape[1]), dtype=float)
 
         for comp_idx in range(n_comp):
@@ -602,17 +628,15 @@ class WeightedPLSResult:
             Xk = Xk - np.outer(tk, pk)
             yk = yk - tk * qk
 
-            W_list.append(wk)
-            P_list.append(pk)
-            q_list.append(qk)
+            c_end = comp_idx + 1
+            W_mat[:, comp_idx] = wk
+            P_mat[:, comp_idx] = pk
+            q_vec[comp_idx] = qk
 
-            W_mat = np.column_stack(W_list)
-            P_mat = np.column_stack(P_list)
-            q_vec = np.asarray(q_list, dtype=float)
             # R = W (P^T W)^{-1}, beta = R q
-            ptw = P_mat.T @ W_mat
-            r_q = linalg.solve(ptw, q_vec)
-            coefs[comp_idx] = W_mat @ r_q
+            ptw = P_mat[:, :c_end].T @ W_mat[:, :c_end]
+            r_q = linalg.solve(ptw, q_vec[:c_end])
+            coefs[comp_idx] = W_mat[:, :c_end] @ r_q
 
         return cls(
             max_components=n_comp,
