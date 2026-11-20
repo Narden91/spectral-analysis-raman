@@ -1,0 +1,424 @@
+"""Repeatability, discriminability, subspace principal-angle, and endpoint prediction metrics."""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Sequence
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from scipy import linalg, spatial
+
+from src.analysis.paired_lipid.cohort import CohortDataset, PairedLipidConfig
+from src.analysis.paired_lipid.models import (
+    CovariatePreprocessor,
+    MultiAlphaRidgeResult,
+    WeightedSpectralPreprocessor,
+)
+
+_INV_SQRT2 = 1.0 / math.sqrt(2.0)
+
+
+def two_way_anova_ms(matrix: np.ndarray) -> tuple[float, float, float]:
+    """Compute two-way ANOVA mean squares ``(ms_row, ms_col, ms_err)`` for a 2D array."""
+    arr = np.asarray(matrix, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError(f"two_way_anova_ms requires a 2D matrix, got shape {arr.shape}.")
+    n_rows, n_cols = arr.shape
+    if n_rows == 0 or n_cols == 0:
+        return float("nan"), float("nan"), float("nan")
+
+    grand_mean = float(np.mean(arr))
+    centered = arr - grand_mean
+    row_means = np.mean(centered, axis=1)
+    col_means = np.mean(centered, axis=0)
+
+    ss_row = float(n_cols * np.sum(row_means * row_means))
+    ss_col = float(n_rows * np.sum(col_means * col_means))
+    ss_tot = float(np.sum(centered * centered))
+    ss_err = max(0.0, ss_tot - ss_row - ss_col)
+
+    ms_row = ss_row / float(n_rows - 1) if n_rows >= 2 else float("nan")
+    ms_col = ss_col / float(n_cols - 1) if n_cols >= 2 else float("nan")
+    ms_err = ss_err / float((n_rows - 1) * (n_cols - 1)) if (n_rows >= 2 and n_cols >= 2) else float("nan")
+    return ms_row, ms_col, ms_err
+
+
+def compute_icc_a1(y_a: np.ndarray, y_b: np.ndarray) -> dict[str, Any]:
+    """Two-way mixed-effects, single-measure, absolute-agreement ICC(A,1) per Koo & Li (2016).
+
+    Formula:
+        ICC(A,1) = (MS_R - MS_E) / (MS_R + (k - 1)*MS_E + (k / n)*(MS_C - MS_E))
+    with k = 2 fixed positions and n random participants. Zero and negative estimates
+    are retained; marked non-estimable only for n < 2 or non-positive/degenerate denominator.
+    """
+    a = np.asarray(y_a, dtype=float)
+    b = np.asarray(y_b, dtype=float)
+    valid = np.isfinite(a) & np.isfinite(b)
+    a = a[valid]
+    b = b[valid]
+    n = int(a.size)
+    if n < 2:
+        return {
+            "icc_a1": float("nan"),
+            "estimable": False,
+            "reason": "fewer_than_two_paired_participants",
+            "n_pairs": n,
+            "mean_diff": float("nan"),
+            "rmsd": float("nan"),
+        }
+
+    k = 2
+    ms_r, ms_c, ms_e = two_way_anova_ms(np.column_stack([a, b]))
+    denom = ms_r + (k - 1) * ms_e + (float(k) / float(n)) * (ms_c - ms_e)
+    diffs = a - b
+    mean_diff = float(np.mean(diffs))
+    rmsd = float(np.sqrt(np.mean(diffs * diffs)))
+
+    max_ms = max(ms_r, ms_c, ms_e)
+    if not np.isfinite(denom) or denom <= 0.0 or denom <= 1e-15 * max_ms:
+        return {
+            "icc_a1": float("nan"),
+            "estimable": False,
+            "reason": "degenerate_denominator",
+            "n_pairs": n,
+            "mean_diff": mean_diff,
+            "rmsd": rmsd,
+        }
+
+    icc = float((ms_r - ms_e) / denom)
+    return {
+        "icc_a1": icc,
+        "estimable": True,
+        "reason": "ok",
+        "n_pairs": n,
+        "mean_diff": mean_diff,
+        "rmsd": rmsd,
+        "ms_between_participants": ms_r,
+        "ms_between_positions": ms_c,
+        "ms_error": ms_e,
+    }
+
+
+def compute_discriminability_and_retrieval(
+    z_a: np.ndarray,
+    z_b: np.ndarray,
+    labels_a: np.ndarray | None = None,
+    labels_b: np.ndarray | None = None,
+    *,
+    local_window: int = 5,
+) -> dict[str, float]:
+    """Compute within-fold Bridgeford discriminability and bidirectional retrieval accuracy."""
+    n = int(z_a.shape[0])
+    if n < 2:
+        return {
+            "n_pairs": float(n),
+            "discriminability": float("nan"),
+            "retrieval_top1": float("nan"),
+            "retrieval_chance": float("nan"),
+            "local_retrieval_top1": float("nan"),
+            "local_retrieval_chance": float("nan"),
+        }
+
+    Z = np.vstack([z_a, z_b])  # 2n x r
+    dist_mat = spatial.distance.cdist(Z, Z, metric="euclidean")
+
+    # Within-participant distances: d(iA, iB) = dist_mat[i, n + i]
+    idx_n = np.arange(n)
+    within_d = dist_mat[idx_n, idx_n + n]
+
+    # Discriminability across all 2n samples: compare each sample's partner distance against all 2(n-1) others.
+    d_same_all = np.concatenate([within_d, within_d])[:, None]
+    other_mask = np.ones((2 * n, 2 * n), dtype=bool)
+    other_mask[idx_n, idx_n] = False
+    other_mask[idx_n, idx_n + n] = False
+    other_mask[idx_n + n, idx_n] = False
+    other_mask[idx_n + n, idx_n + n] = False
+    wins = float(
+        np.sum((d_same_all < dist_mat) & other_mask)
+        + 0.5 * np.sum((d_same_all == dist_mat) & other_mask)
+    )
+    total_comparisons = 2 * n * (2 * n - 2)
+    discrim = wins / float(total_comparisons) if total_comparisons > 0 else float("nan")
+
+    # Bidirectional cross-position retrieval (A -> B and B -> A) with fractional tie credit.
+    cross_ab = dist_mat[:n, n:]  # n x n, diagonal is true match
+    diag_d = np.diag(cross_ab)
+    min_ab = np.min(cross_ab, axis=1)
+    hits_ab = np.where(
+        diag_d == min_ab,
+        1.0 / np.maximum(np.sum(cross_ab == min_ab[:, None], axis=1), 1),
+        0.0,
+    )
+    min_ba = np.min(cross_ab, axis=0)
+    hits_ba = np.where(
+        diag_d == min_ba,
+        1.0 / np.maximum(np.sum(cross_ab == min_ba[None, :], axis=0), 1),
+        0.0,
+    )
+    retrieval_top1 = float(0.5 * (np.mean(hits_ab) + np.mean(hits_ba)))
+    retrieval_chance = 1.0 / float(n)
+
+    # Local neighbor-label candidate sensitivity over finite-label pairs only, vectorized bidirectionally.
+    local_retrieval_top1 = float("nan")
+    local_retrieval_chance = float("nan")
+    if labels_a is not None and labels_b is not None:
+        mean_lbl = 0.5 * (np.asarray(labels_a, dtype=float) + np.asarray(labels_b, dtype=float))
+        finite_idx = np.flatnonzero(np.isfinite(mean_lbl))
+        m = int(finite_idx.size)
+        if m >= 2:
+            order = np.argsort(mean_lbl[finite_idx], kind="stable")
+            rank_pos = np.empty(m, dtype=int)
+            rank_pos[order] = np.arange(m)
+            cand_mask = np.abs(rank_pos[:, None] - rank_pos[None, :]) <= local_window
+            cand_counts = np.sum(cand_mask, axis=1)
+            valid_q = cand_counts >= 2
+            if np.any(valid_q):
+                cross_sub = cross_ab[np.ix_(finite_idx, finite_idx)]
+                diag_sub = diag_d[finite_idx]
+                masked_ab = np.where(cand_mask, cross_sub, np.inf)
+
+                # Because cand_mask is symmetric, row i holds A->B candidates and col i holds B->A candidates.
+                min_loc_ab = np.min(masked_ab, axis=1)
+                hits_loc_ab = np.where(
+                    diag_sub == min_loc_ab,
+                    1.0 / np.maximum(np.sum(masked_ab == min_loc_ab[:, None], axis=1), 1),
+                    0.0,
+                )
+                min_loc_ba = np.min(masked_ab, axis=0)
+                hits_loc_ba = np.where(
+                    diag_sub == min_loc_ba,
+                    1.0 / np.maximum(np.sum(masked_ab == min_loc_ba[None, :], axis=0), 1),
+                    0.0,
+                )
+                local_retrieval_top1 = float(
+                    0.5 * (np.mean(hits_loc_ab[valid_q]) + np.mean(hits_loc_ba[valid_q]))
+                )
+                local_retrieval_chance = float(np.mean(1.0 / cand_counts[valid_q].astype(float)))
+
+    return {
+        "n_pairs": float(n),
+        "discriminability": discrim,
+        "retrieval_top1": retrieval_top1,
+        "retrieval_chance": retrieval_chance,
+        "local_retrieval_top1": local_retrieval_top1,
+        "local_retrieval_chance": local_retrieval_chance,
+    }
+
+
+def map_subspace_to_metric_orthonormal_basis(
+    spec_prep: WeightedSpectralPreprocessor,
+    pca_k: int,
+    eigvecs_V: np.ndarray,
+    p_1300: int,
+    p_2850: int,
+) -> np.ndarray:
+    """Map paired directions back to canonical channels and orthonormalize under declared metric.
+
+    Declared metric: equal block weight (1/2 per block) and equal channel weight within each block
+    (1 / (2 * p_b)). Returns Q of shape (p_1300 + p_2850, r) with Q^T Q = I_r in metric coordinates.
+    """
+    pca_loadings_k = spec_prep.pca_components[:pca_k].T  # (p_total, k)
+    proj = pca_loadings_k @ eigvecs_V  # (p_total, r)
+    if proj.shape[0] != p_1300 + p_2850:
+        raise ValueError(
+            f"Projected basis row count {proj.shape[0]} does not match p_1300 + p_2850 ({p_1300 + p_2850})."
+        )
+    scale_1300 = spec_prep.scale_1300 / math.sqrt(2.0 * max(p_1300, 1))
+    scale_2850 = spec_prep.scale_2850 / math.sqrt(2.0 * max(p_2850, 1))
+    metric_dirs = np.empty_like(proj, dtype=float)
+    metric_dirs[:p_1300] = proj[:p_1300] * scale_1300
+    metric_dirs[p_1300:] = proj[p_1300:] * scale_2850
+    Q, _ = linalg.qr(metric_dirs, mode="economic")
+    return Q
+
+
+def _ensure_orthonormal_basis(basis: np.ndarray) -> np.ndarray:
+    """Return an orthonormal column basis, reusing ``basis`` directly when already orthonormal."""
+    arr = np.asarray(basis, dtype=float)
+    if arr.size == 0:
+        return arr
+    gram = arr.T @ arr
+    if np.allclose(gram, np.eye(arr.shape[1], dtype=float), rtol=0.0, atol=1e-12):
+        return arr
+    return linalg.orth(arr)
+
+
+def _principal_angles_from_orthonormal(QA: np.ndarray, QB: np.ndarray) -> np.ndarray:
+    """Compute exact Bjorck-Golub principal angles (radians) between orthonormal bases QA and QB."""
+    if QA.shape[1] < QB.shape[1]:
+        A, B = QB, QA
+    else:
+        A, B = QA, QB
+    M = A.T @ B
+    sv = linalg.svdvals(M)
+    angles = np.arccos(np.clip(sv, 0.0, 1.0))
+    small_mask = sv > _INV_SQRT2
+    if np.any(small_mask):
+        # Refine angles below pi/4 via sine of the orthogonal residual B - A (A^T B).
+        sv_sin = linalg.svdvals(B - A @ M)[::-1]
+        angles = np.where(small_mask, np.arcsin(np.clip(sv_sin, 0.0, 1.0)), angles)
+    return angles
+
+
+def compute_subspace_principal_angles(bases: Sequence[np.ndarray]) -> pd.DataFrame:
+    """Compute pairwise principal angles (degrees) between fold-specific metric-orthonormal bases."""
+    orth_bases = [_ensure_orthonormal_basis(b) for b in bases]
+    rows: list[dict[str, Any]] = []
+    for i in range(len(bases)):
+        Qi_orig = bases[i]
+        Qi = orth_bases[i]
+        if Qi_orig.size == 0 or Qi.size == 0:
+            continue
+        for j in range(i + 1, len(bases)):
+            Qj_orig = bases[j]
+            Qj = orth_bases[j]
+            if Qj_orig.size == 0 or Qj.size == 0:
+                continue
+            angles_rad = _principal_angles_from_orthonormal(Qi, Qj)
+            cosines = np.clip(np.cos(angles_rad), 0.0, 1.0)
+            angles_deg = np.degrees(angles_rad)
+            rows.append(
+                {
+                    "fold_a": i,
+                    "fold_b": j,
+                    "dim_a": int(Qi_orig.shape[1]),
+                    "dim_b": int(Qj_orig.shape[1]),
+                    "max_principal_angle_deg": float(np.max(angles_deg)),
+                    "mean_principal_angle_deg": float(np.mean(angles_deg)),
+                    "min_cosine": float(np.min(cosines)),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def compute_endpoint_summary(
+    y_true: np.ndarray,
+    y_pred_cov: np.ndarray,
+    y_pred_model: np.ndarray,
+    weights: np.ndarray | None = None,
+) -> dict[str, float]:
+    """Compute participant-weighted held-out LDL-C prediction metrics and descriptive calibration."""
+    y = np.asarray(y_true, dtype=float)
+    yc = np.asarray(y_pred_cov, dtype=float)
+    ym = np.asarray(y_pred_model, dtype=float)
+    w = np.ones_like(y) if weights is None else np.asarray(weights, dtype=float)
+    valid = np.isfinite(y) & np.isfinite(yc) & np.isfinite(ym) & (w > 0.0)
+    if not np.any(valid):
+        return {
+            "delta_mse": float("nan"),
+            "relative_mse_reduction": float("nan"),
+            "mse_covariate": float("nan"),
+            "mse_model": float("nan"),
+            "rmse_model": float("nan"),
+            "mae_model": float("nan"),
+            "calibration_intercept": float("nan"),
+            "calibration_slope": float("nan"),
+        }
+
+    y, yc, ym, w = y[valid], yc[valid], ym[valid], w[valid]
+    w_norm = w / np.sum(w)
+
+    sq_err_c = (y - yc) ** 2
+    sq_err_m = (y - ym) ** 2
+    mse_c = float(w_norm @ sq_err_c)
+    mse_m = float(w_norm @ sq_err_m)
+    delta = float(w_norm @ (sq_err_c - sq_err_m))
+    rel_red = delta / mse_c if mse_c > 1e-15 else float("nan")
+    rmse = float(math.sqrt(mse_m))
+    mae = float(w_norm @ np.abs(y - ym))
+
+    ym_bar = float(w_norm @ ym)
+    y_bar = float(w_norm @ y)
+    ym_c = ym - ym_bar
+    var_ym = float(w_norm @ (ym_c * ym_c))
+    if var_ym > 1e-12:
+        slope = float((w_norm @ (ym_c * (y - y_bar))) / var_ym)
+        intercept = y_bar - slope * ym_bar
+    else:
+        slope = float("nan")
+        intercept = float("nan")
+
+    return {
+        "delta_mse": delta,
+        "relative_mse_reduction": rel_red,
+        "mse_covariate": mse_c,
+        "mse_model": mse_m,
+        "rmse_model": rmse,
+        "mae_model": mae,
+        "calibration_intercept": intercept,
+        "calibration_slope": slope,
+    }
+
+
+def _predict_paired_ab(
+    fit: MultiAlphaRidgeResult,
+    X_cov: np.ndarray,
+    Z_a: np.ndarray,
+    Z_b: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Evaluate paired A/B predictions while computing the shared covariate linear term once."""
+    b0 = float(fit.intercepts[0])
+    b_cov = fit.coef_cov[0]
+    b_spec = fit.coef_spec[0]
+    cov_part = (b0 + X_cov @ b_cov) if X_cov.shape[1] > 0 else np.full(X_cov.shape[0], b0, dtype=float)
+    if Z_a.shape[1] > 0:
+        spec_a = ((Z_a - fit.z_mean) / fit.z_scale) @ b_spec
+        spec_b = ((Z_b - fit.z_mean) / fit.z_scale) @ b_spec
+    else:
+        spec_a = np.zeros(X_cov.shape[0], dtype=float)
+        spec_b = np.zeros(X_cov.shape[0], dtype=float)
+    return cov_part + spec_a, spec_a, cov_part + spec_b, spec_b
+
+
+def outer_test_repeatability(
+    dataset: CohortDataset,
+    cfg: PairedLipidConfig,
+    outer_test_idx: np.ndarray,
+    outer_cov_prep: CovariatePreprocessor,
+    fit_paired_outer: MultiAlphaRidgeResult,
+    fit_band_outer: MultiAlphaRidgeResult,
+    sample_paired_z: np.ndarray,
+    sample_band_mat: np.ndarray,
+    sample_pca_sel: np.ndarray,
+) -> dict[str, Any]:
+    """Per-sample (A vs B) ICCs and discriminability on the paired outer-test participants."""
+    paired_test_pos = np.isin(dataset.paired_participant_indices, outer_test_idx)
+    paired_test_p = dataset.paired_participant_indices[paired_test_pos]
+    idx_a_te = dataset.pair_sample_a_indices[paired_test_pos]
+    idx_b_te = dataset.pair_sample_b_indices[paired_test_pos]
+
+    info: dict[str, Any] = {"n_paired_test": int(paired_test_p.size)}
+    if paired_test_p.size < 2:
+        return info
+
+    X_cov_pair_te = outer_cov_prep.transform(
+        dataset.covariate_frame, paired_test_p, raw_cache=dataset._cache
+    )
+    y_pair_a, s_pair_a, y_pair_b, s_pair_b = _predict_paired_ab(
+        fit_paired_outer, X_cov_pair_te, sample_paired_z[idx_a_te], sample_paired_z[idx_b_te]
+    )
+    y_band_a, s_band_a, y_band_b, s_band_b = _predict_paired_ab(
+        fit_band_outer, X_cov_pair_te, sample_band_mat[idx_a_te], sample_band_mat[idx_b_te]
+    )
+    lbl_a = dataset.sample_parsed_labels[idx_a_te]
+    lbl_b = dataset.sample_parsed_labels[idx_b_te]
+
+    def _discrim(z: np.ndarray) -> dict[str, float]:
+        return compute_discriminability_and_retrieval(
+            z[idx_a_te], z[idx_b_te], lbl_a, lbl_b, local_window=cfg.local_candidate_window
+        )
+
+    info.update(
+        {
+            "paired_full_icc": compute_icc_a1(y_pair_a, y_pair_b),
+            "paired_spectral_icc": compute_icc_a1(s_pair_a, s_pair_b),
+            "fixed_band_full_icc": compute_icc_a1(y_band_a, y_band_b),
+            "fixed_band_spectral_icc": compute_icc_a1(s_band_a, s_band_b),
+            "paired_discriminability": _discrim(sample_paired_z),
+            "pca_discriminability": _discrim(sample_pca_sel),
+            "band_discriminability": _discrim(sample_band_mat),
+        }
+    )
+    return info

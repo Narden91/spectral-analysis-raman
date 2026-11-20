@@ -2,68 +2,81 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from functools import lru_cache
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from scipy import linalg
 
-from src.analysis.paired_lipid.cohort import (
-    CohortDataset,
-    PairedLipidConfig,
-    extract_sample_band_matrix,
+from src.analysis.paired_lipid._backend import (
+    _get_gpu_xp as _get_gpu_xp,
 )
-from src.analysis.paired_lipid.models import (
-    CovariatePreprocessor,
+from src.analysis.paired_lipid._backend import (
+    _probe_cupy as _probe_cupy,
 )
-
-
-@lru_cache(maxsize=1)
-def _probe_cupy() -> Any | None:
-    """Import CuPy and verify at least one CUDA device once per process."""
-    try:
-        import cupy as cp  # type: ignore[import-not-found]
-
-        if cp.cuda.runtime.getDeviceCount() > 0:
-            return cp
-    except Exception:
-        pass
-    return None
-
-
-def _get_gpu_xp() -> Any | None:
-    """Return the CuPy module when an NVIDIA CUDA device is available, else None."""
-    return _probe_cupy()
+from src.analysis.paired_lipid._backend import (
+    _to_np as _to_np,
+)
+from src.analysis.paired_lipid._backend import (
+    resolve_array_backend as _resolve_array_backend_impl,
+)
+from src.analysis.paired_lipid._backend import (
+    suggest_batch_size as suggest_batch_size,
+)
+from src.analysis.paired_lipid._batched_models import (
+    batched_division_prep as batched_division_prep,
+)
+from src.analysis.paired_lipid._batched_models import (
+    batched_paired_schur_sse as batched_paired_schur_sse,
+)
+from src.analysis.paired_lipid._batched_models import (
+    batched_pca_schur_sse as batched_pca_schur_sse,
+)
+from src.analysis.paired_lipid._batched_models import (
+    batched_pls_sse_and_preds as batched_pls_sse_and_preds,
+)
+from src.analysis.paired_lipid._batched_models import (
+    batched_ridge_sse_and_preds as batched_ridge_sse_and_preds,
+)
+from src.analysis.paired_lipid._eigensolvers import (
+    _chefsi_top_k_gpu as _chefsi_top_k_gpu,
+)
+from src.analysis.paired_lipid._eigensolvers import (
+    _exact_top_k_eigh_active as _exact_top_k_eigh_active,
+)
+from src.analysis.paired_lipid._eigensolvers import (
+    _fast_top1_eigvalsh as _fast_top1_eigvalsh,
+)
+from src.analysis.paired_lipid._eigensolvers import (
+    _rayleigh_ritz_32 as _rayleigh_ritz_32,
+)
+from src.analysis.paired_lipid._eigensolvers import (
+    _top_k_eigh as _top_k_eigh,
+)
+from src.analysis.paired_lipid._eigensolvers import (
+    _whitened_generalized_eigh as _whitened_generalized_eigh,
+)
+from src.analysis.paired_lipid._eigensolvers import (
+    batched_solve_directions_grid as batched_solve_directions_grid,
+)
+from src.analysis.paired_lipid._gram_cache import (
+    _get_dataset_gram_cache as _get_dataset_gram_cache,
+)
+from src.analysis.paired_lipid._gram_cache import (
+    _precompute_division_constants as _precompute_division_constants,
+)
+from src.analysis.paired_lipid.cohort import CohortDataset, PairedLipidConfig
 
 
 def resolve_array_backend(
     use_gpu: bool | None,
     n_draws: int,
     *,
-    min_auto_draws: int = 32,
+    min_auto_draws: int = 256,
+    gpu_probe: Callable[[], Any | None] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
-    """Select CuPy or NumPy backend and build standardized execution metadata."""
-    cp_mod = _get_gpu_xp() if use_gpu is not False else None
-    gpu_requested = use_gpu is True or (use_gpu is None and n_draws >= min_auto_draws)
-    xp = cp_mod if (cp_mod is not None and gpu_requested) else np
-    gpu_fallback = bool(gpu_requested and cp_mod is None)
-    meta: dict[str, Any] = {
-        "device": "gpu" if xp is not np else "cpu",
-        "gpu_requested": use_gpu,
-        "gpu_active": xp is not np,
-        "gpu_fallback": gpu_fallback,
-    }
-    if gpu_fallback:
-        meta["gpu_fallback_reason"] = "CuPy/CUDA device unavailable"
-    return xp, meta
-
-
-def _to_np(xp: Any, arr: Any) -> np.ndarray:
-    """Convert a NumPy or CuPy array to a host NumPy float64 array."""
-    if xp is not np and hasattr(xp, "asnumpy"):
-        return np.asarray(xp.asnumpy(arr), dtype=np.float64)
-    return np.asarray(arr, dtype=np.float64)
+    """Select CuPy or NumPy backend while honoring monkeypatches to ``batched._get_gpu_xp``."""
+    probe = _get_gpu_xp if gpu_probe is None else gpu_probe
+    return _resolve_array_backend_impl(use_gpu, n_draws, min_auto_draws=min_auto_draws, gpu_probe=probe)
 
 
 # Tie rules (research_design.md): fewer retained directions, fewer PCA dimensions, then stronger
@@ -89,872 +102,6 @@ def _select_paired_setting(pair_r: np.ndarray) -> tuple[np.ndarray, np.ndarray, 
     lam_idx = (n_lam - 1) - rem % n_lam
     rem = rem // n_lam
     return rem // n_k, rem % n_k, lam_idx, a_idx
-
-
-def _get_dataset_gram_cache(dataset: CohortDataset, cfg: PairedLipidConfig) -> dict[str, Any]:
-    """Memoize sample-level and participant-level Gram matrices and raw covariates on dataset."""
-    key = f"gram_cache__{cfg.covariate_preset}"
-    cached = dataset._cache.get(key)
-    if cached is not None:
-        return cached
-
-    n_p = dataset.n_participants
-    n_s = dataset.n_samples
-    X1 = np.asarray(dataset.sample_1300, dtype=np.float64)
-    X2 = np.asarray(dataset.sample_2850, dtype=np.float64)
-    K1 = X1 @ X1.T
-    K2 = X2 @ X2.T
-
-    A_part = np.zeros((n_p, n_s), dtype=np.float64)
-    p_for_s = dataset.sample_participant_idx
-    A_part[p_for_s, np.arange(n_s, dtype=int)] = 1.0 / dataset.participant_sample_counts[p_for_s].astype(np.float64)
-
-    K_part_1 = A_part @ K1 @ A_part.T
-    K_part_2 = A_part @ K2 @ A_part.T
-
-    sample_band_mat, _ = extract_sample_band_matrix(dataset)
-    part_band_mat = A_part @ sample_band_mat
-
-    CovariatePreprocessor.fit(
-        dataset.covariate_frame,
-        np.arange(n_p),
-        np.ones(n_p),
-        preset=cfg.covariate_preset,
-        raw_cache=dataset._cache,
-    )
-    raw_cov, _ = dataset._cache[f"raw_cov_matrix__{cfg.covariate_preset}"]
-    raw_cov_arr = np.asarray(raw_cov, dtype=np.float64)
-
-    out = {
-        "K1": K1,
-        "K2": K2,
-        "A_part": A_part,
-        "K_part_1": K_part_1,
-        "K_part_2": K_part_2,
-        "sample_band_mat": sample_band_mat,
-        "part_band_mat": part_band_mat,
-        "raw_cov": raw_cov_arr,
-        "has_missing_cov": bool(not np.all(np.isfinite(raw_cov_arr))),
-        "dconst_cpu_cache": {},
-    }
-    dataset._cache[key] = out
-    return out
-
-
-def _fast_top1_eigvalsh(xp: Any, G_batch: Any, sw: Any, Q0: Any) -> Any:
-    """QR-free 2-step subspace Rayleigh-Ritz for the leading eigenvalue of a PSD batch."""
-    Y = G_batch @ (sw[:, :, None] * Q0[None, :, :])
-    Y = G_batch @ Y
-    YtY = xp.swapaxes(Y, -1, -2) @ Y
-    YtY = 0.5 * (YtY + xp.swapaxes(YtY, -1, -2))
-    d, V = xp.linalg.eigh(YtY)
-    d_max = xp.maximum(d[:, -1:], 1e-24)
-    valid = d > (1e-18 * d_max)
-    inv_s = xp.where(valid, 1.0 / xp.sqrt(xp.maximum(d, 1e-30)), 0.0)
-    Q = Y @ (V * inv_s[:, None, :])
-    GQ = G_batch @ Q
-    H = xp.swapaxes(Q, -1, -2) @ GQ
-    H = 0.5 * (H + xp.swapaxes(H, -1, -2))
-    return xp.linalg.eigvalsh(H)[:, -1]
-
-
-def _rayleigh_ritz_32(xp: Any, G_sym: Any, Y: Any) -> tuple[Any, Any, Any]:
-    """Column-normalized 32x32 Rayleigh-Ritz step using cuSOLVER's warp-batched syevjBatched."""
-    norms = xp.linalg.norm(Y, axis=1, keepdims=True)
-    Yn = Y / xp.maximum(norms, 1e-30)
-    YtY = xp.swapaxes(Yn, -1, -2) @ Yn
-    YtY = 0.5 * (YtY + xp.swapaxes(YtY, -1, -2))
-    d, V = xp.linalg.eigh(YtY)
-    d_max = xp.maximum(d[:, -1:], 1e-30)
-    inv_s = xp.where(d > (1e-24 * d_max), 1.0 / xp.sqrt(xp.maximum(d, 1e-30)), 0.0)
-    Q = Yn @ (V * inv_s[:, None, :])
-    GQ = G_sym @ Q
-    H = xp.swapaxes(Q, -1, -2) @ GQ
-    H = 0.5 * (H + xp.swapaxes(H, -1, -2))
-    theta, W = xp.linalg.eigh(H)
-    return theta, Q @ W, GQ @ W
-
-
-def _chefsi_top_k_gpu(
-    xp: Any,
-    G_sym: Any,
-    max_k: int,
-    sw: Any,
-    Q0_comb: Any,
-    *,
-    n_cycles: int = 3,
-    poly_deg: int = 4,
-    residual_tol: float = 1e-12,
-) -> tuple[Any, Any]:
-    """Warm-started Chebyshev-filtered subspace iteration (q=32) with exact residual verification.
-
-    Uses pure batched GEMMs plus 32x32 warp-batched ``eigh``; any draw with fewer than 32 active
-    samples or eigenpair residual exceeding ``residual_tol`` is solved exactly via
-    ``_exact_top_k_eigh_active`` so fp64 accuracy is strictly preserved.
-    """
-    B, n_s, _ = G_sym.shape
-    n_act = _to_np(xp, xp.sum(sw > 0, axis=1)).astype(int)
-    can_chefsi = n_act >= 32
-    if not np.any(can_chefsi):
-        return _exact_top_k_eigh_active(xp, G_sym, max_k, sw)
-
-    if np.all(can_chefsi):
-        G_run = G_sym
-        sw_run = sw
-    else:
-        c_idx = xp.asarray(np.flatnonzero(can_chefsi))
-        G_run = G_sym[c_idx]
-        sw_run = sw[c_idx]
-
-    Y0 = G_run @ (sw_run[:, :, None] * Q0_comb[None, :, :])
-    theta, U, GU = _rayleigh_ritz_32(xp, G_run, Y0)
-    del Y0
-    for _ in range(n_cycles):
-        b_cut = xp.maximum(theta[:, 0], 1e-15)
-        inv_e = 2.0 / b_cut[:, None, None]
-        Y_prev = U
-        Y_curr = inv_e * GU - U
-        del GU
-        for _ in range(1, poly_deg):
-            GY = G_run @ Y_curr
-            Y_next = 2.0 * (inv_e * GY - Y_curr) - Y_prev
-            del GY
-            Y_prev = Y_curr
-            Y_curr = Y_next
-        del Y_prev
-        theta, U, GU = _rayleigh_ritz_32(xp, G_run, Y_curr)
-        del Y_curr
-
-    ev_k = xp.maximum(theta[:, -max_k:][:, ::-1], 0.0)
-    u_k = U[:, :, -max_k:][:, :, ::-1]
-    gu_k = GU[:, :, -max_k:][:, :, ::-1]
-    res_norm = xp.max(xp.linalg.norm(gu_k - u_k * ev_k[:, None, :], axis=1), axis=1)
-    rel_res = _to_np(xp, res_norm / xp.maximum(ev_k[:, 0], 1e-12))
-    converged_sub = np.isfinite(rel_res) & (rel_res <= residual_tol)
-
-    if np.all(can_chefsi) and np.all(converged_sub):
-        return ev_k, u_k
-
-    ev_out = xp.zeros((B, max_k), dtype=xp.float64)
-    u_out = xp.zeros((B, n_s, max_k), dtype=xp.float64)
-    conv_global = np.zeros(B, dtype=bool)
-    if np.all(can_chefsi):
-        conv_global = converged_sub
-        if np.any(converged_sub):
-            ok_xp = xp.asarray(np.flatnonzero(converged_sub))
-            ev_out[ok_xp] = ev_k[ok_xp]
-            u_out[ok_xp] = u_k[ok_xp]
-    else:
-        c_host = np.flatnonzero(can_chefsi)
-        conv_global[c_host] = converged_sub
-        if np.any(converged_sub):
-            sub_ok = xp.asarray(np.flatnonzero(converged_sub))
-            glob_ok = xp.asarray(c_host[converged_sub])
-            ev_out[glob_ok] = ev_k[sub_ok]
-            u_out[glob_ok] = u_k[sub_ok]
-
-    bad_host = np.flatnonzero(~conv_global)
-    if bad_host.size > 0:
-        bad_xp = xp.asarray(bad_host)
-        ev_fb, u_fb = _exact_top_k_eigh_active(xp, G_sym[bad_xp], max_k, sw[bad_xp])
-        ev_out[bad_xp] = ev_fb
-        u_out[bad_xp] = u_fb
-    return ev_out, u_out
-
-
-def _top_k_eigh(
-    xp: Any,
-    G_batch: Any,
-    max_k: int,
-    sw: Any,
-    Q0_comb: Any | None = None,
-    *,
-    is_symmetric: bool = False,
-) -> tuple[Any, Any]:
-    """Exact fp64 top-max_k eigenpairs: active-sample LAPACK dsyevr on CPU, verified CheFSI on GPU."""
-    if is_symmetric:
-        G_sym = G_batch
-    else:
-        G_sym = G_batch + xp.swapaxes(G_batch, -1, -2)
-        G_sym *= 0.5
-    if xp is np:
-        B, n_s, _ = G_sym.shape
-        ev_out = np.zeros((B, max_k), dtype=np.float64)
-        u_out = np.zeros((B, n_s, max_k), dtype=np.float64)
-        for b in range(B):
-            act = np.flatnonzero(sw[b] > 0)
-            n_act = act.size
-            k_b = min(max_k, n_act)
-            if k_b <= 0:
-                continue
-            G_sub = G_sym[b][np.ix_(act, act)]
-            ev_b, u_b = linalg.eigh(
-                G_sub,
-                subset_by_index=[n_act - k_b, n_act - 1],
-                driver="evr",
-                check_finite=False,
-            )
-            ev_out[b, :k_b] = np.maximum(ev_b[::-1], 0.0)
-            u_out[b, act, :k_b] = u_b[:, ::-1]
-        return ev_out, u_out
-
-    B, n_s, _ = G_sym.shape
-    if n_s <= 32:
-        ev, u = xp.linalg.eigh(G_sym)
-        k = min(max_k, n_s)
-        ev_desc = xp.maximum(ev[:, -k:][:, ::-1], 0.0)
-        u_desc = u[:, :, -k:][:, :, ::-1]
-        if k == max_k:
-            return ev_desc, u_desc
-        ev_pad = xp.zeros((B, max_k), dtype=xp.float64)
-        u_pad = xp.zeros((B, n_s, max_k), dtype=xp.float64)
-        ev_pad[:, :k] = ev_desc
-        u_pad[:, :, :k] = u_desc
-        return ev_pad, u_pad
-
-    if Q0_comb is not None and Q0_comb.shape[1] == 32 and max_k <= 24:
-        return _chefsi_top_k_gpu(xp, G_sym, max_k, sw, Q0_comb)
-
-    return _exact_top_k_eigh_active(xp, G_sym, max_k, sw)
-
-
-def _exact_top_k_eigh_active(xp: Any, G_sym: Any, max_k: int, sw: Any) -> tuple[Any, Any]:
-    """Exact fp64 top-max_k eigenpairs, solved only over each draw's active samples.
-
-    A sample of a participant with bootstrap multiplicity 0 has weight 0, so its gram row and
-    column are zero (about 37% of samples per draw). The top eigenpairs of the active block equal
-    those of the full matrix; eigh cost grows with the cube of the size, so solving the smaller
-    block is the speed-up. Draws are grouped by active count rounded up to a multiple of 8;
-    the extra rows in a group are zero rows and add only zero eigenvalues.
-    """
-    B, n_s, _ = G_sym.shape
-    active = sw > 0
-    n_act = _to_np(xp, xp.sum(active, axis=1)).astype(int)
-    # Unique sort keys: active samples first, each group in original sample order.
-    pos = xp.arange(n_s)[None, :]
-    order = xp.argsort(xp.where(active, pos, n_s + pos), axis=1)
-    bucket_step = 32 if B <= 256 else 8
-    sizes = np.minimum(-(-n_act // bucket_step) * bucket_step, n_s)
-
-    ev_out = xp.zeros((B, max_k), dtype=xp.float64)
-    u_out = xp.zeros((B, n_s, max_k), dtype=xp.float64)
-    for m in np.unique(sizes):
-        b_idx = xp.asarray(np.flatnonzero(sizes == m))
-        idx = order[b_idx, :m]
-        G_sub = xp.take_along_axis(G_sym[b_idx], idx[:, :, None], axis=1)
-        G_sub = xp.take_along_axis(G_sub, idx[:, None, :], axis=2)
-        ev, u = xp.linalg.eigh(G_sub)
-        del G_sub
-        k = min(max_k, int(m))
-        ev_out[b_idx, :k] = xp.maximum(ev[:, -k:][:, ::-1], 0.0)
-        u_grp = xp.zeros((b_idx.size, n_s, max_k), dtype=xp.float64)
-        u_grp[xp.arange(b_idx.size)[:, None], idx, :k] = u[:, :, -k:][:, :, ::-1]
-        del ev, u
-        u_out[b_idx] = u_grp
-        del u_grp
-    return ev_out, u_out
-
-
-_HOST_DCONST_KEYS: frozenset[str] = frozenset(
-    {"tr_p", "val_p", "s_div", "s_rel", "p_pair_tr", "idx_a_tr", "idx_b_tr", "pair_rel"}
-)
-
-
-def _precompute_division_constants(
-    xp: Any,
-    gcache: dict[str, Any],
-    dataset: CohortDataset,
-    tr_p: np.ndarray,
-    val_p: np.ndarray,
-    cfg: PairedLipidConfig,
-) -> dict[str, Any]:
-    """Precompute division-specific Gram slices and warm-start bases outside the bootstrap loop."""
-    cpu_cache = gcache.setdefault("dconst_cpu_cache", {})
-    cache_key = (
-        np.ascontiguousarray(tr_p, dtype=np.int64).tobytes(),
-        np.ascontiguousarray(val_p, dtype=np.int64).tobytes(),
-        cfg.pca_dimensions,
-    )
-    cpu_out = cpu_cache.get(cache_key)
-    if cpu_out is None:
-        n_tr = tr_p.size
-        in_tr_mask = np.isin(dataset.sample_participant_idx, tr_p)
-        s_div = np.flatnonzero(in_tr_mask)
-        n_s = int(s_div.size)
-        p_to_rel = np.full(dataset.n_participants, -1, dtype=int)
-        p_to_rel[tr_p] = np.arange(n_tr, dtype=int)
-        s_rel = p_to_rel[dataset.sample_participant_idx[s_div]]
-        m_i_div = dataset.participant_sample_counts[dataset.sample_participant_idx[s_div]].astype(np.float64)
-
-        raw_cov = np.asarray(gcache["raw_cov"], dtype=np.float64)
-        X_raw_tr = raw_cov[tr_p]
-        X_raw_val = raw_cov[val_p]
-        ptp_tr = np.ptp(X_raw_tr, axis=0)
-        keep_col = ptp_tr > 1e-12
-        X_raw_tr = np.ascontiguousarray(X_raw_tr[:, keep_col])
-        X_raw_val = np.ascontiguousarray(X_raw_val[:, keep_col])
-
-        A_part_np = gcache["A_part"]
-        Kp1_all_div = np.ascontiguousarray(A_part_np @ gcache["K1"][:, s_div], dtype=np.float64)
-        K1_div = np.ascontiguousarray(gcache["K1"][np.ix_(s_div, s_div)], dtype=np.float64)
-        Kp2_all_div = np.ascontiguousarray(A_part_np @ gcache["K2"][:, s_div], dtype=np.float64)
-        K2_div = np.ascontiguousarray(gcache["K2"][np.ix_(s_div, s_div)], dtype=np.float64)
-
-        w_s0 = (1.0 / m_i_div) / np.sum(1.0 / m_i_div)
-        sw0 = np.sqrt(w_s0 * (n_s / max(n_s - 1.0, 1.0)))
-        sw0_outer = sw0[:, None] * sw0[None, :]
-        inv_sw0 = 1.0 / np.maximum(sw0[:, None], 1e-12)
-        q_dim_1 = min(8, n_s)
-
-        k1_0 = w_s0 @ K1_div
-        m1_0 = float(np.sum(w_s0 * k1_0))
-        G1_0 = (K1_div - k1_0[:, None] - k1_0[None, :] + m1_0) * sw0_outer
-        G1_0 = 0.5 * (G1_0 + G1_0.T)
-        ev1_0, U1_0 = linalg.eigh(
-            G1_0, subset_by_index=[n_s - q_dim_1, n_s - 1], driver="evr", check_finite=False
-        )
-
-        k2_0 = w_s0 @ K2_div
-        m2_0 = float(np.sum(w_s0 * k2_0))
-        G2_0 = (K2_div - k2_0[:, None] - k2_0[None, :] + m2_0) * sw0_outer
-        G2_0 = 0.5 * (G2_0 + G2_0.T)
-        ev2_0, U2_0 = linalg.eigh(
-            G2_0, subset_by_index=[n_s - q_dim_1, n_s - 1], driver="evr", check_finite=False
-        )
-
-        Q0_1 = np.ascontiguousarray(U1_0 * inv_sw0)
-        Q0_2 = np.ascontiguousarray(U2_0 * inv_sw0)
-
-        max_k = max(cfg.pca_dimensions)
-        Q0_comb: np.ndarray | None = None
-        if n_s > 32 and max_k <= 24:
-            G_comb_0 = G1_0 / max(float(ev1_0[-1]), 1e-12) + G2_0 / max(float(ev2_0[-1]), 1e-12)
-            G_comb_0 = 0.5 * (G_comb_0 + G_comb_0.T)
-            ev_comb_0, U_comb_0 = linalg.eigh(
-                G_comb_0, subset_by_index=[n_s - 32, n_s - 1], driver="evr", check_finite=False
-            )
-            # CheFSI (degree 4 x 3 cycles) requires a clear spectral decay ratio between mode max_k
-            # and mode 32; flat white-noise Marchenko-Pastur bulks route directly to exact eigh.
-            if float(ev_comb_0[-max_k]) / max(float(ev_comb_0[0]), 1e-15) >= 2.0:
-                Q0_comb = np.ascontiguousarray(U_comb_0 * inv_sw0)
-
-        paired_in_tr = np.isin(dataset.paired_participant_indices, tr_p)
-        p_pair_tr = dataset.paired_participant_indices[paired_in_tr]
-        idx_a_tr = dataset.pair_sample_a_indices[paired_in_tr]
-        idx_b_tr = dataset.pair_sample_b_indices[paired_in_tr]
-        pair_rel = p_to_rel[p_pair_tr]
-        DK1_pair_div = np.ascontiguousarray(
-            gcache["K1"][idx_a_tr][:, s_div] - gcache["K1"][idx_b_tr][:, s_div], dtype=np.float64
-        )
-        DK2_pair_div = np.ascontiguousarray(
-            gcache["K2"][idx_a_tr][:, s_div] - gcache["K2"][idx_b_tr][:, s_div], dtype=np.float64
-        )
-
-        cpu_out = {
-            "tr_p": tr_p,
-            "val_p": val_p,
-            "s_div": s_div,
-            "s_rel": s_rel,
-            "m_i_div": m_i_div,
-            "X_raw_tr": X_raw_tr,
-            "X_raw_val": X_raw_val,
-            "Kp1_all_div": Kp1_all_div,
-            "K1_div": K1_div,
-            "Kp2_all_div": Kp2_all_div,
-            "K2_div": K2_div,
-            "DK1_pair_div": DK1_pair_div,
-            "DK2_pair_div": DK2_pair_div,
-            "Q0_1": Q0_1,
-            "Q0_2": Q0_2,
-            "Q0_comb": Q0_comb,
-            "p_pair_tr": p_pair_tr,
-            "idx_a_tr": idx_a_tr,
-            "idx_b_tr": idx_b_tr,
-            "pair_rel": pair_rel,
-            "K_p1_tr": np.ascontiguousarray(gcache["K_part_1"][np.ix_(tr_p, tr_p)], dtype=np.float64),
-            "K_p1_vt": np.ascontiguousarray(gcache["K_part_1"][np.ix_(val_p, tr_p)], dtype=np.float64),
-            "K_p2_tr": np.ascontiguousarray(gcache["K_part_2"][np.ix_(tr_p, tr_p)], dtype=np.float64),
-            "K_p2_vt": np.ascontiguousarray(gcache["K_part_2"][np.ix_(val_p, tr_p)], dtype=np.float64),
-        }
-        cpu_cache[cache_key] = cpu_out
-
-    if xp is np:
-        return cpu_out
-
-    return {
-        k: (v if (k in _HOST_DCONST_KEYS or v is None) else xp.asarray(v, dtype=xp.float64))
-        for k, v in cpu_out.items()
-    }
-
-
-def batched_division_prep(
-    xp: Any,
-    gcache: dict[str, Any],
-    dconst: dict[str, Any],
-    M_tr: Any,
-    M_val: Any,
-    y_all_xp: Any,
-    alphas_xp: Any,
-    cfg: PairedLipidConfig,
-    *,
-    compute_pca_suff: bool = True,
-    compute_cov_preds: bool = False,
-) -> dict[str, Any]:
-    """Compute batched MFA-PCA coordinates, paired moments, and 15x15 Schur sufficient statistics."""
-    tr_p = dconst["tr_p"]
-    val_p = dconst["val_p"]
-
-    w_tr_sum = xp.sum(M_tr, axis=1, keepdims=True)
-    w_tr = M_tr / xp.maximum(w_tr_sum, 1e-12)
-    w_val = M_val
-
-    # 1. Covariates
-    X_raw_tr = dconst["X_raw_tr"]
-    X_raw_val = dconst["X_raw_val"]
-    c_mean = w_tr @ X_raw_tr
-    C_tr = X_raw_tr[None, :, :] - c_mean[:, None, :]
-    c_var = xp.sum(w_tr[:, :, None] * (C_tr * C_tr), axis=1)
-    valid_c = c_var > 1e-12
-    c_scale = xp.where(valid_c, xp.sqrt(xp.maximum(c_var, 1e-12)), 1.0)
-    X_cov_tr = xp.where(valid_c[:, None, :], C_tr / c_scale[:, None, :], 0.0)
-    X_cov_val = xp.where(
-        valid_c[:, None, :],
-        (X_raw_val[None, :, :] - c_mean[:, None, :]) / c_scale[:, None, :],
-        0.0,
-    )
-
-    # 2. Spectral MFA-PCA in sample Gram space
-    s_rel = dconst["s_rel"]
-    m_i_div = dconst["m_i_div"]
-    m_s = M_tr[:, s_rel]
-    w_s_raw = m_s / (w_tr_sum * m_i_div[None, :])
-    w_s = w_s_raw / xp.maximum(xp.sum(w_s_raw, axis=1, keepdims=True), 1e-12)
-    m_total = xp.sum(m_s, axis=1)
-    denom_factor = m_total / xp.maximum(m_total - 1.0, 1.0)
-    sqrt_w = xp.sqrt(w_s * denom_factor[:, None])
-
-    Kp1_all_div = dconst["Kp1_all_div"]
-    K1_div = dconst["K1_div"]
-    Kp2_all_div = dconst["Kp2_all_div"]
-    K2_div = dconst["K2_div"]
-    DK1_pair_div = dconst["DK1_pair_div"]
-    DK2_pair_div = dconst["DK2_pair_div"]
-
-    # The (B, n_s, n_s) arrays below dominate GPU memory. In-place updates keep the operation
-    # order of the plain expressions (bitwise-identical results) with fewer live temporaries.
-    sw_outer = sqrt_w[:, :, None] * sqrt_w[:, None, :]
-
-    def _weighted_centered_gram(K_div: Any, k_mu: Any, mu_sq: Any, sw_outer_mat: Any) -> Any:
-        g = K_div[None, :, :] - k_mu[:, :, None]
-        g -= k_mu[:, None, :]
-        g += mu_sq[:, None, None]
-        g *= sw_outer_mat
-        return g
-
-    k1_mu_div = w_s @ K1_div
-    mu1_sq = xp.sum(w_s * k1_mu_div, axis=1)
-    gram = _weighted_centered_gram(K1_div, k1_mu_div, mu1_sq, sw_outer)
-    eig1_1300 = _fast_top1_eigvalsh(xp, gram, sqrt_w, dconst["Q0_1"])
-    scale1_sq = 1.0 / xp.maximum(eig1_1300, 1e-12)
-
-    k2_mu_div = w_s @ K2_div
-    mu2_sq = xp.sum(w_s * k2_mu_div, axis=1)
-    gram2 = _weighted_centered_gram(K2_div, k2_mu_div, mu2_sq, sw_outer)
-    del sw_outer
-    eig1_2850 = _fast_top1_eigvalsh(xp, gram2, sqrt_w, dconst["Q0_2"])
-    scale2_sq = 1.0 / xp.maximum(eig1_2850, 1e-12)
-
-    gram *= scale1_sq[:, None, None]
-    gram2 *= scale2_sq[:, None, None]
-    gram += gram2
-    del gram2
-    G_sym = gram + xp.swapaxes(gram, -1, -2)
-    del gram
-    G_sym *= 0.5
-    max_k = max(cfg.pca_dimensions)
-    eigvals_top, eigvecs_top = _top_k_eigh(
-        xp, G_sym, max_k, sqrt_w, dconst.get("Q0_comb"), is_symmetric=True
-    )
-    del G_sym
-    s_kept = xp.sqrt(eigvals_top)
-
-    alpha = (sqrt_w[:, :, None] * eigvecs_top) / xp.maximum(s_kept[:, None, :], 1e-12)
-    alpha_sum = xp.sum(alpha, axis=1)
-    kp1_mu_all = w_s @ Kp1_all_div.T
-    kp2_mu_all = w_s @ Kp2_all_div.T
-
-    p_term1 = (
-        (Kp1_all_div @ alpha)
-        - kp1_mu_all[:, :, None] * alpha_sum[:, None, :]
-        - xp.sum((k1_mu_div - mu1_sq[:, None])[:, :, None] * alpha, axis=1)[:, None, :]
-    )
-    p_term2 = (
-        (Kp2_all_div @ alpha)
-        - kp2_mu_all[:, :, None] * alpha_sum[:, None, :]
-        - xp.sum((k2_mu_div - mu2_sq[:, None])[:, :, None] * alpha, axis=1)[:, None, :]
-    )
-    part_pca_max = scale1_sq[:, None, None] * p_term1 + scale2_sq[:, None, None] * p_term2
-
-    # 3. PairedMoments directly in participant / pair-difference space
-    p_pair_tr = dconst["p_pair_tr"]
-    pair_rel = dconst["pair_rel"]
-    mult_pair = M_tr[:, pair_rel]
-    n_pair_mult = xp.sum(mult_pair, axis=1)
-    w_pair = mult_pair / xp.maximum(n_pair_mult[:, None], 1e-12)
-
-    dk1_mu = w_s @ DK1_pair_div.T
-    dk2_mu = w_s @ DK2_pair_div.T
-    diff_1 = (DK1_pair_div @ alpha) - dk1_mu[:, :, None] * alpha_sum[:, None, :]
-    diff_2 = (DK2_pair_div @ alpha) - dk2_mu[:, :, None] * alpha_sum[:, None, :]
-    raw_diff = scale1_sq[:, None, None] * diff_1 + scale2_sq[:, None, None] * diff_2
-    W_max = 0.5 * (xp.swapaxes(w_pair[:, :, None] * raw_diff, -1, -2) @ raw_diff)
-    W_max = 0.5 * (W_max + xp.swapaxes(W_max, -1, -2))
-
-    zbar = part_pca_max[:, p_pair_tr, :]
-    mu_pair = xp.sum(w_pair[:, :, None] * zbar, axis=1)
-    z_cent = zbar - mu_pair[:, None, :]
-    pair_denom = n_pair_mult / xp.maximum(n_pair_mult - 1.0, 1.0)
-    T_max = pair_denom[:, None, None] * (xp.swapaxes(w_pair[:, :, None] * z_cent, -1, -2) @ z_cent)
-    T_max = 0.5 * (T_max + xp.swapaxes(T_max, -1, -2))
-
-    y_tr = y_all_xp[tr_p]
-    y_val = y_all_xp[val_p]
-
-    out: dict[str, Any] = {
-        "tr_p": tr_p,
-        "val_p": val_p,
-        "w_tr": w_tr,
-        "w_val": w_val,
-        "y_tr": y_tr,
-        "y_val": y_val,
-        "X_cov_tr": X_cov_tr,
-        "X_cov_val": X_cov_val,
-        "part_pca_max": part_pca_max,
-        "W_max": W_max,
-        "T_max": T_max,
-        "scale1_sq": scale1_sq,
-        "scale2_sq": scale2_sq,
-        "K_p1_tr": dconst["K_p1_tr"],
-        "K_p1_vt": dconst["K_p1_vt"],
-        "K_p2_tr": dconst["K_p2_tr"],
-        "K_p2_vt": dconst["K_p2_vt"],
-    }
-
-    if compute_pca_suff or compute_cov_preds:
-        y_mean = xp.sum(w_tr * y_tr[None, :], axis=1)
-        yc = y_tr[None, :] - y_mean[:, None]
-        cm = xp.sum(w_tr[:, :, None] * X_cov_tr, axis=1)
-        Cc_tr = X_cov_tr - cm[:, None, :]
-        Cc_val = X_cov_val - cm[:, None, :]
-        Cw = Cc_tr * w_tr[:, :, None]
-        Cw_T = xp.swapaxes(Cw, -1, -2)
-        G_cc = Cw_T @ Cc_tr
-        G_cc = 0.5 * (G_cc + xp.swapaxes(G_cc, -1, -2))
-        g_cy = (Cw_T @ yc[:, :, None])[:, :, 0]
-
-        evals_c, evecs_c = xp.linalg.eigh(G_cc)
-        evals_c = xp.maximum(evals_c, 0.0)
-        inv_eig = 1.0 / (evals_c[:, None, :] + alphas_xp[None, :, None])
-        evecs_c_T = xp.swapaxes(evecs_c, -1, -2)
-        inv_c = (evecs_c[:, None, :, :] * inv_eig[:, :, None, :]) @ evecs_c_T[:, None, :, :]
-        beta_c0 = (inv_c @ g_cy[:, None, :, None])[:, :, :, 0]
-        preds_cov = y_mean[:, None, None] + (Cc_val @ xp.swapaxes(beta_c0, -1, -2))
-        out["preds_cov"] = preds_cov
-
-    if compute_pca_suff:
-        r_val_0 = y_val[None, :, None] - preds_cov
-        sse_0 = xp.sum(w_val[:, :, None] * (r_val_0 * r_val_0), axis=1)
-
-        pca_tr = part_pca_max[:, tr_p, :]
-        pca_val = part_pca_max[:, val_p, :]
-        p_mean = xp.sum(w_tr[:, :, None] * pca_tr, axis=1)
-        Pc_tr = pca_tr - p_mean[:, None, :]
-        Pc_val = pca_val - p_mean[:, None, :]
-        Pw = Pc_tr * w_tr[:, :, None]
-        Pw_T = xp.swapaxes(Pw, -1, -2)
-
-        Sigma_p = Pw_T @ Pc_tr
-        G_cp = Cw_T @ Pc_tr
-        g_py = (Pw_T @ yc[:, :, None])[:, :, 0]
-
-        H_p = inv_c @ G_cp[:, None, :, :]
-        P_tilde_val = Pc_val[:, None, :, :] - (Cc_val[:, None, :, :] @ H_p)
-        P_tilde_w = P_tilde_val * w_val[:, None, :, None]
-        P_tilde_w_T = xp.swapaxes(P_tilde_w, -1, -2)
-        Val_gram_p = P_tilde_w_T @ P_tilde_val
-        Val_rhs_p = (P_tilde_w_T @ xp.swapaxes(r_val_0, 1, 2)[:, :, :, None])[:, :, :, 0]
-        Schur_p = Sigma_p[:, None, :, :] - (xp.swapaxes(G_cp, -1, -2)[:, None, :, :] @ H_p)
-        g_tilde_p = g_py[:, None, :] - (beta_c0 @ G_cp)
-
-        out.update(
-            {
-                "sse_0": sse_0,
-                "Sigma_p": Sigma_p,
-                "Schur_p": Schur_p,
-                "g_tilde_p": g_tilde_p,
-                "Val_gram_p": Val_gram_p,
-                "Val_rhs_p": Val_rhs_p,
-            }
-        )
-    return out
-
-
-def batched_paired_schur_sse(
-    xp: Any,
-    div: dict[str, Any],
-    V_grid: dict[int, Any],
-    k_list: list[int],
-    alphas_xp: Any,
-) -> Any:
-    """Evaluate all (k, lam, r=1..3, alpha) validation SSEs simultaneously via 3x3 nested LDL^T."""
-    Sigma_p = div["Sigma_p"]
-    Schur_p = div["Schur_p"]
-    g_tilde_p = div["g_tilde_p"]
-    Val_gram_p = div["Val_gram_p"]
-    Val_rhs_p = div["Val_rhs_p"]
-    sse_0 = div["sse_0"]
-
-    B = Sigma_p.shape[0]
-    max_k = Sigma_p.shape[1]
-    V_padded_list = []
-    for k in k_list:
-        Vk = V_grid[k][:, :, :, :3]
-        if k < max_k:
-            pad = xp.zeros((B, Vk.shape[1], max_k - k, 3), dtype=Vk.dtype)
-            Vk = xp.concatenate([Vk, pad], axis=2)
-        V_padded_list.append(Vk)
-    V_all = xp.concatenate(V_padded_list, axis=1)
-    M = V_all.shape[1]
-    A = alphas_xp.shape[0]
-
-    V_flat = xp.swapaxes(V_all, 1, 2).reshape(B, max_k, M * 3)
-    SV_flat = Sigma_p @ V_flat
-    z_var = xp.sum(V_flat * SV_flat, axis=1).reshape(B, M, 3)
-    z_scale = xp.sqrt(xp.maximum(z_var, 1e-12))
-    V_std = V_all / z_scale[:, :, None, :]
-    V_std_flat = xp.swapaxes(V_std, 1, 2).reshape(B, max_k, M * 3)
-    V_std_flat_T = xp.swapaxes(V_std_flat, -1, -2)
-
-    g = xp.swapaxes((V_std_flat_T @ xp.swapaxes(g_tilde_p, -1, -2)).reshape(B, M, 3, A), 2, 3)
-    V_val_rhs = xp.swapaxes((V_std_flat_T @ xp.swapaxes(Val_rhs_p, -1, -2)).reshape(B, M, 3, A), 2, 3)
-
-    Schur_V = xp.moveaxis((Schur_p @ V_std_flat[:, None, :, :]).reshape(B, A, max_k, M, 3), 3, 1)
-    Val_V = xp.moveaxis((Val_gram_p @ V_std_flat[:, None, :, :]).reshape(B, A, max_k, M, 3), 3, 1)
-    V_std_T = xp.swapaxes(V_std, -1, -2)[:, :, None, :, :]
-    S = V_std_T @ Schur_V
-    eye3 = xp.eye(3, dtype=S.dtype)[None, None, None, :, :]
-    S = S + alphas_xp[None, None, :, None, None] * eye3
-    V_val_gram = V_std_T @ Val_V
-
-    d1 = S[:, :, :, 0, 0]
-    L10 = S[:, :, :, 1, 0] / d1
-    d2 = S[:, :, :, 1, 1] - L10 * L10 * d1
-    L20 = S[:, :, :, 2, 0] / d1
-    L21 = (S[:, :, :, 2, 1] - L20 * L10 * d1) / d2
-    d3 = S[:, :, :, 2, 2] - L20 * L20 * d1 - L21 * L21 * d2
-
-    z1 = g[:, :, :, 0]
-    z2 = g[:, :, :, 1] - L10 * z1
-    z3 = g[:, :, :, 2] - L20 * z1 - L21 * z2
-
-    b1_0 = z1 / d1
-    b2_1 = z2 / d2
-    b2_0 = b1_0 - L10 * b2_1
-    b3_2 = z3 / d3
-    b3_1 = b2_1 - L21 * b3_2
-    b3_0 = b2_0 - (L20 - L21 * L10) * b3_2
-
-    sse_r1 = sse_0[:, None, :] - 2.0 * (b1_0 * V_val_rhs[:, :, :, 0]) + (b1_0 * b1_0 * V_val_gram[:, :, :, 0, 0])
-
-    quad_r2 = (
-        b2_0 * b2_0 * V_val_gram[:, :, :, 0, 0]
-        + b2_1 * b2_1 * V_val_gram[:, :, :, 1, 1]
-        + 2.0 * b2_0 * b2_1 * V_val_gram[:, :, :, 0, 1]
-    )
-    lin_r2 = b2_0 * V_val_rhs[:, :, :, 0] + b2_1 * V_val_rhs[:, :, :, 1]
-    sse_r2 = sse_0[:, None, :] - 2.0 * lin_r2 + quad_r2
-
-    quad_r3 = (
-        b3_0 * b3_0 * V_val_gram[:, :, :, 0, 0]
-        + b3_1 * b3_1 * V_val_gram[:, :, :, 1, 1]
-        + b3_2 * b3_2 * V_val_gram[:, :, :, 2, 2]
-        + 2.0
-        * (
-            b3_0 * b3_1 * V_val_gram[:, :, :, 0, 1]
-            + b3_0 * b3_2 * V_val_gram[:, :, :, 0, 2]
-            + b3_1 * b3_2 * V_val_gram[:, :, :, 1, 2]
-        )
-    )
-    lin_r3 = b3_0 * V_val_rhs[:, :, :, 0] + b3_1 * V_val_rhs[:, :, :, 1] + b3_2 * V_val_rhs[:, :, :, 2]
-    sse_r3 = sse_0[:, None, :] - 2.0 * lin_r3 + quad_r3
-
-    return xp.stack([sse_r1, sse_r2, sse_r3], axis=1)
-
-
-def batched_ridge_sse_and_preds(
-    xp: Any,
-    X_cov_tr: Any,
-    X_cov_val: Any,
-    Z_tr: Any,
-    Z_val: Any,
-    y_tr: Any,
-    y_val: Any,
-    w_tr: Any,
-    w_val: Any,
-    alphas_xp: Any,
-) -> tuple[Any, Any]:
-    """Batched multi-penalty ridge regression fit and validation prediction."""
-    y_mean = xp.sum(w_tr * y_tr[None, :], axis=1)
-    y_cent = y_tr[None, :] - y_mean[:, None]
-
-    if Z_tr is None:
-        X_tr = X_cov_tr
-        X_val = X_cov_val
-    else:
-        z_mean = xp.sum(w_tr[:, :, None] * Z_tr, axis=1)
-        Z_c = Z_tr - z_mean[:, None, :]
-        z_var = xp.sum(w_tr[:, :, None] * (Z_c * Z_c), axis=1)
-        z_scale = xp.sqrt(xp.maximum(z_var, 1e-12))
-        Z_std_tr = Z_c / z_scale[:, None, :]
-        Z_std_val = (Z_val - z_mean[:, None, :]) / z_scale[:, None, :]
-        X_tr = xp.concatenate([X_cov_tr, Z_std_tr], axis=2)
-        X_val = xp.concatenate([X_cov_val, Z_std_val], axis=2)
-
-    x_mean = xp.sum(w_tr[:, :, None] * X_tr, axis=1)
-    X_c = X_tr - x_mean[:, None, :]
-    Xw = X_c * w_tr[:, :, None]
-    Xw_T = xp.swapaxes(Xw, -1, -2)
-    gram = Xw_T @ X_c
-    gram = 0.5 * (gram + xp.swapaxes(gram, -1, -2))
-    rhs = (Xw_T @ y_cent[:, :, None])[:, :, 0]
-    evals, evecs = xp.linalg.eigh(gram)
-    evals = xp.maximum(evals, 0.0)
-    proj_rhs = (xp.swapaxes(evecs, -1, -2) @ rhs[:, :, None])[:, :, 0]
-    scaled = proj_rhs[:, None, :] / (evals[:, None, :] + alphas_xp[None, :, None])
-    coefs = scaled @ xp.swapaxes(evecs, -1, -2)
-    intercepts = y_mean[:, None] - (coefs @ x_mean[:, :, None])[:, :, 0]
-    preds = intercepts[:, None, :] + (X_val @ xp.swapaxes(coefs, -1, -2))
-    sse = xp.sum(w_val[:, :, None] * ((y_val[None, :, None] - preds) ** 2), axis=1)
-    return sse, preds
-
-
-def batched_pls_sse_and_preds(xp: Any, div: dict[str, Any], max_comp: int) -> tuple[Any, Any]:
-    """Dual Gram NIPALS for batched multi-component weighted PLS regression."""
-    w_tr = div["w_tr"]
-    w_val = div["w_val"]
-    y_tr = div["y_tr"]
-    y_val = div["y_val"]
-    X_cov_tr = div["X_cov_tr"]
-    X_cov_val = div["X_cov_val"]
-    scale1_sq = div["scale1_sq"]
-    scale2_sq = div["scale2_sq"]
-
-    B = X_cov_tr.shape[0]
-    n_val = X_cov_val.shape[1]
-
-    cov_mean = xp.sum(w_tr[:, :, None] * X_cov_tr, axis=1)
-    C_tr = X_cov_tr - cov_mean[:, None, :]
-    C_val = X_cov_val - cov_mean[:, None, :]
-    C_tr_T = xp.swapaxes(C_tr, -1, -2)
-    K_cov_tr = C_tr @ C_tr_T
-    K_cov_vt = C_val @ C_tr_T
-
-    K_p1_tr = div["K_p1_tr"]
-    K_p1_vt = div["K_p1_vt"]
-    K_p2_tr = div["K_p2_tr"]
-    K_p2_vt = div["K_p2_vt"]
-
-    k1_mu_tr = w_tr @ K_p1_tr
-    mu1_sq = xp.sum(w_tr * k1_mu_tr, axis=1)
-    K1_spec_tr = K_p1_tr[None, :, :] - k1_mu_tr[:, :, None] - k1_mu_tr[:, None, :] + mu1_sq[:, None, None]
-    k1_mu_vt = w_tr @ K_p1_vt.T
-    K1_spec_vt = K_p1_vt[None, :, :] - k1_mu_vt[:, :, None] - k1_mu_tr[:, None, :] + mu1_sq[:, None, None]
-
-    k2_mu_tr = w_tr @ K_p2_tr
-    mu2_sq = xp.sum(w_tr * k2_mu_tr, axis=1)
-    K2_spec_tr = K_p2_tr[None, :, :] - k2_mu_tr[:, :, None] - k2_mu_tr[:, None, :] + mu2_sq[:, None, None]
-    k2_mu_vt = w_tr @ K_p2_vt.T
-    K2_spec_vt = K_p2_vt[None, :, :] - k2_mu_vt[:, :, None] - k2_mu_tr[:, None, :] + mu2_sq[:, None, None]
-
-    K_tr = K_cov_tr + scale1_sq[:, None, None] * K1_spec_tr + scale2_sq[:, None, None] * K2_spec_tr
-    K_vt = K_cov_vt + scale1_sq[:, None, None] * K1_spec_vt + scale2_sq[:, None, None] * K2_spec_vt
-
-    y_mean = xp.sum(w_tr * y_tr[None, :], axis=1)
-    yk = y_tr[None, :] - y_mean[:, None]
-    accum = xp.broadcast_to(y_mean[:, None], (B, n_val)).copy()
-    preds_all = xp.zeros((B, n_val, max_comp), dtype=xp.float64)
-
-    for c in range(max_comp):
-        wy = w_tr * yk
-        k_wy = (K_tr @ wy[:, :, None])[:, :, 0]
-        w_norm = xp.sqrt(xp.maximum(xp.sum(wy * k_wy, axis=1), 1e-24))
-        tk = k_wy / w_norm[:, None]
-        t_val = (K_vt @ wy[:, :, None])[:, :, 0] / w_norm[:, None]
-        t_sq = xp.maximum(xp.sum(w_tr * tk * tk, axis=1), 1e-24)
-        qk = xp.sum(w_tr * tk * yk, axis=1) / t_sq
-        accum = accum + qk[:, None] * t_val
-        preds_all[:, :, c] = accum
-        if c < max_comp - 1:
-            yk = yk - qk[:, None] * tk
-            u = (w_tr * tk) / t_sq[:, None]
-            kt_u = (K_tr @ u[:, :, None])[:, :, 0]
-            u_kt_u = xp.sum(u * kt_u, axis=1)
-            K_vt = K_vt - t_val[:, :, None] * kt_u[:, None, :]
-            v_def = kt_u - (0.5 * u_kt_u)[:, None] * tk
-            K_tr = K_tr - tk[:, :, None] * v_def[:, None, :] - v_def[:, :, None] * tk[:, None, :]
-
-    sse = xp.sum(w_val[:, :, None] * ((y_val[None, :, None] - preds_all) ** 2), axis=1)
-    return sse, preds_all
-
-
-def _whitened_generalized_eigh(
-    xp: Any,
-    W_k: Any,
-    T_k: Any,
-    lam: Any,
-    *,
-    grid_mode: bool,
-) -> Any:
-    """Solve T_k v = rho (W_k + lam * tau * I) v via symmetric whitening in O(k^3).
-
-    When ``grid_mode=True``, ``lam`` has shape ``(n_lam,)`` and output has shape ``(B, n_lam, k, k)``.
-    When ``grid_mode=False``, ``lam`` has shape ``(B,)`` and output has shape ``(B, k, k)``.
-    """
-    k = W_k.shape[-1]
-    d_w, q_w = xp.linalg.eigh(W_k)
-    d_w = xp.maximum(d_w, 0.0)
-    tau = xp.maximum(xp.diagonal(T_k, axis1=-2, axis2=-1).sum(axis=-1) / float(k), 1e-12)
-    T_tilde = xp.swapaxes(q_w, -1, -2) @ T_k @ q_w
-    T_tilde = 0.5 * (T_tilde + xp.swapaxes(T_tilde, -1, -2))
-    if grid_mode:
-        denom = d_w[:, None, :] + lam[None, :, None] * tau[:, None, None]
-        inv_sqrt = 1.0 / xp.sqrt(xp.maximum(denom, 1e-18))
-        M_batch = T_tilde[:, None, :, :] * (inv_sqrt[:, :, :, None] * inv_sqrt[:, :, None, :])
-        M_batch = 0.5 * (M_batch + xp.swapaxes(M_batch, -1, -2))
-        _, U_batch = xp.linalg.eigh(M_batch)
-        return q_w[:, None, :, :] @ (inv_sqrt[:, :, :, None] * U_batch[:, :, :, ::-1])
-
-    denom = d_w + (lam * tau)[:, None]
-    inv_sqrt = 1.0 / xp.sqrt(xp.maximum(denom, 1e-18))
-    M_mat = T_tilde * (inv_sqrt[:, :, None] * inv_sqrt[:, None, :])
-    M_mat = 0.5 * (M_mat + xp.swapaxes(M_mat, -1, -2))
-    _, U_mat = xp.linalg.eigh(M_mat)
-    return q_w @ (inv_sqrt[:, :, None] * U_mat[:, :, ::-1])
-
-
-def batched_solve_directions_grid(
-    xp: Any,
-    W_max: Any,
-    T_max: Any,
-    k_list: list[int],
-    lam_grid: Sequence[float],
-) -> dict[int, Any]:
-    """Solve generalized eigenproblems across all (k, lam) grid points simultaneously."""
-    lam_xp = xp.asarray(lam_grid, dtype=xp.float64)
-    return {
-        k: _whitened_generalized_eigh(xp, W_max[:, :k, :k], T_max[:, :k, :k], lam_xp, grid_mode=True)
-        for k in k_list
-    }
 
 
 def _check_fast_batch_eligibility(
@@ -1030,6 +177,7 @@ def batched_select_inner_settings(
     lam_list = list(cfg.lambda_grid)
     r_list = list(cfg.retained_directions)
     max_pls_c = max(cfg.pls_component_grid)
+    pls_idx = np.asarray(sorted({int(c) - 1 for c in cfg.pls_component_grid}), dtype=int)
     n_k, n_lam, n_r = len(k_list), len(lam_list), len(r_list)
 
     total_val_w = xp.zeros(B, dtype=xp.float64)
@@ -1038,6 +186,7 @@ def batched_select_inner_settings(
     pca_sse = xp.zeros((B, n_k, n_alphas), dtype=xp.float64)
     pls_sse = xp.zeros((B, max_pls_c), dtype=xp.float64)
     pair_sse = xp.zeros((B, n_r, n_k * n_lam, n_alphas), dtype=xp.float64)
+    rank_ok_xp = xp.ones(B, dtype=bool)
 
     for dconst in in_dconsts:
         in_tr = dconst["tr_p"]
@@ -1053,17 +202,16 @@ def batched_select_inner_settings(
             cfg,
             compute_pca_suff=True,
         )
+        rank_ok_xp &= div["rank_ok"]
         total_val_w += xp.sum(div["w_val"], axis=1)
         cov_sse += div["sse_0"]
 
-        Zb_tr = xp.broadcast_to(part_band_xp[None, in_tr, :], (B, in_tr.size, part_band_xp.shape[1]))
-        Zb_val = xp.broadcast_to(part_band_xp[None, in_val, :], (B, in_val.size, part_band_xp.shape[1]))
         sse_b, _ = batched_ridge_sse_and_preds(
             xp,
             div["X_cov_tr"],
             div["X_cov_val"],
-            Zb_tr,
-            Zb_val,
+            part_band_xp[in_tr],
+            part_band_xp[in_val],
             div["y_tr"],
             div["y_val"],
             div["w_tr"],
@@ -1072,27 +220,19 @@ def batched_select_inner_settings(
         )
         band_sse += sse_b
 
-        for k_idx, k in enumerate(k_list):
-            Zp_tr = div["part_pca_max"][:, in_tr, :k]
-            Zp_val = div["part_pca_max"][:, in_val, :k]
-            sse_p, _ = batched_ridge_sse_and_preds(
-                xp,
-                div["X_cov_tr"],
-                div["X_cov_val"],
-                Zp_tr,
-                Zp_val,
-                div["y_tr"],
-                div["y_val"],
-                div["w_tr"],
-                div["w_val"],
-                alphas_xp,
-            )
-            pca_sse[:, k_idx, :] += sse_p
+        pca_sse += batched_pca_schur_sse(xp, div, k_list, alphas_xp)
 
         sse_pls, _ = batched_pls_sse_and_preds(xp, div, max_pls_c)
         pls_sse += sse_pls
 
-        V_grid = batched_solve_directions_grid(xp, div["W_max"], div["T_max"], k_list, lam_list)
+        V_grid = batched_solve_directions_grid(
+            xp,
+            div["W_max"],
+            div["T_max"],
+            k_list,
+            lam_list,
+            eigenvalue_tolerance=cfg.eigenvalue_tolerance,
+        )
         pair_sse += batched_paired_schur_sse(xp, div, V_grid, k_list, alphas_xp)
         del div, V_grid
 
@@ -1101,27 +241,30 @@ def batched_select_inner_settings(
     pca_mses = _to_np(xp, pca_sse / total_val_w[:, None, None])
     pls_mses = _to_np(xp, pls_sse / total_val_w[:, None])
     pair_mses = _to_np(xp, pair_sse / total_val_w[:, None, None, None])
+    rank_ok = _to_np(xp, rank_ok_xp) > 0.5
 
     b_arange = np.arange(B)
     best_cov_a = _argmin_last(np.round(cov_mses, 12))
 
     best_band_a = _argmin_last(np.round(band_mses, 12))
-    best_band_mse = band_mses[b_arange, best_band_a]
+    best_band_mse = np.round(band_mses[b_arange, best_band_a], 12)
 
     pca_r = np.round(pca_mses, 12)
     best_pca_k_idx, best_pca_a = _select_pca_setting(pca_r)
     best_pca_mse = pca_r[b_arange, best_pca_k_idx, best_pca_a]
 
-    pls_r = np.round(pls_mses, 12)
-    best_pls_c_idx = np.argmin(pls_r, axis=1)
-    best_pls_mse = pls_mses[b_arange, best_pls_c_idx]
+    pls_r_cand = np.round(pls_mses[:, pls_idx], 12)
+    best_pls_c_idx = pls_idx[np.argmin(pls_r_cand, axis=1)]
+    best_pls_mse = np.round(pls_mses[b_arange, best_pls_c_idx], 12)
 
     comp_stack = np.stack([best_band_mse, best_pca_mse, best_pls_mse], axis=1)
     best_comp_idx = np.argmin(comp_stack, axis=1)
 
-    best_r_idx, best_k_idx, best_pair_l_idx, best_pair_a = _select_paired_setting(
-        np.round(pair_mses.reshape(B, n_r, n_k, n_lam, n_alphas), 12)
-    )
+    pair_r = np.round(pair_mses.reshape(B, n_r, n_k, n_lam, n_alphas), 12)
+    pair_finite = np.isfinite(pair_r)
+    pair_ok = np.any(pair_finite, axis=(1, 2, 3, 4))
+    pair_r_safe = np.where(pair_finite, pair_r, np.inf)
+    best_r_idx, best_k_idx, best_pair_l_idx, best_pair_a = _select_paired_setting(pair_r_safe)
     return {
         "best_cov_a": best_cov_a,
         "best_band_a": best_band_a,
@@ -1136,7 +279,37 @@ def batched_select_inner_settings(
         "best_k_idx": best_k_idx,
         "best_pair_l_idx": best_pair_l_idx,
         "best_pair_a": best_pair_a,
+        "rank_ok": rank_ok & pair_ok,
     }
+
+
+def _predict_grouped_ridge_outer(
+    xp: Any,
+    outer_div: dict[str, Any],
+    b_idx: np.ndarray,
+    Z_otr: Any,
+    Z_ote: Any,
+    alpha_indices: np.ndarray,
+    alphas_xp: Any,
+    out_preds: Any,
+) -> None:
+    """Fit outer ridge across all alphas for a draw subset and gather selected predictions on device."""
+    if b_idx.size == 0:
+        return
+    b_xp = xp.asarray(b_idx)
+    _, pr = batched_ridge_sse_and_preds(
+        xp,
+        outer_div["X_cov_tr"][b_xp],
+        outer_div["X_cov_val"][b_xp],
+        Z_otr,
+        Z_ote,
+        outer_div["y_tr"],
+        outer_div["y_val"],
+        outer_div["w_tr"][b_xp],
+        outer_div["w_val"][b_xp],
+        alphas_xp,
+    )
+    out_preds[b_xp] = pr[xp.arange(b_idx.size), :, xp.asarray(alpha_indices)]
 
 
 def _run_batched_multiplicity_draws(
@@ -1151,10 +324,11 @@ def _run_batched_multiplicity_draws(
     use_gpu: bool | None = None,
     batch_size: int | None = None,
     execution_metadata: dict[str, Any] | None = None,
+    fallback_draws_out: set[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate multiplicity bootstrap draws in batches on GPU (CuPy) or CPU (NumPy)."""
     n_sub, n_p = M_sub.shape
-    xp, backend_meta = resolve_array_backend(use_gpu, n_sub, min_auto_draws=32)
+    xp, backend_meta = resolve_array_backend(use_gpu, n_sub, gpu_probe=_get_gpu_xp)
     if execution_metadata is not None:
         execution_metadata.update(
             device=backend_meta["device"],
@@ -1163,22 +337,14 @@ def _run_batched_multiplicity_draws(
         )
         if "gpu_fallback_reason" in backend_meta:
             execution_metadata["gpu_fallback_reason"] = backend_meta["gpu_fallback_reason"]
-    if batch_size is None:
-        batch_size = 2048 if xp is not np else 128
 
     y_all_xp = xp.asarray(y_all, dtype=xp.float64)
-    alphas = list(cfg.ridge_alpha_grid)
-    alphas_xp = xp.asarray(alphas, dtype=xp.float64)
-    k_list = list(cfg.pca_dimensions)
-    lam_list = list(cfg.lambda_grid)
-    lam_xp = xp.asarray(lam_list, dtype=xp.float64)
-    r_list = list(cfg.retained_directions)
+    alphas_xp = xp.asarray(list(cfg.ridge_alpha_grid), dtype=xp.float64)
+    k_list = [int(k) for k in cfg.pca_dimensions]
+    lam_xp = xp.asarray(list(cfg.lambda_grid), dtype=xp.float64)
+    r_list = [int(r) for r in cfg.retained_directions]
     max_pls_c = max(cfg.pls_component_grid)
     part_band_xp = xp.asarray(gcache["part_band_mat"], dtype=xp.float64)
-
-    oof_cov = np.zeros((n_sub, n_p), dtype=np.float64)
-    oof_paired = np.zeros((n_sub, n_p), dtype=np.float64)
-    oof_strongest = np.zeros((n_sub, n_p), dtype=np.float64)
 
     fold_dconsts = []
     for (tr_idx, te_idx), in_splits in zip(outer_splits, inner_splits_per_fold):
@@ -1189,15 +355,27 @@ def _run_batched_multiplicity_draws(
         out_dconst = _precompute_division_constants(xp, gcache, dataset, tr_idx, te_idx, cfg)
         fold_dconsts.append((tr_idx, te_idx, in_dconsts, out_dconst))
 
+    if batch_size is None:
+        n_samples_outer = max((int(out_dc["K1_div"].shape[0]) for _, _, _, out_dc in fold_dconsts), default=n_p)
+        batch_size = suggest_batch_size(xp, n_sub, n_samples_outer)
+
+    oof_cov = xp.zeros((n_sub, n_p), dtype=xp.float64)
+    oof_paired = xp.zeros((n_sub, n_p), dtype=xp.float64)
+    oof_strongest = xp.zeros((n_sub, n_p), dtype=xp.float64)
+
     for b_start in range(0, n_sub, batch_size):
         b_end = min(b_start + batch_size, n_sub)
         B = b_end - b_start
         M_batch = xp.asarray(M_sub[b_start:b_end], dtype=xp.float64)
+        batch_ok = np.ones(B, dtype=bool)
+        b_arange_xp = xp.arange(B)
 
         for tr_idx, te_idx, in_dconsts, out_dconst in fold_dconsts:
             sel = batched_select_inner_settings(
                 xp, gcache, in_dconsts, M_batch, y_all_xp, alphas_xp, part_band_xp, cfg
             )
+            batch_ok &= sel["rank_ok"]
+
             best_cov_a = sel["best_cov_a"]
             best_band_a = sel["best_band_a"]
             best_pca_k_idx = sel["best_pca_k_idx"]
@@ -1221,29 +399,36 @@ def _run_batched_multiplicity_draws(
                 compute_pca_suff=False,
                 compute_cov_preds=True,
             )
-            preds_cov_np = _to_np(xp, outer_div["preds_cov"])
+            batch_ok &= _to_np(xp, outer_div["rank_ok"]) > 0.5
             pca_otr = outer_div["part_pca_max"][:, tr_idx, :]
             pca_ote = outer_div["part_pca_max"][:, te_idx, :]
 
-            # Solve outer paired generalized eigensystem only for each draw's selected (k, lam)
+            # Solve outer paired generalized eigensystem only for valid draws' selected (k, lam).
             V_outer_sel: dict[int, Any] = {}
+            b_k_by_k: dict[int, np.ndarray] = {}
             for k_idx, k in enumerate(k_list):
-                b_k = np.flatnonzero(best_k_idx == k_idx)
+                b_k = np.flatnonzero(batch_ok & (best_k_idx == k_idx))
                 if b_k.size == 0:
                     continue
                 b_k_xp = xp.asarray(b_k)
                 lam_sel = lam_xp[xp.asarray(best_pair_l_idx[b_k])]
-                V_outer_sel[k_idx] = _whitened_generalized_eigh(
+                V_k = _whitened_generalized_eigh(
                     xp,
                     outer_div["W_max"][b_k_xp, :k, :k],
                     outer_div["T_max"][b_k_xp, :k, :k],
                     lam_sel,
                     grid_mode=False,
+                    eigenvalue_tolerance=cfg.eigenvalue_tolerance,
                 )
+                v_finite = _to_np(xp, xp.all(xp.isfinite(V_k), axis=(-2, -1))) > 0.5
+                if not np.all(v_finite):
+                    batch_ok[b_k[~v_finite]] = False
+                V_outer_sel[k_idx] = V_k
+                b_k_by_k[k_idx] = b_k
 
-            pred_paired_ote = np.zeros((B, te_idx.size), dtype=np.float64)
+            pred_paired_ote = xp.zeros((B, te_idx.size), dtype=xp.float64)
             for r_idx, r in enumerate(r_list):
-                mask_b = np.flatnonzero(best_r_idx == r_idx)
+                mask_b = np.flatnonzero(batch_ok & (best_r_idx == r_idx))
                 if mask_b.size == 0:
                     continue
                 Z_otr_sel = xp.zeros((mask_b.size, tr_idx.size, r), dtype=xp.float64)
@@ -1254,74 +439,46 @@ def _run_batched_multiplicity_draws(
                         continue
                     b_ids = mask_b[sub_m]
                     b_ids_xp = xp.asarray(b_ids)
-                    b_k_all = np.flatnonzero(best_k_idx == k_idx)
+                    b_k_all = b_k_by_k[k_idx]
                     pos_in_bk = xp.asarray(np.searchsorted(b_k_all, b_ids))
                     V_sel = V_outer_sel[k_idx][pos_in_bk, :, :r]
                     sub_m_xp = xp.asarray(sub_m)
                     Z_otr_sel[sub_m_xp] = pca_otr[b_ids_xp, :, :k] @ V_sel
                     Z_ote_sel[sub_m_xp] = pca_ote[b_ids_xp, :, :k] @ V_sel
 
-                b_all_xp = xp.asarray(mask_b)
-                _, pr_pair_sub = batched_ridge_sse_and_preds(
-                    xp,
-                    outer_div["X_cov_tr"][b_all_xp],
-                    outer_div["X_cov_val"][b_all_xp],
-                    Z_otr_sel,
-                    Z_ote_sel,
-                    outer_div["y_tr"],
-                    outer_div["y_val"],
-                    outer_div["w_tr"][b_all_xp],
-                    outer_div["w_val"][b_all_xp],
-                    alphas_xp,
+                _predict_grouped_ridge_outer(
+                    xp, outer_div, mask_b, Z_otr_sel, Z_ote_sel, best_pair_a[mask_b], alphas_xp, pred_paired_ote
                 )
-                pr_pair_sub_np = _to_np(xp, pr_pair_sub)
-                pred_paired_ote[mask_b] = pr_pair_sub_np[np.arange(mask_b.size), :, best_pair_a[mask_b]]
 
-            pred_comp_sel = np.zeros((B, te_idx.size), dtype=np.float64)
-            b_band = np.flatnonzero(best_comp_idx == 0)
-            if b_band.size > 0:
-                b_band_xp = xp.asarray(b_band)
-                Zb_otr = xp.broadcast_to(
-                    part_band_xp[None, tr_idx, :], (b_band.size, tr_idx.size, part_band_xp.shape[1])
-                )
-                Zb_ote = xp.broadcast_to(
-                    part_band_xp[None, te_idx, :], (b_band.size, te_idx.size, part_band_xp.shape[1])
-                )
-                _, pr_b = batched_ridge_sse_and_preds(
-                    xp,
-                    outer_div["X_cov_tr"][b_band_xp],
-                    outer_div["X_cov_val"][b_band_xp],
-                    Zb_otr,
-                    Zb_ote,
-                    outer_div["y_tr"],
-                    outer_div["y_val"],
-                    outer_div["w_tr"][b_band_xp],
-                    outer_div["w_val"][b_band_xp],
-                    alphas_xp,
-                )
-                pr_b_np = _to_np(xp, pr_b)
-                pred_comp_sel[b_band] = pr_b_np[np.arange(b_band.size), :, best_band_a[b_band]]
+            pred_comp_sel = xp.zeros((B, te_idx.size), dtype=xp.float64)
+            b_band = np.flatnonzero(batch_ok & (best_comp_idx == 0))
+            _predict_grouped_ridge_outer(
+                xp,
+                outer_div,
+                b_band,
+                part_band_xp[tr_idx],
+                part_band_xp[te_idx],
+                best_band_a[b_band],
+                alphas_xp,
+                pred_comp_sel,
+            )
 
             for k_idx, k in enumerate(k_list):
-                b_pca = np.flatnonzero((best_comp_idx == 1) & (best_pca_k_idx == k_idx))
+                b_pca = np.flatnonzero(batch_ok & (best_comp_idx == 1) & (best_pca_k_idx == k_idx))
                 if b_pca.size > 0:
                     b_pca_xp = xp.asarray(b_pca)
-                    _, pr_p = batched_ridge_sse_and_preds(
+                    _predict_grouped_ridge_outer(
                         xp,
-                        outer_div["X_cov_tr"][b_pca_xp],
-                        outer_div["X_cov_val"][b_pca_xp],
+                        outer_div,
+                        b_pca,
                         pca_otr[b_pca_xp, :, :k],
                         pca_ote[b_pca_xp, :, :k],
-                        outer_div["y_tr"],
-                        outer_div["y_val"],
-                        outer_div["w_tr"][b_pca_xp],
-                        outer_div["w_val"][b_pca_xp],
+                        best_pca_a[b_pca],
                         alphas_xp,
+                        pred_comp_sel,
                     )
-                    pr_p_np = _to_np(xp, pr_p)
-                    pred_comp_sel[b_pca] = pr_p_np[np.arange(b_pca.size), :, best_pca_a[b_pca]]
 
-            b_pls = np.flatnonzero(best_comp_idx == 2)
+            b_pls = np.flatnonzero(batch_ok & (best_comp_idx == 2))
             if b_pls.size > 0:
                 b_pls_xp = xp.asarray(b_pls)
                 pls_div = {
@@ -1339,16 +496,31 @@ def _run_batched_multiplicity_draws(
                     "K_p2_vt": outer_div["K_p2_vt"],
                 }
                 _, pr_pls = batched_pls_sse_and_preds(xp, pls_div, max_pls_c)
-                pr_pls_np = _to_np(xp, pr_pls)
-                pred_comp_sel[b_pls] = pr_pls_np[np.arange(b_pls.size), :, best_pls_c_idx[b_pls]]
+                pred_comp_sel[b_pls_xp] = pr_pls[xp.arange(b_pls.size), :, xp.asarray(best_pls_c_idx[b_pls])]
 
-            b_arange = np.arange(B)
-            oof_cov[b_start:b_end, te_idx] = preds_cov_np[b_arange, :, best_cov_a]
-            oof_paired[b_start:b_end, te_idx] = pred_paired_ote
-            oof_strongest[b_start:b_end, te_idx] = pred_comp_sel
+            te_xp = xp.asarray(te_idx)
+            oof_cov[b_start:b_end, te_xp] = outer_div["preds_cov"][b_arange_xp, :, xp.asarray(best_cov_a)]
+            oof_paired[b_start:b_end, te_xp] = pred_paired_ote
+            oof_strongest[b_start:b_end, te_xp] = pred_comp_sel
+            del outer_div
 
-    w_norm_all = M_sub / np.sum(M_sub, axis=1, keepdims=True)
-    mse_cov = np.sum(w_norm_all * ((y_all[None, :] - oof_cov) ** 2), axis=1)
-    mse_paired = np.sum(w_norm_all * ((y_all[None, :] - oof_paired) ** 2), axis=1)
-    mse_strongest = np.sum(w_norm_all * ((y_all[None, :] - oof_strongest) ** 2), axis=1)
-    return mse_cov - mse_paired, mse_strongest - mse_paired
+        if not np.all(batch_ok):
+            bad_local = np.flatnonzero(~batch_ok)
+            oof_paired[xp.asarray(b_start + bad_local)] = xp.nan
+            if fallback_draws_out is not None:
+                fallback_draws_out.update(int(b_start + idx) for idx in bad_local)
+
+    M_sub_xp = xp.asarray(M_sub, dtype=xp.float64)
+    w_norm_all = M_sub_xp / xp.sum(M_sub_xp, axis=1, keepdims=True)
+    diff_cov = y_all_xp[None, :] - oof_cov
+    diff_pair = y_all_xp[None, :] - oof_paired
+    diff_comp = y_all_xp[None, :] - oof_strongest
+    mse_cov = xp.sum(w_norm_all * (diff_cov * diff_cov), axis=1)
+    mse_paired = xp.sum(w_norm_all * (diff_pair * diff_pair), axis=1)
+    mse_strongest = xp.sum(w_norm_all * (diff_comp * diff_comp), axis=1)
+    delta_pair = _to_np(xp, mse_cov - mse_paired)
+    delta_comp = _to_np(xp, mse_strongest - mse_paired)
+    if fallback_draws_out is not None:
+        bad_final = np.flatnonzero(~(np.isfinite(delta_pair) & np.isfinite(delta_comp)))
+        fallback_draws_out.update(int(idx) for idx in bad_final)
+    return delta_pair, delta_comp

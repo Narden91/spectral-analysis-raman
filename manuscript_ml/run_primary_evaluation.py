@@ -26,6 +26,7 @@ from manuscript_ml import (  # noqa: E402
     add_cohort_stage_args,
     ensure_output_dir,
     load_manuscript_config,
+    print_stage_outputs,
     resolve_experiment_dataset,
     write_json_atomic,
     write_run_provenance,
@@ -96,6 +97,7 @@ def run_primary_evaluation(
         compact_grid=compact_grid,
         cfg=cfg,
         readiness=raw_cfg["readiness"],
+        config_path=config_path,
     )
 
     eval_res = evaluate_nested_cohort(dataset, cfg=cfg, include_band_paired=True)
@@ -115,13 +117,17 @@ def run_primary_evaluation(
         },
     }
 
-    # Build held-out predictions dataframe
+    target_col = (
+        "y_true_ldl_mmol_l"
+        if cfg.primary_endpoint == "ldl_mmol_l"
+        else f"y_true_{cfg.primary_endpoint}"
+    )
     pred_df = pd.DataFrame(
         {
             "participant_id": dataset.participant_ids,
             "outer_fold": fold_assignment,
             "n_eligible_samples": dataset.participant_sample_counts,
-            "y_true_ldl_mmol_l": dataset.outcomes[cfg.primary_endpoint],
+            target_col: dataset.outcomes[cfg.primary_endpoint],
         }
     )
     for m_name, preds in eval_res["oof_predictions"].items():
@@ -129,7 +135,6 @@ def run_primary_evaluation(
     for m_name, s_vals in eval_res["oof_spectral_contributions"].items():
         pred_df[f"spectral_contrib_{m_name}"] = s_vals
 
-    # Build comparator errors and differences table
     comp_rows: list[dict[str, Any]] = []
     for m_name, metrics in eval_res["comparisons_vs_covariate_ridge"].items():
         comp_rows.append(
@@ -222,10 +227,8 @@ def main(argv: list[str] | None = None) -> None:
         compact_grid=args.compact_grid,
         config_path=args.config,
     )
-    for key, path in outputs.items():
-        print(f"[run_primary_evaluation] wrote {key}: {path}")
+    print_stage_outputs("run_primary_evaluation", outputs)
 
 
 if __name__ == "__main__":
     main()
-

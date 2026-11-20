@@ -8,139 +8,41 @@ bootstrap interval coverage against the provisional feasibility gate.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
-import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from manuscript_ml import ensure_output_dir, load_manuscript_config, write_run_provenance  # noqa: E402
+from manuscript_ml import (  # noqa: E402
+    add_common_stage_args,
+    ensure_output_dir,
+    load_manuscript_config,
+    print_stage_outputs,
+    write_run_provenance,
+)
 from src.analysis.io_utils import write_csv_atomic  # noqa: E402
-from src.analysis.paired_lipid.cohort import PairedLipidConfig  # noqa: E402
-from src.analysis.paired_lipid.nested_cv import evaluate_nested_cohort  # noqa: E402
 from src.analysis.paired_lipid.simulation import (  # noqa: E402
+    SeedSet,
+    _ldl_factor_recovery_r2,
     check_gate_attainable,
     evaluate_bootstrap_calibration,
     evaluate_scenario_calibration_suite,
     generate_synthetic_cohort,
+    run_synthetic_scenario_suite,
 )
 
-_SCENARIO_META_KEYS = ("scenario", "covariate_preset")
-
-
-def _ldl_factor_recovery_r2(eval_res: dict[str, Any], z_ldl: np.ndarray) -> float:
-    """Mean over outer folds of the held-out R^2 of the true LDL-C factor on the learned paired scores."""
-    r2s = []
-    for te_idx, scores in eval_res["fold_test_paired_scores"]:
-        y = z_ldl[te_idx]
-        X = np.column_stack([np.ones(te_idx.size), scores])
-        beta, *_ = np.linalg.lstsq(X, y, rcond=None)
-        ss_tot = float(np.sum((y - y.mean()) ** 2))
-        r2s.append(1.0 - float(np.sum((y - X @ beta) ** 2)) / ss_tot if ss_tot > 0 else float("nan"))
-    return float(np.nanmean(r2s))
-
-
-def _eval_single_scenario_rep(
-    seed: int,
-    n_participants: int,
-    compact_grid: bool,
-    spec: dict[str, Any],
-    cfg: PairedLipidConfig,
-) -> tuple[float, float, float, float, float, float | None, float, float]:
-    gen_kwargs = {k: v for k, v in spec.items() if k not in _SCENARIO_META_KEYS}
-    ds, truth = generate_synthetic_cohort(
-        n_participants=n_participants, seed=seed, compact_grid=compact_grid, **gen_kwargs
-    )
-    res = evaluate_nested_cohort(ds, cfg=cfg)
-    comp = res["comparisons_vs_covariate_ridge"]
-    fold_iccs = [
-        float(r["paired_spectral_icc"]["icc_a1"])
-        for r in res["fold_repeatability"]
-        if "paired_spectral_icc" in r and r["paired_spectral_icc"]["estimable"]
-    ]
-    mean_icc = float(np.mean(fold_iccs)) if fold_iccs else None
-    return (
-        float(comp["paired_linear_ridge"]["delta_mse"]),
-        float(comp["pca_ridge"]["delta_mse"]),
-        float(comp["pls_regression"]["delta_mse"]),
-        float(comp["fixed_band_ridge"]["delta_mse"]),
-        float(res["paired_vs_strongest_comparator"]["delta_mse"]),
-        mean_icc,
-        _ldl_factor_recovery_r2(res, truth["z_bio"][:, 0]),
-        float(np.corrcoef(ds.outcomes["ldl_mmol_l"], ds.outcomes["triglycerides_mmol_l"])[0, 1]),
-    )
-
-
-def run_synthetic_scenario_suite(
-    *,
-    scenarios: list[dict[str, Any]],
-    n_participants_grid: list[int],
-    n_repetitions: int = 5,
-    compact_grid: bool = True,
-    base_seed: int = 1000,
-    n_jobs: int = -1,
-    cfg: PairedLipidConfig = PairedLipidConfig(),
-) -> pd.DataFrame:
-    """Evaluate every configured synthetic scenario at every participant count across repetitions."""
-    tasks = [
-        (
-            s_idx,
-            n_idx,
-            base_seed + 1_000_000 * n_idx + 10_000 * s_idx + rep,
-            spec,
-            replace(cfg, covariate_preset=str(spec["covariate_preset"])),
-        )
-        for n_idx in range(len(n_participants_grid))
-        for s_idx, spec in enumerate(scenarios)
-        for rep in range(n_repetitions)
-    ]
-
-    def _run(task: tuple[int, int, int, dict[str, Any], PairedLipidConfig]) -> tuple:
-        _, n_idx, seed, spec, task_cfg = task
-        return _eval_single_scenario_rep(seed, n_participants_grid[n_idx], compact_grid, spec, task_cfg)
-
-    if n_jobs != 1 and len(tasks) >= 120:
-        from joblib import Parallel, delayed
-
-        eff_jobs = min(8, max(1, (os.cpu_count() or 4) // 2)) if n_jobs < 0 else n_jobs
-        task_results = Parallel(n_jobs=eff_jobs)(delayed(_run)(t) for t in tasks)
-    else:
-        task_results = [_run(t) for t in tasks]
-
-    grouped: dict[tuple[int, int], list[tuple]] = {}
-    for (s_idx, n_idx, *_), result in zip(tasks, task_results):
-        grouped.setdefault((n_idx, s_idx), []).append(result)
-
-    rows: list[dict[str, Any]] = []
-    for (n_idx, s_idx), s_res in grouped.items():
-        spec = scenarios[s_idx]
-        deltas_paired = [r[0] for r in s_res]
-        spec_iccs = [r[5] for r in s_res if r[5] is not None]
-        rows.append(
-            {
-                "scenario": spec["scenario"],
-                "covariate_preset": spec["covariate_preset"],
-                "n_repetitions": n_repetitions,
-                "n_participants": n_participants_grid[n_idx],
-                "mean_delta_mse_paired": float(np.mean(deltas_paired)),
-                "sd_delta_mse_paired": float(np.std(deltas_paired, ddof=1)) if n_repetitions > 1 else 0.0,
-                "mean_delta_vs_strongest_comparator": float(np.mean([r[4] for r in s_res])),
-                "mean_delta_mse_pca": float(np.mean([r[1] for r in s_res])),
-                "mean_delta_mse_pls": float(np.mean([r[2] for r in s_res])),
-                "mean_delta_mse_fixed_band": float(np.mean([r[3] for r in s_res])),
-                "mean_spectral_icc_a1": float(np.mean(spec_iccs)) if spec_iccs else float("nan"),
-                "mean_recovery_r2_ldl_factor": float(np.nanmean([r[6] for r in s_res])),
-                "mean_corr_ldl_tg": float(np.mean([r[7] for r in s_res])),
-            }
-        )
-    return pd.DataFrame(rows)
+__all__ = [
+    "SeedSet",
+    "_ldl_factor_recovery_r2",
+    "generate_synthetic_cohort",
+    "main",
+    "run_simulation_and_calibration",
+    "run_synthetic_scenario_suite",
+]
 
 
 def run_simulation_and_calibration(
@@ -154,7 +56,7 @@ def run_simulation_and_calibration(
     n_jobs: int = -1,
     use_gpu: bool | None = None,
     config_path: str | Path | None = None,
-    seed_set: str = "development",
+    seed_set: SeedSet = "development",
     calibrate_all_scenarios: bool = False,
 ) -> dict[str, Path]:
     """Run the synthetic scenario suite and bootstrap interval calibration (calibration uses n_participants)."""
@@ -175,6 +77,7 @@ def run_simulation_and_calibration(
     check_gate_attainable(n_calibration_reps, seed_set, float(cal_cfg["gate_wilson_lower_min"]))
 
     scenarios = list(sim_cfg["scenarios"])
+    scenarios_path = target_dir / "simulation_scenarios_summary.csv"
     scenarios_df = run_synthetic_scenario_suite(
         scenarios=scenarios,
         n_participants_grid=n_grid,
@@ -184,6 +87,8 @@ def run_simulation_and_calibration(
         n_jobs=n_jobs,
         cfg=cfg,
     )
+    write_csv_atomic(scenarios_df, scenarios_path, index=False)
+
     if calibrate_all_scenarios:
         cal_df = evaluate_scenario_calibration_suite(
             scenarios=scenarios,
@@ -195,7 +100,7 @@ def run_simulation_and_calibration(
             n_jobs=n_jobs,
             use_gpu=use_gpu,
             n_test_participants=int(cal_cfg["n_test_participants"]),
-            seed_set=seed_set,  # type: ignore[arg-type]
+            seed_set=seed_set,
             compact_grid=compact_grid,
             gate_wilson_lower_min=float(cal_cfg["gate_wilson_lower_min"]),
             gate_max_failure_rate=float(cal_cfg["gate_max_failure_rate"]),
@@ -211,16 +116,14 @@ def run_simulation_and_calibration(
             n_jobs=n_jobs,
             use_gpu=use_gpu,
             n_test_participants=int(cal_cfg["n_test_participants"]),
-            seed_set=seed_set,  # type: ignore[arg-type]
+            seed_set=seed_set,
             compact_grid=compact_grid,
             gate_wilson_lower_min=float(cal_cfg["gate_wilson_lower_min"]),
             gate_max_failure_rate=float(cal_cfg["gate_max_failure_rate"]),
         )
         cal_df = pd.DataFrame([cal_summary])
 
-    scenarios_path = target_dir / "simulation_scenarios_summary.csv"
     cal_path = target_dir / "simulation_calibration_report.csv"
-    write_csv_atomic(scenarios_df, scenarios_path, index=False)
     write_csv_atomic(cal_df, cal_path, index=False)
     prov_path = write_run_provenance(
         target_dir,
@@ -250,7 +153,7 @@ def run_simulation_and_calibration(
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run known-factor synthetic simulations and bootstrap calibration.")
-    parser.add_argument("--output-dir", type=str, default=None)
+    add_common_stage_args(parser)
     parser.add_argument("--quick", action="store_true", help="Run fast smoke-test repetition counts.")
     parser.add_argument("--scenario-reps", type=int, default=10)
     parser.add_argument("--calibration-reps", type=int, default=20)
@@ -260,7 +163,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     gpu_group = parser.add_mutually_exclusive_group()
     gpu_group.add_argument("--use-gpu", dest="use_gpu", action="store_true", default=None, help="Force GPU execution.")
     gpu_group.add_argument("--no-gpu", dest="use_gpu", action="store_false", help="Force CPU execution.")
-    parser.add_argument("--config", type=str, default=None, help="Experiment settings YAML.")
     parser.add_argument(
         "--seed-set",
         choices=("development", "validation"),
@@ -290,8 +192,7 @@ def main(argv: list[str] | None = None) -> None:
         seed_set=args.seed_set,
         calibrate_all_scenarios=args.calibrate_all_scenarios,
     )
-    for key, path in outputs.items():
-        print(f"[run_simulation_calibration] wrote {key}: {path}")
+    print_stage_outputs("run_simulation_calibration", outputs)
 
 
 if __name__ == "__main__":

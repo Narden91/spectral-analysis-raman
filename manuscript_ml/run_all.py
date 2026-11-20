@@ -10,7 +10,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from manuscript_ml import add_cohort_stage_args, ensure_output_dir  # noqa: E402
+from manuscript_ml import (  # noqa: E402
+    add_cohort_stage_args,
+    ensure_output_dir,
+    print_stage_outputs,
+    require_cohort_approval,
+)
 from manuscript_ml.audit_readiness import run_readiness_audit  # noqa: E402
 from manuscript_ml.run_primary_evaluation import run_primary_evaluation  # noqa: E402
 from manuscript_ml.run_sensitivity_and_secondary import run_sensitivity_and_secondary  # noqa: E402
@@ -30,8 +35,10 @@ def run_all_pipeline(
     include_simulation_calibration: bool = False,
 ) -> dict[str, Path]:
     """Run readiness and cohort analyses, with calibration only by explicit request."""
-    if not use_synthetic and not approve_cohort_evaluation:
-        raise PermissionError("Cohort evaluation requires explicit '--approve-cohort-evaluation'")
+    require_cohort_approval(
+        use_synthetic=use_synthetic,
+        approve_cohort_evaluation=approve_cohort_evaluation,
+    )
     target_dir = ensure_output_dir(output_dir)
     eff_compact = bool(quick or compact_grid)
     clinical_kw = {"clinical_master_path": clinical_master_path} if clinical_master_path is not None else {}
@@ -39,7 +46,15 @@ def run_all_pipeline(
 
     all_outputs.update(run_readiness_audit(output_dir=target_dir, config_path=config_path, **clinical_kw))
     if use_synthetic or include_simulation_calibration:
-        all_outputs.update(run_simulation_and_calibration(output_dir=target_dir, quick=quick, config_path=config_path))
+        sim_kw = {"n_bootstraps": n_bootstraps} if n_bootstraps > 0 else {}
+        all_outputs.update(
+            run_simulation_and_calibration(
+                output_dir=target_dir,
+                quick=quick,
+                config_path=config_path,
+                **sim_kw,
+            )
+        )
     all_outputs.update(
         run_primary_evaluation(
             use_synthetic=use_synthetic,
@@ -91,10 +106,8 @@ def main(argv: list[str] | None = None) -> None:
         config_path=args.config,
         include_simulation_calibration=args.include_simulation_calibration,
     )
-    for key, path in outputs.items():
-        print(f"[run_all] written artifact {key}: {path}")
+    print_stage_outputs("run_all", outputs)
 
 
 if __name__ == "__main__":
     main()
-

@@ -557,7 +557,9 @@ def test_covariate_preprocessor_excludes_zero_weight_participants() -> None:
     assert prep_all.feature_names == prep_act.feature_names
     assert prep_all.dropped_columns == prep_act.dropped_columns
     assert "statin" in prep_all.dropped_columns
-    assert "age_years_missing" not in prep_all.feature_names
+    assert "age_years__missing" not in prep_all.feature_names
+    prep_with_missing = CovariatePreprocessor.fit(df, np.arange(5, dtype=int), np.ones(5, dtype=float), preset="primary")
+    assert "age_years__missing" in prep_with_missing.feature_names
     np.testing.assert_allclose(
         prep_all.transform(df, active_idx),
         prep_act.transform(df, active_idx),
@@ -685,3 +687,1049 @@ def test_gpu_chefsi_eigensolver_matches_exact_eigh_to_fp64_precision() -> None:
     np.testing.assert_allclose(cp.asnumpy(ev_chefsi), cp.asnumpy(ev_ref), rtol=1e-12, atol=1e-12)
     dots = np.abs(np.sum(cp.asnumpy(u_chefsi) * cp.asnumpy(u_ref), axis=1))
     np.testing.assert_allclose(dots, np.ones_like(dots), rtol=1e-11, atol=1e-11)
+
+
+def test_cohort_dataset_replace_isolates_cache_and_band_matrix_is_readonly() -> None:
+    from dataclasses import replace
+
+    ds, _ = generate_synthetic_cohort(n_participants=12, n_single_sample=2, seed=1011, compact_grid=True)
+    mat_1, names_1 = extract_sample_band_matrix(ds)
+    assert mat_1.flags.writeable is False
+    with pytest.raises(ValueError, match="read-only"):
+        mat_1[0, 0] = 0.0
+
+    mat_2, names_2 = extract_sample_band_matrix(ds)
+    assert mat_2 is mat_1
+    assert names_2 == names_1
+    assert names_2 is not names_1
+    names_1.append("mutated_band")
+    _, names_3 = extract_sample_band_matrix(ds)
+    assert names_3 == names_2
+    assert "mutated_band" not in names_3
+
+    ds_copy = replace(ds, outcomes={**ds.outcomes})
+    assert ds_copy._cache is not ds._cache
+    assert ds_copy._cache == {}
+    ds_copy._cache["isolated_probe"] = True
+    assert "isolated_probe" not in ds._cache
+
+    mat_copy, _ = extract_sample_band_matrix(ds_copy)
+    assert mat_copy is not mat_1
+    assert mat_copy.flags.writeable is False
+    np.testing.assert_array_equal(mat_copy, mat_1)
+
+
+def test_config_coercion_validation_and_subset_mode_rejection() -> None:
+    cfg = PairedLipidConfig(
+        pca_dimensions=[4, 8],  # type: ignore[arg-type]
+        retained_directions=[1, 2],  # type: ignore[arg-type]
+        lambda_grid=[0.01, 0.5],  # type: ignore[arg-type]
+        ridge_alpha_grid=[0.1, 10.0],  # type: ignore[arg-type]
+        pls_component_grid=[1, 3],  # type: ignore[arg-type]
+        sensitivity_seeds=[11, 22],  # type: ignore[arg-type]
+        secondary_endpoints=["hdl_mmol_l"],  # type: ignore[arg-type]
+    )
+    assert cfg.pca_dimensions == (4, 8) and isinstance(cfg.pca_dimensions, tuple)
+    assert cfg.retained_directions == (1, 2) and isinstance(cfg.retained_directions, tuple)
+    assert cfg.lambda_grid == (0.01, 0.5) and isinstance(cfg.lambda_grid, tuple)
+    assert cfg.ridge_alpha_grid == (0.1, 10.0) and isinstance(cfg.ridge_alpha_grid, tuple)
+    assert cfg.pls_component_grid == (1, 3) and isinstance(cfg.pls_component_grid, tuple)
+    assert cfg.sensitivity_seeds == (11, 22) and isinstance(cfg.sensitivity_seeds, tuple)
+    assert cfg.secondary_endpoints == ("hdl_mmol_l",) and isinstance(cfg.secondary_endpoints, tuple)
+
+    for bad_kwargs in (
+        {"lambda_grid": (0.01, float("nan"))},
+        {"lambda_grid": (0.01, float("inf"))},
+        {"ridge_alpha_grid": (0.1, float("nan"))},
+        {"ridge_alpha_grid": (0.1, float("inf"))},
+        {"pca_dimensions": (5, float("nan"))},
+        {"rank_tolerance": float("nan")},
+        {"eigenvalue_tolerance": float("inf")},
+    ):
+        with pytest.raises(ValueError, match="finite"):
+            PairedLipidConfig(**bad_kwargs)  # type: ignore[arg-type]
+
+    for bad_kwargs in (
+        {"pca_dimensions": (10, 5)},
+        {"pca_dimensions": (5, 5)},
+        {"retained_directions": (2, 1)},
+        {"retained_directions": (2, 2)},
+        {"lambda_grid": (1.0, 0.1)},
+        {"lambda_grid": (0.1, 0.1)},
+        {"ridge_alpha_grid": (10.0, 1.0)},
+        {"ridge_alpha_grid": (1.0, 1.0)},
+        {"pls_component_grid": (3, 2)},
+        {"pls_component_grid": (2, 2)},
+    ):
+        with pytest.raises(ValueError, match="strictly ascending"):
+            PairedLipidConfig(**bad_kwargs)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="Unknown subset_mode"):
+        build_paired_cohort_dataset(
+            pd.DataFrame(),
+            pd.DataFrame(),
+            np.empty((0, 2)),
+            np.empty((0, 2)),
+            np.arange(2.0),
+            np.arange(2.0),
+            subset_mode="invalid_mode",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="Unknown subset_mode"):
+        generate_synthetic_cohort(n_participants=10, compact_grid=True, subset_mode="invalid_mode")  # type: ignore[arg-type]
+
+
+def test_covariate_whitespace_readonly_matrix_and_weight_validation() -> None:
+    from src.analysis.paired_lipid.models import CovariatePreprocessor, WeightedPLSResult
+
+    df = pd.DataFrame(
+        {
+            "age_years": [60.0, 65.0, 70.0, 75.0],
+            "sex": [" female ", "  MALE  ", "Female ", " male"],
+            "statin": [0, 1, 0, 1],
+            "sample_label_trend": [1.0, 2.0, 3.0, 4.0],
+            "smoking_status": [" former ", " NEVER ", " current ", " Former"],
+        }
+    )
+    cache: dict[str, object] = {}
+    raw_mat, raw_cols = CovariatePreprocessor.raw_design_matrix(
+        df, preset="pre_event_risk_factors", raw_cache=cache
+    )
+    assert raw_mat.flags.writeable is False
+    with pytest.raises(ValueError, match="read-only"):
+        raw_mat[0, 0] = 99.0
+
+    raw_mat_2, raw_cols_2 = CovariatePreprocessor.raw_design_matrix(
+        df, preset="pre_event_risk_factors", raw_cache=cache
+    )
+    assert raw_mat_2 is raw_mat
+    assert raw_cols_2 == raw_cols
+
+    col_idx = {name: i for i, name in enumerate(raw_cols)}
+    np.testing.assert_array_equal(raw_mat[:, col_idx["sex_female"]], np.array([1.0, 0.0, 1.0, 0.0]))
+    np.testing.assert_array_equal(raw_mat[:, col_idx["smoking_former"]], np.array([1.0, 0.0, 0.0, 1.0]))
+    np.testing.assert_array_equal(raw_mat[:, col_idx["smoking_current"]], np.array([0.0, 0.0, 1.0, 0.0]))
+
+    rng = np.random.default_rng(14)
+    X_cov = rng.normal(size=(8, 2))
+    Z_spec = rng.normal(size=(8, 3))
+    y = rng.normal(size=8)
+    bad_weights = (
+        np.zeros(8, dtype=float),
+        np.array([1.0, -0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+        np.array([1.0, np.nan, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+        np.array([1.0, np.inf, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+    )
+    for weights in bad_weights:
+        with pytest.raises(ValueError, match="weights"):
+            fit_ridge_grid(X_cov, Z_spec, y, weights, [0.1, 1.0])
+        with pytest.raises(ValueError, match="weights"):
+            WeightedPLSResult.fit(X_cov, Z_spec, y, weights, max_components=2)
+
+
+def test_weighted_spectral_preprocessor_matches_primal_svd_reference() -> None:
+    from src.analysis.paired_lipid.cohort import CohortDataset
+
+    rng = np.random.default_rng(1301)
+    n_p, n_paired = 20, 17
+    p1, p2 = 35, 25
+    counts = np.array([2] * n_paired + [1] * (n_p - n_paired), dtype=int)
+    n_s = int(np.sum(counts))
+    sample_p_idx = np.repeat(np.arange(n_p, dtype=int), counts)
+
+    # Smooth exponential spectral decay gives strictly separated singular values for exact loading parity.
+    r_latent = 14
+    q1, _ = np.linalg.qr(rng.normal(size=(p1, r_latent)))
+    q2, _ = np.linalg.qr(rng.normal(size=(p2, r_latent)))
+    scores = rng.normal(size=(n_s, r_latent)) * np.exp(-0.35 * np.arange(r_latent))[None, :]
+    sample_1300 = scores @ q1.T + 0.05
+    sample_2850 = scores @ q2.T - 0.03
+
+    paired_p = np.arange(n_paired, dtype=int)
+    ds = CohortDataset(
+        participant_ids=np.arange(n_p).astype(str),
+        outcomes={"ldl_mmol_l": rng.normal(3.0, 0.5, size=n_p)},
+        covariate_frame=pd.DataFrame({"age_years": np.linspace(55.0, 80.0, n_p)}),
+        wavenumbers_1300=np.linspace(750.0, 1750.0, p1),
+        wavenumbers_2850=np.linspace(2500.0, 3150.0, p2),
+        sample_1300=sample_1300,
+        sample_2850=sample_2850,
+        sample_participant_idx=sample_p_idx,
+        sample_ids=np.array([f"s_{i}" for i in range(n_s)]),
+        sample_parsed_labels=np.arange(1, n_s + 1, dtype=float),
+        participant_sample_counts=counts,
+        paired_participant_indices=paired_p,
+        pair_sample_a_indices=2 * paired_p,
+        pair_sample_b_indices=2 * paired_p + 1,
+    )
+
+    train_p = np.arange(18, dtype=int)
+    mult = np.array([2.0, 0.0, 1.0, 3.0, 1.0, 2.0, 0.0, 1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 1.0, 0.0, 1.0, 2.0, 1.0])
+    cfg = PairedLipidConfig(pca_dimensions=(5, 10))
+    prep = WeightedSpectralPreprocessor.fit(ds, train_p, mult, cfg=cfg)
+
+    # Explicit primal SVD reference
+    keep = mult > 0.0
+    active_p = train_p[keep]
+    active_m = mult[keep]
+    p_to_m = np.zeros(n_p, dtype=float)
+    p_to_m[active_p] = active_m
+    s_idx = np.flatnonzero(p_to_m[sample_p_idx] > 0.0)
+    s_p = sample_p_idx[s_idx]
+    w_s = p_to_m[s_p] / (float(np.sum(active_m)) * counts[s_p].astype(float))
+    w_s /= float(np.sum(w_s))
+
+    X1, X2 = sample_1300[s_idx], sample_2850[s_idx]
+    mean1 = w_s @ X1
+    mean2 = w_s @ X2
+    m_total = float(np.sum(p_to_m[s_p]))
+    sqrt_w = np.sqrt(w_s * (m_total / max(m_total - 1.0, 1.0)))[:, None]
+    SW1 = sqrt_w * (X1 - mean1)
+    SW2 = sqrt_w * (X2 - mean2)
+    _, s1_ref, _ = np.linalg.svd(SW1, full_matrices=False)
+    _, s2_ref, _ = np.linalg.svd(SW2, full_matrices=False)
+    scale1_ref = 1.0 / float(s1_ref[0])
+    scale2_ref = 1.0 / float(s2_ref[0])
+
+    SW_comb = np.hstack([SW1 * scale1_ref, SW2 * scale2_ref])
+    _, s_ref, vt_ref = np.linalg.svd(SW_comb, full_matrices=False)
+    k = prep.pca_components.shape[0]
+    loadings_ref = vt_ref[:k].copy()
+    for i in range(k):
+        if loadings_ref[i, int(np.argmax(np.abs(loadings_ref[i])))] < 0.0:
+            loadings_ref[i] *= -1.0
+
+    np.testing.assert_allclose(prep.mean_1300, mean1, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(prep.mean_2850, mean2, rtol=1e-12, atol=1e-12)
+    assert prep.scale_1300 == pytest.approx(scale1_ref, rel=1e-12, abs=1e-12)
+    assert prep.scale_2850 == pytest.approx(scale2_ref, rel=1e-12, abs=1e-12)
+    np.testing.assert_allclose(prep.pca_singular_values, s_ref[:k], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(prep.pca_components, loadings_ref, rtol=1e-12, atol=1e-12)
+
+
+def test_two_way_anova_exact_icc_scale_invariance_and_antisymmetric_degeneracy() -> None:
+    from src.analysis.paired_lipid.metrics import two_way_anova_ms
+
+    mat = np.array([[1.0, 3.0], [2.0, 6.0], [3.0, 9.0]], dtype=float)
+    ms_row, ms_col, ms_err = two_way_anova_ms(mat)
+    assert ms_row == pytest.approx(8.0, abs=1e-14)
+    assert ms_col == pytest.approx(24.0, abs=1e-14)
+    assert ms_err == pytest.approx(2.0, abs=1e-14)
+
+    with pytest.raises(ValueError, match="2D matrix"):
+        two_way_anova_ms(np.array([1.0, 2.0, 3.0]))
+
+    base_icc = compute_icc_a1(mat[:, 0], mat[:, 1])
+    assert base_icc["estimable"] is True
+    assert base_icc["icc_a1"] == pytest.approx(9.0 / 37.0, rel=1e-12, abs=1e-12)
+
+    for scale in (1e-8, 1e8):
+        scaled_icc = compute_icc_a1(scale * mat[:, 0], scale * mat[:, 1])
+        assert scaled_icc["estimable"] is True
+        assert scaled_icc["icc_a1"] == pytest.approx(base_icc["icc_a1"], rel=1e-12, abs=1e-12)
+
+    # n=2 anti-symmetric pairs have MS_R = MS_C = 0 and denom = MS_R + MS_C = 0.
+    for shift in (0.0, 1e4):
+        deg = compute_icc_a1(np.array([1.0 + shift, -1.0 + shift]), np.array([-1.0 + shift, 1.0 + shift]))
+        assert deg["estimable"] is False
+        assert deg["reason"] == "degenerate_denominator"
+        assert np.isnan(deg["icc_a1"])
+
+
+def test_discriminability_exact_ties_and_nan_label_exclusion() -> None:
+    # Identical embeddings yield exact 0.5 discriminability and chance retrieval via tie credit.
+    zeros = np.zeros((4, 2), dtype=float)
+    all_ties = compute_discriminability_and_retrieval(zeros, zeros)
+    assert all_ties["discriminability"] == pytest.approx(0.5, abs=1e-12)
+    assert all_ties["retrieval_top1"] == pytest.approx(0.25, abs=1e-12)
+
+    # Partial exact ties: pairs 0 and 1 coincide at 0.0, pair 2 is isolated at 10.0.
+    z_tied = np.array([[0.0], [0.0], [10.0]], dtype=float)
+    partial = compute_discriminability_and_retrieval(z_tied, z_tied)
+    assert partial["discriminability"] == pytest.approx(5.0 / 6.0, abs=1e-12)
+    assert partial["retrieval_top1"] == pytest.approx(2.0 / 3.0, abs=1e-12)
+
+    # NaN labels must be excluded from local candidate windows and local retrieval scoring.
+    z_a = np.array([[0.0], [10.0], [20.0], [30.0], [40.0], [50.0]], dtype=float)
+    z_b = np.array([[0.2], [10.2], [20.2], [30.2], [0.05], [50.2]], dtype=float)
+    labels_a = np.array([1.0, 2.0, 3.0, 4.0, np.nan, 6.0], dtype=float)
+    labels_b = np.array([1.0, 2.0, 3.0, 4.0, 5.0, np.nan], dtype=float)
+    res = compute_discriminability_and_retrieval(z_a, z_b, labels_a, labels_b, local_window=1)
+    # Globally, pair 4's B sample (0.05) hijacks pair 0's A->B match; locally, pairs 4 and 5 are excluded.
+    assert res["retrieval_top1"] < 1.0
+    assert res["local_retrieval_top1"] == pytest.approx(1.0, abs=1e-12)
+    # 4 finite-label pairs with window=1 have candidate counts [2, 3, 3, 2] -> mean chance = 5/12.
+    assert res["local_retrieval_chance"] == pytest.approx(5.0 / 12.0, abs=1e-12)
+
+    few_finite = compute_discriminability_and_retrieval(
+        z_a[:3], z_b[:3], np.array([1.0, np.nan, np.nan]), np.array([1.0, np.nan, np.nan]), local_window=1
+    )
+    assert np.isnan(few_finite["local_retrieval_top1"])
+    assert np.isnan(few_finite["local_retrieval_chance"])
+
+
+def test_subspace_principal_angles_matches_scipy_across_regimes() -> None:
+    from scipy import linalg
+
+    rng = np.random.default_rng(77)
+
+    def _assert_matches_scipy(base_a: np.ndarray, base_b: np.ndarray) -> None:
+        df = compute_subspace_principal_angles([base_a, base_b])
+        assert len(df) == 1
+        row = df.iloc[0]
+        assert int(row["dim_a"]) == base_a.shape[1]
+        assert int(row["dim_b"]) == base_b.shape[1]
+        ref_rad = linalg.subspace_angles(base_a, base_b)
+        ref_deg = np.degrees(ref_rad)
+        assert row["max_principal_angle_deg"] == pytest.approx(float(np.max(ref_deg)), rel=1e-12, abs=1e-12)
+        assert row["mean_principal_angle_deg"] == pytest.approx(float(np.mean(ref_deg)), rel=1e-12, abs=1e-12)
+        assert row["min_cosine"] == pytest.approx(float(np.min(np.cos(ref_rad))), rel=1e-12, abs=1e-12)
+
+    # Equal-dim (including non-orthonormal input)
+    A_eq = rng.normal(size=(40, 3))
+    B_eq = rng.normal(size=(40, 3))
+    _assert_matches_scipy(A_eq, B_eq)
+
+    # Unequal-dim in both orders
+    Q_2, _ = linalg.qr(rng.normal(size=(40, 2)), mode="economic")
+    Q_4, _ = linalg.qr(rng.normal(size=(40, 4)), mode="economic")
+    _assert_matches_scipy(Q_2, Q_4)
+    _assert_matches_scipy(Q_4, Q_2)
+
+    # Tiny-angle regime exercising Bjorck-Golub sine refinement
+    Q_full, _ = linalg.qr(rng.normal(size=(50, 6)), mode="economic")
+    Q_base = Q_full[:, :3]
+    Q_pert, _ = linalg.qr(Q_base + 1e-9 * Q_full[:, 3:6], mode="economic")
+    _assert_matches_scipy(Q_base, Q_pert)
+
+    # Metric-weighted bases with p_1300 != p_2850
+    ds, _ = generate_synthetic_cohort(n_participants=30, n_single_sample=2, seed=78, compact_grid=True)
+    p1, p2 = ds.wavenumbers_1300.size, ds.wavenumbers_2850.size
+    assert p1 != p2
+    cfg = PairedLipidConfig()
+    tr_a = np.arange(0, 24, dtype=int)
+    tr_b = np.arange(6, 30, dtype=int)
+    prep_a = WeightedSpectralPreprocessor.fit(ds, tr_a, np.ones(tr_a.size), cfg=cfg)
+    prep_b = WeightedSpectralPreprocessor.fit(ds, tr_b, np.ones(tr_b.size), cfg=cfg)
+    mom_a = PairedMoments.from_sample_coordinates(
+        prep_a.transform_pca(ds.sample_1300, ds.sample_2850), ds, tr_a, np.ones(tr_a.size)
+    )
+    mom_b = PairedMoments.from_sample_coordinates(
+        prep_b.transform_pca(ds.sample_1300, ds.sample_2850), ds, tr_b, np.ones(tr_b.size)
+    )
+    Va, _, _ = mom_a.solve_directions(10, lam=0.1)
+    Vb, _, _ = mom_b.solve_directions(10, lam=0.1)
+    Qa = map_subspace_to_metric_orthonormal_basis(prep_a, 10, Va[:, :2], p1, p2)
+    Qb = map_subspace_to_metric_orthonormal_basis(prep_b, 10, Vb[:, :3], p1, p2)
+    np.testing.assert_allclose(Qa.T @ Qa, np.eye(2), rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(Qb.T @ Qb, np.eye(3), rtol=0.0, atol=1e-12)
+    _assert_matches_scipy(Qa, Qb)
+
+
+def test_anchor_associations_handles_collinear_covariates_under_missingness() -> None:
+    from dataclasses import replace
+
+    ds, _ = generate_synthetic_cohort(n_participants=30, n_single_sample=2, seed=812, compact_grid=True)
+    cov = ds.covariate_frame.copy()
+    # Globally full-rank covariates that drop rank by 2 once participant 0 is masked out by missing HDL.
+    cov["statin"] = 0
+    cov.loc[0, "statin"] = 1
+    cov["age_years"] = 60.0 + 0.5 * cov["sample_label_trend"]
+    cov.loc[0, "age_years"] = 85.0
+
+    hdl = ds.outcomes["hdl_mmol_l"].copy()
+    hdl[0] = np.nan
+    ds_col = replace(ds, covariate_frame=cov, outcomes={**ds.outcomes, "hdl_mmol_l": hdl})
+
+    rng = np.random.default_rng(813)
+    spec_contrib = 0.6 * np.where(np.isfinite(hdl), hdl, 1.5) + 0.3 * cov["age_years"].to_numpy() + rng.normal(
+        0.0, 0.25, size=ds_col.n_participants
+    )
+    eval_stub = {"oof_spectral_contributions": {"paired_linear_ridge": spec_contrib}}
+    df = summarize_anchor_associations(
+        ds_col, eval_stub, anchors=("ldl_mmol_l", "hdl_mmol_l"), n_resamples=40, seed=7
+    )
+    row_hdl = df.loc[df["anchor"] == "hdl_mmol_l"].iloc[0]
+    assert int(row_hdl["n_participants"]) == ds_col.n_participants - 1
+    assert np.isfinite(row_hdl["partial_pearson_r"])
+    assert np.isfinite(row_hdl["partial_spearman_rho"])
+    assert np.isfinite(row_hdl["resample_ci_low"]) and np.isfinite(row_hdl["resample_ci_high"])
+    assert row_hdl["attribution_status"] == "continuous_exploratory_summary_only"
+
+    # Independent reduced full-rank reference on the observed HDL subset (intercept, sex_female, label_trend).
+    valid = np.arange(1, ds_col.n_participants, dtype=int)
+    sex_bin = (cov["sex"].astype(str).str.strip().str.lower() == "female").to_numpy(dtype=float)[valid]
+    lbl_v = cov["sample_label_trend"].to_numpy(dtype=float)[valid]
+    X_ref = np.column_stack([np.ones(valid.size), sex_bin, lbl_v])
+    s_v = spec_contrib[valid]
+    y_v = hdl[valid]
+    s_res = s_v - X_ref @ np.linalg.lstsq(X_ref, s_v, rcond=None)[0]
+    y_res = y_v - X_ref @ np.linalg.lstsq(X_ref, y_v, rcond=None)[0]
+    expected_r = float(np.dot(s_res, y_res) / (np.linalg.norm(s_res) * np.linalg.norm(y_res)))
+    assert row_hdl["partial_pearson_r"] == pytest.approx(expected_r, rel=0.0, abs=1e-12)
+
+
+@pytest.mark.parametrize(
+    "use_gpu",
+    [False, pytest.param(True, marks=pytest.mark.skipif(not _gpu_available(), reason="CuPy/CUDA unavailable"))],
+)
+def test_batched_pca_schur_sse_matches_batched_ridge(use_gpu: bool) -> None:
+    from src.analysis.paired_lipid.batched import (
+        _get_dataset_gram_cache,
+        _get_gpu_xp,
+        _precompute_division_constants,
+        _to_np,
+        batched_division_prep,
+        batched_pca_schur_sse,
+        batched_ridge_sse_and_preds,
+    )
+    from src.analysis.paired_lipid.nested_cv import make_nested_splits
+
+    xp = _get_gpu_xp() if use_gpu else np
+    assert xp is not None
+    ds, _ = generate_synthetic_cohort(n_participants=60, n_single_sample=2, seed=901, compact_grid=True)
+    cfg = PairedLipidConfig(pca_dimensions=(5, 10, 15))
+    outer, inner = make_nested_splits(ds, cfg, cfg.primary_seed)
+    tr_outer, _ = outer[0]
+    in_tr_rel, in_val_rel = inner[0][0]
+    tr_p, val_p = tr_outer[in_tr_rel], tr_outer[in_val_rel]
+
+    gcache = _get_dataset_gram_cache(ds, cfg)
+    dconst = _precompute_division_constants(xp, gcache, ds, tr_p, val_p, cfg)
+
+    rng = np.random.default_rng(902)
+    M = np.vstack(
+        [np.ones(ds.n_participants)]
+        + [np.bincount(rng.integers(0, ds.n_participants, ds.n_participants), minlength=ds.n_participants) for _ in range(5)]
+    ).astype(np.float64)
+    M_xp = xp.asarray(M, dtype=xp.float64)
+    y_xp = xp.asarray(ds.outcomes[cfg.primary_endpoint], dtype=xp.float64)
+    alphas_xp = xp.asarray(list(cfg.ridge_alpha_grid), dtype=xp.float64)
+
+    div = batched_division_prep(
+        xp, gcache, dconst, M_xp[:, tr_p], M_xp[:, val_p], y_xp, alphas_xp, cfg, compute_pca_suff=True
+    )
+    k_list = list(cfg.pca_dimensions)
+    sse_schur = _to_np(xp, batched_pca_schur_sse(xp, div, k_list, alphas_xp))
+    val_w_sum = np.sum(M[:, val_p], axis=1, keepdims=True)
+
+    for k_idx, k in enumerate(k_list):
+        sse_ref, _ = batched_ridge_sse_and_preds(
+            xp,
+            div["X_cov_tr"],
+            div["X_cov_val"],
+            div["part_pca_max"][:, tr_p, :k],
+            div["part_pca_max"][:, val_p, :k],
+            div["y_tr"],
+            div["y_val"],
+            div["w_tr"],
+            div["w_val"],
+            alphas_xp,
+        )
+        sse_ref_np = _to_np(xp, sse_ref)
+        np.testing.assert_allclose(sse_schur[:, k_idx, :], sse_ref_np, rtol=1e-11, atol=1e-11)
+        np.testing.assert_allclose(
+            sse_schur[:, k_idx, :] / val_w_sum,
+            sse_ref_np / val_w_sum,
+            rtol=0.0,
+            atol=1e-11,
+        )
+
+
+@pytest.mark.parametrize(
+    "use_gpu",
+    [False, pytest.param(True, marks=pytest.mark.skipif(not _gpu_available(), reason="CuPy/CUDA unavailable"))],
+)
+def test_rayleigh_ritz_32_cholesky_qr_fallback_on_rank_deficient_batch(use_gpu: bool) -> None:
+    from scipy import linalg
+
+    from src.analysis.paired_lipid.batched import _get_gpu_xp, _rayleigh_ritz_32, _to_np
+
+    xp = _get_gpu_xp() if use_gpu else np
+    assert xp is not None
+    rng = np.random.default_rng(915)
+    n_s, q = 48, 32
+
+    # Build a 4-draw symmetric PSD batch with full-rank, exact rank-deficient, near-singular, and zero-col Y.
+    A = rng.normal(size=(4, n_s, 20))
+    G_np = np.einsum("bik,bjk->bij", A, A)
+    G_np = 0.5 * (G_np + np.swapaxes(G_np, -1, -2))
+
+    Y_np = rng.normal(size=(4, n_s, q))
+    Y_np[1, :, 16:] = Y_np[1, :, :16]
+    Y_np[2, :, 31] = Y_np[2, :, 0] + 1e-14 * rng.normal(size=n_s)
+    Y_np[3, :, 31] = 0.0
+
+    for subset in ([0, 1, 2, 3], [0, 2]):
+        G_sub = xp.asarray(G_np[subset], dtype=xp.float64)
+        Y_sub = xp.asarray(Y_np[subset], dtype=xp.float64)
+        theta_xp, U_xp, GU_xp = _rayleigh_ritz_32(xp, G_sub, Y_sub)
+        theta = _to_np(xp, theta_xp)
+        U = _to_np(xp, U_xp)
+        GU = _to_np(xp, GU_xp)
+        assert np.all(np.isfinite(theta))
+        assert np.all(np.isfinite(U))
+        assert np.all(np.isfinite(GU))
+
+        for loc_i, orig_b in enumerate(subset):
+            G_b = G_np[orig_b]
+            np.testing.assert_allclose(GU[loc_i], G_b @ U[loc_i], rtol=1e-11, atol=1e-11)
+            np.testing.assert_allclose(U[loc_i].T @ G_b @ U[loc_i], np.diag(theta[loc_i]), rtol=1e-11, atol=1e-11)
+
+            Q_ref = linalg.orth(Y_np[orig_b])
+            r_eff = Q_ref.shape[1]
+            ev_ref = linalg.eigvalsh(Q_ref.T @ G_b @ Q_ref)
+            np.testing.assert_allclose(theta[loc_i, -r_eff:], ev_ref, rtol=1e-11, atol=1e-11)
+
+    # Empty batch edge case
+    theta_e, U_e, GU_e = _rayleigh_ritz_32(
+        xp, xp.zeros((0, n_s, n_s), dtype=xp.float64), xp.zeros((0, n_s, q), dtype=xp.float64)
+    )
+    assert theta_e.shape == (0, q)
+    assert U_e.shape == (0, n_s, q)
+    assert GU_e.shape == (0, n_s, q)
+
+
+def test_noncontiguous_pls_grid_parity_between_sequential_and_batched() -> None:
+    from src.analysis.paired_lipid.batched import (
+        _check_fast_batch_eligibility,
+        _get_dataset_gram_cache,
+        _run_batched_multiplicity_draws,
+    )
+    from src.analysis.paired_lipid.nested_cv import make_nested_splits
+
+    ds, _ = generate_synthetic_cohort(n_participants=70, n_single_sample=2, seed=1010, compact_grid=True)
+    cfg = PairedLipidConfig(pls_component_grid=(2, 4))
+    splits = make_nested_splits(ds, cfg, cfg.primary_seed)
+
+    fast = evaluate_nested_cohort(ds, cfg=cfg, precomputed_splits=splits, compute_diagnostics=False)
+    seq = evaluate_nested_cohort(
+        ds, cfg=cfg, precomputed_splits=splits, include_band_paired=True, compute_diagnostics=False
+    )
+    assert set(fast["fold_settings"]["pls_components"]).issubset({2, 4})
+    assert set(seq["fold_settings"]["pls_components"]).issubset({2, 4})
+    cols = [c for c in fast["fold_settings"].columns if c != "dropped_covariates"]
+    pd.testing.assert_frame_equal(fast["fold_settings"][cols], seq["fold_settings"][cols], rtol=1e-8)
+    for model, preds in fast["oof_predictions"].items():
+        np.testing.assert_allclose(preds, seq["oof_predictions"][model], rtol=0.0, atol=1e-8)
+
+    rng = np.random.default_rng(1011)
+    n_p = ds.n_participants
+    M = np.vstack(
+        [np.ones(n_p)] + [np.bincount(rng.integers(0, n_p, n_p), minlength=n_p) for _ in range(2)]
+    ).astype(float)
+    gcache = _get_dataset_gram_cache(ds, cfg)
+    assert _check_fast_batch_eligibility(ds, *splits, M, cfg, gcache).all()
+    d_pair, d_comp = _run_batched_multiplicity_draws(
+        ds, ds.outcomes[cfg.primary_endpoint], *splits, M, cfg, gcache, use_gpu=False
+    )
+    for b in range(M.shape[0]):
+        ref = evaluate_nested_cohort(
+            ds,
+            cfg=cfg,
+            participant_multiplicities=M[b],
+            precomputed_splits=splits,
+            include_band_paired=True,
+            compute_diagnostics=False,
+        )
+        assert d_pair[b] == pytest.approx(
+            ref["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-8
+        )
+        assert d_comp[b] == pytest.approx(ref["paired_vs_strongest_comparator"]["delta_mse"], abs=1e-8)
+
+
+def test_twelve_decimal_comparator_tie_breaking_parity(monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.analysis.paired_lipid.batched as batched_mod
+    import src.analysis.paired_lipid.nested_cv as nested_mod
+
+    ds, _ = generate_synthetic_cohort(n_participants=36, n_single_sample=2, seed=1020, compact_grid=True)
+    cfg = PairedLipidConfig()
+    outer, inner = nested_mod.make_nested_splits(ds, cfg, cfg.primary_seed)
+    tr_idx, te_idx = outer[0]
+    y_all = ds.outcomes[cfg.primary_endpoint]
+    mult = np.ones(ds.n_participants, dtype=float)
+
+    # 1. Sequential/outer comparator tie-breaking at 12 decimals (band -> pca -> pls).
+    for band_mse, pca_mse, pls_mse, expected_name in (
+        (1.0, 1.0 - 1e-14, 1.0 - 2e-14, "fixed_band_ridge"),
+        (1.1, 1.0, 1.0 - 2e-14, "pca_ridge"),
+    ):
+        sel_stub = nested_mod._InnerSelection(
+            cov_alpha_idx=0,
+            band_alpha_idx=0,
+            band_mse=band_mse,
+            pca_setting=(5, 0),
+            pca_mse=pca_mse,
+            pls_components=1,
+            pls_mse=pls_mse,
+            paired_setting=(5, cfg.lambda_grid[0], 1, 0),
+            invalid_candidates=[],
+        )
+        with monkeypatch.context() as mp:
+            mp.setattr(nested_mod, "_select_inner_settings", lambda *_a, _s=sel_stub, **_kw: _s)
+            fold_out = nested_mod._select_inner_models_and_fit_outer(
+                ds, y_all, tr_idx, te_idx, inner[0], mult, cfg, compute_diagnostics=False
+            )
+        assert fold_out["selected_settings"]["strongest_comparator_name"] == expected_name
+
+    # 2. Batched inner selection comparator tie-breaking at 12 decimals.
+    n_b, n_a = 2, len(cfg.ridge_alpha_grid)
+    n_k, n_lam, n_r = len(cfg.pca_dimensions), len(cfg.lambda_grid), len(cfg.retained_directions)
+    max_pls = max(cfg.pls_component_grid)
+    dummy_div = {
+        "rank_ok": np.ones(n_b, dtype=bool),
+        "w_val": np.full((n_b, 10), 1.0),
+        "sse_0": np.full((n_b, n_a), 20.0),
+        "X_cov_tr": np.zeros((n_b, 1, 1)),
+        "X_cov_val": np.zeros((n_b, 1, 1)),
+        "y_tr": np.zeros(1),
+        "y_val": np.zeros(1),
+        "w_tr": np.ones((n_b, 1)),
+        "W_max": np.zeros((n_b, 1, 1)),
+        "T_max": np.zeros((n_b, 1, 1)),
+    }
+    band_sse = np.full((n_b, n_a), 20.0)
+    band_sse[0, 0] = 10.0  # MSE = 1.0
+    band_sse[1, 0] = 11.0  # MSE = 1.1
+    pca_sse = np.full((n_b, n_k, n_a), 20.0)
+    pca_sse[0, 0, 0] = 10.0 - 1e-13  # MSE = 1.0 - 1e-14 -> ties band at 12 decimals
+    pca_sse[1, 0, 0] = 10.0  # MSE = 1.0
+    pls_sse = np.full((n_b, max_pls), 20.0)
+    pls_sse[0, 0] = 10.0 - 2e-13  # MSE = 1.0 - 2e-14 -> ties band and pca at 12 decimals
+    pls_sse[1, 0] = 10.0 - 2e-13  # MSE = 1.0 - 2e-14 -> ties pca at 12 decimals
+
+    with monkeypatch.context() as mp:
+        mp.setattr(batched_mod, "batched_division_prep", lambda *_a, **_kw: dummy_div)
+        mp.setattr(batched_mod, "batched_ridge_sse_and_preds", lambda *_a, **_kw: (band_sse, None))
+        mp.setattr(batched_mod, "batched_pca_schur_sse", lambda *_a, **_kw: pca_sse)
+        mp.setattr(batched_mod, "batched_pls_sse_and_preds", lambda *_a, **_kw: (pls_sse, None))
+        mp.setattr(batched_mod, "batched_solve_directions_grid", lambda *_a, **_kw: {})
+        mp.setattr(
+            batched_mod,
+            "batched_paired_schur_sse",
+            lambda *_a, **_kw: np.full((n_b, n_r, n_k * n_lam, n_a), 10.0),
+        )
+        sel = batched_mod.batched_select_inner_settings(
+            np,
+            {},
+            [{"tr_p": np.array([0]), "val_p": np.array([1])}],
+            np.ones((n_b, 2)),
+            np.zeros(2),
+            np.asarray(cfg.ridge_alpha_grid, dtype=float),
+            np.zeros((2, 1)),
+            cfg,
+        )
+    assert sel["best_comp_idx"].tolist() == [0, 1]
+
+
+def test_inner_fold_rank_deficiency_triggers_fallback_draws_out() -> None:
+    from dataclasses import replace
+
+    from src.analysis.paired_lipid.batched import (
+        _check_fast_batch_eligibility,
+        _get_dataset_gram_cache,
+        _run_batched_multiplicity_draws,
+    )
+    from src.analysis.paired_lipid.nested_cv import make_nested_splits
+
+    ds, _ = generate_synthetic_cohort(n_participants=60, n_single_sample=0, seed=1012, compact_grid=True)
+    cfg = PairedLipidConfig(pca_dimensions=(5, 10))
+    outer, inner = make_nested_splits(ds, cfg, cfg.primary_seed)
+    tr_outer_0, _ = outer[0]
+    in_tr_0 = tr_outer_0[inner[0][0][0]]
+    special_p = in_tr_0[:3]
+
+    # Restrict non-special samples inside inner fold 0's training split to a joint rank-7 subspace so
+    # zeroing only special_p causes rank deficiency (< 10) inside inner fold 0 while draw 0 keeps full rank.
+    p1 = ds.sample_1300.shape[1]
+    s1 = ds.sample_1300.copy()
+    s2 = ds.sample_2850.copy()
+    restrict_p = np.setdiff1d(in_tr_0, special_p)
+    restrict_mask = np.isin(ds.sample_participant_idx, restrict_p)
+    comb_r = np.hstack([s1[restrict_mask], s2[restrict_mask]])
+    uc, svc, vtc = np.linalg.svd(comb_r, full_matrices=False)
+    comb_low = (uc[:, :7] * svc[:7]) @ vtc[:7]
+    s1[restrict_mask] = comb_low[:, :p1]
+    s2[restrict_mask] = comb_low[:, p1:]
+    ds_part_rank = replace(ds, sample_1300=s1, sample_2850=s2)
+
+    m_full = np.ones(ds.n_participants, dtype=float)
+    m_def = np.ones(ds.n_participants, dtype=float)
+    m_def[special_p] = 0.0
+    M = np.vstack([m_full, m_def])
+
+    gcache = _get_dataset_gram_cache(ds_part_rank, cfg)
+    assert _check_fast_batch_eligibility(ds_part_rank, outer, inner, M, cfg, gcache).all()
+    fallback_out: set[int] = set()
+    d_pair, d_comp = _run_batched_multiplicity_draws(
+        ds_part_rank,
+        ds_part_rank.outcomes[cfg.primary_endpoint],
+        outer,
+        inner,
+        M,
+        cfg,
+        gcache,
+        use_gpu=False,
+        fallback_draws_out=fallback_out,
+    )
+    assert fallback_out == {1}
+    assert np.isfinite(d_pair[0]) and np.isfinite(d_comp[0])
+    assert np.isnan(d_pair[1])
+
+    # End-to-end bootstrap recovery: globally joint rank-8 spectra with max_k=10 fall back cleanly to sequential.
+    comb_all = np.hstack([ds.sample_1300, ds.sample_2850])
+    u_all, sv_all, vt_all = np.linalg.svd(comb_all, full_matrices=False)
+    comb_rank8 = (u_all[:, :8] * sv_all[:8]) @ vt_all[:8]
+    ds_rank8 = replace(ds, sample_1300=comb_rank8[:, :p1], sample_2850=comb_rank8[:, p1:])
+    sp_rank8 = WeightedSpectralPreprocessor.fit(ds_rank8, np.arange(48, dtype=int), np.ones(48, dtype=float), cfg=cfg)
+    assert sp_rank8.numerical_rank == 8
+    assert sp_rank8.pca_components.shape[0] == 8
+    boot = run_multiplicity_bootstrap(ds_rank8, cfg=cfg, n_bootstraps=3, bootstrap_seed=42, use_gpu=False)
+    assert boot["interval_procedure_succeeded"] is True
+    assert boot["n_bootstraps_succeeded"] == 3
+    assert boot["n_fallback_draws"] == 3
+    assert np.isfinite(boot["point_estimate_delta_mse"])
+
+
+@pytest.mark.parametrize(
+    "use_gpu",
+    [False, pytest.param(True, marks=pytest.mark.skipif(not _gpu_available(), reason="CuPy/CUDA unavailable"))],
+)
+def test_mixed_batch_degenerate_outer_isolates_fallback_draws(
+    use_gpu: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.analysis.paired_lipid.batched as batched_mod
+    from src.analysis.paired_lipid.nested_cv import make_nested_splits
+
+    ds, _ = generate_synthetic_cohort(n_participants=60, n_single_sample=0, seed=1050, compact_grid=True)
+    cfg = PairedLipidConfig(pca_dimensions=(5, 10))
+    outer, inner = make_nested_splits(ds, cfg, cfg.primary_seed)
+    n_p = ds.n_participants
+    rng = np.random.default_rng(1051)
+    M = np.vstack(
+        [
+            np.ones(n_p),
+            np.bincount(rng.integers(0, n_p, n_p), minlength=n_p),
+            np.bincount(rng.integers(0, n_p, n_p), minlength=n_p),
+        ]
+    ).astype(np.float64)
+    gcache = batched_mod._get_dataset_gram_cache(ds, cfg)
+    assert batched_mod._check_fast_batch_eligibility(ds, outer, inner, M, cfg, gcache).all()
+
+    ref_0 = evaluate_nested_cohort(
+        ds,
+        cfg=cfg,
+        participant_multiplicities=M[0],
+        precomputed_splits=(outer, inner),
+        include_band_paired=True,
+        compute_diagnostics=False,
+    )
+    ref_2 = evaluate_nested_cohort(
+        ds,
+        cfg=cfg,
+        participant_multiplicities=M[2],
+        precomputed_splits=(outer, inner),
+        include_band_paired=True,
+        compute_diagnostics=False,
+    )
+    orig_prep = batched_mod.batched_division_prep
+
+    # 1. Degenerate outer T_max on draw 1 produces non-finite V_outer_sel without crashing CPU/GPU batch.
+    def _prep_degenerate_t(xp, *args, **kwargs):
+        out = orig_prep(xp, *args, **kwargs)
+        if kwargs.get("compute_cov_preds"):
+            out["T_max"][1] = 0.0
+        return out
+
+    fb_t: set[int] = set()
+    with monkeypatch.context() as mp:
+        mp.setattr(batched_mod, "batched_division_prep", _prep_degenerate_t)
+        dp_t, dc_t = batched_mod._run_batched_multiplicity_draws(
+            ds,
+            ds.outcomes[cfg.primary_endpoint],
+            outer,
+            inner,
+            M,
+            cfg,
+            gcache,
+            use_gpu=use_gpu,
+            fallback_draws_out=fb_t,
+        )
+    assert fb_t == {1}
+    assert np.isnan(dp_t[1])
+    assert dp_t[0] == pytest.approx(ref_0["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-8)
+    assert dc_t[0] == pytest.approx(ref_0["paired_vs_strongest_comparator"]["delta_mse"], abs=1e-8)
+    assert dp_t[2] == pytest.approx(ref_2["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-8)
+    assert dc_t[2] == pytest.approx(ref_2["paired_vs_strongest_comparator"]["delta_mse"], abs=1e-8)
+
+    # 2. Failed outer rank_ok (~batch_ok) with poisoned part_pca_max on draw 1 must stay isolated from draws 0 and 2.
+    def _prep_bad_rank(xp, *args, **kwargs):
+        out = orig_prep(xp, *args, **kwargs)
+        if kwargs.get("compute_cov_preds"):
+            out["rank_ok"][1] = False
+            out["part_pca_max"][1] = xp.nan
+        return out
+
+    fb_r: set[int] = set()
+    with monkeypatch.context() as mp:
+        mp.setattr(batched_mod, "batched_division_prep", _prep_bad_rank)
+        dp_r, dc_r = batched_mod._run_batched_multiplicity_draws(
+            ds,
+            ds.outcomes[cfg.primary_endpoint],
+            outer,
+            inner,
+            M,
+            cfg,
+            gcache,
+            use_gpu=use_gpu,
+            fallback_draws_out=fb_r,
+        )
+    assert fb_r == {1}
+    assert np.isnan(dp_r[1])
+    assert dp_r[0] == pytest.approx(dp_t[0], abs=1e-12)
+    assert dc_r[0] == pytest.approx(dc_t[0], abs=1e-12)
+    assert dp_r[2] == pytest.approx(dp_t[2], abs=1e-12)
+    assert dc_r[2] == pytest.approx(dc_t[2], abs=1e-12)
+
+
+def test_multiplicity_bootstrap_allows_missing_secondary_endpoint() -> None:
+    from dataclasses import replace
+
+    ds, _ = generate_synthetic_cohort(n_participants=60, n_single_sample=2, seed=1013, compact_grid=True)
+    y_hdl = ds.outcomes["hdl_mmol_l"].copy()
+    missing_idx = np.array([2, 15, 31, 47])
+    y_hdl[missing_idx] = np.nan
+    ds_nan = replace(ds, outcomes={**ds.outcomes, "hdl_mmol_l": y_hdl})
+
+    with pytest.raises(ValueError, match="missing values"):
+        run_multiplicity_bootstrap(ds_nan, endpoint="hdl_mmol_l", n_bootstraps=4, use_gpu=False)
+
+    boot = run_multiplicity_bootstrap(
+        ds_nan,
+        endpoint="hdl_mmol_l",
+        n_bootstraps=6,
+        bootstrap_seed=77,
+        use_gpu=False,
+        allow_missing_outcome=True,
+    )
+    assert boot["interval_procedure_succeeded"] is True
+    assert boot["n_bootstraps_succeeded"] == 6
+    assert boot["n_failed_refits"] == 0
+    assert boot["mean_distinct_participants"] <= ds_nan.n_participants - missing_idx.size
+    lo, hi = boot["ci_95_delta_mse"]
+    assert np.isfinite(lo) and np.isfinite(hi) and lo < hi
+
+    ref = evaluate_nested_cohort(ds_nan, endpoint="hdl_mmol_l", allow_missing_outcome=True, compute_diagnostics=False)
+    assert boot["point_estimate_delta_mse"] == pytest.approx(
+        ref["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-8
+    )
+    assert boot["point_estimate_vs_comparator"] == pytest.approx(
+        ref["paired_vs_strongest_comparator"]["delta_mse"], abs=1e-8
+    )
+
+
+def test_synthetic_cohort_subset_modes_and_prepared_external_test() -> None:
+    from src.analysis.paired_lipid.nested_cv import PreparedExternalTest, score_external_primary_pair
+
+    ds_all, _ = generate_synthetic_cohort(
+        n_participants=30, n_single_sample=5, seed=1101, compact_grid=True, subset_mode="all_eligible"
+    )
+    ds_paired, truth_paired = generate_synthetic_cohort(
+        n_participants=30, n_single_sample=5, seed=1101, compact_grid=True, subset_mode="paired_only"
+    )
+    assert ds_paired.manifest_summary["subset_mode"] == "paired_only"
+    assert ds_paired.n_participants == 25
+    assert ds_paired.manifest_summary["n_single_sample_participants"] == 0
+    assert truth_paired["z_bio"].shape == (25, 2)
+    assert any(e["reason"] == "unpaired_in_paired_only_mode" for e in ds_paired.exclusions)
+
+    ds_single, truth_single = generate_synthetic_cohort(
+        n_participants=30, n_single_sample=5, seed=1101, compact_grid=True, subset_mode="single_sample"
+    )
+    assert ds_single.manifest_summary["subset_mode"] == "single_sample"
+    assert ds_single.n_participants == 30
+    assert truth_single["z_bio"].shape == (30, 2)
+    paired_p = ds_single.paired_participant_indices
+    np.testing.assert_allclose(
+        ds_single.covariate_frame["sample_label_trend"].to_numpy()[paired_p],
+        ds_single.sample_parsed_labels[ds_single.pair_sample_a_indices],
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+    ds_3map, truth_3map = generate_synthetic_cohort(
+        n_participants=30, n_single_sample=5, seed=1101, compact_grid=True, subset_mode="three_map_complete"
+    )
+    assert ds_3map.manifest_summary["subset_mode"] == "three_map_complete"
+    assert ds_3map.manifest_summary["min_maps_per_block"] == 3
+    assert ds_3map.n_samples < ds_all.n_samples
+    assert truth_3map["z_bio"].shape == (ds_3map.n_participants, 2)
+    assert any(e["reason"] == "fewer_than_3_maps" for e in ds_3map.exclusions)
+
+    train_ds, _ = generate_synthetic_cohort(n_participants=40, n_single_sample=2, seed=1102, compact_grid=True)
+    test_ds, _ = generate_synthetic_cohort(n_participants=80, n_single_sample=4, seed=1103, compact_grid=True)
+    cfg = PairedLipidConfig()
+    prepared = PreparedExternalTest.from_dataset(test_ds, cfg.primary_endpoint, preset=cfg.covariate_preset)
+
+    ref = evaluate_nested_cohort(train_ds, cfg=cfg, external_test=test_ds, compute_diagnostics=False)
+    fast = score_external_primary_pair(train_ds, prepared, cfg=cfg)
+    via_eval = evaluate_nested_cohort(train_ds, cfg=cfg, external_test=prepared, compute_diagnostics=False)
+
+    assert fast["endpoint"] == ref["endpoint"]
+    assert fast["external_delta_mse"] == pytest.approx(ref["external_delta_mse"], rel=0.0, abs=1e-12)
+    np.testing.assert_allclose(
+        fast["external_participant_deltas"], ref["external_participant_deltas"], rtol=0.0, atol=1e-12
+    )
+    assert via_eval["external_delta_mse"] == pytest.approx(ref["external_delta_mse"], rel=0.0, abs=1e-12)
+    np.testing.assert_allclose(
+        via_eval["external_participant_deltas"], ref["external_participant_deltas"], rtol=0.0, atol=1e-12
+    )
+
+    wrong_ep = PreparedExternalTest.from_dataset(test_ds, "hdl_mmol_l", preset=cfg.covariate_preset)
+    with pytest.raises(ValueError, match="does not match requested endpoint"):
+        score_external_primary_pair(train_ds, wrong_ep, cfg=cfg)
+
+
+def test_audit_readiness_count_mismatch_and_missing_summary_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    import manuscript_ml.audit_readiness as audit_mod
+    import src.data_preparation.materialize as materialize
+    import src.data_preparation.store as store
+
+    master_path = tmp_path / "clinical_master.csv"
+    master_path.write_text("participant_key\nstroke_1\n", encoding="utf-8")
+    fake_store = tmp_path / "store"
+    fake_store.mkdir()
+    (fake_store / "manifest.json").write_text("{}", encoding="utf-8")
+    source = SimpleNamespace(source_path=fake_store, manifest_hash="fixture_hash")
+
+    monkeypatch.setattr(materialize, "store_dir", lambda *_args: fake_store)
+    monkeypatch.setattr(store, "get_active_data_source", lambda: source)
+    monkeypatch.setattr(
+        audit_mod,
+        "load_clinical_master_verified",
+        lambda _p: (pd.DataFrame(), {"stroke_identity_verified": 92}),
+    )
+
+    # 1. Observed counts mismatch expected counts
+    mismatch_ds = SimpleNamespace(
+        manifest_summary={
+            "n_eligible_participants": 91,
+            "n_paired_participants": 87,
+            "n_single_sample_participants": 4,
+            "n_eligible_samples": 178,
+        },
+        exclusions=[],
+    )
+    monkeypatch.setattr(audit_mod, "load_paired_cohort_from_store", lambda *_a, **_kw: (mismatch_ds, {}))
+    out_mismatch = audit_mod.run_readiness_audit(
+        clinical_master_path=master_path, output_dir=tmp_path / "audit_mismatch"
+    )
+    manifest_mismatch = json.loads(out_mismatch["readiness_manifest"].read_text(encoding="utf-8"))
+    mr = manifest_mismatch["measurement_readiness"]
+    assert mr["identity_verified_matches_expected"] is True
+    assert mr["cohort_join"]["status"] == "count_mismatch"
+    assert mr["ready_for_cohort_join"] is False
+    assert mr["ready_for_cohort_evaluation"] is False
+
+    # 2. Missing summary keys must report count_mismatch without raising KeyError
+    partial_ds = SimpleNamespace(manifest_summary={"n_eligible_participants": 92}, exclusions=[])
+    monkeypatch.setattr(audit_mod, "load_paired_cohort_from_store", lambda *_a, **_kw: (partial_ds, {}))
+    out_partial = audit_mod.run_readiness_audit(
+        clinical_master_path=master_path, output_dir=tmp_path / "audit_partial"
+    )
+    manifest_partial = json.loads(out_partial["readiness_manifest"].read_text(encoding="utf-8"))
+    mr_p = manifest_partial["measurement_readiness"]
+    assert mr_p["cohort_join"]["status"] == "count_mismatch"
+    assert mr_p["ready_for_cohort_join"] is False
+    assert mr_p["ready_for_cohort_evaluation"] is False
+    assert mr_p["cohort_join"]["observed"] == {"n_eligible_participants": 92}
+
+
+def test_sensitivity_eval_memo_and_config_scenario_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import copy
+
+    import yaml
+
+    import manuscript_ml.run_sensitivity_and_secondary as sens_mod
+    from manuscript_ml import DEFAULT_CONFIG_PATH, clear_dataset_cache, load_manuscript_config
+
+    clear_dataset_cache()
+    calls: list[tuple[object, ...]] = []
+
+    def _recording_eval(
+        ds: object,
+        *,
+        cfg: PairedLipidConfig = PairedLipidConfig(),
+        endpoint: str | None = None,
+        outer_seed: int | None = None,
+        single_sample_downstream: bool = False,
+        allow_missing_outcome: bool = False,
+        compute_diagnostics: bool = True,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        del compute_diagnostics
+        calls.append(
+            (
+                ds.manifest_summary.get("subset_mode"),  # type: ignore[attr-defined]
+                cfg.covariate_preset,
+                endpoint or cfg.primary_endpoint,
+                cfg.primary_seed if outer_seed is None else int(outer_seed),
+                bool(single_sample_downstream),
+                bool(allow_missing_outcome),
+            )
+        )
+        n_p = ds.n_participants  # type: ignore[attr-defined]
+        stub_metric = {
+            "delta_mse": 0.12,
+            "relative_mse_reduction": 0.06,
+            "rmse_model": 0.55,
+            "mae_model": 0.42,
+        }
+        return {
+            "n_missing_outcome": 0,
+            "comparisons_vs_covariate_ridge": {"paired_linear_ridge": stub_metric},
+            "paired_vs_strongest_comparator": {"delta_mse": 0.03},
+            "oof_spectral_contributions": {"paired_linear_ridge": np.linspace(-1.0, 1.0, n_p)},
+        }
+
+    monkeypatch.setattr(sens_mod, "evaluate_nested_cohort", _recording_eval)
+    try:
+        outputs = sens_mod.run_sensitivity_and_secondary(
+            use_synthetic=True,
+            compact_grid=True,
+            output_dir=tmp_path / "sens_memo",
+        )
+    finally:
+        clear_dataset_cache()
+
+    # 5 covariate presets + 3 non-all_eligible subsets + 3 sensitivity seeds + 3 secondary endpoints = 14 unique calls.
+    assert len(calls) == 14
+    assert len(set(calls)) == 14
+    primary_key = ("all_eligible", "primary", "ldl_mmol_l", 42, False, False)
+    assert calls.count(primary_key) == 1
+    assert len(pd.read_csv(outputs["covariate_and_subset_sensitivity"])) == 9
+    assert len(pd.read_csv(outputs["outer_partition_seed_sensitivity"])) == 4
+    assert len(pd.read_csv(outputs["secondary_endpoints_summary"])) == 3
+    assert len(pd.read_csv(outputs["anchor_associations_continuous"])) == 4
+
+    # load_manuscript_config must reject unknown/reserved scenario kwargs and invalid presets upfront.
+    base_raw = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    for bad_update, pattern in (
+        ({"unknown_scenario_arg": 1.0}, "Unknown or reserved generator argument"),
+        ({"seed": 999}, "Unknown or reserved generator argument"),
+        ({"n_participants": 50}, "Unknown or reserved generator argument"),
+        ({"covariate_preset": "unknown_preset"}, "Unknown covariate_preset"),
+    ):
+        mutated = copy.deepcopy(base_raw)
+        mutated["simulation"]["scenarios"][0].update(bad_update)
+        bad_cfg_path = tmp_path / f"bad_{next(iter(bad_update))}.yaml"
+        bad_cfg_path.write_text(yaml.safe_dump(mutated), encoding="utf-8")
+        with pytest.raises(ValueError, match=pattern):
+            load_manuscript_config(bad_cfg_path)
+

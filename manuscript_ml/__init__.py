@@ -8,18 +8,21 @@ to preserve DRY and KISS principles.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
+import inspect
 import json
+import math
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import lru_cache
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
-import pandas as pd
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -28,37 +31,180 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.analysis.io_utils import write_json_atomic  # noqa: E402
 from src.analysis.paired_lipid.cohort import (  # noqa: E402
+    COVARIATE_PRESETS,
     PRE_EVENT_RISK_FACTORS,
+    SUBSET_MODES,
     CohortDataset,
     PairedLipidConfig,
     SubsetMode,
     load_paired_cohort_from_store,
 )
-from src.analysis.paired_lipid.simulation import generate_synthetic_cohort  # noqa: E402
+from src.analysis.paired_lipid.synthetic import generate_synthetic_cohort  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Results_manuscript_ml"
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "manuscript_ml.yaml"
 
+_TRACKED_PACKAGES: tuple[str, ...] = (
+    "numpy",
+    "scipy",
+    "pandas",
+    "scikit-learn",
+    "joblib",
+    "pyyaml",
+    "pyarrow",
+    "statsmodels",
+    "cupy",
+    "cupy-cuda12x",
+    "cupy-cuda13x",
+)
+
+__all__ = [
+    "CohortDataset",
+    "DEFAULT_CONFIG_PATH",
+    "DEFAULT_OUTPUT_DIR",
+    "PRE_EVENT_RISK_FACTORS",
+    "PROJECT_ROOT",
+    "PairedLipidConfig",
+    "SubsetMode",
+    "add_cohort_stage_args",
+    "add_common_stage_args",
+    "clear_dataset_cache",
+    "ensure_output_dir",
+    "generate_synthetic_cohort",
+    "load_manuscript_config",
+    "load_paired_cohort_from_store",
+    "print_stage_outputs",
+    "require_cohort_approval",
+    "resolve_experiment_dataset",
+    "write_json_atomic",
+    "write_run_provenance",
+]
+
+
+def _validate_manuscript_sections(raw: Mapping[str, Any]) -> None:
+    """Validate optional top-level experiment sections and scenario keyword arguments upfront."""
+    if "readiness" in raw:
+        from manuscript_ml.readiness import validate_readiness_expectations
+
+        validate_readiness_expectations(raw["readiness"])
+
+    if "seeds" in raw:
+        seeds = raw["seeds"]
+        if not isinstance(seeds, Mapping):
+            raise ValueError("'seeds' section in manuscript config must be a mapping")
+        for key, val in seeds.items():
+            if isinstance(val, bool) or not isinstance(val, int):
+                raise ValueError(f"Seed {key!r} must be an integer, got {val!r}")
+
+    if "anchors" in raw:
+        anchors = raw["anchors"]
+        if not isinstance(anchors, Mapping):
+            raise ValueError("'anchors' section in manuscript config must be a mapping")
+        if "n_resamples" in anchors:
+            n_res = anchors["n_resamples"]
+            if isinstance(n_res, bool) or not isinstance(n_res, int) or n_res < 0:
+                raise ValueError("anchors.n_resamples must be a non-negative integer")
+        if "seed" in anchors and (isinstance(anchors["seed"], bool) or not isinstance(anchors["seed"], int)):
+            raise ValueError("anchors.seed must be an integer")
+
+    if "calibration" in raw:
+        cal = raw["calibration"]
+        if not isinstance(cal, Mapping):
+            raise ValueError("'calibration' section in manuscript config must be a mapping")
+        if "n_test_participants" in cal:
+            n_test = cal["n_test_participants"]
+            if isinstance(n_test, bool) or not isinstance(n_test, int) or n_test <= 0:
+                raise ValueError("calibration.n_test_participants must be a positive integer")
+        if "signal_strength" in cal:
+            sig_val = cal["signal_strength"]
+            if isinstance(sig_val, bool) or not isinstance(sig_val, (int, float)) or not math.isfinite(float(sig_val)):
+                raise ValueError("calibration.signal_strength must be a finite number")
+        if "gate_wilson_lower_min" in cal:
+            gw = cal["gate_wilson_lower_min"]
+            if isinstance(gw, bool) or not isinstance(gw, (int, float)) or not (0.0 < float(gw) < 1.0):
+                raise ValueError("calibration.gate_wilson_lower_min must lie strictly in (0, 1)")
+        if "gate_max_failure_rate" in cal:
+            gf = cal["gate_max_failure_rate"]
+            if isinstance(gf, bool) or not isinstance(gf, (int, float)) or not (0.0 <= float(gf) <= 1.0):
+                raise ValueError("calibration.gate_max_failure_rate must lie in [0, 1]")
+
+    if "simulation" in raw:
+        sim = raw["simulation"]
+        if not isinstance(sim, Mapping):
+            raise ValueError("'simulation' section in manuscript config must be a mapping")
+        if "compact_grid" in sim and not isinstance(sim["compact_grid"], bool):
+            raise ValueError("simulation.compact_grid must be a boolean")
+        if "n_participants_grid" in sim:
+            grid = sim["n_participants_grid"]
+            if (
+                not isinstance(grid, (list, tuple))
+                or not grid
+                or any(isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in grid)
+            ):
+                raise ValueError("simulation.n_participants_grid must be a non-empty list of positive integers")
+        if "scenarios" in sim:
+            scenarios = sim["scenarios"]
+            if not isinstance(scenarios, (list, tuple)) or not scenarios:
+                raise ValueError("simulation.scenarios must be a non-empty sequence of scenario mappings")
+            reserved = {"n_participants", "seed", "compact_grid", "cfg"}
+            sig_params = inspect.signature(generate_synthetic_cohort).parameters
+            allowed_gen_keys = {
+                name
+                for name, param in sig_params.items()
+                if name not in reserved
+                and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            }
+            for idx, spec in enumerate(scenarios):
+                if not isinstance(spec, Mapping):
+                    raise ValueError(f"simulation.scenarios[{idx}] must be a mapping")
+                name = spec.get("scenario")
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError(f"simulation.scenarios[{idx}] must define a non-empty 'scenario' string")
+                preset = spec.get("covariate_preset")
+                if not isinstance(preset, str) or preset not in COVARIATE_PRESETS:
+                    raise ValueError(f"Unknown covariate_preset {preset!r} in scenario {name!r}")
+                extra_keys = set(spec.keys()) - {"scenario", "covariate_preset"}
+                unknown_keys = sorted(extra_keys - allowed_gen_keys)
+                if unknown_keys:
+                    raise ValueError(
+                        f"Unknown or reserved generator argument(s) in scenario {name!r}: {unknown_keys}"
+                    )
+
 
 def load_manuscript_config(path: str | Path | None = None) -> tuple[PairedLipidConfig, dict[str, Any]]:
-    """Read the locked experiment settings; return the model config and the raw mapping."""
+    """Read and validate the locked experiment settings; return the model config and raw mapping."""
     raw = yaml.safe_load(Path(path or DEFAULT_CONFIG_PATH).read_text(encoding="utf-8"))
+    if not isinstance(raw, Mapping) or "paired_lipid" not in raw or not isinstance(raw["paired_lipid"], Mapping):
+        raise ValueError("Manuscript configuration YAML must contain a 'paired_lipid' mapping")
     fields = {k: tuple(v) if isinstance(v, list) else v for k, v in raw["paired_lipid"].items()}
-    return PairedLipidConfig(**fields), raw
+    cfg = PairedLipidConfig(**fields)
+    _validate_manuscript_sections(raw)
+    return cfg, dict(raw)
 
 
-def _git(*args: str) -> str:
+def _git_output(*args: str) -> str | None:
     try:
         return subprocess.run(
             ["git", *args], cwd=PROJECT_ROOT, capture_output=True, text=True, check=True
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
-        return "unavailable"
+        return None
 
 
+@lru_cache(maxsize=1)
+def _git_metadata() -> tuple[str, bool | None]:
+    commit = _git_output("log", "-1", "--format=%H")
+    status = _git_output("status", "--porcelain")
+    return (
+        commit if commit is not None else "unavailable",
+        (status != "") if status is not None else None,
+    )
+
+
+@lru_cache(maxsize=1)
 def _package_versions() -> dict[str, str]:
-    versions = {}
-    for pkg in ("numpy", "scipy", "pandas", "scikit-learn", "joblib", "cupy-cuda12x", "cupy-cuda13x"):
+    versions: dict[str, str] = {}
+    for pkg in _TRACKED_PACKAGES:
         try:
             versions[pkg] = metadata.version(pkg)
         except metadata.PackageNotFoundError:
@@ -86,10 +232,11 @@ def write_run_provenance(
         if manifest_path is not None and manifest_path.is_file()
         else None
     )
+    git_commit, git_worktree_dirty = _git_metadata()
     payload = {
         "stage": stage,
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "argv": sys.argv,
+        "argv": list(sys.argv),
         "config_path": str(cfg_file),
         "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
         "config_text": config_bytes.decode("utf-8"),
@@ -98,29 +245,53 @@ def write_run_provenance(
         "resolved_paired_lipid_config": asdict(cfg),
         "pre_event_risk_factors": list(PRE_EVENT_RISK_FACTORS),
         "stage_settings": dict(settings),
-        "git_commit": _git("log", "-1", "--format=%H"),
-        "git_worktree_dirty": _git("status", "--porcelain") not in ("", "unavailable"),
+        "git_commit": git_commit,
+        "git_worktree_dirty": git_worktree_dirty,
         "python": sys.version,
-        "packages": _package_versions(),
+        "packages": dict(_package_versions()),
         "data": dict(source_meta) if source_meta is not None else None,
     }
     return write_json_atomic(target_dir / f"run_provenance_{stage}.json", payload)
 
 
+def add_common_stage_args(parser: argparse.ArgumentParser) -> None:
+    """Add output-directory and YAML configuration arguments shared across all CLI runners."""
+    parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--config", type=str, default=None, help="Experiment settings YAML.")
+
+
 def add_cohort_stage_args(parser: argparse.ArgumentParser) -> None:
-    """Add the flags shared by the cohort-evaluation stages (primary evaluation, sensitivity)."""
+    """Add the flags shared by the cohort-evaluation stages (primary evaluation, sensitivity, run_all)."""
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--cohort", action="store_true", help="Evaluate on the verified stroke cohort (default).")
-    mode.add_argument("--synthetic", action="store_true", help="Explicit development simulation; outputs are not cohort evidence.")
+    mode.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Explicit development simulation; outputs are not cohort evidence.",
+    )
     parser.add_argument(
         "--approve-cohort-evaluation",
         action="store_true",
         help="Confirm that all readiness gates in runbook.md are satisfied.",
     )
     parser.add_argument("--clinical-master", type=str, default=str(PROJECT_ROOT / "data" / "clinical_master.csv"))
-    parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--compact-grid", action="store_true")
-    parser.add_argument("--config", type=str, default=None, help="Experiment settings YAML.")
+    add_common_stage_args(parser)
+
+
+def require_cohort_approval(*, use_synthetic: bool, approve_cohort_evaluation: bool) -> None:
+    """Refuse unapproved evaluations on the real clinical cohort."""
+    if not use_synthetic and not approve_cohort_evaluation:
+        raise PermissionError(
+            "Cohort evaluation requires explicit '--approve-cohort-evaluation' after "
+            "completing all readiness checks in manuscript_ml/runbook.md."
+        )
+
+
+def print_stage_outputs(stage_name: str, outputs: Mapping[str, Path]) -> None:
+    """Print the output artifact key-to-path mapping for a completed CLI stage."""
+    for key, path in outputs.items():
+        print(f"[{stage_name}] wrote {key}: {path}")
 
 
 def ensure_output_dir(output_dir: str | Path | None = None) -> Path:
@@ -141,18 +312,20 @@ def resolve_experiment_dataset(
     compact_grid: bool = False,
     cfg: PairedLipidConfig = PairedLipidConfig(),
     readiness: Mapping[str, Any] | None = None,
+    config_path: str | Path | None = None,
 ) -> tuple[CohortDataset, dict[str, Any]]:
     """Resolve either the synthetic benchmark cohort or the verified preprocessed cohort.
 
-    Results are memoized per argument set within a process, so repeated stages
-    share one dataset object and its Gram cache. Treat the returned dataset as
-    read-only; call ``clear_dataset_cache()`` to force a reload.
+    Results are memoized per dataset-affecting argument set within a process, so
+    repeated stages share one dataset object and its Gram cache. Treat the returned
+    dataset as read-only; call ``clear_dataset_cache()`` to force a reload.
     """
-    if not use_synthetic and not approve_cohort_evaluation:
-        raise PermissionError(
-            "Cohort evaluation requires explicit '--approve-cohort-evaluation' after "
-            "completing all readiness checks in manuscript_ml/runbook.md."
-        )
+    if subset_mode not in SUBSET_MODES:
+        raise ValueError(f"Unknown subset_mode: {subset_mode!r}. Expected one of {SUBSET_MODES}.")
+    require_cohort_approval(
+        use_synthetic=use_synthetic,
+        approve_cohort_evaluation=approve_cohort_evaluation,
+    )
     source_identity = ""
     readiness_json = "{}"
     if not use_synthetic:
@@ -161,19 +334,30 @@ def resolve_experiment_dataset(
 
         source = get_active_data_source() or resolve_data_source()
         source_identity = hash_file(source.source_path / "manifest.json") + hash_file(clinical_master_path)
-        expectations = readiness if readiness is not None else load_manuscript_config()[1]["readiness"]
+        expectations = (
+            readiness
+            if readiness is not None
+            else load_manuscript_config(config_path)[1]["readiness"]
+        )
         readiness_json = json.dumps(dict(expectations), sort_keys=True)
-    return _resolve_experiment_dataset_cached(
+
+    dataset_cfg_key = (
+        cfg.primary_endpoint,
+        tuple(cfg.secondary_endpoints),
+        int(cfg.min_maps_per_block),
+    )
+    dataset, cached_meta = _resolve_experiment_dataset_cached(
         use_synthetic,
         str(Path(clinical_master_path).resolve()),
         subset_mode,
         synthetic_participants,
         synthetic_seed,
         compact_grid,
-        cfg,
+        dataset_cfg_key,
         source_identity,
         readiness_json,
     )
+    return dataset, copy.deepcopy(cached_meta)
 
 
 def clear_dataset_cache() -> None:
@@ -181,33 +365,32 @@ def clear_dataset_cache() -> None:
     _resolve_experiment_dataset_cached.cache_clear()
 
 
-@lru_cache(maxsize=16)
+@lru_cache(maxsize=4)
 def _resolve_experiment_dataset_cached(
     use_synthetic: bool,
     clinical_master_path: str,
-    subset_mode: str,
+    subset_mode: SubsetMode,
     synthetic_participants: int,
     synthetic_seed: int,
     compact_grid: bool,
-    cfg: PairedLipidConfig,
+    dataset_cfg_key: tuple[str, tuple[str, ...], int],
     source_identity: str,
     readiness_json: str,
 ) -> tuple[CohortDataset, dict[str, Any]]:
+    primary_endpoint, secondary_endpoints, min_maps_per_block = dataset_cfg_key
+    load_cfg = PairedLipidConfig(
+        primary_endpoint=primary_endpoint,
+        secondary_endpoints=secondary_endpoints,
+        min_maps_per_block=min_maps_per_block,
+    )
     if use_synthetic:
-        if subset_mode == "all_eligible":
-            dataset, truth = generate_synthetic_cohort(
-                n_participants=synthetic_participants,
-                seed=synthetic_seed,
-                compact_grid=compact_grid,
-            )
-        else:
-            dataset, truth = _rebuild_synthetic_with_mode(
-                n_participants=synthetic_participants,
-                seed=synthetic_seed,
-                compact_grid=compact_grid,
-                subset_mode=subset_mode,
-                cfg=cfg,
-            )
+        dataset, truth = generate_synthetic_cohort(
+            n_participants=synthetic_participants,
+            seed=synthetic_seed,
+            compact_grid=compact_grid,
+            subset_mode=subset_mode,
+            cfg=load_cfg,
+        )
         meta = {
             "data_mode": "synthetic",
             "synthetic_seed": synthetic_seed,
@@ -218,11 +401,34 @@ def _resolve_experiment_dataset_cached(
 
     from src.data_preparation.store import get_active_data_source, resolve_data_source
 
+    if subset_mode != "all_eligible":
+        # Validate and cache readiness once on the full eligible cohort rather than
+        # loading all_eligible again on every non-primary subset mode.
+        _, base_meta = _resolve_experiment_dataset_cached(
+            False,
+            clinical_master_path,
+            "all_eligible",
+            synthetic_participants,
+            synthetic_seed,
+            compact_grid,
+            dataset_cfg_key,
+            source_identity,
+            readiness_json,
+        )
+        source = get_active_data_source() or resolve_data_source()
+        dataset, _ = load_paired_cohort_from_store(
+            clinical_master_path=clinical_master_path,
+            data_source=source,
+            cfg=load_cfg,
+            subset_mode=subset_mode,
+        )
+        return dataset, copy.deepcopy(base_meta)
+
     source = get_active_data_source() or resolve_data_source()
     dataset, clin_audit = load_paired_cohort_from_store(
         clinical_master_path=clinical_master_path,
         data_source=source,
-        cfg=cfg,
+        cfg=load_cfg,
         subset_mode="all_eligible",
     )
     from manuscript_ml.readiness import evaluate_cohort_readiness
@@ -230,10 +436,6 @@ def _resolve_experiment_dataset_cached(
     measured_readiness = evaluate_cohort_readiness(clin_audit, dataset.manifest_summary, json.loads(readiness_json))
     if not measured_readiness["ready_for_cohort_evaluation"]:
         raise RuntimeError("Current clinical identity or cohort-join counts do not match readiness expectations")
-    if subset_mode != "all_eligible":
-        dataset, _ = load_paired_cohort_from_store(
-            clinical_master_path=clinical_master_path, data_source=source, cfg=cfg, subset_mode=subset_mode,
-        )
     return dataset, {
         "readiness": measured_readiness,
         "source_identity": source_identity,
@@ -242,70 +444,3 @@ def _resolve_experiment_dataset_cached(
         "store_path": str(source.source_path),
         "store_manifest_hash": str(source.manifest_hash),
     }
-
-
-def _rebuild_synthetic_with_mode(
-    *,
-    n_participants: int,
-    seed: int,
-    compact_grid: bool,
-    subset_mode: SubsetMode,
-    cfg: PairedLipidConfig,
-) -> tuple[CohortDataset, dict[str, Any]]:
-    """Helper to generate a synthetic cohort and apply a specific subset_mode.
-
-    Known limitation (synthetic smoke runs only): the rebuilt maps add map noise on top of samples
-    that are already medians of noisy maps, so subset-mode spectra are noisier than the base cohort.
-    """
-    import numpy as np
-
-    from src.analysis.paired_lipid.cohort import build_paired_cohort_dataset
-
-    base_ds, truth = generate_synthetic_cohort(
-        n_participants=n_participants,
-        seed=seed,
-        compact_grid=compact_grid,
-    )
-    # Reconstruct map records from base_ds samples: 3 noisy maps per sample (generator map noise SD),
-    # and 2 maps in 20% of samples so that the three-map-complete subset actually excludes samples.
-    map_rng = np.random.default_rng(seed + 7)
-    clin_df = base_ds.covariate_frame.copy()
-    clin_df["participant_id"] = base_ds.participant_ids
-    clin_df["cohort"] = "stroke"
-    clin_df["identity_verified"] = True
-    for ep_name, vals in base_ds.outcomes.items():
-        clin_df[ep_name] = vals
-
-    n_maps_per_sample = np.where(map_rng.random(base_ds.n_samples) < 0.2, 2, 3)
-    sample_idx_per_map = np.repeat(np.arange(base_ds.n_samples, dtype=int), n_maps_per_sample)
-    total_maps = int(sample_idx_per_map.size)
-
-    spec_1300 = base_ds.sample_1300[sample_idx_per_map] + map_rng.normal(
-        0.0, 0.04, size=(total_maps, base_ds.sample_1300.shape[1])
-    )
-    spec_2850 = base_ds.sample_2850[sample_idx_per_map] + map_rng.normal(
-        0.0, 0.04, size=(total_maps, base_ds.sample_2850.shape[1])
-    )
-    map_pids = base_ds.participant_ids[base_ds.sample_participant_idx[sample_idx_per_map]]
-    map_sids = base_ds.sample_ids[sample_idx_per_map]
-    row_indices = np.arange(total_maps, dtype=int)
-    map_df = pd.DataFrame(
-        {
-            "participant_id": np.repeat(map_pids, 2),
-            "sample_id": np.repeat(map_sids, 2),
-            "spectral_range": np.tile(np.array(["1300", "2850"], dtype=object), total_maps),
-            "row_index": np.repeat(row_indices, 2),
-            "retained": np.ones(2 * total_maps, dtype=bool),
-        }
-    )
-    ds = build_paired_cohort_dataset(
-        clin_df,
-        map_df,
-        spec_1300,
-        spec_2850,
-        base_ds.wavenumbers_1300,
-        base_ds.wavenumbers_2850,
-        cfg=cfg,
-        subset_mode=subset_mode,
-    )
-    return ds, truth

@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any
 
 import pandas as pd
 
@@ -25,12 +26,15 @@ from manuscript_ml import (  # noqa: E402
     add_cohort_stage_args,
     ensure_output_dir,
     load_manuscript_config,
+    print_stage_outputs,
     resolve_experiment_dataset,
     write_run_provenance,
 )
 from src.analysis.io_utils import write_csv_atomic  # noqa: E402
 from src.analysis.paired_lipid.cohort import (  # noqa: E402
     COVARIATE_PRESETS,
+    SUBSET_MODES,
+    CohortDataset,
     PairedLipidConfig,
     SubsetMode,
 )
@@ -38,8 +42,6 @@ from src.analysis.paired_lipid.nested_cv import (  # noqa: E402
     evaluate_nested_cohort,
     summarize_anchor_associations,
 )
-
-SUBSET_MODES: tuple[SubsetMode, ...] = get_args(SubsetMode)
 
 
 def _paired_metrics(res: dict[str, Any], *, with_mae: bool = False) -> dict[str, float]:
@@ -56,6 +58,18 @@ def _paired_metrics(res: dict[str, Any], *, with_mae: bool = False) -> dict[str,
     return row
 
 
+def _dataset_memo_key(subset_mode: SubsetMode, ds: CohortDataset, source_meta: Mapping[str, Any]) -> tuple[Any, ...]:
+    source_meta_key = (
+        str(source_meta.get("data_mode", "")),
+        str(source_meta.get("source_identity", "")),
+        str(source_meta.get("store_manifest_hash", "")),
+        source_meta.get("synthetic_seed"),
+        source_meta.get("compact_grid"),
+        ds.n_participants,
+    )
+    return (subset_mode, source_meta_key)
+
+
 def run_sensitivity_and_secondary(
     *,
     use_synthetic: bool = False,
@@ -70,36 +84,68 @@ def run_sensitivity_and_secondary(
     base_cfg, raw_cfg = load_manuscript_config(config_path)
     anchor_cfg = raw_cfg["anchors"]
     eval_memo: dict[tuple[Any, ...], dict[str, Any]] = {}
+    resolved_datasets: dict[SubsetMode, tuple[CohortDataset, dict[str, Any]]] = {}
 
-    def evaluate(ds: Any, cfg: PairedLipidConfig, **kwargs: Any) -> dict[str, Any]:
-        # Deterministic evaluations repeat across axes (e.g. primary preset, primary seed,
-        # anchors); compute each distinct (dataset, config, options) only once. The key holds
-        # every option, and outer_seed=None means the primary seed, so equal runs share one entry.
-        # Step 4 tables consume held-out errors and spectral contributions, not fold repeatability
-        # or subspace principal angles, so skip unused fold diagnostics by default.
-        kwargs.setdefault("compute_diagnostics", False)
-        seed = kwargs.get("outer_seed")
-        options = {**kwargs, "outer_seed": cfg.primary_seed if seed is None else int(seed)}
-        key = (id(ds), cfg, tuple(sorted(options.items())))
+    def get_dataset(mode: SubsetMode) -> tuple[CohortDataset, dict[str, Any]]:
+        if mode not in resolved_datasets:
+            resolved_datasets[mode] = resolve_experiment_dataset(
+                use_synthetic=use_synthetic,
+                approve_cohort_evaluation=approve_cohort_evaluation,
+                clinical_master_path=clinical_master_path,
+                subset_mode=mode,
+                compact_grid=compact_grid,
+                cfg=base_cfg,
+                readiness=raw_cfg["readiness"],
+                config_path=config_path,
+            )
+        return resolved_datasets[mode]
+
+    def evaluate(
+        subset_mode: SubsetMode,
+        ds: CohortDataset,
+        source_meta: Mapping[str, Any],
+        cfg: PairedLipidConfig,
+        *,
+        endpoint: str | None = None,
+        outer_seed: int | None = None,
+        single_sample_downstream: bool = False,
+        allow_missing_outcome: bool = False,
+        compute_diagnostics: bool = False,
+    ) -> dict[str, Any]:
+        # Deterministic evaluations repeat across axes (primary preset, all_eligible subset,
+        # primary seed, and anchor associations); normalize every option into a typed key so
+        # identical runs share one evaluation without relying on object memory addresses.
+        resolved_endpoint = cfg.primary_endpoint if endpoint is None else str(endpoint)
+        resolved_seed = cfg.primary_seed if outer_seed is None else int(outer_seed)
+        ds_key = _dataset_memo_key(subset_mode, ds, source_meta)
+        key = (
+            ds_key,
+            cfg,
+            resolved_endpoint,
+            resolved_seed,
+            bool(single_sample_downstream),
+            bool(allow_missing_outcome),
+            bool(compute_diagnostics),
+        )
         if key not in eval_memo:
-            eval_memo[key] = evaluate_nested_cohort(ds, cfg=cfg, **kwargs)
+            eval_memo[key] = evaluate_nested_cohort(
+                ds,
+                cfg=cfg,
+                endpoint=resolved_endpoint,
+                outer_seed=resolved_seed,
+                single_sample_downstream=single_sample_downstream,
+                allow_missing_outcome=allow_missing_outcome,
+                compute_diagnostics=compute_diagnostics,
+            )
         return eval_memo[key]
 
-    base_ds, base_meta = resolve_experiment_dataset(
-        use_synthetic=use_synthetic,
-        approve_cohort_evaluation=approve_cohort_evaluation,
-        clinical_master_path=clinical_master_path,
-        subset_mode="all_eligible",
-        compact_grid=compact_grid,
-        cfg=base_cfg,
-        readiness=raw_cfg["readiness"],
-    )
+    base_ds, base_meta = get_dataset("all_eligible")
 
     # 1. Covariate preset and subset mode sensitivity
     sens_rows: list[dict[str, Any]] = []
     for preset in COVARIATE_PRESETS:
         cfg_p = replace(base_cfg, covariate_preset=preset)
-        res_p = evaluate(base_ds, cfg_p)
+        res_p = evaluate("all_eligible", base_ds, base_meta, cfg_p)
         sens_rows.append(
             {
                 "sensitivity_axis": "covariate_preset",
@@ -110,17 +156,11 @@ def run_sensitivity_and_secondary(
         )
 
     for s_mode in SUBSET_MODES:
-        ds_sub, _ = resolve_experiment_dataset(
-            use_synthetic=use_synthetic,
-            approve_cohort_evaluation=approve_cohort_evaluation,
-            clinical_master_path=clinical_master_path,
-            subset_mode=s_mode,
-            compact_grid=compact_grid,
-            cfg=base_cfg,
-            readiness=raw_cfg["readiness"],
-        )
+        ds_sub, meta_sub = get_dataset(s_mode)
         res_sub = evaluate(
+            s_mode,
             ds_sub,
+            meta_sub,
             base_cfg,
             single_sample_downstream=(s_mode == "single_sample"),
         )
@@ -136,7 +176,7 @@ def run_sensitivity_and_secondary(
     # 2. Additional fixed outer partition seeds sensitivity (dependent folds, never selected for superiority)
     seed_rows: list[dict[str, Any]] = []
     for seed in (base_cfg.primary_seed, *base_cfg.sensitivity_seeds):
-        res_s = evaluate(base_ds, base_cfg, outer_seed=seed)
+        res_s = evaluate("all_eligible", base_ds, base_meta, base_cfg, outer_seed=seed)
         seed_rows.append(
             {
                 "outer_seed": int(seed),
@@ -150,7 +190,14 @@ def run_sensitivity_and_secondary(
     # Same eligible population and outer folds as the primary endpoint (design); a participant
     # missing this endpoint is left out of every fold's training and test error.
     for ep in base_cfg.secondary_endpoints:
-        res_ep = evaluate(base_ds, base_cfg, endpoint=ep, allow_missing_outcome=True)
+        res_ep = evaluate(
+            "all_eligible",
+            base_ds,
+            base_meta,
+            base_cfg,
+            endpoint=ep,
+            allow_missing_outcome=True,
+        )
         sec_rows.append(
             {
                 "endpoint": ep,
@@ -162,7 +209,7 @@ def run_sensitivity_and_secondary(
         )
 
     # 4. Continuous exploratory anchor associations
-    primary_eval = evaluate(base_ds, base_cfg)
+    primary_eval = evaluate("all_eligible", base_ds, base_meta, base_cfg)
     anchor_df = summarize_anchor_associations(
         base_ds,
         primary_eval,
@@ -185,7 +232,11 @@ def run_sensitivity_and_secondary(
         "sensitivity_and_secondary",
         config_path=config_path,
         cfg=base_cfg,
-        settings={"covariate_presets": list(COVARIATE_PRESETS), "subset_modes": list(SUBSET_MODES), "compact_grid": compact_grid},
+        settings={
+            "covariate_presets": list(COVARIATE_PRESETS),
+            "subset_modes": list(SUBSET_MODES),
+            "compact_grid": compact_grid,
+        },
         source_meta=base_meta,
     )
 
@@ -216,10 +267,8 @@ def main(argv: list[str] | None = None) -> None:
         compact_grid=args.compact_grid,
         config_path=args.config,
     )
-    for key, path in outputs.items():
-        print(f"[run_sensitivity_and_secondary] wrote {key}: {path}")
+    print_stage_outputs("run_sensitivity_and_secondary", outputs)
 
 
 if __name__ == "__main__":
     main()
-

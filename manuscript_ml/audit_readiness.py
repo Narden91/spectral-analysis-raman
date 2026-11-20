@@ -19,8 +19,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from manuscript_ml import (  # noqa: E402
+    add_common_stage_args,
     ensure_output_dir,
     load_manuscript_config,
+    print_stage_outputs,
     write_json_atomic,
     write_run_provenance,
 )
@@ -44,12 +46,13 @@ def run_readiness_audit(
     """Audit current measurement identities and joins without model fitting."""
     target_dir = ensure_output_dir(output_dir)
     cfg, raw_cfg = load_manuscript_config(config_path)
-    expected_verified = int(raw_cfg["readiness"]["expected_identity_verified"])
+    readiness_cfg = raw_cfg["readiness"]
+    expected_verified = int(readiness_cfg["expected_identity_verified"])
 
     master_path = Path(clinical_master_path)
     if master_path.is_file():
         _, clin_audit = load_clinical_master_verified(master_path)
-        clin_ready = clin_audit["stroke_identity_verified"] == expected_verified
+        clin_ready = clin_audit.get("stroke_identity_verified") == expected_verified
     else:
         clin_audit = {"status": "clinical_master_not_found", "path": str(master_path)}
         clin_ready = False
@@ -65,26 +68,31 @@ def run_readiness_audit(
 
     # Dry-run the cohort join (counts only, no model fit): file presence alone once hid a join that
     # returned zero participants.
-    expected_join = {k: int(v) for k, v in raw_cfg["readiness"]["expected_cohort_join"].items()}
-    cohort_join: dict[str, Any] = {"status": "not_run", "expected": expected_join}
+    join_status: str | None = "not_run"
+    observed_summary: dict[str, Any] | None = None
+    store_meta: dict[str, Any] = {}
     if clin_ready and store_manifest_exists:
         try:
             source = get_active_data_source() or resolve_data_source()
-            cohort_join.update(store_path=str(source.source_path), store_manifest_hash=source.manifest_hash)
+            store_meta["store_path"] = str(source.source_path)
+            store_meta["store_manifest_hash"] = source.manifest_hash
             join_ds, _ = load_paired_cohort_from_store(master_path, data_source=source, cfg=cfg)
-            observed = {k: int(join_ds.manifest_summary[k]) for k in expected_join}
-            cohort_join.update(
-                status="ok",
-                observed=observed,
-                exclusion_reasons=dict(Counter(e["reason"] for e in join_ds.exclusions)),
-            )
+            observed_summary = dict(join_ds.manifest_summary)
+            store_meta["exclusion_reasons"] = dict(Counter(e["reason"] for e in join_ds.exclusions))
+            join_status = None
         except (ValueError, RuntimeError) as exc:
             # RuntimeError: the store failed validation in resolve_data_source.
-            cohort_join.update(status="failed", error=str(exc))
+            join_status = "failed"
+            store_meta["error"] = str(exc)
 
     measured_readiness = evaluate_cohort_readiness(
-        clin_audit, cohort_join.get("observed", {}), raw_cfg["readiness"],
+        clin_audit,
+        observed_summary,
+        readiness_cfg,
+        join_status=join_status,
+        store_meta=store_meta,
     )
+    cohort_join = measured_readiness["cohort_join"]
 
     n_pca = len(cfg.pca_dimensions)
     n_lam = len(cfg.lambda_grid)
@@ -99,9 +107,9 @@ def run_readiness_audit(
             "clinical_master_present": master_path.is_file(),
             "clinical_audit": clin_audit,
             "preprocessed_store_present": store_manifest_exists,
-            "expected_identity_verified": expected_verified,
-            "identity_verified_matches_expected": bool(clin_ready),
-            "ready_for_cohort_join": cohort_join.get("status") == "ok",
+            "expected_identity_verified": measured_readiness["expected_identity_verified"],
+            "identity_verified_matches_expected": measured_readiness["identity_verified_matches_expected"],
+            "ready_for_cohort_join": bool(cohort_join["status"] == "ok"),
             "cohort_join": cohort_join,
             "ready_for_cohort_evaluation": measured_readiness["ready_for_cohort_evaluation"],
         },
@@ -141,10 +149,9 @@ def run_readiness_audit(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit readiness gates and estimate computational budget.")
     parser.add_argument("--clinical-master", type=str, default=str(PROJECT_ROOT / "data" / "clinical_master.csv"))
-    parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--planned-bootstraps", type=int, default=2000)
     parser.add_argument("--planned-sim-reps", type=int, default=1000)
-    parser.add_argument("--config", type=str, default=None, help="Experiment settings YAML.")
+    add_common_stage_args(parser)
     return parser.parse_args(argv)
 
 
@@ -157,10 +164,8 @@ def main(argv: list[str] | None = None) -> None:
         n_planned_sim_reps=args.planned_sim_reps,
         config_path=args.config,
     )
-    for key, path in outputs.items():
-        print(f"[audit_readiness] wrote {key}: {path}")
+    print_stage_outputs("audit_readiness", outputs)
 
 
 if __name__ == "__main__":
     main()
-
