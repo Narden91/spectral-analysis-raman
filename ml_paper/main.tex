@@ -43,7 +43,7 @@
 }
 
 \begin{abstract}
-Raman spectra of size-exclusion-chromatography (SEC)-isolated plasma extracellular-vesicle (EV)-enriched fractions contain composite particle signals. We specify a retrospective protocol testing whether paired-sample linear representations improve held-out prediction of recorded low-density lipoprotein cholesterol (LDL-C). Covariate-only ridge regression uses age, sex, chronic statin use, and a prespecified sample-label trend; spectral comparators use fixed bands, principal components, and partial least squares. The recorded readiness audit retains 92 stroke participants: 88 with two eligible technical samples and 4 with one. Five outer and three inner participant folds confine fitting and selection to training data. Agreement is assessed separately for full predictions and spectral contributions because shared covariates can inflate repeatability. Complete-procedure bootstrap intervals require simulation validation. Cohort prediction and validation campaigns are pending; engineering checks establish neither predictive benefit nor calibrated coverage. Eventual conclusions concern normalized spectral shape under the observed protocol and cannot identify contributing particle classes.
+Raman spectra of size-exclusion-chromatography (SEC)-isolated plasma extracellular-vesicle (EV)-enriched fractions contain composite particle signals. We specify a retrospective protocol testing whether paired-sample linear representations improve held-out prediction of recorded low-density lipoprotein cholesterol (LDL-C). Covariate-only ridge regression uses age, sex, chronic statin use, and a prespecified sample-label trend; spectral comparators use fixed bands, principal components, and partial least squares. The recorded readiness audit retains 92 stroke participants: 88 with two eligible technical samples and 4 with one. Five outer and three inner participant folds confine fitting and selection to training data. Agreement is assessed separately for full predictions and spectral contributions across both paired and established spectral comparators because shared covariates can inflate repeatability. Complete-procedure centered studentized participant-multiplicity bootstrap-$t$ intervals require full cohort-grid simulation validation. Cohort prediction and validation campaigns are pending; engineering checks establish neither predictive benefit nor calibrated coverage. Eventual conclusions concern normalized spectral shape under the observed protocol and cannot identify contributing particle classes.
 \end{abstract}
 
 \begin{keyword}
@@ -55,12 +55,12 @@ Raman spectroscopy \sep EV-enriched fractions \sep ischemic stroke \sep LDL-C \s
 \section{Introduction}
 \label{sec:introduction}
 
-Circulating extracellular-vesicle (EV)-enriched fractions isolated from human plasma by size-exclusion chromatography (SEC) contain vesicles alongside lipoproteins and other co-isolated plasma components \cite{welsh2024, koster2021}. Raman spectroscopy measures overlapping vibrational contributions associated with proteins, nucleic acids, carotenoids, and lipids \cite{liu2025, czamara2015, bonizzi2025}. These assignments motivate evaluation against recorded clinical lipid measurements, but they do not identify the particles responsible for a spectral feature.
+Circulating extracellular-vesicle (EV)-enriched fractions isolated from human plasma by size-exclusion chromatography (SEC) contain vesicles alongside lipoproteins and other co-isolated plasma components \cite{welsh2024, koster2021}. Raman spectroscopy measures overlapping vibrational contributions associated with proteins, nucleic acids, carotenoids, and lipids \cite{liu2025, czamara2015, bonizzi2025, gualerzi2019}. These assignments motivate evaluation against recorded clinical lipid measurements, but they do not identify the particles responsible for a spectral feature.
 
 A central open question is whether participant-level Raman variation in plasma EV-enriched fractions reflects circulating lipid measurements recorded in the clinical laboratory, specifically low-density lipoprotein cholesterol (LDL-C). Raman and partial least-squares (PLS) modeling of circulating lipids is established in whole serum \cite{silveira2017}, and Raman profiling of extracellular-particle fractions has recently been compared with biochemical lipid and protein assays \cite{bonizzi2025}. However, evaluating incremental lipid information in dried-droplet Raman maps of SEC-isolated fractions requires addressing three methodological challenges:
 \begin{enumerate}
     \item \textbf{Hierarchical technical replication and unequal sample counts:} Spectra are acquired across multiple pixels within multiple spatial maps per dried technical sample, with most stroke participants contributing two technical samples from a single blood collection and a minority contributing one. Collapsing all maps into an unweighted participant median discards within-participant disagreement information, whereas treating samples or maps as independent rows induces pseudoreplication \cite{hurlbert1984, lazic2010}.
-    \item \textbf{Separation of spectral repeatability from shared clinical covariates:} When clinical covariates ($C$) and spectral features ($Z$) are combined in a predictive model, full-model predictions across technical repeats can exhibit high agreement solely because $C$ is identical across repeats of the same participant. Reliability must therefore be quantified specifically on the isolated spectral contribution $s_{is} = \widehat{\beta}_Z^\top z_{is}$ using an explicit absolute-agreement intraclass correlation model \cite{koo2016, koo2017erratum} alongside multivariate discriminability \cite{bridgeford2021}.
+    \item \textbf{Separation of spectral repeatability from shared clinical covariates:} When clinical covariates ($C$) and spectral features ($Z$) are combined in a predictive model, full-model predictions across technical repeats can exhibit high agreement solely because $C$ is identical across repeats of the same participant. Reliability must therefore be quantified specifically on the isolated spectral contribution $s_{is} = \widehat{\beta}_Z^\top \tilde{z}_{is}$ using an explicit absolute-agreement intraclass correlation model \cite{koo2016, koo2017erratum} alongside spectral contribution dispersion and multivariate discriminability \cite{bridgeford2021}.
     \item \textbf{Benchmarking against established spectral transformations and covariate nonlinearity:} Generalized eigenvalue decompositions that order spectral directions by signal-to-noise or between-to-within disagreement belong to the established noise-fraction family \cite{green1988}. Claiming a predictive or methodological contribution requires nested cross-validation against covariate-only ridge regression and established spectral comparators (curated Raman bands, block-scaled PCA, and PLS regression) as well as synthetic verification against nonlinear covariate proxy effects \cite{bates2024, bengio2004}.
 \end{enumerate}
 
@@ -74,7 +74,7 @@ We specify a repeat-aware linear pipeline to test whether paired technical-sampl
 
 Stroke participants were enrolled prospectively in the IBioStroke study at the Comprehensive Stroke Center, University Hospital in Krakow, Poland, between July 18, 2020, and December 14, 2022 \cite{deccwiek2025}. The protocol was approved by the Jagiellonian University Ethical Committee (approval no.\ 1072.6120.118.2020), and all participants provided written informed consent. Eligibility required age $\ge 18$~years and acute ischemic stroke meeting the World Health Organization definition; exclusions were pre-stroke modified Rankin Scale ($\mathrm{mRS}) > 2$, pre-stroke dementia or depression, and concomitant chronic neurodegenerative, autoimmune, or malignant disease.
 
-Although 97 stroke participants and 50 controls have raw spectral folders, participant eligibility for the present study is governed by a verified standalone clinical master table. Five stroke records carry an explicit folder-versus-clinical sex discrepancy (\texttt{SEX\_FOLDER\_CONFLICT}) and are excluded rather than silently relinked, leaving $N = 92$ provisionally linkable stroke participants. Of these, 90 have two technical sample labels and 2 have one. A technical sample is eligible only when each spectral block retains at least two measurement maps after pixel-level quality control. For one sample of each of two participants, quality control rejected all pixels in two of the three C--H stretching maps, so the analysis includes 88 participants with two eligible technical samples and 4 with one. A matched link status alone does not establish identity, so the remaining linkage flags are inspected before cohort evaluation. Control participants lack recorded lipid panels and have only one technical sample per participant; they are excluded from the primary model.
+Although 97 stroke participants and 50 controls have raw spectral folders, participant eligibility for the present study is governed by a verified standalone clinical master table paired with its column dictionary. Programmatic linkage verification requires \texttt{spectral\_link\_status = matched} and screens all four explicit identity-conflict flags (\texttt{SEX\_\allowbreak{}FOLDER\_\allowbreak{}CONFLICT}, \texttt{SPECTRAL\_\allowbreak{}FILENAME\_\allowbreak{}FOLDER\_\allowbreak{}CONFLICT}, \texttt{MULTIPLE\_\allowbreak{}SEX\_\allowbreak{}FOLDERS}, and \texttt{POSSIBLE\_\allowbreak{}SPECTRA\_\allowbreak{}IN\_\allowbreak{}ANOTHER\_\allowbreak{}FOLDER}); the readiness audit additionally enforces exact column-order parity against the clinical dictionary and Schema~v5 store manifest hashes. Five stroke records carry \texttt{SEX\_FOLDER\_CONFLICT} and are excluded rather than silently relinked, leaving $N = 92$ identity-verified stroke participants (zero other identity-conflict flags present). Of these, 90 have two technical sample labels and 2 have one. A technical sample is eligible only when each spectral block retains at least two measurement maps after pixel-level quality control. For one sample of each of two participants, quality control rejected all pixels in two of the three C--H stretching maps, so the analysis includes 88 participants with two eligible technical samples and 4 with one (180 eligible technical samples). Control participants lack recorded lipid panels and have only one technical sample per participant; they are excluded from the primary model.
 
 For each eligible participant $i$, measurements follow the four-level hierarchy
 \[
@@ -105,10 +105,10 @@ Raw pixel spectra underwent the frozen preprocessing pipeline (\Cref{tab:preproc
 Processing Stage & Locked Specification \\
 \midrule
 Dead / saturated pixel screen & Minimum spectral SD: $1.0$; saturation ceiling: $65{,}000$ \\
-Positive cosmic-ray correction & Spatial-neighbor $z > 8$; max width: 3 channels; 8 neighbors; max corrected fraction: $0.02$ \\
+Positive cosmic-ray correction & Spatial-neighbor $z > 8$; local window: $\pm 10$ channels (21-channel kernel); max width: 3 channels; 8 neighbors; max corrected fraction: $0.02$ \\
 Edge trim and interpolation & $\approx 15~\si{\per\centi\metre}$ trim; linear interpolation onto 734--1788 and 2451--3197~\si{\per\centi\metre} ($1~\si{\per\centi\metre}$ step, no extrapolation) \\
-Baseline correction & arPLS ($\lambda = 10^6$, $p = 0.01$, max 100 iterations, tolerance $0.001$); signed residuals retained \\
-Quality-control SNR gate & Minimum $\mathrm{SNR} = 5$; at least 4 retained pixels per map; at least 2 maps per sample and block \\
+Baseline correction & arPLS ($\lambda = 10^6$, max 100 iterations, tolerance $0.001$); signed residuals retained \\
+Quality-control SNR gate & Minimum $\mathrm{SNR} = 5$ (anchor windows 995--1015, 1435--1470, 1630--1680~\si{\per\centi\metre} for fingerprint and 2840--2975~\si{\per\centi\metre} for C--H; peak window: 5 channels; noise tail: 20 channels); at least 4 retained pixels per map; at least 2 maps per sample and block \\
 Smoothing & Savitzky--Golay order 2 (fingerprint: 7 channels; C--H: 9 channels) \\
 Block normalization & Fingerprint: Standard Normal Variate (SNV); C--H: trapezoidal area \\
 \bottomrule
@@ -118,21 +118,21 @@ Block normalization & Fingerprint: Standard Normal Variate (SNV); C--H: trapezoi
 \subsection{Primary endpoint, covariates, and participant-weighted preprocessing}
 \label{subsec:endpoint}
 
-The primary comparison evaluates whether adding the paired linear spectral representation ($Z$) to locked clinical and technical covariates ($C$) reduces held-out squared error for recorded LDL-C ($y_i$). The source dictionary labels the lipid scale as assumed $\si{\milli\mole\per\litre}$; units, assay definition, and the relationship between clinical and spectral blood collections require confirmation before a biological interpretation. No values are converted or recalculated. The primary statistic is
+The primary comparison evaluates whether adding the paired linear spectral representation ($Z$) to locked clinical and technical covariates ($C$) reduces held-out squared error for recorded LDL-C ($y_i$). The source dictionary labels the lipid scale as assumed $\si{\milli\mole\per\litre}$; units, assay definition, and the relationship between clinical and spectral blood collections require confirmation before a biological interpretation. No values are converted or recalculated. With normalized participant weights $\tilde{\mu}_i = \mu_i / \sum_{j=1}^n \mu_j$ (where $\mu_i = 1$ in the unweighted primary evaluation, $\mu_i$ equals participant resampling multiplicity under bootstrap refits, and $\mu_i = 0$ for participants missing a secondary outcome), the primary statistic is
 \begin{equation}
-\widehat{\Delta} = \frac{1}{n} \sum_{i=1}^{n} \left[ (y_i - \widehat{y}_{C,i})^2 - (y_i - \widehat{y}_{C+Z,i})^2 \right].
+\widehat{\Delta} = \sum_{i=1}^{n} \tilde{\mu}_i \left[ (y_i - \widehat{y}_{C,i})^2 - (y_i - \widehat{y}_{C+Z,i})^2 \right].
 \label{eq:delta_mse}
 \end{equation}
 Positive $\widehat{\Delta}$ favors adding spectra to the specified covariate procedure. Report the difference in squared LDL-C units, relative reduction $\widehat{\Delta}/\mathrm{MSE}_C$ when the denominator is positive, RMSE, MAE, and descriptive calibration intercept and slope. The target is the difference in expected prediction error between the two training procedures at the outer-training size, approximately four-fifths of the cohort, rather than the risk of a model trained on all participants. Spectra can improve a linear covariate model by proxying omitted nonlinear covariate effects; improvement would not establish general conditional association or removal of confounding.
 
-The primary covariate vector $C_i$ comprises age (years), sex, chronic pre-stroke statin use, and the participant-average parsed numeric sample label as a declared nuisance proxy. Its association with physical processing order or session has not been established. Maps acquired in the two acquisition modes are pooled as equivalent. Median imputation, missingness indicators, and zero-mean unit-variance standardization are fitted strictly inside each training division.
+The primary covariate vector $C_i$ comprises age (years), sex (encoded as \texttt{sex\_female}), chronic pre-stroke statin use, and the participant-average parsed numeric sample label as a declared nuisance proxy (with \texttt{smoking\_status} indicators added in the pre-event risk-factor sensitivity preset). Its association with physical processing order or session has not been established. Maps acquired in the two acquisition modes are pooled as equivalent. Training-only median imputation, missingness indicators, constant-column screening ($\mathrm{ptp} \le 10^{-12}$, retaining \texttt{\{col\}\_\_missing} when a constant observed numeric column contains missing values), and zero-mean unit-variance standardization (variance floor $10^{-12}$) are fitted strictly inside each training division.
 
 To ensure equal population weight per biological participant during spectral preprocessing, training participant $i$ with multiplicity $\mu_i$ (where $\mu_i = 1$ in the base evaluation) and $m_i \in \{1, 2\}$ eligible samples assigns weight
 \begin{equation}
 w_{is} = \frac{\mu_i}{N_{\text{eff}} m_i}, \qquad N_{\text{eff}} = \sum_{i \in \text{train}} \mu_i,
 \label{eq:sample_weights}
 \end{equation}
-to each sample $s$. Within each training division, block $b \in \{1300, 2850\}$ is centered by its $w_{is}$-weighted mean and scaled by $1/\sqrt{\lambda_1^{(b)}}$, where $\lambda_1^{(b)}$ is the leading eigenvalue of the weighted sample covariance of block $b$ (Multiple Factor Analysis convention). The scaled blocks are concatenated and projected onto the top $k \in \{5, 10, 15\}$ weighted principal components (capped by numerical rank and distinct paired training participants minus one).
+to each sample $s$. Within each training division, block $b \in \{1300, 2850\}$ is centered by its $w_{is}$-weighted mean and scaled by $1/\sqrt{\lambda_1^{(b)}}$, where $\lambda_1^{(b)}$ is the leading eigenvalue of the Bessel-corrected weighted sample covariance $\frac{M_{\text{eff}}}{M_{\text{eff}} - 1}\sum_{i,s} w_{is} (x_{is}^{(b)} - \bar{x}^{(b)})(x_{is}^{(b)} - \bar{x}^{(b)})^\top$ with $M_{\text{eff}} = \sum_{i \in \text{train}} \mu_i m_i$ (Multiple Factor Analysis convention). The scaled blocks are concatenated and projected onto the top $k \in \{5, 10, 15\}$ weighted principal components, with candidate $k$ capped jointly across outer and inner training divisions by numerical rank and distinct paired training participants minus one.
 
 \subsection{Regularized paired signal-to-disagreement representation and comparators}
 \label{subsec:eigensolver}
@@ -141,24 +141,24 @@ Let $x_{iA}, x_{iB} \in \mathbb{R}^k$ denote the $k$-dimensional weighted MFA-PC
 \begin{equation}
 \begin{aligned}
 W &= \frac{1}{2 n_p} \sum_{i \in \text{paired}} \mu_i (x_{iA} - x_{iB})(x_{iA} - x_{iB})^\top, \\
-T &= \frac{1}{n_p - 1} \sum_{i \in \text{paired}} \mu_i (u_i - \bar{u})(u_i - \bar{u})^\top.
+T &= \frac{1}{n_p - 1} \sum_{i \in \text{paired}} \mu_i (u_i - \bar{u})(u_i - \bar{u})^\top,
 \end{aligned}
 \label{eq:W_and_T}
 \end{equation}
-where $\bar{u} = \frac{1}{n_p}\sum_i \mu_i u_i$. Leaving $x_{iA} - x_{iB}$ uncentered in $W$ penalizes systematic $A/B$ shifts alongside random sample disagreement. We solve the symmetric generalized eigenvalue problem
+where $\bar{u} = \frac{1}{n_p}\sum_{i \in \text{paired}} \mu_i u_i$. Leaving $x_{iA} - x_{iB}$ uncentered in $W$ penalizes systematic $A/B$ shifts alongside random sample disagreement. We solve the symmetric generalized eigenvalue problem
 \begin{equation}
 T v_j = \rho_j (W + \lambda \tau I_k) v_j, \qquad \tau = \frac{\operatorname{tr}(T)}{k},
 \label{eq:gep}
 \end{equation}
-for $\lambda \in \{0.001, 0.01, 0.1, 1, 10\}$, ordering directions by decreasing $\rho_1 \ge \rho_2 \ge \dots \ge \rho_k$, normalizing $v_j^\top (W + \lambda \tau I_k) v_j = 1$, fixing signs deterministically from training loadings, and retaining $r \in \{1, 2, 3\}$ directions ($V_r = [v_1, \dots, v_r]$). Participant-level representations $z_i = \frac{1}{m_i}\sum_s V_r^\top x_{is}$ are standardized on training data and combined with standardized $C_i$ in a ridge regression model optimizing $\frac{1}{N_{\text{eff}}}\sum_i \mu_i (y_i - \beta_0 - C_i^\top \beta_C - z_i^\top \beta_Z)^2 + \alpha (\|\beta_C\|^2 + \|\beta_Z\|^2)$ over $\alpha \in \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10, 10^2, 10^3\}$.
+for $\lambda \in \{0.001, 0.01, 0.1, 1, 10\}$, ordering directions by decreasing $\rho_1 \ge \rho_2 \ge \dots \ge \rho_k$, normalizing $v_j^\top (W + \lambda \tau I_k) v_j = 1$, fixing signs deterministically from training loadings, and retaining $r \in \{1, 2, 3\}$ directions ($V_r = [v_1, \dots, v_r]$). Participant-level representations $z_i = \frac{1}{m_i}\sum_s V_r^\top x_{is}$ are standardized on training data to $\tilde{z}_i$ and combined with standardized $C_i$ in a ridge regression model optimizing $\frac{1}{N_{\text{eff}}}\sum_i \mu_i (y_i - \beta_0 - C_i^\top \beta_C - \tilde{z}_i^\top \beta_Z)^2 + \alpha (\|\beta_C\|^2 + \|\beta_Z\|^2)$ over $\alpha \in \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10, 10^2, 10^3\}$.
 
 On identical participant divisions, we evaluate:
 \begin{enumerate}
     \item \textbf{Covariate-only ridge (\texttt{covariate\_ridge}):} Ridge regression on $C_i$ alone (primary baseline).
     \item \textbf{Fixed 21-band summaries plus ridge (\texttt{fixed\_band\_ridge}):} Mean intensities across the 21 pre-specified Raman windows (\Cref{tab:raman_bands}) plus $C_i$.
     \item \textbf{Block-scaled PCA plus ridge (\texttt{pca\_ridge}):} Same weighted MFA-PCA coordinates ($k \in \{5, 10, 15\}$) without the pair-disagreement step, plus $C_i$.
-    \item \textbf{PLS regression (\texttt{pls\_regression}):} Conventional 1D PLS regression ($c \in \{1, \dots, 5\}$ components) on concatenated standardized $C_i$ and participant-average block-scaled spectra.
-    \item \textbf{Paired linear representation plus ridge (\texttt{paired\_linear\_ridge}):} Designated primary spectral procedure, plus secondary ablation on the 21 fixed bands (\texttt{band\_paired\_ridge}).
+    \item \textbf{PLS regression (\texttt{pls\_regression}):} Multiplicity-weighted NIPALS 1D PLS regression ($c \in \{1, \dots, 5\}$ components, capped at $n_{\text{active}} - 2$) on concatenated standardized $C_i$ and participant-average block-scaled spectra.
+    \item \textbf{Paired linear representation plus ridge (\texttt{paired\_linear\_ridge}):} Designated primary spectral procedure, plus a secondary 21-band ablation (\texttt{band\_paired\_ridge}), standardized on outer-training participant-weighted moments so SNV fingerprint and area-normalized C--H bands enter on commensurate variance; \texttt{band\_paired\_ridge} is not tuned separately in inner CV and reuses $(\lambda, r, \alpha)$ selected for MFA-PCA \texttt{paired\_linear\_ridge}.
 \end{enumerate}
 
 \begin{table}[ht]
@@ -202,18 +202,24 @@ The fixed windows are taken from the existing software registry, not selected by
 
 Evaluation uses a locked 5-fold outer participant partition and 3-fold inner selection partition stratified by pair availability (\texttt{primary\_seed = 42}; sensitivity seeds \texttt{101, 202, 303}). All samples, maps, and blocks of a participant remain in the same division. Inner selection minimizes participant-weighted validation MSE with a deterministic tie-breaking hierarchy favoring fewer retained directions ($r$), fewer PCA dimensions ($k$), and stronger regularization ($\lambda$, then $\alpha$). For a single method comparison against established comparators, the comparator with the lowest inner validation MSE is selected within each outer fold (\texttt{strongest\_comparator}).
 
-The candidate uncertainty procedure is a 95\% percentile interval from 2,000 complete participant-bootstrap refits. Each original participant keeps the same outer and inner membership; multiplicity weights preprocessing, pair covariance, fitting, inner validation loss, and held-out error aggregation. If any resampled dataset cannot yield the locked comparison, the dataset interval fails rather than discarding that draw. Failed dataset intervals count as noncoverage in simulation; coverage among successful intervals and failure rate are also reported.
+The candidate uncertainty procedure is a centered full-procedure studentized participant-multiplicity bootstrap-$t$ interval (\texttt{interval\_method = studentized\_t}) from 2,000 complete participant-bootstrap refits (with raw percentile limits reported alongside for transparency). Each original participant keeps the same outer and inner membership; multiplicity $\mu_i^{*b}$ weights preprocessing, pair covariance, fitting, inner validation loss, and held-out error aggregation. For each contrast (covariate-only minus paired linear, inner-selected comparator minus paired linear, and covariate-only minus inner-selected comparator), each draw computes the weighted out-of-fold loss-difference mean $\widehat{\Delta}^{*b} = \sum_i \tilde{\mu}_i^{*b} d_i^{*b}$ and within-draw dispersion $\hat{s}^{*b} = \sqrt{\sum_i \tilde{\mu}_i^{*b}(d_i^{*b} - \widehat{\Delta}^{*b})^2}$, forming the centered pivot and inverted 95\% interval
+\begin{equation}
+t^{*b} = \frac{\widehat{\Delta}^{*b} - \overline{\widehat{\Delta}^*}}{\hat{s}^{*b}}, \qquad
+\mathrm{CI}_{95\%} = \left[\widehat{\Delta} - q_{0.975}(t^*)\,\hat{s}_0,\;\; \widehat{\Delta} - q_{0.025}(t^*)\,\hat{s}_0\right],
+\label{eq:studentized_t}
+\end{equation}
+where $\widehat{\Delta}$ and $\hat{s}_0$ are the base-draw point estimate and dispersion. If any resampled dataset cannot yield the locked comparison or has degenerate dispersion ($\hat{s}_0 \le 10^{-12}$ or $\hat{s}^{*b} \le 10^{-12}$), the dataset interval fails rather than discarding that draw. Failed dataset intervals count as noncoverage in simulation; coverage among successful intervals, failure rate, distinct participant counts, Maritz--Jarrett quantile endpoint Monte Carlo SEs, and raw draw arrays (\path{bootstrap_draws.npz}) are archived.
 
 The design requires at least 1,000 validation datasets for each prespecified core calibration scenario, with development and validation seeds separated. The provisional feasibility thresholds are a 95\% Wilson lower bound of at least 0.925 on unconditional coverage and a dataset interval failure rate below 1\%. A validation run needs at least 48 datasets even to attain this bound under perfect coverage; this minimum is not the planned validation sample size or evidence that the procedure is calibrated. Candidate intervals remain descriptive until the required validation is complete \cite{bates2024, bengio2004}.
 
-The current calibration implementation evaluates one configured signal-strength setting, separately from the scenario performance suite. It estimates a common risk-difference target by averaging the replicate outer-fold models' errors on one shared independent synthetic test cohort. Its reported target Monte Carlo standard error measures variation across training replicates conditional on that test cohort. It does not quantify uncertainty from the finite test cohort, and estimating the target from the same replicates also limits an exact binomial interpretation of the coverage count. Coverage across failure-mode scenarios and target-estimation error therefore remain validation requirements; a passing flag from this implementation alone does not meet the full design.
+The calibration suite supports single-setting, multi-scenario (\texttt{--calibrate-\allowbreak{}all-\allowbreak{}scenarios}), and minimum-detectable-effect (MDE) curve (\texttt{--run-\allowbreak{}mde-\allowbreak{}curve}, signal-strength grid $\{0.0, 0.25, 0.5, 0.75, 1.0\}$) validation across 17 configured synthetic scenarios (10 core scenarios plus 7 stress regimes covering high-dimensional technical nuisance, strong shared preparation, correlated and unequal $A/B$ sample errors, nonlinear spectral signal, correlated within-sample maps, and covariate missingness) for both the primary comparison (covariate-only minus paired linear) and the methodological comparison (inner-selected comparator minus paired linear). It estimates each common risk-difference target by averaging the replicate outer-fold models' errors on one shared independent synthetic test cohort of $n_{\text{test}} = 25{,}000$ participants with matched single-sample proportion, and reports crossed two-way random-effects standard errors separating training-replicate variation (\texttt{target\_\allowbreak{}monte\_\allowbreak{}carlo\_\allowbreak{}se}), finite test-cohort variation (\texttt{target\_\allowbreak{}test\_\allowbreak{}cohort\_\allowbreak{}se}), and total target uncertainty (\texttt{target\_\allowbreak{}total\_\allowbreak{}se}), together with worst-case coverage across the target's 95\% uncertainty interval (\texttt{target\_\allowbreak{}sensitivity\_\allowbreak{}min\_\allowbreak{}coverage}) and detection rate. Development checks on 20 November 2026 ($n = 92$, $n_{\text{single}} = 4$, 96 replicates $\times$ 250 bootstraps, $n_{\text{test}} = 25{,}000$, compact grid) showed that the earlier raw percentile bootstrap suffered right-tail undercoverage (83.3--85.4\%) on \texttt{nonlinear\_\allowbreak{}proxy\_\allowbreak{}linear\_\allowbreak{}covariates} and conservative overcoverage (100\%, 1.88--2.65$\times$ SD ratio) on the comparator contrast, whereas centered studentized-$t$ achieved 96.9--97.9\% primary coverage on linear-signal, no-association, $A/B$-shift, and high-dimensional-nuisance scenarios (92.7\%, 89/96 at $R = 96$ on \texttt{nonlinear\_\allowbreak{}proxy\_\allowbreak{}linear\_\allowbreak{}covariates}, rising to 96.1\%, 246/256, Wilson lower 0.930, in a follow-up $R = 256$ development check) and 97.9--100.0\% comparator coverage with zero failures and 1.20--1.57$\times$ comparator SD ratios (plus 0.0\% failures across the remaining six stress regimes at $R = 48$). Because coverage indicators still share an estimated target across replicates, exact binomial interpretation of the Wilson summary remains approximate, and the full 1,000-repetition validation-seed campaign on the $1~\si{\per\centi\metre}$ cohort grid remains pending; development checks alone do not meet the full design until that campaign completes.
 
-Within each outer fold, repeatability across paired test samples ($A$ and $B$) is quantified for both full predictions ($\widehat{y}_{iA}, \widehat{y}_{iB}$) and isolated spectral contributions ($s_{is} = \widehat{\beta}_Z^\top \tilde{z}_{is}$) using the two-way mixed-effects, single-measure, absolute-agreement intraclass correlation \cite{koo2016, koo2017erratum}:
+Within each outer fold, repeatability across paired test samples ($A$ and $B$) is quantified for both full predictions ($\widehat{y}_{iA}, \widehat{y}_{iB}$) and isolated spectral contributions ($s_{is} = \widehat{\beta}_Z^\top \tilde{z}_{is}$) across \texttt{paired\_linear\_ridge}, \texttt{fixed\_band\_ridge}, \texttt{pca\_ridge}, \texttt{pls\_regression}, and \texttt{strongest\_comparator} using the two-way mixed-effects, single-measure, absolute-agreement intraclass correlation \cite{koo2016, koo2017erratum}:
 \begin{equation}
 \mathrm{ICC}(A, 1) = \frac{\mathrm{MS}_R - \mathrm{MS}_E}{\mathrm{MS}_R + (k_{\text{pos}} - 1)\mathrm{MS}_E + \frac{k_{\text{pos}}}{n_{\text{pair}}}(\mathrm{MS}_C - \mathrm{MS}_E)}, \qquad k_{\text{pos}} = 2,
 \label{eq:icc_a1}
 \end{equation}
-retaining negative ICC estimates and reporting fold-specific paired counts, alongside mean paired difference and root mean squared paired difference ($\mathrm{RMSD}$), Bridgeford discriminability \cite{bridgeford2021}, and bidirectional ($A \leftrightarrow B$) top-1 retrieval accuracy. ICCs from different fitted fold models are not pooled; single-sample agreement is distinct from agreement of a two-sample average. Fold subspaces are compared by mapping directions back to the 1,802 canonical spectral channels, orthonormalizing under the equal-block, equal-channel metric ($w_b = \frac{1}{2 p_b}$), and computing pairwise principal angles.
+retaining negative ICC estimates and reporting fold-specific paired counts, ANOVA mean squares ($\mathrm{MS}_R, \mathrm{MS}_C, \mathrm{MS}_E$), spectral contribution dispersion ($\mathrm{SD}(s_i)$) and variance share $\mathrm{Var}(s_i)/\mathrm{Var}(\widehat{y}_i)$ (so strong ridge shrinkage cannot masquerade as meaningful scale-invariant ICC), mean paired difference and root mean squared paired difference ($\mathrm{RMSD}$), Bridgeford discriminability \cite{bridgeford2021}, and bidirectional ($A \leftrightarrow B$) top-1 retrieval accuracy under Euclidean distance with fractional tie credit ($1/t$) for global candidates and local rank-neighbor windows ($|\mathrm{rank}_i - \mathrm{rank}_j| \le 5$ on participant-mean parsed labels among pairs with both labels finite). ICCs from different fitted fold models are not pooled; single-sample agreement is distinct from agreement of a two-sample average. Fold subspaces of both \texttt{paired\_linear\_ridge} and \texttt{pca\_ridge} are mapped back to the 1,802 canonical spectral channels, orthonormalized under the equal-block, equal-channel metric ($w_b = \frac{1}{2 p_b}$), and compared via pairwise individual principal angles ($\theta_1, \theta_2, \theta_3$); fold-specific effective canonical spectral weight vectors are exported in \path{fold_spectral_weights.csv}.
 
 \section{Readiness evidence and planned results}
 \label{sec:results}
@@ -221,27 +227,51 @@ retaining negative ICC estimates and reporting fold-specific paired counts, alon
 \subsection{Cohort eligibility and synthetic calibration}
 \label{subsec:results_calibration}
 
-The 9 November 2026 readiness evidence recorded in the repository reports 92 eligible participants, 88 paired and 4 single-sample, totaling 180 eligible samples. These counts are carried forward from that audit and were not recalculated for this manuscript revision. Numerical implementation checks used the real spectra, covariates, and folds with seeded dummy outcomes; they produced no cohort lipid result. Simulation calibration, primary prediction, and sensitivity results remain pending. Tables below specify reporting fields and contain no estimated study effects.
+The 20 November 2026 readiness audit confirms 92 identity-verified stroke participants (88 paired and 4 single-sample, totaling 180 eligible samples), exact 82-column parity between \path{clinical_master.csv} and \path{clinical_master_dictionary.csv}, and a verified Schema~v5 preprocessed store join without fitting models on clinical outcomes. Numerical parity checks used the real spectra, covariates, and folds with seeded dummy outcomes; they produced no cohort lipid result. Validation-seed simulation calibration on the $1~\si{\per\centi\metre}$ cohort grid, primary LDL-C prediction, and sensitivity analyses remain pending. Tables below specify the exact reporting schema populated deterministically by \path{manuscript_ml/build_manuscript_artifacts.py} and contain no estimated cohort effects.
 
 \begin{table}[ht]
 \centering
-\caption{Planned scenario-performance summary. Coverage, interval width, bias, and failures require a separate calibration report for every core scenario; scenario point estimates alone do not assess coverage. All configured scenarios are reported at each planned participant count (60, 92, 150); entries are pending.}
+\caption{Planned scenario-performance summary (\texttt{simulation\_scenarios\_summary.csv}). All 17 configured scenarios (10 core scenarios plus 7 stress regimes) are evaluated at each planned participant count ($N \in \{60, 92, 150\}$) on the $1~\si{\per\centi\metre}$ cohort grid; entries are pending.}
 \label{tab:synthetic_scenarios}
-\small
-\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}X c c c c@{}}
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}X c l c c c c@{}}
 \toprule
-Scenario & Covariate Preset & $\widehat{\Delta}_{\text{paired}}$ & $\widehat{\Delta}_{\text{vs comp}}$ & Spectral $\mathrm{ICC}(A,1)$ \\
+Scenario & $N$ & Preset & $\widehat{\Delta}_{\text{pair}}$ & $\widehat{\Delta}_{\text{comp}}$ & ICC & $R^2$ \\
 \midrule
-Linear biological signal & Primary & Pending & Pending & Pending \\
-No-association reference & Primary & Pending & Pending & Pending \\
-Nonlinear $\text{age}^2$ proxy & Primary (linear $C$) & Pending & Pending & Pending \\
-Nonlinear $\text{age}^2$ proxy & Quadratic age \& label & Pending & Pending & Pending \\
-Systematic $A/B$ shift \& drift & Primary & Pending & Pending & Pending \\
-Formula-linked LDL-C & Primary & Pending & Pending & Pending \\
-Anchor correlation: zero & Primary & Pending & Pending & Pending \\
-Anchor correlation: high & Primary & Pending & Pending & Pending \\
-Map dropout & Primary & Pending & Pending & Pending \\
-Technical-proxy ablation & No label trend & Pending & Pending & Pending \\
+Linear biological signal & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+No-association reference & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Nonlinear $\text{age}^2$ proxy & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Nonlinear $\text{age}^2$ proxy & 60/92/150 & Quad.\ age/lbl & Pend. & Pend. & Pend. & Pend. \\
+Systematic $A/B$ shift \& drift & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Formula-linked LDL-C & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Anchor correlation: zero & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Anchor correlation: high & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Map dropout (3$\to$2 maps) & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Technical-proxy ablation & 60/92/150 & No label & Pend. & Pend. & Pend. & Pend. \\
+High-dim.\ technical nuisance & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Strong shared preparation & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Correlated $A/B$ sample errors & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Unequal $A/B$ sample errors & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Nonlinear spectral signal & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Correlated within-sample maps & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+Covariate missingness & 60/92/150 & Primary & Pend. & Pend. & Pend. & Pend. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Planned validation-seed calibration and MDE reporting schema (\texttt{simulation\_calibration\_report.csv} and \texttt{simulation\_mde\_curve.csv}, $N=92$, $n_{\text{test}}=25{,}000$, centered studentized-$t$, $1~\si{\per\centi\metre}$ cohort grid). Entries are pending full 1,000-repetition validation.}
+\label{tab:simulation_calibration}
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}X c c c c c c@{}}
+\toprule
+Core scenario / MDE grid & P.\ Cov & P.\ W & C.\ Cov & C.\ W & Tgt.\ SE & Fail/Det \\
+\midrule
+Core scenarios (validation seeds) & Pend. & Pend. & Pend. & Pend. & Pend. & Pend. \\
+MDE grid ($0.0, 0.25, 0.5, 0.75, 1.0$) & Pend. & Pend. & Pend. & Pend. & Pend. & Pend. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -249,50 +279,87 @@ Technical-proxy ablation & No label trend & Pending & Pending & Pending \\
 \subsection{Primary held-out LDL-C prediction and comparator performance}
 \label{subsec:results_primary}
 
-Populate the performance and comparison panels from \path{comparator_errors_and_differences.csv}, retaining the baseline named in each comparison. Bootstrap endpoints and failure status come from \path{eligibility_and_split_manifest.json}; do not infer an interval from outer-fold dispersion. Selected settings come from \path{fold_selected_settings.csv}.
+Populate the performance and comparison panels deterministically from \path{comparator_errors_and_differences.csv}, retaining the baseline named in each comparison. Centered studentized-$t$ and raw percentile bootstrap endpoints, Maritz--Jarrett quantile MC SEs, distinct participant counts, and failure status come from \path{eligibility_and_split_manifest.json}; do not infer an interval from outer-fold dispersion. Selected settings, inner validation MSEs, generalized eigenvalue spectra, and dropped covariates come from \path{fold_selected_settings.csv}.
 
 \begin{table}[ht]
 \centering
-\caption{Planned held-out prediction report. Pending fields must be filled only from authorized cohort results. RMSE and MAE use the confirmed LDL-C scale; the two comparison baselines are kept separate.}
+\caption{Planned held-out prediction report. Pending fields must be filled only from authorized cohort results via \texttt{build\_manuscript\_artifacts.py}. MSE, RMSE, and MAE use the confirmed LDL-C scale; comparison baselines are kept separate.}
 \label{tab:primary_results}
-\small
-\begin{tabularx}{\textwidth}{@{}X c c c@{}}
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}X c c c c c c@{}}
 \toprule
-Procedure & RMSE & MAE & Calibration \\
+Procedure & MSE & Rel.\ red. & RMSE & MAE & Cal.\ int. & Cal.\ slope \\
 \midrule
-Covariate-only ridge & Pending & Pending & Pending \\
-Fixed 21-band + ridge & Pending & Pending & Pending \\
-Block-scaled PCA + ridge & Pending & Pending & Pending \\
-PLS ($C$ + spectra) & Pending & Pending & Pending \\
-Paired linear + ridge & Pending & Pending & Pending \\
-Band-paired ablation & Pending & Pending & Pending \\
-Inner-selected established comparator & Pending & Pending & Pending \\
+Covariate-only ridge & Pending & Pending & Pending & Pending & Pending & Pending \\
+Fixed 21-band + ridge & Pending & Pending & Pending & Pending & Pending & Pending \\
+Block-scaled PCA + ridge & Pending & Pending & Pending & Pending & Pending & Pending \\
+PLS ($C$ + spectra) & Pending & Pending & Pending & Pending & Pending & Pending \\
+Paired linear + ridge & Pending & Pending & Pending & Pending & Pending & Pending \\
+Band-paired ablation & Pending & Pending & Pending & Pending & Pending & Pending \\
+Inner-selected comparator & Pending & Pending & Pending & Pending & Pending & Pending \\
 \bottomrule
 \end{tabularx}
 
 \medskip
-\begin{tabularx}{\textwidth}{@{}X c c@{}}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}X c c c@{}}
 \toprule
-Error difference (positive favors paired) & Estimate & 95\% interval \\
+Error difference (positive favors right model) & Estimate & Stud.-$t$ 95\% & Pct.\ 95\% \\
 \midrule
-Covariate-only minus paired linear & Pending & Pending \\
-Inner-selected comparator minus paired linear & Pending & Pending \\
+Covariate-only minus paired linear & Pending & Pending & Pending \\
+Inner-selected comparator minus paired linear & Pending & Pending & Pending \\
+Covariate-only minus inner-selected comparator & Pending & Pending & Pending \\
 \bottomrule
 \end{tabularx}
 
 \smallskip
-\raggedright Relative MSE reduction is reported separately against the covariate-only baseline. Differences use squared LDL-C units. Until calibration is adequate, label bootstrap ranges as descriptive resampling dispersion. Other comparator differences remain descriptive under the specified comparison family.
+\raggedright Relative MSE reduction is reported against the covariate-only baseline. Differences use squared LDL-C units. Until cohort-grid validation calibration is complete, label bootstrap ranges as descriptive resampling dispersion. Other comparator differences remain descriptive under the specified comparison family.
 \end{table}
 
 \subsection{Technical-repeat agreement, discriminability, and subspace stability}
 \label{subsec:results_repeatability}
 
-Pending. Report fold-specific paired counts, full-prediction and spectral-contribution ICCs, signed differences, RMSD, discriminability, candidate sizes, retrieval chance levels, and subspace dimensions and angles. Sources are \path{baseline_repeatability_report.csv} and \path{subspace_principal_angles.csv}. No repeatability estimate is supplied by the engineering checks.
+Pending. Report fold-specific paired counts, full-prediction and spectral-contribution $\mathrm{ICC}(A,1)$ across \texttt{paired\_linear\_ridge}, \texttt{fixed\_band\_ridge}, \texttt{pca\_ridge}, \texttt{pls\_regression}, and \texttt{strongest\_comparator}, ANOVA mean squares, $\mathrm{SD}(s_i)$ and spectral variance share, signed differences, RMSD, discriminability, global and local retrieval (candidate sizes and chance levels), individual principal angles ($\theta_1, \theta_2, \theta_3$) for \texttt{paired\_linear\_ridge} and \texttt{pca\_ridge}, and canonical 1,802-channel fold spectral weight profiles. Sources are \path{baseline_repeatability_report.csv}, \path{subspace_principal_angles.csv}, and \path{fold_spectral_weights.csv} (\Cref{tab:repeatability_plan}). No repeatability estimate is supplied by engineering checks.
+
+\begin{table}[ht]
+\centering
+\caption{Planned fold-level repeatability and subspace stability reporting schema (\texttt{baseline\_repeatability\_report.csv} and \texttt{subspace\_principal\_angles.csv}). Entries are pending authorized cohort evaluation.}
+\label{tab:repeatability_plan}
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}X c c c c c@{}}
+\toprule
+Outer fold / fold pair & $n_{\text{pair}}$ & Full / Spec.\ ICC & $\mathrm{SD}(s)$ / RMSD & Strong.\ ICC & Discrim.\ / $\theta_1$--$\theta_3$ \\
+\midrule
+Outer folds 0--4 (per fold) & Pending & Pending & Pending & Pending & Pending \\
+Fold subspaces (paired vs PCA) & -- & -- & -- & -- & Pending \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
 \subsection{Sensitivity analyses and secondary laboratory anchors}
 \label{subsec:results_sensitivity}
 
-Pending. Report all locked covariate and subset analyses and all three additional outer partitions, without choosing the best result. Secondary HDL-C, triglyceride, and platelet models repeat inner selection for their own targets on the primary population and outer membership; missing targets receive zero weight. These comparisons and continuous anchor associations are descriptive, with no categorical attribution or confirmatory secondary testing. Artifact mapping is maintained in the manuscript README.
+Pending. Report all locked covariate presets, subset modes, and three additional outer partitions without choosing the best result, together with $\mathrm{MSE}_C$, $\mathrm{MSE}_{\text{paired}}$, individual comparator MSEs, inner-selected comparator identity, and attenuation relative to the primary $\widehat{\Delta}$ (\Cref{tab:sensitivity_plan}). Secondary HDL-C, triglyceride, and platelet models repeat inner selection for their own targets on the primary population and outer membership; missing targets receive zero weight. Continuous anchor associations use 2,000 participant resamples, per-anchor covariate preprocessing, explicit \texttt{target\_role} labels distinguishing the primary supervised target from unseen secondary anchors, and per-fold partial-correlation summaries. These comparisons remain descriptive, with no categorical attribution or confirmatory secondary testing. Artifact mapping is maintained in the manuscript README.
+
+\begin{table}[ht]
+\centering
+\caption{Planned sensitivity, secondary-endpoint, and anchor-association reporting schema (\texttt{covariate\_and\_subset\_sensitivity.csv}, \texttt{outer\_partition\_seed\_sensitivity.csv}, \texttt{secondary\_endpoints\_summary.csv}, and \texttt{anchor\_associations\_continuous.csv}). Entries are pending authorized cohort evaluation.}
+\label{tab:sensitivity_plan}
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}X l c c c@{}}
+\toprule
+Analysis family & Scope & $\mathrm{MSE}_C$ & $\widehat{\Delta}_{\text{pair}}$ / $r$ & Atten.\ / Med.\ $r$ \\
+\midrule
+Covariate presets (5) & Primary to risk factors & Pending & Pending & Pending \\
+Subset modes (4) & All eligible to 3-map & Pending & Pending & Pending \\
+Outer seeds (4) & 42 (prim.) + 101, 202, 303 & Pending & Pending & Pending \\
+Secondary endpoints (3) & HDL-C, TG, platelets & Pending & Pending & Pending \\
+Continuous anchors (2,000) & Primary vs unseen & -- & Pending & Pending \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
 \section{Discussion and Limitations}
 \label{sec:discussion}

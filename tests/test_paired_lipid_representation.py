@@ -1733,3 +1733,1166 @@ def test_sensitivity_eval_memo_and_config_scenario_validation(
         with pytest.raises(ValueError, match=pattern):
             load_manuscript_config(bad_cfg_path)
 
+
+def test_band_paired_and_band_discriminability_are_scale_invariant_across_blocks() -> None:
+    from dataclasses import replace
+
+    # Real stores use SNV for 1300 (~SD 0.5) and trapezoidal area for 2850 (~SD 1e-3),
+    # a ~2e5 variance ratio that previously erased C-H bands from band_paired_ridge and band_discriminability.
+    ds_base, _ = generate_synthetic_cohort(
+        n_participants=40, n_single_sample=2, seed=1201, compact_grid=True, signal_strength=0.9
+    )
+    ds_scaled = replace(ds_base, sample_2850=ds_base.sample_2850 * 1e-3)
+
+    res_base = evaluate_nested_cohort(ds_base, include_band_paired=True, compute_diagnostics=True)
+    res_scaled = evaluate_nested_cohort(ds_scaled, include_band_paired=True, compute_diagnostics=True)
+
+    np.testing.assert_allclose(
+        res_base["oof_predictions"]["band_paired_ridge"],
+        res_scaled["oof_predictions"]["band_paired_ridge"],
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    for rep_a, rep_b in zip(res_base["fold_repeatability"], res_scaled["fold_repeatability"]):
+        bd_a = rep_a["band_discriminability"]
+        bd_b = rep_b["band_discriminability"]
+        assert bd_a["discriminability"] == pytest.approx(bd_b["discriminability"], abs=1e-12)
+        assert bd_a["retrieval_top1"] == pytest.approx(bd_b["retrieval_top1"], abs=1e-12)
+        assert bd_a["local_retrieval_top1"] == pytest.approx(bd_b["local_retrieval_top1"], abs=1e-12)
+        assert bd_a["global_candidate_size"] == float(rep_a["n_paired_test"])
+        assert np.isfinite(bd_a["mean_local_candidate_size"]) and bd_a["mean_local_candidate_size"] >= 2.0
+
+
+def test_external_comparator_scoring_and_calibration_parity() -> None:
+    from src.analysis.paired_lipid.calibration import evaluate_scenario_calibration_suite
+    from src.analysis.paired_lipid.nested_cv import PreparedExternalTest, score_external_primary_pair
+
+    train_ds, _ = generate_synthetic_cohort(n_participants=45, n_single_sample=3, seed=1202, compact_grid=True)
+    test_ds, _ = generate_synthetic_cohort(n_participants=100, n_single_sample=7, seed=1203, compact_grid=True)
+    cfg = PairedLipidConfig()
+    prepared = PreparedExternalTest.from_dataset(test_ds, cfg.primary_endpoint, preset=cfg.covariate_preset)
+
+    ref = evaluate_nested_cohort(train_ds, cfg=cfg, external_test=test_ds, compute_diagnostics=False)
+    fast = score_external_primary_pair(train_ds, prepared, cfg=cfg)
+    assert fast["external_delta_mse"] == pytest.approx(ref["external_delta_mse"], abs=1e-12)
+    assert fast["external_delta_vs_comparator"] == pytest.approx(ref["external_delta_vs_comparator"], abs=1e-12)
+    np.testing.assert_allclose(
+        fast["external_participant_deltas_vs_comparator"],
+        ref["external_participant_deltas_vs_comparator"],
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+    cal = evaluate_bootstrap_calibration(
+        n_repetitions=3,
+        n_bootstraps=6,
+        n_participants=42,
+        signal_strength=0.85,
+        base_seed=9200,
+        n_test_participants=120,
+        compact_grid=True,
+    )
+    for key in (
+        "target_delta_vs_comparator",
+        "target_monte_carlo_se_vs_comparator",
+        "target_test_cohort_se_vs_comparator",
+        "target_total_se_vs_comparator",
+        "mean_point_estimate_vs_comparator",
+        "bias_vs_comparator",
+        "unconditional_coverage_vs_comparator",
+        "conditional_coverage_vs_comparator",
+        "target_sensitivity_min_coverage",
+        "target_sensitivity_min_coverage_vs_comparator",
+        "wilson_95_lower_vs_comparator",
+        "wilson_95_upper_vs_comparator",
+        "mean_interval_width_vs_comparator",
+    ):
+        assert np.isfinite(cal[key]), f"Expected finite calibration metric {key}, got {cal[key]}"
+    assert cal["target_sensitivity_min_coverage"] <= cal["unconditional_coverage"] + 1e-12
+    assert cal["target_sensitivity_min_coverage_vs_comparator"] <= cal["unconditional_coverage_vs_comparator"] + 1e-12
+
+    with pytest.raises(ValueError, match="disjoint from replicate seeds"):
+        evaluate_scenario_calibration_suite(
+            scenarios=[
+                {"scenario": "s1", "covariate_preset": "primary"},
+                {"scenario": "s2", "covariate_preset": "primary"},
+            ],
+            n_repetitions=2,
+            n_bootstraps=4,
+            base_seed=9999,
+        )
+
+
+def test_synthetic_label_drift_confounds_ldl_and_is_controlled_by_label_covariate() -> None:
+    ds, _ = generate_synthetic_cohort(
+        n_participants=60,
+        n_single_sample=2,
+        seed=1204,
+        compact_grid=True,
+        signal_strength=0.0,
+        ab_shift_scale=0.0,
+        shared_prep_scale=0.0,
+        label_drift_scale=0.9,
+    )
+    lbl = ds.covariate_frame["sample_label_trend"].to_numpy(dtype=float)
+    ldl = ds.outcomes["ldl_mmol_l"]
+    corr = float(np.corrcoef(lbl, ldl)[0, 1])
+    assert corr > 0.6
+
+    res_adj = evaluate_nested_cohort(
+        ds, cfg=PairedLipidConfig(covariate_preset="primary"), compute_diagnostics=False
+    )
+    res_unadj = evaluate_nested_cohort(
+        ds, cfg=PairedLipidConfig(covariate_preset="no_label_trend"), compute_diagnostics=False
+    )
+    delta_adj = res_adj["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"]
+    delta_unadj = res_unadj["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"]
+    assert delta_unadj > delta_adj + 0.1
+
+
+def test_singular_lambda_zero_denominator_recorded_invalid_without_crash() -> None:
+    from dataclasses import replace
+
+    # Identical A/B pairs make W = 0, so lam = 0.0 triggers scipy.linalg.LinAlgError while lam = 0.1 succeeds.
+    ds, _ = generate_synthetic_cohort(n_participants=36, n_single_sample=0, seed=1205, compact_grid=True)
+    s1 = ds.sample_1300.copy()
+    s2 = ds.sample_2850.copy()
+    s1[ds.pair_sample_b_indices] = s1[ds.pair_sample_a_indices]
+    s2[ds.pair_sample_b_indices] = s2[ds.pair_sample_a_indices]
+    ds_zero_w = replace(ds, sample_1300=s1, sample_2850=s2)
+
+    cfg = PairedLipidConfig(pca_dimensions=(5,), retained_directions=(1, 2), lambda_grid=(0.0, 0.1))
+    res = evaluate_nested_cohort(ds_zero_w, cfg=cfg, include_band_paired=True, compute_diagnostics=False)
+    assert (res["fold_settings"]["paired_lambda"] == 0.1).all()
+    assert (res["fold_settings"]["n_invalid_candidates"] >= 1).all()
+
+
+def test_primary_evaluation_outputs_unambiguous_baseline_and_candidate_sizes(tmp_path: Path) -> None:
+    import json
+
+    from manuscript_ml.run_primary_evaluation import run_primary_evaluation
+
+    outputs = run_primary_evaluation(
+        use_synthetic=True,
+        output_dir=tmp_path / "prim_schema",
+        n_bootstraps=4,
+        compact_grid=True,
+        use_gpu=False,
+    )
+    comp_df = pd.read_csv(outputs["comparator_errors_and_differences"])
+    assert "baseline_model" in comp_df.columns
+    assert "mse_baseline" in comp_df.columns
+    comp_row = comp_df.loc[comp_df["comparison"] == "paired_linear_ridge_vs_strongest_comparator"].iloc[0]
+    assert comp_row["baseline_model"] == "strongest_comparator"
+    assert np.isfinite(comp_row["mse_baseline"])
+    assert pd.isna(comp_row["mse_covariate"])
+
+    rep_df = pd.read_csv(outputs["baseline_repeatability_report"])
+    for key in ("paired_discriminability", "pca_discriminability", "band_discriminability"):
+        assert f"{key}_global_candidate_size" in rep_df.columns
+        assert f"{key}_mean_local_candidate_size" in rep_df.columns
+
+    manifest = json.loads(outputs["eligibility_and_split_manifest"].read_text(encoding="utf-8"))
+    boot_m = manifest["multiplicity_bootstrap"]
+    assert boot_m["parity_within_1e6"] is True
+    assert "monte_carlo_se_of_mean_vs_comparator" in boot_m
+
+
+def test_band_paired_ablation_handles_singular_w_without_crashing_primary() -> None:
+    # With n_paired_train < 21 and lam=0.0, W_21 is singular even when k=5 paired_linear_ridge succeeds.
+    ds, _ = generate_synthetic_cohort(n_participants=26, n_single_sample=4, seed=1206, compact_grid=True)
+    cfg = PairedLipidConfig(pca_dimensions=(5,), retained_directions=(1, 2), lambda_grid=(0.0,))
+    res = evaluate_nested_cohort(ds, cfg=cfg, include_band_paired=True, compute_diagnostics=False)
+    assert np.isfinite(res["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"])
+    # Secondary ablation must be reported non-estimable (NaN) rather than crashing or dropping folds.
+    assert np.isnan(res["comparisons_vs_covariate_ridge"]["band_paired_ridge"]["delta_mse"])
+    assert np.isnan(res["comparisons_vs_covariate_ridge"]["band_paired_ridge"]["mse_model"])
+
+
+def test_prepared_external_test_missing_band_matrix_fails_closed() -> None:
+    from src.analysis.paired_lipid.nested_cv import PreparedExternalTest, score_external_primary_pair
+
+    ds_tr, _ = generate_synthetic_cohort(n_participants=45, n_single_sample=2, seed=2, compact_grid=True)
+    ds_te, _ = generate_synthetic_cohort(n_participants=60, n_single_sample=2, seed=3, compact_grid=True)
+    bad_ext = PreparedExternalTest(
+        endpoint="ldl_mmol_l",
+        spec_1300=ds_te.sample_1300[:60],
+        spec_2850=ds_te.sample_2850[:60],
+        raw_cov_frame=ds_te.covariate_frame,
+        y_ext=ds_te.outcomes["ldl_mmol_l"],
+        n_participants=60,
+        part_band_mat=None,
+    )
+    with pytest.raises(ValueError, match="part_band_mat is required"):
+        score_external_primary_pair(ds_tr, bad_ext, cfg=PairedLipidConfig())
+
+
+@pytest.mark.parametrize(
+    "use_gpu",
+    [False, pytest.param(True, marks=pytest.mark.skipif(not _gpu_available(), reason="CuPy/CUDA unavailable"))],
+)
+def test_batched_covariate_ptp_and_zero_cov_parity_with_sequential(use_gpu: bool) -> None:
+    from dataclasses import replace
+
+    from src.analysis.paired_lipid.batched import (
+        _get_dataset_gram_cache,
+        _run_batched_multiplicity_draws,
+    )
+    from src.analysis.paired_lipid.nested_cv import make_nested_splits
+
+    ds, _ = generate_synthetic_cohort(n_participants=70, n_single_sample=2, seed=1207, compact_grid=True)
+    cfg = PairedLipidConfig()
+    outer, inner = make_nested_splits(ds, cfg, cfg.primary_seed)
+    M = np.ones((2, 70), dtype=float)
+    M[1, 0] = 2.0
+    M[1, 1] = 0.0
+
+    # 1. Small-scale covariate with ptp=1e-6 (> 1e-12) but variance=2.5e-13 (<= 1e-12)
+    cov_tiny = ds.covariate_frame.copy()
+    parity = np.where(np.arange(70) % 2 == 0, 1.0, -1.0)
+    cov_tiny["age_years"] = 65.0 + 0.5e-6 * parity
+    y_par = 3.0 + 2.0 * parity + np.random.default_rng(1208).normal(0.0, 0.2, size=70)
+    ds_tiny = replace(ds, covariate_frame=cov_tiny, outcomes={**ds.outcomes, "ldl_mmol_l": y_par})
+    gc_tiny = _get_dataset_gram_cache(ds_tiny, cfg)
+    dp_t, dc_t = _run_batched_multiplicity_draws(ds_tiny, y_par, outer, inner, M, cfg, gc_tiny, use_gpu=use_gpu)
+    for b in range(2):
+        ref = evaluate_nested_cohort(
+            ds_tiny, cfg=cfg, participant_multiplicities=M[b], precomputed_splits=(outer, inner),
+            include_band_paired=True, compute_diagnostics=False,
+        )
+        assert dp_t[b] == pytest.approx(
+            ref["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+        )
+        assert dc_t[b] == pytest.approx(ref["paired_vs_strongest_comparator"]["delta_mse"], abs=1e-10)
+
+    # 2. All covariates constant (p_cov == 0 after dropping)
+    cov_const = ds.covariate_frame.copy()
+    cov_const["age_years"] = 65.0
+    cov_const["sex"] = "female"
+    cov_const["statin"] = 0
+    cov_const["sample_label_trend"] = 10.0
+    ds_zero = replace(ds, covariate_frame=cov_const)
+    gc_zero = _get_dataset_gram_cache(ds_zero, cfg)
+    dp_z, dc_z = _run_batched_multiplicity_draws(
+        ds_zero, ds_zero.outcomes["ldl_mmol_l"], outer, inner, M, cfg, gc_zero, use_gpu=use_gpu
+    )
+    ref0 = evaluate_nested_cohort(
+        ds_zero, cfg=cfg, participant_multiplicities=M[0], precomputed_splits=(outer, inner),
+        include_band_paired=True, compute_diagnostics=False,
+    )
+    assert dp_z[0] == pytest.approx(
+        ref0["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+    )
+    assert dc_z[0] == pytest.approx(ref0["paired_vs_strongest_comparator"]["delta_mse"], abs=1e-10)
+
+
+def test_fused_pls_predict_from_raw_blocks_matches_unfused_predict() -> None:
+    from src.analysis.paired_lipid.models import CovariatePreprocessor, WeightedPLSResult
+
+    ds, _ = generate_synthetic_cohort(n_participants=45, n_single_sample=2, seed=1209, compact_grid=True)
+    cfg = PairedLipidConfig()
+    tr = np.arange(35, dtype=int)
+    te = np.arange(35, 45, dtype=int)
+    w_tr = np.ones(tr.size, dtype=float)
+    cov_prep = CovariatePreprocessor.fit(ds.covariate_frame, tr, w_tr, preset=cfg.covariate_preset)
+    X_cov_tr = cov_prep.transform(ds.covariate_frame, tr)
+    X_cov_te = cov_prep.transform(ds.covariate_frame, te)
+    spec_prep = WeightedSpectralPreprocessor.fit(ds, tr, w_tr, cfg=cfg)
+    part_1300 = aggregate_samples_to_participants(ds.sample_1300, ds)
+    part_2850 = aggregate_samples_to_participants(ds.sample_2850, ds)
+    X_spec_tr = spec_prep.transform_scaled_blocks(part_1300[tr], part_2850[tr])
+    X_spec_te = spec_prep.transform_scaled_blocks(part_1300[te], part_2850[te])
+
+    pls = WeightedPLSResult.fit(X_cov_tr, X_spec_tr, ds.outcomes["ldl_mmol_l"][tr], w_tr, max_components=4)
+    p_all_ref, s_all_ref = pls.predict(X_cov_te, X_spec_te)
+    p_all_fus, s_all_fus = pls.predict_from_raw_blocks(spec_prep, X_cov_te, part_1300[te], part_2850[te])
+    np.testing.assert_allclose(p_all_fus, p_all_ref, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(s_all_fus, s_all_ref, rtol=1e-12, atol=1e-12)
+    for c in range(1, 5):
+        p_ref, s_ref = pls.predict(X_cov_te, X_spec_te, n_components=c)
+        p_fus, s_fus = pls.predict_from_raw_blocks(
+            spec_prep, X_cov_te, part_1300[te], part_2850[te], n_components=c
+        )
+        np.testing.assert_allclose(p_fus, p_ref, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(s_fus, s_ref, rtol=1e-12, atol=1e-12)
+
+
+def test_anchor_associations_reresidualizes_per_bootstrap_resample() -> None:
+    from scipy import linalg
+
+    from src.analysis.paired_lipid.models import CovariatePreprocessor
+
+    ds, _ = generate_synthetic_cohort(n_participants=40, n_single_sample=2, seed=1210, compact_grid=True)
+    cfg = PairedLipidConfig(covariate_preset="pre_event_risk_factors")
+    rng_s = np.random.default_rng(1211)
+    spec_c = rng_s.normal(size=ds.n_participants)
+    df = summarize_anchor_associations(
+        ds,
+        {"oof_spectral_contributions": {"paired_linear_ridge": spec_c}},
+        anchors=("ldl_mmol_l",),
+        n_resamples=60,
+        seed=99,
+        cfg=cfg,
+    )
+    row = df.iloc[0]
+
+    # Independent direct re-residualization reference with the exact same seed
+    all_idx = np.arange(ds.n_participants, dtype=int)
+    cp = CovariatePreprocessor.fit(ds.covariate_frame, all_idx, np.ones(ds.n_participants), preset=cfg.covariate_preset)
+    X_cov = cp.transform(ds.covariate_frame, all_idx)
+    design = np.column_stack([np.ones(ds.n_participants, dtype=float), X_cov])
+    y_a = ds.outcomes["ldl_mmol_l"]
+    rng = np.random.default_rng(99)
+    idx_mat = rng.integers(0, ds.n_participants, size=(60, ds.n_participants))
+    ref_rs = []
+    for b_idx in idx_mat:
+        d_b = design[b_idx]
+        u_b, sv_b, _ = linalg.svd(d_b, full_matrices=False)
+        uk_b = u_b[:, sv_b > max(d_b.shape) * np.finfo(float).eps * sv_b[0]]
+        sb = spec_c[b_idx] - uk_b @ (uk_b.T @ spec_c[b_idx])
+        yb = y_a[b_idx] - uk_b @ (uk_b.T @ y_a[b_idx])
+        ref_rs.append(float(np.dot(sb, yb) / (linalg.norm(sb) * linalg.norm(yb))))
+    assert row["resample_ci_low"] == pytest.approx(float(np.percentile(ref_rs, 2.5)), abs=1e-12)
+    assert row["resample_ci_high"] == pytest.approx(float(np.percentile(ref_rs, 97.5)), abs=1e-12)
+
+
+def test_calibration_checkpoint_resume_sufficient_stats_and_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.analysis.paired_lipid.calibration as cal_mod
+    from manuscript_ml.run_simulation_calibration import run_simulation_and_calibration
+    from src.analysis.paired_lipid.calibration import (
+        _two_way_anova_ms_from_sufficient_stats,
+        evaluate_scenario_calibration_suite,
+    )
+    from src.analysis.paired_lipid.metrics import two_way_anova_ms
+
+    # 1. Exact O(R + C) two-way ANOVA parity against dense matrix ANOVA
+    rng = np.random.default_rng(1212)
+    D = rng.normal(loc=0.5, scale=1.2, size=(15, 200))
+    ms_r_ref, ms_c_ref, ms_e_ref = two_way_anova_ms(D)
+    row_means = np.mean(D, axis=1)
+    col_sums = np.sum(D, axis=0)
+    row_ss = np.sum((D - row_means[:, None]) ** 2, axis=1)
+    ms_r, ms_c, ms_e = _two_way_anova_ms_from_sufficient_stats(row_means, col_sums, row_ss, D.shape[1])
+    assert ms_r == pytest.approx(ms_r_ref, rel=1e-12, abs=1e-12)
+    assert ms_c == pytest.approx(ms_c_ref, rel=1e-12, abs=1e-12)
+    assert ms_e == pytest.approx(ms_e_ref, rel=1e-12, abs=1e-12)
+
+    # 2. Input validation rejects degenerate calibration parameters upfront
+    with pytest.raises(ValueError, match="n_bootstraps"):
+        evaluate_bootstrap_calibration(n_repetitions=2, n_bootstraps=0, n_participants=40)
+    with pytest.raises(ValueError, match="n_repetitions"):
+        evaluate_bootstrap_calibration(n_repetitions=0, n_bootstraps=4, n_participants=40)
+    with pytest.raises(ValueError, match="base_seed"):
+        evaluate_bootstrap_calibration(n_repetitions=2, n_bootstraps=4, base_seed=-1)
+
+    # 3. Chunked checkpoint save/resume matches uncheckpointed run and catches config mismatch
+    ckpt_file = tmp_path / "cal_ckpt.npz"
+    ref = evaluate_bootstrap_calibration(
+        n_repetitions=4,
+        n_bootstraps=6,
+        n_participants=42,
+        signal_strength=0.85,
+        base_seed=9250,
+        n_test_participants=80,
+        compact_grid=True,
+        use_gpu=False,
+        n_jobs=1,
+    )
+    assert ref["conditional_coverage"] + ref["lower_noncoverage_rate"] + ref["upper_noncoverage_rate"] == pytest.approx(
+        1.0, abs=1e-12
+    )
+    assert (
+        ref["conditional_coverage_vs_comparator"]
+        + ref["lower_noncoverage_rate_vs_comparator"]
+        + ref["upper_noncoverage_rate_vs_comparator"]
+        == pytest.approx(1.0, abs=1e-12)
+    )
+    assert np.isfinite(ref["empirical_sd_point_estimate"])
+    assert np.isfinite(ref["empirical_sd_point_estimate_vs_comparator"])
+
+    res_ckpt = evaluate_bootstrap_calibration(
+        n_repetitions=4,
+        n_bootstraps=6,
+        n_participants=42,
+        signal_strength=0.85,
+        base_seed=9250,
+        n_test_participants=80,
+        compact_grid=True,
+        use_gpu=False,
+        n_jobs=1,
+        checkpoint_path=ckpt_file,
+        checkpoint_chunk_size=2,
+    )
+    assert ckpt_file.is_file()
+    for key in (
+        "target_delta_mse",
+        "target_test_cohort_se",
+        "target_total_se",
+        "unconditional_coverage",
+        "lower_noncoverage_rate",
+        "upper_noncoverage_rate",
+        "target_delta_vs_comparator",
+        "target_total_se_vs_comparator",
+        "unconditional_coverage_vs_comparator",
+    ):
+        assert res_ckpt[key] == pytest.approx(ref[key], rel=1e-12, abs=1e-12)
+
+    # Simulate real mid-run crash on rep index 2 (after chunk 0 [reps 0, 1] flushes to disk),
+    # then resume and verify only reps 2 and 3 execute and match the uncheckpointed run to 1e-12.
+    ckpt_mid = tmp_path / "cal_mid_crash.npz"
+    orig_eval_rep = cal_mod._eval_single_calibration_rep
+    calls_before_crash = 0
+
+    def _crash_on_third(*args: object, **kwargs: object) -> object:
+        nonlocal calls_before_crash
+        calls_before_crash += 1
+        if calls_before_crash == 3:
+            raise RuntimeError("simulated mid-campaign interruption")
+        return orig_eval_rep(*args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as mp:
+        mp.setattr(cal_mod, "_eval_single_calibration_rep", _crash_on_third)
+        with pytest.raises(RuntimeError, match="simulated mid-campaign interruption"):
+            evaluate_bootstrap_calibration(
+                n_repetitions=4,
+                n_bootstraps=6,
+                n_participants=42,
+                signal_strength=0.85,
+                base_seed=9250,
+                n_test_participants=80,
+                compact_grid=True,
+                use_gpu=False,
+                n_jobs=1,
+                checkpoint_path=ckpt_mid,
+                checkpoint_chunk_size=2,
+            )
+    assert ckpt_mid.is_file()
+    with np.load(ckpt_mid, allow_pickle=False) as partial_state:
+        assert int(np.sum(partial_state["completed"])) == 2
+
+    calls_on_resume = 0
+
+    def _counting_eval(*args: object, **kwargs: object) -> object:
+        nonlocal calls_on_resume
+        calls_on_resume += 1
+        return orig_eval_rep(*args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as mp:
+        mp.setattr(cal_mod, "_eval_single_calibration_rep", _counting_eval)
+        res_resumed = evaluate_bootstrap_calibration(
+            n_repetitions=4,
+            n_bootstraps=6,
+            n_participants=42,
+            signal_strength=0.85,
+            base_seed=9250,
+            n_test_participants=80,
+            compact_grid=True,
+            use_gpu=False,
+            n_jobs=1,
+            checkpoint_path=ckpt_mid,
+            checkpoint_chunk_size=2,
+        )
+    assert calls_on_resume == 2
+    for key in (
+        "target_delta_mse",
+        "target_test_cohort_se",
+        "target_total_se",
+        "unconditional_coverage",
+        "lower_noncoverage_rate",
+        "upper_noncoverage_rate",
+        "target_delta_vs_comparator",
+        "target_total_se_vs_comparator",
+        "unconditional_coverage_vs_comparator",
+    ):
+        assert res_resumed[key] == pytest.approx(ref[key], rel=1e-12, abs=1e-12)
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        evaluate_bootstrap_calibration(
+            n_repetitions=4,
+            n_bootstraps=6,
+            n_participants=42,
+            signal_strength=0.5,  # mismatched config!
+            base_seed=9250,
+            n_test_participants=80,
+            compact_grid=True,
+            use_gpu=False,
+            n_jobs=1,
+            checkpoint_path=ckpt_file,
+        )
+
+    # 4. Filtered scenario calibration preserves canonical seed offsets and writes checkpoints
+    out_dir = tmp_path / "filtered_cal"
+    outs = run_simulation_and_calibration(
+        output_dir=out_dir,
+        n_calibration_reps=2,
+        n_bootstraps=4,
+        n_participants=42,
+        n_test_participants=60,
+        compact_grid=True,
+        use_gpu=False,
+        n_jobs=1,
+        calibrate_all_scenarios=True,
+        scenario_names=["no_association_reference"],
+        skip_scenario_suite=True,
+        resume=True,
+        checkpoint_chunk_size=1,
+    )
+    assert "simulation_scenarios_summary" not in outs
+    cal_df = pd.read_csv(outs["simulation_calibration_report"])
+    assert list(cal_df["scenario"]) == ["no_association_reference"]
+    # no_association_reference is scenario index 1 in config/manuscript_ml.yaml
+    assert (out_dir / "calibration_checkpoints" / "scenario_01_no_association_reference.npz").is_file()
+    assert (out_dir / "calibration_checkpoints" / "partial_calibration_report.csv").is_file()
+    # Direct suite check with explicit canonical offset matches identically
+    direct_df = evaluate_scenario_calibration_suite(
+        scenarios=[{"scenario": "no_association_reference", "covariate_preset": "primary", "signal_strength": 0.0, "ab_shift_scale": 0.15, "label_drift_scale": 0.0}],
+        n_repetitions=2,
+        n_bootstraps=4,
+        n_participants=42,
+        base_seed=9000,
+        n_test_participants=60,
+        compact_grid=True,
+        use_gpu=False,
+        n_jobs=1,
+        base_seed_offsets=[1],
+    )
+    assert cal_df["target_delta_mse"].iloc[0] == pytest.approx(direct_df["target_delta_mse"].iloc[0], abs=1e-12)
+
+
+def test_studentized_t_bootstrap_batched_vs_sequential_parity_cpu_and_gpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.analysis.paired_lipid.nested_cv as nested_mod
+    from src.analysis.paired_lipid.calibration import evaluate_bootstrap_calibration
+
+    ds, _ = generate_synthetic_cohort(n_participants=48, seed=2101, compact_grid=True)
+    cfg = PairedLipidConfig()
+
+    boot_cpu = run_multiplicity_bootstrap(
+        ds, cfg=cfg, n_bootstraps=6, bootstrap_seed=701, interval_method="studentized_t", use_gpu=False
+    )
+    assert boot_cpu["interval_method"] == "studentized_t"
+    assert boot_cpu["interval_procedure_succeeded"] is True
+    assert boot_cpu["n_failed_refits"] == 0
+    assert boot_cpu["mean_distinct_participants"] > 0.0
+    assert 0 < boot_cpu["min_distinct_participants"] <= boot_cpu["max_distinct_participants"] <= 48
+    for mc_key in (
+        "mc_se_ci_95_low_delta_mse",
+        "mc_se_ci_95_high_delta_mse",
+        "mc_se_ci_95_low_vs_comparator",
+        "mc_se_ci_95_high_vs_comparator",
+        "mc_se_ci_95_low_strongest_vs_covariate",
+        "mc_se_ci_95_high_strongest_vs_covariate",
+    ):
+        assert np.isfinite(boot_cpu[mc_key]) and boot_cpu[mc_key] >= 0.0
+
+    # Force sequential fallback for all draws and verify exact parity (<= 1e-12) across means, SDs, and CIs.
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            nested_mod,
+            "_check_fast_batch_eligibility",
+            lambda _ds, _os, _is, m_mat, _cfg, _gc: np.zeros(m_mat.shape[0], dtype=bool),
+        )
+        boot_seq = run_multiplicity_bootstrap(
+            ds, cfg=cfg, n_bootstraps=6, bootstrap_seed=701, interval_method="studentized_t", use_gpu=False
+        )
+    assert boot_seq["n_fallback_draws"] == 6
+    for arr_key in (
+        "bootstrap_draws_delta_mse",
+        "bootstrap_draws_vs_comparator",
+        "bootstrap_draws_strongest_vs_covariate",
+        "bootstrap_oof_sds_delta_mse",
+        "bootstrap_oof_sds_vs_comparator",
+        "bootstrap_oof_sds_strongest_vs_covariate",
+    ):
+        assert np.max(np.abs(boot_cpu[arr_key] - boot_seq[arr_key])) <= 1e-12
+    for ci_key in (
+        "ci_95_delta_mse",
+        "ci_95_vs_comparator",
+        "ci_95_strongest_vs_covariate",
+        "ci_95_percentile_delta_mse",
+        "ci_95_percentile_vs_comparator",
+        "ci_95_percentile_strongest_vs_covariate",
+    ):
+        assert boot_cpu[ci_key][0] == pytest.approx(boot_seq[ci_key][0], abs=1e-12)
+        assert boot_cpu[ci_key][1] == pytest.approx(boot_seq[ci_key][1], abs=1e-12)
+
+    if _gpu_available():
+        boot_gpu = run_multiplicity_bootstrap(
+            ds, cfg=cfg, n_bootstraps=6, bootstrap_seed=701, interval_method="studentized_t", use_gpu=True
+        )
+        for arr_key in (
+            "bootstrap_draws_delta_mse",
+            "bootstrap_draws_vs_comparator",
+            "bootstrap_draws_strongest_vs_covariate",
+            "bootstrap_oof_sds_delta_mse",
+            "bootstrap_oof_sds_vs_comparator",
+            "bootstrap_oof_sds_strongest_vs_covariate",
+        ):
+            assert np.max(np.abs(boot_gpu[arr_key] - boot_seq[arr_key])) <= 1e-12
+
+    # Degenerate OOF SD (<= 1e-12) must fail closed under studentized_t.
+    stub_zero_sd = {
+        "comparisons_vs_covariate_ridge": {
+            "paired_linear_ridge": {"delta_mse": 0.0, "oof_loss_diff_sd": 0.0},
+            "strongest_comparator": {"delta_mse": 0.0, "oof_loss_diff_sd": 0.0},
+        },
+        "paired_vs_strongest_comparator": {"delta_mse": 0.0, "oof_loss_diff_sd": 0.0},
+    }
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            nested_mod,
+            "_check_fast_batch_eligibility",
+            lambda _ds, _os, _is, m_mat, _cfg, _gc: np.zeros(m_mat.shape[0], dtype=bool),
+        )
+        mp.setattr(nested_mod, "evaluate_nested_cohort", lambda *_a, **_kw: stub_zero_sd)
+        deg = run_multiplicity_bootstrap(
+            ds, cfg=cfg, n_bootstraps=3, bootstrap_seed=702, interval_method="studentized_t", use_gpu=False
+        )
+    assert deg["interval_procedure_succeeded"] is False
+    assert deg["n_failed_refits"] == 3
+    assert any("degenerate" in r for r in deg["failure_reasons"])
+
+    # Calibration checkpoint fingerprint must reject mismatched interval_method.
+    ckpt_path = tmp_path / "cal_im.npz"
+    cal_st = evaluate_bootstrap_calibration(
+        n_repetitions=2,
+        n_bootstraps=4,
+        n_participants=42,
+        signal_strength=0.85,
+        base_seed=9310,
+        n_test_participants=60,
+        compact_grid=True,
+        interval_method="studentized_t",
+        use_gpu=False,
+        n_jobs=1,
+        checkpoint_path=ckpt_path,
+    )
+    assert cal_st["interval_method"] == "studentized_t"
+    with pytest.raises(ValueError, match="fingerprint"):
+        evaluate_bootstrap_calibration(
+            n_repetitions=2,
+            n_bootstraps=4,
+            n_participants=42,
+            signal_strength=0.85,
+            base_seed=9310,
+            n_test_participants=60,
+            compact_grid=True,
+            interval_method="percentile",
+            use_gpu=False,
+            n_jobs=1,
+            checkpoint_path=ckpt_path,
+        )
+
+
+def test_engine_edge_cases_constant_nan_covariate_gram_rank_and_anchor_guard() -> None:
+    import warnings
+    from dataclasses import replace
+
+    from src.analysis.paired_lipid._batched_models import _prep_mfa_pca_batch
+    from src.analysis.paired_lipid._gram_cache import _get_dataset_gram_cache, _precompute_division_constants
+    from src.analysis.paired_lipid.models import CovariatePreprocessor, WeightedSpectralPreprocessor
+    from src.analysis.paired_lipid.nested_cv import summarize_anchor_associations
+
+    # 1. Constant observed numeric covariate with NaNs must retain its {col}__missing indicator.
+    cov_df = pd.DataFrame(
+        {
+            "age_years": [60.0, 65.0, 70.0, 75.0, 80.0, 85.0],
+            "sex": ["female", "male", "female", "male", "female", "male"],
+            "statin": [1.0, 1.0, np.nan, 1.0, np.nan, 1.0],
+            "sample_label_trend": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }
+    )
+    idx_all = np.arange(6, dtype=int)
+    w_all = np.ones(6, dtype=float)
+    prep = CovariatePreprocessor.fit(cov_df, idx_all, w_all, preset="primary")
+    assert "statin" in prep.dropped_columns
+    assert "statin__missing" in prep.feature_names
+    x_mat = prep.transform(cov_df, idx_all)
+    assert x_mat.shape == (6, len(prep.feature_names))
+    assert np.all(np.isfinite(x_mat))
+
+    # 2. Gram, primal SVD, and batched MFA-PCA agree on numerical_rank.
+    ds, _ = generate_synthetic_cohort(n_participants=36, seed=2102, compact_grid=True)
+    cfg = PairedLipidConfig()
+    tr_idx = np.arange(28, dtype=int)
+    te_idx = np.arange(28, 36, dtype=int)
+    w_tr = np.ones(tr_idx.size, dtype=float)
+    spec_gram = WeightedSpectralPreprocessor.fit(ds, tr_idx, w_tr, cfg=cfg)
+    gcache = _get_dataset_gram_cache(ds, cfg)
+    dconst = _precompute_division_constants(np, gcache, ds, tr_idx, te_idx, cfg)
+    m_tr = np.ones((1, tr_idx.size), dtype=float)
+    w_tr_sum = np.array([[float(tr_idx.size)]], dtype=float)
+    batch_prep = _prep_mfa_pca_batch(np, gcache, dconst, m_tr, w_tr_sum, cfg, compute_full_rank=True)
+    assert int(batch_prep["numerical_rank"][0]) == int(spec_gram.numerical_rank)
+
+    # 3. summarize_anchor_associations: constant input emits zero ConstantInputWarning, tags target_role & per-fold stats.
+    ds_miss, _ = generate_synthetic_cohort(
+        n_participants=42, seed=2103, compact_grid=True, covariate_missing_rate=0.15
+    )
+    eval_res = evaluate_nested_cohort(ds_miss, cfg=cfg, compute_diagnostics=False)
+    # Build a synthetic eval dict with constant spectral contributions to verify Spearman constant guard.
+    eval_const = dict(eval_res)
+    eval_const["oof_spectral_contributions"] = {
+        "paired_linear_ridge": np.zeros(ds_miss.n_participants, dtype=float)
+    }
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        anchor_const = summarize_anchor_associations(ds_miss, eval_const, n_resamples=20, seed=11, cfg=cfg)
+    assert not any("ConstantInput" in str(w.category.__name__) or "constant" in str(w.message).lower() for w in caught)
+    assert (anchor_const["partial_spearman_rho"] == 0.0).all()
+
+    anchor_df = summarize_anchor_associations(ds_miss, eval_res, n_resamples=30, seed=11, cfg=cfg)
+    assert set(
+        ["target_role", "fold_median_partial_r", "fold_min_partial_r", "fold_max_partial_r"]
+    ).issubset(anchor_df.columns)
+    roles = dict(zip(anchor_df["anchor"], anchor_df["target_role"]))
+    assert roles["ldl_mmol_l"] == "primary_supervised_target"
+    assert roles["hdl_mmol_l"] == "unseen_secondary_anchor"
+    assert roles["triglycerides_mmol_l"] == "unseen_secondary_anchor"
+    assert roles["plt_10e9_l"] == "unseen_secondary_anchor"
+    assert np.all(np.isfinite(anchor_df["fold_median_partial_r"]))
+    _ = replace(cfg, primary_endpoint="ldl_mmol_l")
+
+
+def test_readonly_cohort_dataset_manifest_hash_and_dictionary_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    import manuscript_ml as runner
+    import manuscript_ml.audit_readiness as audit_mod
+    import src.data_preparation.materialize as materialize
+    import src.data_preparation.store as store
+
+    ds, _ = generate_synthetic_cohort(n_participants=24, seed=2104, compact_grid=True)
+    with pytest.raises(ValueError, match="read-only"):
+        ds.sample_1300[0, 0] = 999.0
+    with pytest.raises(ValueError, match="read-only"):
+        ds.outcomes["ldl_mmol_l"][0] = 999.0
+    with pytest.raises(ValueError, match="read-only"):
+        ds.paired_participant_indices[0] = 0
+
+    # Active source manifest_hash disagreeing with disk manifest.json must raise RuntimeError.
+    fake_store = tmp_path / "store"
+    fake_store.mkdir()
+    (fake_store / "manifest.json").write_text(json.dumps({"manifest_hash": "disk_hash_abc"}), encoding="utf-8")
+    master_path = tmp_path / "clinical_master.csv"
+    master_path.write_text("participant_key,age_years\nstroke_1,60\n", encoding="utf-8")
+    dict_path = tmp_path / "clinical_master_dictionary.csv"
+    dict_path.write_text("column,applies_to\nparticipant_key,both\nwrong_col,both\n", encoding="utf-8")
+
+    bad_source = SimpleNamespace(source_path=fake_store, manifest_hash="active_hash_xyz")
+    monkeypatch.setattr(store, "get_active_data_source", lambda: bad_source)
+    runner.clear_dataset_cache()
+    with pytest.raises(RuntimeError, match="manifest_hash"):
+        runner.resolve_experiment_dataset(
+            use_synthetic=False,
+            approve_cohort_evaluation=True,
+            clinical_master_path=master_path,
+            readiness={"expected_identity_verified": 1, "expected_cohort_join": {"n_eligible_participants": 1}},
+        )
+    runner.clear_dataset_cache()
+
+    # Mismatched clinical_master_dictionary.csv columns must block ready_for_cohort_evaluation.
+    good_source = SimpleNamespace(source_path=fake_store, manifest_hash="disk_hash_abc")
+    monkeypatch.setattr(materialize, "store_dir", lambda *_a: fake_store)
+    monkeypatch.setattr(store, "get_active_data_source", lambda: good_source)
+    monkeypatch.setattr(
+        audit_mod, "load_clinical_master_verified", lambda _p: (pd.DataFrame(), {"stroke_identity_verified": 92})
+    )
+    ok_ds = SimpleNamespace(
+        manifest_summary={
+            "n_eligible_participants": 92,
+            "n_paired_participants": 88,
+            "n_single_sample_participants": 4,
+            "n_eligible_samples": 180,
+        },
+        exclusions=[],
+    )
+    monkeypatch.setattr(audit_mod, "load_paired_cohort_from_store", lambda *_a, **_kw: (ok_ds, {}))
+    out_bad = audit_mod.run_readiness_audit(clinical_master_path=master_path, output_dir=tmp_path / "audit_dict_bad")
+    m_bad = json.loads(out_bad["readiness_manifest"].read_text(encoding="utf-8"))
+    assert m_bad["measurement_readiness"]["dictionary_columns_match_exact"] is False
+    assert m_bad["measurement_readiness"]["ready_for_cohort_evaluation"] is False
+
+    dict_path.write_text("column,applies_to\nparticipant_key,both\nage_years,both\n", encoding="utf-8")
+    out_ok = audit_mod.run_readiness_audit(
+        clinical_master_path=master_path,
+        output_dir=tmp_path / "audit_dict_ok",
+        measured_runtime_seconds=10.19,
+    )
+    m_ok = json.loads(out_ok["readiness_manifest"].read_text(encoding="utf-8"))
+    assert m_ok["measurement_readiness"]["dictionary_columns_match_exact"] is True
+    assert m_ok["measurement_readiness"]["ready_for_cohort_evaluation"] is True
+    assert m_ok["computational_readiness"]["status"] == "measured_in_current_audit"
+    assert m_ok["computational_readiness"]["total_division_candidate_fits_per_refit"] == 5350
+
+
+def test_single_sample_autodetect_new_synthetic_regimes_and_mde_smoke(tmp_path: Path) -> None:
+    from manuscript_ml.run_simulation_calibration import run_simulation_and_calibration
+    from src.analysis.paired_lipid.synthetic import DEFAULT_N_SINGLE_SAMPLE
+
+    # 1. Default n_single_sample == 4 and randomized positions across 0..n_participants-1.
+    ds_def, _ = generate_synthetic_cohort(n_participants=92, seed=2105, compact_grid=True)
+    assert DEFAULT_N_SINGLE_SAMPLE == 4
+    assert ds_def.manifest_summary["n_single_sample_participants"] == 4
+    single_pos = np.flatnonzero(ds_def.participant_sample_counts == 1)
+    assert single_pos.size == 4
+    assert not np.array_equal(single_pos, np.arange(88, 92))
+
+    # 2. single_sample auto-detection in evaluate_nested_cohort & run_multiplicity_bootstrap.
+    ds_ss, _ = generate_synthetic_cohort(n_participants=36, seed=2106, compact_grid=True, subset_mode="single_sample")
+    cfg = PairedLipidConfig()
+    ev_auto = evaluate_nested_cohort(ds_ss, cfg=cfg, compute_diagnostics=False)
+    ev_expl = evaluate_nested_cohort(ds_ss, cfg=cfg, single_sample_downstream=True, compute_diagnostics=False)
+    assert ev_auto["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"] == pytest.approx(
+        ev_expl["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-12
+    )
+    b_auto = run_multiplicity_bootstrap(ds_ss, cfg=cfg, n_bootstraps=3, bootstrap_seed=77, use_gpu=False)
+    b_expl = run_multiplicity_bootstrap(
+        ds_ss, cfg=cfg, n_bootstraps=3, bootstrap_seed=77, single_sample_downstream=True, use_gpu=False
+    )
+    assert b_auto["n_fallback_draws"] == 3
+    assert b_auto["point_estimate_delta_mse"] == pytest.approx(b_expl["point_estimate_delta_mse"], abs=1e-12)
+    assert np.max(np.abs(b_auto["bootstrap_draws_delta_mse"] - b_expl["bootstrap_draws_delta_mse"])) <= 1e-12
+
+    # 3. Formula-linked LDL includes label drift and new regimes produce valid finite cohorts.
+    ds_f0, _ = generate_synthetic_cohort(
+        n_participants=60, seed=2107, compact_grid=True, formula_linked_ldl=True, label_drift_scale=0.0
+    )
+    ds_f1, _ = generate_synthetic_cohort(
+        n_participants=60, seed=2107, compact_grid=True, formula_linked_ldl=True, label_drift_scale=0.9
+    )
+    corr_f1 = float(np.corrcoef(ds_f1.covariate_frame["sample_label_trend"], ds_f1.outcomes["ldl_mmol_l"])[0, 1])
+    corr_f0 = float(np.corrcoef(ds_f0.covariate_frame["sample_label_trend"], ds_f0.outcomes["ldl_mmol_l"])[0, 1])
+    assert corr_f1 > corr_f0 + 0.3
+
+    ds_qc, _ = generate_synthetic_cohort(
+        n_participants=60, n_single_sample=0, seed=2108, compact_grid=True, qc_sample_dropout_fraction=0.2
+    )
+    assert ds_qc.manifest_summary["n_single_sample_participants"] > 0
+    assert len(ds_qc.exclusions) == ds_qc.manifest_summary["n_single_sample_participants"]
+
+    for kwargs in (
+        {"n_nuisance_modes": 12, "nuisance_part_scale": 0.9, "nuisance_sample_scale": 0.9, "include_shoulder_in_bio": True},
+        {"n_nuisance_modes": 6, "nuisance_sample_scale": 0.8, "correlated_tech_mode_rho": 0.65},
+        {"unequal_b_error_scale": 0.8},
+        {"nonlinear_spectral_signal": True},
+        {"map_spatial_corr": 0.85, "map_spatial_scale": 0.5},
+        {"covariate_missing_rate": 0.15},
+    ):
+        ds_reg, _ = generate_synthetic_cohort(n_participants=36, seed=2109, compact_grid=True, **kwargs)
+        assert np.all(np.isfinite(ds_reg.sample_1300))
+        assert np.all(np.isfinite(ds_reg.sample_2850))
+        assert np.all(np.isfinite(ds_reg.outcomes["ldl_mmol_l"]))
+
+    # 4. MDE curve smoke via run_simulation_and_calibration.
+    mde_outs = run_simulation_and_calibration(
+        output_dir=tmp_path / "mde_smoke",
+        quick=True,
+        n_calibration_reps=2,
+        n_bootstraps=4,
+        n_jobs=1,
+        use_gpu=False,
+        skip_scenario_suite=True,
+        run_mde_curve=True,
+    )
+    assert "simulation_mde_curve" in mde_outs
+    mde_df = pd.read_csv(mde_outs["simulation_mde_curve"])
+    assert len(mde_df) == 2
+    assert set(["signal_strength", "detection_rate_delta_mse", "interval_method"]).issubset(mde_df.columns)
+    assert (mde_df["interval_method"] == "studentized_t").all()
+
+
+def test_expanded_diagnostics_weights_identity_artifact_builder_and_cli_parity(tmp_path: Path) -> None:
+    import json
+
+    from manuscript_ml.build_manuscript_artifacts import build_manuscript_artifacts
+    from manuscript_ml.run_all import _parse_args as parse_run_all_args
+    from manuscript_ml.run_primary_evaluation import run_primary_evaluation
+    from manuscript_ml.run_sensitivity_and_secondary import run_sensitivity_and_secondary
+
+    stage_dir = tmp_path / "stage_out"
+    prim_outs = run_primary_evaluation(
+        use_synthetic=True,
+        output_dir=stage_dir,
+        n_bootstraps=4,
+        compact_grid=True,
+        use_gpu=False,
+    )
+    sens_outs = run_sensitivity_and_secondary(
+        use_synthetic=True,
+        output_dir=stage_dir,
+        compact_grid=True,
+        n_bootstraps=3,
+        use_gpu=False,
+    )
+
+    # 1. Expanded primary schemas & bootstrap_draws.npz
+    assert prim_outs["fold_spectral_weights"].is_file()
+    assert prim_outs["bootstrap_draws"].is_file()
+    manifest = json.loads(prim_outs["eligibility_and_split_manifest"].read_text(encoding="utf-8"))
+    mb = manifest["multiplicity_bootstrap"]
+    for key in (
+        "interval_method",
+        "ci_95_strongest_vs_covariate",
+        "ci_95_percentile_delta_mse",
+        "mean_distinct_participants",
+        "mc_se_ci_95_low_delta_mse",
+        "mc_se_ci_95_high_delta_mse",
+    ):
+        assert key in mb
+    with np.load(prim_outs["bootstrap_draws"]) as npz:
+        assert set(npz.files) == {
+            "delta_mse",
+            "vs_comparator",
+            "strongest_vs_covariate",
+            "oof_sds_delta_mse",
+            "oof_sds_vs_comparator",
+            "oof_sds_strongest_vs_covariate",
+        }
+
+    rep_df = pd.read_csv(prim_outs["baseline_repeatability_report"])
+    for col in (
+        "strongest_comparator_name",
+        "pca_full_icc_estimate",
+        "pca_spectral_icc_estimate",
+        "pls_full_icc_estimate",
+        "pls_spectral_icc_estimate",
+        "strongest_comparator_spectral_icc_estimate",
+        "pls_discriminability_score",
+        "paired_sd_spectral_contrib",
+        "paired_spectral_variance_share",
+        "paired_spectral_icc_ms_between_participants",
+        "paired_spectral_icc_ms_error",
+    ):
+        assert col in rep_df.columns
+
+    fs_df = pd.read_csv(prim_outs["fold_selected_settings"])
+    for col in (
+        "tr_T",
+        "tr_W",
+        "tr_W_over_tr_T",
+        "mean_ab_shift_share_of_tr_W",
+        "top_rhos_json",
+        "inner_mse_covariate_ridge",
+        "inner_mse_paired_linear_ridge",
+        "inner_min_paired_distinct",
+        "inner_min_numerical_rank",
+    ):
+        assert col in fs_df.columns
+
+    ang_df = pd.read_csv(prim_outs["subspace_principal_angles"])
+    assert set(ang_df["model"].unique()) == {"paired_linear_ridge", "pca_ridge"}
+    assert {"angle_1_deg", "angle_2_deg", "angle_3_deg"}.issubset(ang_df.columns)
+
+    # 2. Exact identity check: canonical fold_spectral_weights reconstructs OOF spectral contributions (up to intercept offset).
+    w_df = pd.read_csv(prim_outs["fold_spectral_weights"])
+    pred_df = pd.read_csv(prim_outs["nested_held_out_predictions"])
+    syn_seed = int(manifest["source_metadata"]["synthetic_seed"])
+    ds_syn, _ = generate_synthetic_cohort(n_participants=92, seed=syn_seed, compact_grid=True)
+    p1300 = aggregate_samples_to_participants(ds_syn.sample_1300, ds_syn)
+    p2850 = aggregate_samples_to_participants(ds_syn.sample_2850, ds_syn)
+    p_all = np.hstack([p1300, p2850])
+    for fold_id in range(5):
+        te_mask = pred_df["outer_fold"].to_numpy() == fold_id
+        w_vec = w_df[f"paired_weight_fold_{fold_id}"].to_numpy(dtype=float)
+        s_hat = p_all[te_mask] @ w_vec
+        s_ref = pred_df.loc[te_mask, "spectral_contrib_paired_linear_ridge"].to_numpy(dtype=float)
+        # Constant intercept offset cancels when centered across test participants.
+        diff_centered = (s_hat - np.mean(s_hat)) - (s_ref - np.mean(s_ref))
+        assert float(np.max(np.abs(diff_centered))) <= 1e-11
+    for col in ("paired_weight_mean", "paired_weight_sd", "paired_weight_abs_mean", "pca_weight_mean", "pls_weight_mean"):
+        assert col in w_df.columns and np.all(np.isfinite(w_df[col]))
+
+    # 3. Expanded sensitivity columns with optional bootstrap CIs.
+    sens_df = pd.read_csv(sens_outs["covariate_and_subset_sensitivity"])
+    for col in (
+        "mse_covariate",
+        "mse_paired",
+        "mse_pca",
+        "mse_pls",
+        "mse_fixed_band",
+        "strongest_comparator_name",
+        "attenuation_vs_primary_delta_mse",
+        "ci_95_delta_mse_low",
+        "ci_95_delta_mse_high",
+    ):
+        assert col in sens_df.columns
+
+    # 4. build_manuscript_artifacts refuses synthetic outputs unless --allow-synthetic-preview is passed.
+    art_dir = tmp_path / "artifacts"
+    with pytest.raises(PermissionError, match="allow-synthetic-preview"):
+        build_manuscript_artifacts(input_dir=stage_dir, output_dir=art_dir)
+
+    art_outs = build_manuscript_artifacts(
+        input_dir=stage_dir, output_dir=art_dir, allow_synthetic_preview=True
+    )
+    for key in (
+        "table_primary_results",
+        "table_repeatability_and_angles",
+        "table_sensitivity_and_secondary",
+        "fig_repeatability_icc_and_scale",
+        "fig_spectral_weights_profile",
+        "fig_sensitivity_forest",
+        "artifact_build_manifest",
+    ):
+        assert key in art_outs and art_outs[key].is_file()
+    assert "SYNTHETIC PREVIEW" in art_outs["table_primary_results"].read_text(encoding="utf-8")
+
+    # 5. run_all CLI parity check
+    parsed = parse_run_all_args(
+        [
+            "--synthetic",
+            "--cohort-grid",
+            "--participants",
+            "92",
+            "--n-test-participants",
+            "25000",
+            "--scenarios",
+            "linear_biological_signal,no_association_reference",
+            "--skip-scenario-suite",
+            "--run-mde-curve",
+            "--resume",
+            "--checkpoint-chunk-size",
+            "8",
+            "--batch-size",
+            "32",
+            "--interval-method",
+            "studentized_t",
+            "--sensitivity-bootstraps",
+            "10",
+        ]
+    )
+    assert parsed.compact_grid is False
+    assert parsed.participants == 92
+    assert parsed.n_test_participants == 25000
+    assert parsed.scenarios == "linear_biological_signal,no_association_reference"
+    assert parsed.skip_scenario_suite is True
+    assert parsed.run_mde_curve is True
+    assert parsed.resume is True
+    assert parsed.checkpoint_chunk_size == 8
+    assert parsed.batch_size == 32
+    assert parsed.interval_method == "studentized_t"
+    assert parsed.sensitivity_bootstraps == 10
+
+
+def test_review_round2_hardening_guards_and_latex_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import warnings
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import manuscript_ml.audit_readiness as audit_mod
+    import src.data_preparation.materialize as materialize
+    import src.data_preparation.store as store
+    from manuscript_ml.build_manuscript_artifacts import build_manuscript_artifacts
+    from src.analysis.paired_lipid.nested_cv import (
+        _InnerSelection,
+        evaluate_nested_cohort,
+        summarize_anchor_associations,
+    )
+
+    # 1. _InnerSelection default inner_dropped_covariates must be an immutable tuple.
+    sel_stub = _InnerSelection(0, 0, 1.0, (5, 0), 1.0, 1, 1.0, (5, 0.1, 1, 0), [])
+    assert isinstance(sel_stub.inner_dropped_covariates, tuple)
+    assert sel_stub.inner_dropped_covariates == ()
+
+    # 2. audit_readiness must fail closed when clinical_master_dictionary.csv is absent.
+    master_path = tmp_path / "clinical_master.csv"
+    master_path.write_text("participant_key,age_years\nstroke_1,65\n", encoding="utf-8")
+    fake_store = tmp_path / "store"
+    fake_store.mkdir()
+    (fake_store / "manifest.json").write_text("{}", encoding="utf-8")
+    source = SimpleNamespace(source_path=fake_store, manifest_hash="fixture_hash")
+    ok_ds = SimpleNamespace(
+        manifest_summary={
+            "n_eligible_participants": 92,
+            "n_paired_participants": 88,
+            "n_single_sample_participants": 4,
+            "n_eligible_samples": 180,
+        },
+        exclusions=[],
+    )
+    monkeypatch.setattr(materialize, "store_dir", lambda *_args: fake_store)
+    monkeypatch.setattr(store, "get_active_data_source", lambda: source)
+    monkeypatch.setattr(
+        audit_mod,
+        "load_clinical_master_verified",
+        lambda _p: (pd.DataFrame(), {"stroke_identity_verified": 92}),
+    )
+    monkeypatch.setattr(audit_mod, "load_paired_cohort_from_store", lambda *_a, **_kw: (ok_ds, {}))
+
+    out_missing_dict = audit_mod.run_readiness_audit(
+        clinical_master_path=master_path,
+        output_dir=tmp_path / "audit_missing_dict",
+    )
+    m_missing = json.loads(out_missing_dict["readiness_manifest"].read_text(encoding="utf-8"))
+    assert m_missing["measurement_readiness"]["clinical_dictionary"]["present"] is False
+    assert m_missing["measurement_readiness"]["ready_for_cohort_evaluation"] is False
+
+    # 3. summarize_anchor_associations must skip saturated folds (residual df < 2) rather than injecting 0.0.
+    ds_sat, _ = generate_synthetic_cohort(
+        n_participants=35, n_single_sample=2, seed=2201, compact_grid=True, covariate_missing_rate=0.15
+    )
+    cfg_rf = replace(PairedLipidConfig(), covariate_preset="pre_event_risk_factors")
+    ev_sat = evaluate_nested_cohort(ds_sat, cfg=cfg_rf, compute_diagnostics=False)
+    adf_sat = summarize_anchor_associations(ds_sat, ev_sat, n_resamples=10, cfg=cfg_rf)
+    assert not adf_sat.empty
+    assert adf_sat["fold_median_partial_r"].isna().all()
+    assert adf_sat["fold_min_partial_r"].isna().all()
+    assert adf_sat["fold_max_partial_r"].isna().all()
+
+    # 4. build_manuscript_artifacts must enforce synthetic guard on standalone sensitivity/anchor CSVs
+    #    and handle empty optional CSVs cleanly with zero Matplotlib warnings and valid tabularx X specs.
+    seed_only = tmp_path / "seed_only"
+    seed_only.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "outer_seed": 42,
+                "role": "primary_locked",
+                "mse_covariate": 1.0,
+                "delta_mse_paired": 0.1,
+                "delta_vs_strongest_comparator": 0.0,
+                "attenuation_vs_primary_delta_mse": 0.0,
+            }
+        ]
+    ).to_csv(seed_only / "outer_partition_seed_sensitivity.csv", index=False)
+    with pytest.raises(PermissionError, match="allow-synthetic-preview"):
+        build_manuscript_artifacts(input_dir=seed_only, output_dir=tmp_path / "out_seed_blocked")
+
+    empty_ang_dir = tmp_path / "empty_angles"
+    empty_ang_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "outer_fold": 0,
+                "n_paired_test": 10,
+                "paired_full_icc_estimate": 0.5,
+                "paired_spectral_icc_estimate": 0.4,
+                "paired_sd_spectral_contrib": 0.1,
+                "strongest_comparator_spectral_icc_estimate": 0.3,
+                "paired_discriminability_score": 0.6,
+                "paired_discriminability_retrieval_top1": 0.5,
+            }
+        ]
+    ).to_csv(empty_ang_dir / "baseline_repeatability_report.csv", index=False)
+    (empty_ang_dir / "subspace_principal_angles.csv").write_text("\n", encoding="utf-8")
+
+    with warnings.catch_warnings(record=True) as wrec:
+        warnings.simplefilter("always")
+        art_empty = build_manuscript_artifacts(
+            input_dir=empty_ang_dir,
+            output_dir=tmp_path / "out_empty_angles",
+            allow_synthetic_preview=True,
+        )
+    assert len(wrec) == 0
+    rep_tex = art_empty["table_repeatability_and_angles"].read_text(encoding="utf-8")
+    assert r"\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}X" in rep_tex

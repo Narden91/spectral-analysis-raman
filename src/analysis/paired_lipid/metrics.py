@@ -14,6 +14,7 @@ from src.analysis.paired_lipid.cohort import CohortDataset, PairedLipidConfig
 from src.analysis.paired_lipid.models import (
     CovariatePreprocessor,
     MultiAlphaRidgeResult,
+    WeightedPLSResult,
     WeightedSpectralPreprocessor,
 )
 
@@ -67,6 +68,9 @@ def compute_icc_a1(y_a: np.ndarray, y_b: np.ndarray) -> dict[str, Any]:
             "n_pairs": n,
             "mean_diff": float("nan"),
             "rmsd": float("nan"),
+            "ms_between_participants": float("nan"),
+            "ms_between_positions": float("nan"),
+            "ms_error": float("nan"),
         }
 
     k = 2
@@ -85,6 +89,9 @@ def compute_icc_a1(y_a: np.ndarray, y_b: np.ndarray) -> dict[str, Any]:
             "n_pairs": n,
             "mean_diff": mean_diff,
             "rmsd": rmsd,
+            "ms_between_participants": ms_r,
+            "ms_between_positions": ms_c,
+            "ms_error": ms_e,
         }
 
     icc = float((ms_r - ms_e) / denom)
@@ -117,8 +124,10 @@ def compute_discriminability_and_retrieval(
             "discriminability": float("nan"),
             "retrieval_top1": float("nan"),
             "retrieval_chance": float("nan"),
+            "global_candidate_size": float(n),
             "local_retrieval_top1": float("nan"),
             "local_retrieval_chance": float("nan"),
+            "mean_local_candidate_size": float("nan"),
         }
 
     Z = np.vstack([z_a, z_b])  # 2n x r
@@ -163,8 +172,12 @@ def compute_discriminability_and_retrieval(
     # Local neighbor-label candidate sensitivity over finite-label pairs only, vectorized bidirectionally.
     local_retrieval_top1 = float("nan")
     local_retrieval_chance = float("nan")
+    mean_local_candidate_size = float("nan")
     if labels_a is not None and labels_b is not None:
-        mean_lbl = 0.5 * (np.asarray(labels_a, dtype=float) + np.asarray(labels_b, dtype=float))
+        la = np.asarray(labels_a, dtype=float)
+        lb = np.asarray(labels_b, dtype=float)
+        # Require both paired sample labels to be finite so unlabelled samples are excluded from local rank windows.
+        mean_lbl = 0.5 * (la + lb)
         finite_idx = np.flatnonzero(np.isfinite(mean_lbl))
         m = int(finite_idx.size)
         if m >= 2:
@@ -196,14 +209,17 @@ def compute_discriminability_and_retrieval(
                     0.5 * (np.mean(hits_loc_ab[valid_q]) + np.mean(hits_loc_ba[valid_q]))
                 )
                 local_retrieval_chance = float(np.mean(1.0 / cand_counts[valid_q].astype(float)))
+                mean_local_candidate_size = float(np.mean(cand_counts[valid_q].astype(float)))
 
     return {
         "n_pairs": float(n),
         "discriminability": discrim,
         "retrieval_top1": retrieval_top1,
         "retrieval_chance": retrieval_chance,
+        "global_candidate_size": float(n),
         "local_retrieval_top1": local_retrieval_top1,
         "local_retrieval_chance": local_retrieval_chance,
+        "mean_local_candidate_size": mean_local_candidate_size,
     }
 
 
@@ -262,7 +278,11 @@ def _principal_angles_from_orthonormal(QA: np.ndarray, QB: np.ndarray) -> np.nda
     return angles
 
 
-def compute_subspace_principal_angles(bases: Sequence[np.ndarray]) -> pd.DataFrame:
+def compute_subspace_principal_angles(
+    bases: Sequence[np.ndarray],
+    *,
+    model_name: str | None = None,
+) -> pd.DataFrame:
     """Compute pairwise principal angles (degrees) between fold-specific metric-orthonormal bases."""
     orth_bases = [_ensure_orthonormal_basis(b) for b in bases]
     rows: list[dict[str, Any]] = []
@@ -278,18 +298,25 @@ def compute_subspace_principal_angles(bases: Sequence[np.ndarray]) -> pd.DataFra
                 continue
             angles_rad = _principal_angles_from_orthonormal(Qi, Qj)
             cosines = np.clip(np.cos(angles_rad), 0.0, 1.0)
-            angles_deg = np.degrees(angles_rad)
-            rows.append(
+            angles_deg = np.sort(np.degrees(angles_rad))
+            row: dict[str, Any] = {}
+            if model_name is not None:
+                row["model"] = str(model_name)
+            row.update(
                 {
                     "fold_a": i,
                     "fold_b": j,
                     "dim_a": int(Qi_orig.shape[1]),
                     "dim_b": int(Qj_orig.shape[1]),
+                    "angle_1_deg": float(angles_deg[0]) if angles_deg.size >= 1 else float("nan"),
+                    "angle_2_deg": float(angles_deg[1]) if angles_deg.size >= 2 else float("nan"),
+                    "angle_3_deg": float(angles_deg[2]) if angles_deg.size >= 3 else float("nan"),
                     "max_principal_angle_deg": float(np.max(angles_deg)),
                     "mean_principal_angle_deg": float(np.mean(angles_deg)),
                     "min_cosine": float(np.min(cosines)),
                 }
             )
+            rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -308,6 +335,7 @@ def compute_endpoint_summary(
     if not np.any(valid):
         return {
             "delta_mse": float("nan"),
+            "oof_loss_diff_sd": float("nan"),
             "relative_mse_reduction": float("nan"),
             "mse_covariate": float("nan"),
             "mse_model": float("nan"),
@@ -322,9 +350,11 @@ def compute_endpoint_summary(
 
     sq_err_c = (y - yc) ** 2
     sq_err_m = (y - ym) ** 2
+    loss_diff = sq_err_c - sq_err_m
     mse_c = float(w_norm @ sq_err_c)
     mse_m = float(w_norm @ sq_err_m)
-    delta = float(w_norm @ (sq_err_c - sq_err_m))
+    delta = float(w_norm @ loss_diff)
+    oof_loss_diff_sd = float(math.sqrt(max(float(w_norm @ ((loss_diff - delta) ** 2)), 0.0)))
     rel_red = delta / mse_c if mse_c > 1e-15 else float("nan")
     rmse = float(math.sqrt(mse_m))
     mae = float(w_norm @ np.abs(y - ym))
@@ -342,6 +372,7 @@ def compute_endpoint_summary(
 
     return {
         "delta_mse": delta,
+        "oof_loss_diff_sd": oof_loss_diff_sd,
         "relative_mse_reduction": rel_red,
         "mse_covariate": mse_c,
         "mse_model": mse_m,
@@ -350,6 +381,27 @@ def compute_endpoint_summary(
         "calibration_intercept": intercept,
         "calibration_slope": slope,
     }
+
+
+def _spectral_scale_metrics(
+    y_a: np.ndarray,
+    y_b: np.ndarray,
+    s_a: np.ndarray,
+    s_b: np.ndarray,
+) -> tuple[float, float]:
+    """Compute participant-mean spectral contribution SD and share of full-prediction variance."""
+    y_mean = 0.5 * (np.asarray(y_a, dtype=float) + np.asarray(y_b, dtype=float))
+    s_mean = 0.5 * (np.asarray(s_a, dtype=float) + np.asarray(s_b, dtype=float))
+    valid = np.isfinite(y_mean) & np.isfinite(s_mean)
+    if int(np.count_nonzero(valid)) < 2:
+        return float("nan"), float("nan")
+    y_v = y_mean[valid]
+    s_v = s_mean[valid]
+    var_s = float(np.var(s_v, ddof=1))
+    var_y = float(np.var(y_v, ddof=1))
+    sd_s = float(math.sqrt(max(var_s, 0.0)))
+    share = float(var_s / var_y) if var_y > 1e-15 else float("nan")
+    return sd_s, share
 
 
 def _predict_paired_ab(
@@ -382,8 +434,14 @@ def outer_test_repeatability(
     sample_paired_z: np.ndarray,
     sample_band_mat: np.ndarray,
     sample_pca_sel: np.ndarray,
+    *,
+    sample_band_discrim: np.ndarray | None = None,
+    fit_pca_outer: MultiAlphaRidgeResult | None = None,
+    fit_pls_outer: WeightedPLSResult | None = None,
+    outer_spec_prep: WeightedSpectralPreprocessor | None = None,
+    strongest_comparator_name: str | None = None,
 ) -> dict[str, Any]:
-    """Per-sample (A vs B) ICCs and discriminability on the paired outer-test participants."""
+    """Per-sample (A vs B) ICCs, scale diagnostics, and discriminability on paired outer-test participants."""
     paired_test_pos = np.isin(dataset.paired_participant_indices, outer_test_idx)
     paired_test_p = dataset.paired_participant_indices[paired_test_pos]
     idx_a_te = dataset.pair_sample_a_indices[paired_test_pos]
@@ -404,21 +462,99 @@ def outer_test_repeatability(
     )
     lbl_a = dataset.sample_parsed_labels[idx_a_te]
     lbl_b = dataset.sample_parsed_labels[idx_b_te]
+    band_discrim_input = sample_band_mat if sample_band_discrim is None else sample_band_discrim
 
     def _discrim(z: np.ndarray) -> dict[str, float]:
+        z_arr = np.asarray(z, dtype=float)
+        if z_arr.ndim == 1:
+            z_arr = z_arr[:, None]
         return compute_discriminability_and_retrieval(
-            z[idx_a_te], z[idx_b_te], lbl_a, lbl_b, local_window=cfg.local_candidate_window
+            z_arr[idx_a_te], z_arr[idx_b_te], lbl_a, lbl_b, local_window=cfg.local_candidate_window
         )
+
+    paired_full_icc = compute_icc_a1(y_pair_a, y_pair_b)
+    paired_spec_icc = compute_icc_a1(s_pair_a, s_pair_b)
+    paired_sd_s, paired_var_share = _spectral_scale_metrics(y_pair_a, y_pair_b, s_pair_a, s_pair_b)
+
+    band_full_icc = compute_icc_a1(y_band_a, y_band_b)
+    band_spec_icc = compute_icc_a1(s_band_a, s_band_b)
+    band_sd_s, band_var_share = _spectral_scale_metrics(y_band_a, y_band_b, s_band_a, s_band_b)
 
     info.update(
         {
-            "paired_full_icc": compute_icc_a1(y_pair_a, y_pair_b),
-            "paired_spectral_icc": compute_icc_a1(s_pair_a, s_pair_b),
-            "fixed_band_full_icc": compute_icc_a1(y_band_a, y_band_b),
-            "fixed_band_spectral_icc": compute_icc_a1(s_band_a, s_band_b),
+            "paired_full_icc": paired_full_icc,
+            "paired_spectral_icc": paired_spec_icc,
+            "paired_sd_spectral_contrib": paired_sd_s,
+            "paired_spectral_variance_share": paired_var_share,
+            "fixed_band_full_icc": band_full_icc,
+            "fixed_band_spectral_icc": band_spec_icc,
+            "fixed_band_sd_spectral_contrib": band_sd_s,
+            "fixed_band_spectral_variance_share": band_var_share,
             "paired_discriminability": _discrim(sample_paired_z),
             "pca_discriminability": _discrim(sample_pca_sel),
-            "band_discriminability": _discrim(sample_band_mat),
+            "band_discriminability": _discrim(band_discrim_input),
         }
     )
+
+    comp_icc_map: dict[str, tuple[dict[str, Any], dict[str, Any], float, float]] = {
+        "fixed_band_ridge": (band_full_icc, band_spec_icc, band_sd_s, band_var_share),
+    }
+
+    if fit_pca_outer is not None:
+        y_pca_a, s_pca_a, y_pca_b, s_pca_b = _predict_paired_ab(
+            fit_pca_outer, X_cov_pair_te, sample_pca_sel[idx_a_te], sample_pca_sel[idx_b_te]
+        )
+        pca_full_icc = compute_icc_a1(y_pca_a, y_pca_b)
+        pca_spec_icc = compute_icc_a1(s_pca_a, s_pca_b)
+        pca_sd_s, pca_var_share = _spectral_scale_metrics(y_pca_a, y_pca_b, s_pca_a, s_pca_b)
+        info["pca_full_icc"] = pca_full_icc
+        info["pca_spectral_icc"] = pca_spec_icc
+        info["pca_sd_spectral_contrib"] = pca_sd_s
+        info["pca_spectral_variance_share"] = pca_var_share
+        comp_icc_map["pca_ridge"] = (pca_full_icc, pca_spec_icc, pca_sd_s, pca_var_share)
+
+    if fit_pls_outer is not None and outer_spec_prep is not None:
+        n_comp_pls = int(fit_pls_outer.max_components)
+        y_pls_a, s_pls_a = fit_pls_outer.predict_from_raw_blocks(
+            outer_spec_prep,
+            X_cov_pair_te,
+            dataset.sample_1300[idx_a_te],
+            dataset.sample_2850[idx_a_te],
+            n_components=n_comp_pls,
+        )
+        y_pls_b, s_pls_b = fit_pls_outer.predict_from_raw_blocks(
+            outer_spec_prep,
+            X_cov_pair_te,
+            dataset.sample_1300[idx_b_te],
+            dataset.sample_2850[idx_b_te],
+            n_components=n_comp_pls,
+        )
+        pls_full_icc = compute_icc_a1(y_pls_a, y_pls_b)
+        pls_spec_icc = compute_icc_a1(s_pls_a, s_pls_b)
+        pls_sd_s, pls_var_share = _spectral_scale_metrics(y_pls_a, y_pls_b, s_pls_a, s_pls_b)
+        info["pls_full_icc"] = pls_full_icc
+        info["pls_spectral_icc"] = pls_spec_icc
+        info["pls_sd_spectral_contrib"] = pls_sd_s
+        info["pls_spectral_variance_share"] = pls_var_share
+        comp_icc_map["pls_regression"] = (pls_full_icc, pls_spec_icc, pls_sd_s, pls_var_share)
+
+        # Sample-level cumulative PLS spectral contributions across 1..c components for discriminability.
+        zeros_cov_all = np.zeros((dataset.n_samples, fit_pls_outer.p_cov), dtype=float)
+        _, sample_pls_spec_all = fit_pls_outer.predict_from_raw_blocks(
+            outer_spec_prep,
+            zeros_cov_all,
+            dataset.sample_1300,
+            dataset.sample_2850,
+            n_components=None,
+        )
+        info["pls_discriminability"] = _discrim(sample_pls_spec_all)
+
+    if strongest_comparator_name is not None and strongest_comparator_name in comp_icc_map:
+        sc_full, sc_spec, sc_sd, sc_share = comp_icc_map[strongest_comparator_name]
+        info["strongest_comparator_name"] = strongest_comparator_name
+        info["strongest_comparator_full_icc"] = sc_full
+        info["strongest_comparator_spectral_icc"] = sc_spec
+        info["strongest_comparator_sd_spectral_contrib"] = sc_sd
+        info["strongest_comparator_spectral_variance_share"] = sc_share
+
     return info

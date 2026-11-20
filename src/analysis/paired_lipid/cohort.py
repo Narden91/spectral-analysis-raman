@@ -196,6 +196,30 @@ class CohortDataset:
     exclusions: list[dict[str, Any]] = field(default_factory=list)
     _cache: dict[str, Any] = field(default_factory=dict, init=False, repr=False, compare=False)
 
+    def __post_init__(self) -> None:
+        # Freeze owned/attached arrays read-only so memoized datasets and Gram caches cannot drift.
+        for attr in (
+            "participant_ids",
+            "wavenumbers_1300",
+            "wavenumbers_2850",
+            "sample_1300",
+            "sample_2850",
+            "sample_participant_idx",
+            "sample_ids",
+            "sample_parsed_labels",
+            "participant_sample_counts",
+            "paired_participant_indices",
+            "pair_sample_a_indices",
+            "pair_sample_b_indices",
+        ):
+            arr = getattr(self, attr)
+            if isinstance(arr, np.ndarray) and arr.flags.writeable:
+                arr.setflags(write=False)
+        if isinstance(self.outcomes, dict):
+            for arr in self.outcomes.values():
+                if isinstance(arr, np.ndarray) and arr.flags.writeable:
+                    arr.setflags(write=False)
+
     @property
     def n_participants(self) -> int:
         return int(self.participant_ids.size)

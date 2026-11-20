@@ -28,14 +28,15 @@ seeds:
 
 calibration:
   signal_strength: 0.85          # LDL-C signal of the calibration replicates
-  n_test_participants: 5000      # independent synthetic test cohort that defines the target
+  n_test_participants: 25000     # independent synthetic test cohort that defines the target
+  interval_method: studentized_t # centered full-procedure studentized multiplicity bootstrap-t
   # Provisional gate: Wilson 95% lower bound of unconditional coverage, and dataset failure rate.
   # A validation run below the replicate count that can reach the lower bound is refused.
   gate_wilson_lower_min: 0.925
   gate_max_failure_rate: 0.01
 
 anchors:
-  n_resamples: 200               # participant resamples for sign stability and intervals
+  n_resamples: 2000              # participant resamples for sign stability and intervals
   seed: 42
 
 readiness:
@@ -55,6 +56,7 @@ simulation:
   # calibration on the cohort grid (slower, not timed).
   compact_grid: true
   n_participants_grid: [60, 92, 150]
+  mde_signal_grid: [0.0, 0.25, 0.5, 0.75, 1.0]
   scenarios:
     - {scenario: linear_biological_signal, covariate_preset: primary,
        signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1}
@@ -77,3 +79,45 @@ simulation:
     # FP/SS modes are pooled, so the label trend is the only technical covariate to drop.
     - {scenario: ablation_no_technical_covariates, covariate_preset: no_label_trend,
        signal_strength: 0.85, ab_shift_scale: 0.45, label_drift_scale: 0.35}
+    # Realistic high-dimensional spectral geometry and docs/research_design.md failure modes (indices 10..16).
+    - {scenario: high_dim_technical_nuisance, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1,
+       n_nuisance_modes: 16, nuisance_part_scale: 0.60, nuisance_sample_scale: 1.50,
+       nuisance_decay: 0.88, bio_loading_scale: 0.80, bio_sample_noise: 0.20,
+       include_shoulder_in_bio: true}
+    - {scenario: strong_shared_preparation, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1,
+       shared_prep_scale: 1.0,
+       n_nuisance_modes: 16, nuisance_part_scale: 0.60, nuisance_sample_scale: 1.50,
+       nuisance_decay: 0.88, bio_loading_scale: 0.80, bio_sample_noise: 0.20,
+       include_shoulder_in_bio: true}
+    - {scenario: correlated_ab_sample_errors, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1,
+       correlated_tech_mode_rho: 0.90,
+       n_nuisance_modes: 16, nuisance_part_scale: 0.60, nuisance_sample_scale: 1.50,
+       nuisance_decay: 0.88, bio_loading_scale: 0.80, bio_sample_noise: 0.20,
+       include_shoulder_in_bio: true}
+    - {scenario: unequal_ab_sample_errors, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1,
+       unequal_b_error_scale: 1.4,
+       n_nuisance_modes: 16, nuisance_part_scale: 0.60, nuisance_sample_scale: 1.50,
+       nuisance_decay: 0.88, bio_loading_scale: 0.80, bio_sample_noise: 0.20,
+       include_shoulder_in_bio: true}
+    - {scenario: nonlinear_spectral_signal, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1,
+       nonlinear_spectral_signal: true,
+       n_nuisance_modes: 16, nuisance_part_scale: 0.60, nuisance_sample_scale: 1.50,
+       nuisance_decay: 0.88, bio_loading_scale: 0.85, bio_sample_noise: 0.18,
+       include_shoulder_in_bio: true}
+    - {scenario: correlated_within_sample_maps, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1,
+       map_spatial_corr: 0.85, map_spatial_scale: 0.8,
+       n_nuisance_modes: 16, nuisance_part_scale: 0.60, nuisance_sample_scale: 1.50,
+       nuisance_decay: 0.88, bio_loading_scale: 0.80, bio_sample_noise: 0.20,
+       include_shoulder_in_bio: true}
+    - {scenario: covariate_missingness, covariate_preset: primary,
+       signal_strength: 0.85, ab_shift_scale: 0.15, label_drift_scale: 0.1,
+       covariate_missing_rate: 0.15,
+       n_nuisance_modes: 16, nuisance_part_scale: 0.60, nuisance_sample_scale: 1.50,
+       nuisance_decay: 0.88, bio_loading_scale: 0.80, bio_sample_noise: 0.20,
+       include_shoulder_in_bio: true}

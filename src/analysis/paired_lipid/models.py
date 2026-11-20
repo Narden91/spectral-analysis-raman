@@ -52,6 +52,47 @@ def _weighted_mean_and_scale(
     return means, scales, centered
 
 
+def standardize_sample_matrix_on_train(
+    sample_matrix: np.ndarray,
+    dataset: CohortDataset,
+    train_participant_indices: np.ndarray,
+    participant_multiplicities: np.ndarray,
+) -> np.ndarray:
+    """Standardize a sample-level feature matrix using training-only participant-weighted moments.
+
+    Each sample of training participant i with multiplicity mu_i and m_i eligible samples receives
+    weight mu_i / (N_eff * m_i), matching ``WeightedSpectralPreprocessor.fit``. This places features
+    from differently normalized blocks (SNV fingerprint vs area-normalized C-H) on unit variance
+    without exposing held-out samples to the scaling step.
+    """
+    train_p = np.asarray(train_participant_indices, dtype=int)
+    mult = np.asarray(participant_multiplicities, dtype=float)
+    if mult.ndim != 1 or mult.size == 0 or not np.all(np.isfinite(mult)) or np.any(mult < 0.0):
+        raise ValueError("standardize_sample_matrix_on_train requires finite non-negative multiplicities.")
+    keep = mult > 0.0
+    train_p = train_p[keep]
+    mult = mult[keep]
+    if train_p.size == 0:
+        raise ValueError("standardize_sample_matrix_on_train requires at least one positively weighted participant.")
+
+    n_eff = float(np.sum(mult))
+    p_to_mult = np.zeros(dataset.n_participants, dtype=float)
+    p_to_mult[train_p] = mult
+
+    sample_p = dataset.sample_participant_idx
+    s_indices = np.flatnonzero(p_to_mult[sample_p] > 0.0)
+    if s_indices.size == 0:
+        raise ValueError("standardize_sample_matrix_on_train found no training samples.")
+    s_p = sample_p[s_indices]
+    m_i = dataset.participant_sample_counts[s_p].astype(float)
+    w_samples = _normalize_weights(
+        p_to_mult[s_p] / (n_eff * m_i),
+        context="standardize_sample_matrix_on_train",
+    )
+    means, scales, _ = _weighted_mean_and_scale(sample_matrix[s_indices], w_samples)
+    return (sample_matrix - means) / scales
+
+
 def _enforce_deterministic_signs(vectors: np.ndarray, *, axis: int) -> np.ndarray:
     """Flip each vector along ``axis`` so its largest-magnitude entry is positive."""
     if vectors.size == 0:
@@ -126,19 +167,20 @@ class CovariatePreprocessor:
             cdf = np.cumsum(f_w[order]) / np.sum(f_w)
             med = float(f_vals[order[np.searchsorted(cdf, 0.5)]])
             imputed = np.where(finite, vals, med)
+            has_missing = not np.all(finite)
             if np.ptp(imputed) <= 1e-12:
                 dropped_cols.append(col)
-                continue
-            kept_cols.append(col)
-            base_indices_list.append(c_idx)
-            medians_list.append(med)
-            base_design.append(imputed)
-            if not np.all(finite):
+            else:
+                kept_cols.append(col)
+                base_indices_list.append(c_idx)
+                medians_list.append(med)
+                base_design.append(imputed)
+            if has_missing:
                 miss_indicator_cols.append(col)
                 miss_indices_list.append(c_idx)
                 miss_design.append((~finite).astype(float))
 
-        if not kept_cols:
+        if not kept_cols and not miss_indicator_cols:
             return cls(
                 feature_names=[],
                 medians=np.empty(0, dtype=float),
@@ -185,11 +227,14 @@ class CovariatePreprocessor:
             and self._base_indices.size == self.medians.size
             and self._miss_indices.size == len(self.include_missing_indicators_for)
         ):
-            base_vals = sub_mat[:, self._base_indices]
-            base_imputed = np.where(np.isfinite(base_vals), base_vals, self.medians[None, :])
+            if self._base_indices.size > 0:
+                base_vals = sub_mat[:, self._base_indices]
+                base_imputed = np.where(np.isfinite(base_vals), base_vals, self.medians[None, :])
+            else:
+                base_imputed = np.empty((idx_arr.size, 0), dtype=float)
             if self._miss_indices.size > 0:
                 miss_vals = (~np.isfinite(sub_mat[:, self._miss_indices])).astype(float)
-                X = np.hstack([base_imputed, miss_vals])
+                X = np.hstack([base_imputed, miss_vals]) if self._base_indices.size > 0 else miss_vals
             else:
                 X = base_imputed
             return (X - self.means) / self.scales
@@ -384,10 +429,13 @@ class WeightedSpectralPreprocessor:
         eps = float(np.finfo(float).eps)
         s0 = max(float(s_vals[0]) if s_vals.size else 1.0, 1.0)
         # Forming SW @ SW.T squares singular values, raising zero modes to O(sqrt(max_dim * eps) * s0).
-        # Fall back to exact primal SVD whenever any requested top-k mode approaches that floor.
+        # Fall back to exact primal SVD whenever any requested top-k mode approaches that floor
+        # or whenever trailing modes sit in the ambiguous band between primal tolerance and 10*gram_s_tol.
         gram_s_tol = float(np.sqrt(max_dim * eps)) * s0
+        gram_safe_tol = max(10.0 * gram_s_tol, float(cfg.rank_tolerance))
+        primal_tol = max(max_dim * eps * s0, float(cfg.rank_tolerance))
         max_cfg_k = max(cfg.pca_dimensions)
-        if s_vals.size < max_cfg_k or float(s_vals[max_cfg_k - 1]) <= 10.0 * gram_s_tol:
+        if s_vals.size < max_cfg_k or float(s_vals[max_cfg_k - 1]) <= gram_safe_tol:
             _, s_vals, vt = linalg.svd(
                 np.hstack([SW1 * scale1, SW2 * scale2]),
                 full_matrices=False,
@@ -399,7 +447,7 @@ class WeightedSpectralPreprocessor:
             s_kept = s_vals[:max_k].copy()
             comps = vt[:max_k].copy()
         else:
-            rank = int(np.sum(s_vals > max(gram_s_tol, cfg.rank_tolerance)))
+            rank = int(np.sum(s_vals > max(primal_tol, gram_safe_tol)))
             max_k = min(max_cfg_k, rank, s_vals.size)
             s_kept = s_vals[:max_k].copy()
             u_kept = eigvecs[:, :max_k]
@@ -768,4 +816,39 @@ class WeightedPLSResult:
         B_spec = self.coefs_by_comp[:, self.p_cov :].T
         cov_part = (X_cov @ B_cov - x_mean_cov @ B_cov) if self.p_cov > 0 else 0.0
         spec_part = X_spec @ B_spec - x_mean_spec @ B_spec
+        return self.y_mean + cov_part + spec_part, spec_part
+
+    def predict_from_raw_blocks(
+        self,
+        spec_prep: WeightedSpectralPreprocessor,
+        X_cov: np.ndarray,
+        X1: np.ndarray,
+        X2: np.ndarray,
+        *,
+        n_components: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Fuse MFA block scaling into PLS weights to avoid materializing large scaled test blocks."""
+        p1 = spec_prep.mean_1300.size
+        x_mean_cov = self.x_mean[: self.p_cov]
+        x_mean_spec = self.x_mean[self.p_cov :]
+
+        if n_components is not None:
+            idx = min(max(int(n_components), 1), self.max_components) - 1
+            beta = self.coefs_by_comp[idx]
+            b_cov = beta[: self.p_cov]
+            b_spec = beta[self.p_cov :]
+            w1 = spec_prep.scale_1300 * b_spec[:p1]
+            w2 = spec_prep.scale_2850 * b_spec[p1:]
+            offset = float(spec_prep.mean_1300 @ w1 + spec_prep.mean_2850 @ w2 + x_mean_spec @ b_spec)
+            cov_part = (X_cov @ b_cov - float(x_mean_cov @ b_cov)) if self.p_cov > 0 else 0.0
+            spec_part = X1 @ w1 + X2 @ w2 - offset
+            return self.y_mean + cov_part + spec_part, spec_part
+
+        B_cov = self.coefs_by_comp[:, : self.p_cov].T
+        B_spec = self.coefs_by_comp[:, self.p_cov :].T
+        W1 = spec_prep.scale_1300 * B_spec[:p1]
+        W2 = spec_prep.scale_2850 * B_spec[p1:]
+        offset = spec_prep.mean_1300 @ W1 + spec_prep.mean_2850 @ W2 + x_mean_spec @ B_spec
+        cov_part = (X_cov @ B_cov - x_mean_cov @ B_cov) if self.p_cov > 0 else 0.0
+        spec_part = X1 @ W1 + X2 @ W2 - offset
         return self.y_mean + cov_part + spec_part, spec_part

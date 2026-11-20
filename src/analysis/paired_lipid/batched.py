@@ -165,6 +165,8 @@ def batched_select_inner_settings(
     alphas_xp: Any,
     part_band_xp: Any,
     cfg: PairedLipidConfig,
+    *,
+    compute_inner_diagnostics: bool = False,
 ) -> dict[str, Any]:
     """Stream inner folds one-at-a-time to select hyperparameters for B draws simultaneously.
 
@@ -187,6 +189,9 @@ def batched_select_inner_settings(
     pls_sse = xp.zeros((B, max_pls_c), dtype=xp.float64)
     pair_sse = xp.zeros((B, n_r, n_k * n_lam, n_alphas), dtype=xp.float64)
     rank_ok_xp = xp.ones(B, dtype=bool)
+    inner_paired_counts: list[np.ndarray] = []
+    inner_ranks: list[np.ndarray] = []
+    inner_dropped_cov_sets: list[set[str]] = [set() for _ in range(B)] if compute_inner_diagnostics else []
 
     for dconst in in_dconsts:
         in_tr = dconst["tr_p"]
@@ -201,8 +206,22 @@ def batched_select_inner_settings(
             alphas_xp,
             cfg,
             compute_pca_suff=True,
+            compute_full_rank=compute_inner_diagnostics,
         )
         rank_ok_xp &= div["rank_ok"]
+        if compute_inner_diagnostics:
+            p_pair_tr = dconst["p_pair_tr"]
+            n_pair_div = _to_np(xp, xp.sum(M_batch[:, p_pair_tr] > 0.0, axis=1)).astype(int)
+            inner_paired_counts.append(n_pair_div)
+            inner_ranks.append(_to_np(xp, div["numerical_rank"]).astype(int))
+            base_dropped = tuple(dconst.get("dropped_cov_cols_base", ()))
+            kept_cols = tuple(dconst.get("kept_cov_cols", ()))
+            valid_mask_np = _to_np(xp, div["valid_cov_mask"]) > 0.5
+            for b_i in range(B):
+                inner_dropped_cov_sets[b_i].update(base_dropped)
+                for col_name, is_ok in zip(kept_cols, valid_mask_np[b_i]):
+                    if not is_ok:
+                        inner_dropped_cov_sets[b_i].add(col_name)
         total_val_w += xp.sum(div["w_val"], axis=1)
         cov_sse += div["sse_0"]
 
@@ -245,42 +264,59 @@ def batched_select_inner_settings(
 
     b_arange = np.arange(B)
     best_cov_a = _argmin_last(np.round(cov_mses, 12))
+    best_cov_mse = cov_mses[b_arange, best_cov_a]
 
     best_band_a = _argmin_last(np.round(band_mses, 12))
-    best_band_mse = np.round(band_mses[b_arange, best_band_a], 12)
+    best_band_mse_raw = band_mses[b_arange, best_band_a]
+    best_band_mse_r = np.round(best_band_mse_raw, 12)
 
     pca_r = np.round(pca_mses, 12)
     best_pca_k_idx, best_pca_a = _select_pca_setting(pca_r)
-    best_pca_mse = pca_r[b_arange, best_pca_k_idx, best_pca_a]
+    best_pca_mse_raw = pca_mses[b_arange, best_pca_k_idx, best_pca_a]
+    best_pca_mse_r = pca_r[b_arange, best_pca_k_idx, best_pca_a]
 
     pls_r_cand = np.round(pls_mses[:, pls_idx], 12)
     best_pls_c_idx = pls_idx[np.argmin(pls_r_cand, axis=1)]
-    best_pls_mse = np.round(pls_mses[b_arange, best_pls_c_idx], 12)
+    best_pls_mse_raw = pls_mses[b_arange, best_pls_c_idx]
+    best_pls_mse_r = np.round(best_pls_mse_raw, 12)
 
-    comp_stack = np.stack([best_band_mse, best_pca_mse, best_pls_mse], axis=1)
+    comp_stack = np.stack([best_band_mse_r, best_pca_mse_r, best_pls_mse_r], axis=1)
     best_comp_idx = np.argmin(comp_stack, axis=1)
 
-    pair_r = np.round(pair_mses.reshape(B, n_r, n_k, n_lam, n_alphas), 12)
+    pair_mses_5d = pair_mses.reshape(B, n_r, n_k, n_lam, n_alphas)
+    pair_r = np.round(pair_mses_5d, 12)
     pair_finite = np.isfinite(pair_r)
     pair_ok = np.any(pair_finite, axis=(1, 2, 3, 4))
     pair_r_safe = np.where(pair_finite, pair_r, np.inf)
     best_r_idx, best_k_idx, best_pair_l_idx, best_pair_a = _select_paired_setting(pair_r_safe)
-    return {
+    best_pair_mse = pair_mses_5d[b_arange, best_r_idx, best_k_idx, best_pair_l_idx, best_pair_a]
+
+    out: dict[str, Any] = {
         "best_cov_a": best_cov_a,
+        "best_cov_mse": best_cov_mse,
         "best_band_a": best_band_a,
-        "best_band_mse": best_band_mse,
+        "best_band_mse": best_band_mse_raw,
         "best_pca_k_idx": best_pca_k_idx,
         "best_pca_a": best_pca_a,
-        "best_pca_mse": best_pca_mse,
+        "best_pca_mse": best_pca_mse_raw,
         "best_pls_c_idx": best_pls_c_idx,
-        "best_pls_mse": best_pls_mse,
+        "best_pls_mse": best_pls_mse_raw,
         "best_comp_idx": best_comp_idx,
         "best_r_idx": best_r_idx,
         "best_k_idx": best_k_idx,
         "best_pair_l_idx": best_pair_l_idx,
         "best_pair_a": best_pair_a,
+        "best_pair_mse": best_pair_mse,
         "rank_ok": rank_ok & pair_ok,
     }
+    if compute_inner_diagnostics and inner_paired_counts:
+        pair_stack = np.vstack(inner_paired_counts)
+        rank_stack = np.vstack(inner_ranks)
+        out["inner_min_paired_distinct"] = np.min(pair_stack, axis=0)
+        out["inner_max_paired_distinct"] = np.max(pair_stack, axis=0)
+        out["inner_min_numerical_rank"] = np.min(rank_stack, axis=0)
+        out["inner_dropped_covariates"] = [sorted(s) for s in inner_dropped_cov_sets]
+    return out
 
 
 def _predict_grouped_ridge_outer(
@@ -325,7 +361,8 @@ def _run_batched_multiplicity_draws(
     batch_size: int | None = None,
     execution_metadata: dict[str, Any] | None = None,
     fallback_draws_out: set[int] | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
+    return_oof_sd: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | dict[str, np.ndarray]:
     """Evaluate multiplicity bootstrap draws in batches on GPU (CuPy) or CPU (NumPy)."""
     n_sub, n_p = M_sub.shape
     xp, backend_meta = resolve_array_backend(use_gpu, n_sub, gpu_probe=_get_gpu_xp)
@@ -506,7 +543,10 @@ def _run_batched_multiplicity_draws(
 
         if not np.all(batch_ok):
             bad_local = np.flatnonzero(~batch_ok)
-            oof_paired[xp.asarray(b_start + bad_local)] = xp.nan
+            bad_global_xp = xp.asarray(b_start + bad_local)
+            oof_cov[bad_global_xp] = xp.nan
+            oof_paired[bad_global_xp] = xp.nan
+            oof_strongest[bad_global_xp] = xp.nan
             if fallback_draws_out is not None:
                 fallback_draws_out.update(int(b_start + idx) for idx in bad_local)
 
@@ -515,11 +555,49 @@ def _run_batched_multiplicity_draws(
     diff_cov = y_all_xp[None, :] - oof_cov
     diff_pair = y_all_xp[None, :] - oof_paired
     diff_comp = y_all_xp[None, :] - oof_strongest
-    mse_cov = xp.sum(w_norm_all * (diff_cov * diff_cov), axis=1)
-    mse_paired = xp.sum(w_norm_all * (diff_pair * diff_pair), axis=1)
-    mse_strongest = xp.sum(w_norm_all * (diff_comp * diff_comp), axis=1)
-    delta_pair = _to_np(xp, mse_cov - mse_paired)
-    delta_comp = _to_np(xp, mse_strongest - mse_paired)
+    sq_cov = diff_cov * diff_cov
+    sq_pair = diff_pair * diff_pair
+    sq_comp = diff_comp * diff_comp
+
+    d_pair_mat = sq_cov - sq_pair
+    d_comp_mat = sq_comp - sq_pair
+    d_strong_mat = sq_cov - sq_comp
+
+    delta_pair_xp = xp.sum(w_norm_all * d_pair_mat, axis=1)
+    delta_comp_xp = xp.sum(w_norm_all * d_comp_mat, axis=1)
+    delta_strong_xp = xp.sum(w_norm_all * d_strong_mat, axis=1)
+    delta_pair = _to_np(xp, delta_pair_xp)
+    delta_comp = _to_np(xp, delta_comp_xp)
+
+    if return_oof_sd:
+        delta_strong = _to_np(xp, delta_strong_xp)
+        var_pair = xp.sum(w_norm_all * ((d_pair_mat - delta_pair_xp[:, None]) ** 2), axis=1)
+        var_comp = xp.sum(w_norm_all * ((d_comp_mat - delta_comp_xp[:, None]) ** 2), axis=1)
+        var_strong = xp.sum(w_norm_all * ((d_strong_mat - delta_strong_xp[:, None]) ** 2), axis=1)
+        sd_pair = _to_np(xp, xp.sqrt(xp.maximum(var_pair, 0.0)))
+        sd_comp = _to_np(xp, xp.sqrt(xp.maximum(var_comp, 0.0)))
+        sd_strong = _to_np(xp, xp.sqrt(xp.maximum(var_strong, 0.0)))
+        if fallback_draws_out is not None:
+            bad_final = np.flatnonzero(
+                ~(
+                    np.isfinite(delta_pair)
+                    & np.isfinite(delta_comp)
+                    & np.isfinite(delta_strong)
+                    & np.isfinite(sd_pair)
+                    & np.isfinite(sd_comp)
+                    & np.isfinite(sd_strong)
+                )
+            )
+            fallback_draws_out.update(int(idx) for idx in bad_final)
+        return {
+            "delta_pair": delta_pair,
+            "delta_comp": delta_comp,
+            "delta_strong": delta_strong,
+            "sd_pair": sd_pair,
+            "sd_comp": sd_comp,
+            "sd_strong": sd_strong,
+        }
+
     if fallback_draws_out is not None:
         bad_final = np.flatnonzero(~(np.isfinite(delta_pair) & np.isfinite(delta_comp)))
         fallback_draws_out.update(int(idx) for idx in bad_final)

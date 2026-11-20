@@ -29,6 +29,8 @@ _HOST_DCONST_KEYS: frozenset[str] = frozenset(
         "pair_rel",
         "base_comb_rank",
         "p_total",
+        "kept_cov_cols",
+        "dropped_cov_cols_base",
     }
 )
 
@@ -86,7 +88,7 @@ def _get_dataset_gram_cache(dataset: CohortDataset, cfg: PairedLipidConfig) -> d
 
     spec_cache = _get_spectral_gram_cache(dataset)
     raw_cov_fn = getattr(CovariatePreprocessor, "raw_design_matrix", CovariatePreprocessor._get_raw_matrix)
-    raw_cov, _ = raw_cov_fn(
+    raw_cov, raw_cols = raw_cov_fn(
         dataset.covariate_frame,
         preset=cfg.covariate_preset,
         raw_cache=dataset._cache,
@@ -96,6 +98,7 @@ def _get_dataset_gram_cache(dataset: CohortDataset, cfg: PairedLipidConfig) -> d
     out = {
         **spec_cache,
         "raw_cov": raw_cov_arr,
+        "raw_cov_cols": tuple(str(c) for c in raw_cols),
         "has_missing_cov": bool(not np.all(np.isfinite(raw_cov_arr))),
         "dconst_cpu_cache": OrderedDict(),
     }
@@ -138,10 +141,13 @@ def _precompute_division_constants(
         m_i_div = dataset.participant_sample_counts[dataset.sample_participant_idx[s_div]].astype(np.float64)
 
         raw_cov = np.asarray(gcache["raw_cov"], dtype=np.float64)
+        raw_cov_cols = tuple(gcache.get("raw_cov_cols", (f"cov_{i}" for i in range(raw_cov.shape[1]))))
         X_raw_tr = raw_cov[tr_p]
         X_raw_val = raw_cov[val_p]
         ptp_tr = np.ptp(X_raw_tr, axis=0)
         keep_col = ptp_tr > 1e-12
+        kept_cov_cols = tuple(c for c, flag in zip(raw_cov_cols, keep_col) if flag)
+        dropped_cov_cols_base = tuple(c for c, flag in zip(raw_cov_cols, keep_col) if not flag)
         X_raw_tr = np.ascontiguousarray(X_raw_tr[:, keep_col])
         X_raw_val = np.ascontiguousarray(X_raw_val[:, keep_col])
 
@@ -202,8 +208,12 @@ def _precompute_division_constants(
         s_comb_top = np.sqrt(np.maximum(ev_comb_0, 0.0))
         s_top_val = float(s_comb_top[-1]) if s_comb_top.size else 1.0
         # Account for squared-Gram eigenvalue roundoff floor when checking base numerical rank.
-        comb_tol = float(np.sqrt(max(n_s, p_total) * np.finfo(float).eps)) * max(s_top_val, 1.0)
-        base_comb_rank = int(np.sum(s_comb_top > max(comb_tol, cfg.rank_tolerance)))
+        eps_f = float(np.finfo(float).eps)
+        max_dim_0 = float(max(n_s, p_total))
+        s0_0 = max(s_top_val, 1.0)
+        comb_gram_tol = float(np.sqrt(max_dim_0 * eps_f)) * s0_0
+        comb_primal_tol = max(max_dim_0 * eps_f * s0_0, float(cfg.rank_tolerance))
+        base_comb_rank = int(np.sum(s_comb_top > max(10.0 * comb_gram_tol, comb_primal_tol)))
 
         paired_in_tr = np.isin(dataset.paired_participant_indices, tr_p)
         p_pair_tr = dataset.paired_participant_indices[paired_in_tr]
@@ -225,6 +235,8 @@ def _precompute_division_constants(
             "m_i_div": m_i_div,
             "X_raw_tr": X_raw_tr,
             "X_raw_val": X_raw_val,
+            "kept_cov_cols": kept_cov_cols,
+            "dropped_cov_cols_base": dropped_cov_cols_base,
             "Kp1_all_div": Kp1_all_div,
             "K1_div": K1_div,
             "Kp2_all_div": Kp2_all_div,

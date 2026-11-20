@@ -39,7 +39,17 @@ from src.analysis.paired_lipid.cohort import (  # noqa: E402
     SubsetMode,
     load_paired_cohort_from_store,
 )
+from src.analysis.paired_lipid.nested_cv import INTERVAL_METHODS  # noqa: E402
 from src.analysis.paired_lipid.synthetic import generate_synthetic_cohort  # noqa: E402
+from src.analysis.raman_bands import RAMAN_BANDS  # noqa: E402
+
+FROZEN_SPECTRAL_GRID_BOUNDS: dict[str, Any] = {
+    "block_1300_cm1": [734, 1788],
+    "block_2850_cm1": [2451, 3197],
+    "step_cm1": 1.0,
+    "n_channels_1300": 1055,
+    "n_channels_2850": 747,
+}
 
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Results_manuscript_ml"
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "manuscript_ml.yaml"
@@ -115,6 +125,12 @@ def _validate_manuscript_sections(raw: Mapping[str, Any]) -> None:
             n_test = cal["n_test_participants"]
             if isinstance(n_test, bool) or not isinstance(n_test, int) or n_test <= 0:
                 raise ValueError("calibration.n_test_participants must be a positive integer")
+        if "interval_method" in cal:
+            im = cal["interval_method"]
+            if not isinstance(im, str) or im not in INTERVAL_METHODS:
+                raise ValueError(
+                    f"calibration.interval_method must be one of {INTERVAL_METHODS}, got {im!r}"
+                )
         if "signal_strength" in cal:
             sig_val = cal["signal_strength"]
             if isinstance(sig_val, bool) or not isinstance(sig_val, (int, float)) or not math.isfinite(float(sig_val)):
@@ -142,6 +158,20 @@ def _validate_manuscript_sections(raw: Mapping[str, Any]) -> None:
                 or any(isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in grid)
             ):
                 raise ValueError("simulation.n_participants_grid must be a non-empty list of positive integers")
+        if "mde_signal_grid" in sim:
+            mde_grid = sim["mde_signal_grid"]
+            if (
+                not isinstance(mde_grid, (list, tuple))
+                or not mde_grid
+                or any(
+                    isinstance(v, bool)
+                    or not isinstance(v, (int, float))
+                    or not math.isfinite(float(v))
+                    or float(v) < 0.0
+                    for v in mde_grid
+                )
+            ):
+                raise ValueError("simulation.mde_signal_grid must be a non-empty list of non-negative finite numbers")
         if "scenarios" in sim:
             scenarios = sim["scenarios"]
             if not isinstance(scenarios, (list, tuple)) or not scenarios:
@@ -192,12 +222,19 @@ def _git_output(*args: str) -> str | None:
 
 
 @lru_cache(maxsize=1)
-def _git_metadata() -> tuple[str, bool | None]:
+def _git_metadata() -> tuple[str, bool | None, str | None]:
     commit = _git_output("log", "-1", "--format=%H")
     status = _git_output("status", "--porcelain")
+    dirty = (status != "") if status is not None else None
+    diff_sha: str | None = None
+    if dirty:
+        diff_text = _git_output("diff", "HEAD") or ""
+        combined = f"{status}\n---\n{diff_text}".encode("utf-8", errors="replace")
+        diff_sha = hashlib.sha256(combined).hexdigest()
     return (
         commit if commit is not None else "unavailable",
-        (status != "") if status is not None else None,
+        dirty,
+        diff_sha,
     )
 
 
@@ -232,7 +269,11 @@ def write_run_provenance(
         if manifest_path is not None and manifest_path.is_file()
         else None
     )
-    git_commit, git_worktree_dirty = _git_metadata()
+    git_commit, git_worktree_dirty, git_diff_sha256 = _git_metadata()
+    raman_bands_snapshot = {
+        name: {"peak": int(band.peak), "bounds": [int(band.bounds[0]), int(band.bounds[1])], "category": band.category}
+        for name, band in RAMAN_BANDS.items()
+    }
     payload = {
         "stage": stage,
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -243,10 +284,13 @@ def write_run_provenance(
         "data_manifest": data_manifest,
         "data_manifest_status": "saved" if data_manifest is not None else "not_available",
         "resolved_paired_lipid_config": asdict(cfg),
+        "frozen_spectral_grid_bounds": dict(FROZEN_SPECTRAL_GRID_BOUNDS),
+        "raman_bands_registry": raman_bands_snapshot,
         "pre_event_risk_factors": list(PRE_EVENT_RISK_FACTORS),
         "stage_settings": dict(settings),
         "git_commit": git_commit,
         "git_worktree_dirty": git_worktree_dirty,
+        "git_diff_sha256": git_diff_sha256,
         "python": sys.version,
         "packages": dict(_package_versions()),
         "data": dict(source_meta) if source_meta is not None else None,
@@ -260,7 +304,7 @@ def add_common_stage_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=str, default=None, help="Experiment settings YAML.")
 
 
-def add_cohort_stage_args(parser: argparse.ArgumentParser) -> None:
+def add_cohort_stage_args(parser: argparse.ArgumentParser, *, include_compact_grid: bool = True) -> None:
     """Add the flags shared by the cohort-evaluation stages (primary evaluation, sensitivity, run_all)."""
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--cohort", action="store_true", help="Evaluate on the verified stroke cohort (default).")
@@ -275,7 +319,8 @@ def add_cohort_stage_args(parser: argparse.ArgumentParser) -> None:
         help="Confirm that all readiness gates in runbook.md are satisfied.",
     )
     parser.add_argument("--clinical-master", type=str, default=str(PROJECT_ROOT / "data" / "clinical_master.csv"))
-    parser.add_argument("--compact-grid", action="store_true")
+    if include_compact_grid:
+        parser.add_argument("--compact-grid", action="store_true")
     add_common_stage_args(parser)
 
 
@@ -329,11 +374,23 @@ def resolve_experiment_dataset(
     source_identity = ""
     readiness_json = "{}"
     if not use_synthetic:
-        from src.data_preparation.manifest import hash_file
+        from src.data_preparation.manifest import hash_file, hash_manifest, load_manifest
         from src.data_preparation.store import get_active_data_source, resolve_data_source
 
         source = get_active_data_source() or resolve_data_source()
-        source_identity = hash_file(source.source_path / "manifest.json") + hash_file(clinical_master_path)
+        disk_manifest_path = source.source_path / "manifest.json"
+        disk_manifest = load_manifest(disk_manifest_path)
+        disk_manifest_hash = disk_manifest.get("manifest_hash")
+        if disk_manifest_hash is not None:
+            computed_disk_hash = hash_manifest(disk_manifest)
+            if str(disk_manifest_hash) != str(computed_disk_hash) or (
+                source.manifest_hash is not None and str(source.manifest_hash) != str(disk_manifest_hash)
+            ):
+                raise RuntimeError(
+                    "Active preprocessed store manifest_hash does not match manifest.json on disk; "
+                    "re-resolve or rebuild the store before cohort evaluation."
+                )
+        source_identity = hash_file(disk_manifest_path) + hash_file(clinical_master_path)
         expectations = (
             readiness
             if readiness is not None

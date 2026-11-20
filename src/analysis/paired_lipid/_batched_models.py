@@ -15,7 +15,9 @@ def _prep_covariates_batch(
     dconst: dict[str, Any],
     M_tr: Any,
     M_val: Any,
-) -> tuple[Any, Any, Any, Any, Any]:
+    *,
+    return_valid_mask: bool = False,
+) -> tuple[Any, ...]:
     """Compute normalized participant weights and standardized training/validation covariates."""
     w_tr_sum = xp.sum(M_tr, axis=1, keepdims=True)
     w_tr = M_tr / xp.maximum(w_tr_sum, 1e-12)
@@ -23,10 +25,23 @@ def _prep_covariates_batch(
 
     X_raw_tr = dconst["X_raw_tr"]
     X_raw_val = dconst["X_raw_val"]
+    if int(X_raw_tr.shape[1]) == 0:
+        B = int(M_tr.shape[0])
+        X_cov_tr = xp.zeros((B, int(X_raw_tr.shape[0]), 0), dtype=xp.float64)
+        X_cov_val = xp.zeros((B, int(X_raw_val.shape[0]), 0), dtype=xp.float64)
+        if return_valid_mask:
+            return w_tr_sum, w_tr, w_val, X_cov_tr, X_cov_val, xp.zeros((B, 0), dtype=bool)
+        return w_tr_sum, w_tr, w_val, X_cov_tr, X_cov_val
     c_mean = w_tr @ X_raw_tr
     C_tr = X_raw_tr[None, :, :] - c_mean[:, None, :]
     c_var = xp.sum(w_tr[:, :, None] * (C_tr * C_tr), axis=1)
-    valid_c = c_var > 1e-12
+    # Match CovariatePreprocessor.fit: drop columns only when active-participant ptp <= 1e-12,
+    # then standardize with min_var=1e-12 so small-scale non-constant covariates stay identical.
+    active = M_tr > 0.0
+    x_hi = xp.where(active[:, :, None], X_raw_tr[None, :, :], -xp.inf)
+    x_lo = xp.where(active[:, :, None], X_raw_tr[None, :, :], xp.inf)
+    c_ptp = xp.max(x_hi, axis=1) - xp.min(x_lo, axis=1)
+    valid_c = xp.isfinite(c_ptp) & (c_ptp > 1e-12)
     c_scale = xp.where(valid_c, xp.sqrt(xp.maximum(c_var, 1e-12)), 1.0)
     X_cov_tr = xp.where(valid_c[:, None, :], C_tr / c_scale[:, None, :], 0.0)
     X_cov_val = xp.where(
@@ -34,6 +49,8 @@ def _prep_covariates_batch(
         (X_raw_val[None, :, :] - c_mean[:, None, :]) / c_scale[:, None, :],
         0.0,
     )
+    if return_valid_mask:
+        return w_tr_sum, w_tr, w_val, X_cov_tr, X_cov_val, valid_c
     return w_tr_sum, w_tr, w_val, X_cov_tr, X_cov_val
 
 
@@ -44,6 +61,8 @@ def _prep_mfa_pca_batch(
     M_tr: Any,
     w_tr_sum: Any,
     cfg: PairedLipidConfig,
+    *,
+    compute_full_rank: bool = False,
 ) -> dict[str, Any]:
     """Compute batched MFA block scales, top-k spectral PCA projections, and rank validity."""
     s_rel = dconst["s_rel"]
@@ -95,16 +114,19 @@ def _prep_mfa_pca_batch(
     eigvals_top, eigvecs_top = _top_k_eigh(
         xp, gram, max_k, sqrt_w, dconst.get("Q0_comb"), is_symmetric=True
     )
-    del gram
     s_kept = xp.sqrt(eigvals_top)
 
     p_total = int(dconst.get("p_total", gcache.get("p_total", sqrt_w.shape[1])))
     n_act = xp.sum(sqrt_w > 0, axis=1)
     max_dim = xp.maximum(n_act, float(p_total))
     # Squared-Gram eigenvalues have an O(max_dim * eps * s0^2) roundoff floor, so singular
-    # values at or below sqrt(max_dim * eps) * s0 must route to the primal SVD fallback.
-    gram_s_tol = xp.sqrt(max_dim * float(np.finfo(float).eps)) * xp.maximum(s_kept[:, 0], 1.0)
-    rank_thresh = xp.maximum(gram_s_tol, float(cfg.rank_tolerance))
+    # values at or below 10 * sqrt(max_dim * eps) * s0 must route to the primal SVD fallback,
+    # matching WeightedSpectralPreprocessor.fit exactly.
+    eps_f = float(np.finfo(float).eps)
+    s0 = xp.maximum(s_kept[:, 0], 1.0)
+    gram_s_tol = xp.sqrt(max_dim * eps_f) * s0
+    primal_tol = xp.maximum(max_dim * eps_f * s0, float(cfg.rank_tolerance))
+    rank_thresh = xp.maximum(10.0 * gram_s_tol, primal_tol)
     rank_ok = (
         xp.isfinite(s_kept[:, -1])
         & (s_kept[:, -1] > rank_thresh)
@@ -113,6 +135,12 @@ def _prep_mfa_pca_batch(
         & xp.isfinite(eig1_2850)
         & (eig1_2850 > float(cfg.eigenvalue_tolerance))
     )
+    full_numerical_rank = None
+    if compute_full_rank:
+        all_ev = xp.linalg.eigvalsh(gram)
+        all_s = xp.sqrt(xp.maximum(all_ev, 0.0))
+        full_numerical_rank = xp.sum(all_s > rank_thresh[:, None], axis=1)
+    del gram
 
     alpha = (sqrt_w[:, :, None] * eigvecs_top) / xp.maximum(s_kept[:, None, :], 1e-12)
     del eigvecs_top, eigvals_top, s_kept, sqrt_w
@@ -133,7 +161,7 @@ def _prep_mfa_pca_batch(
     part_pca_max = scale1_sq[:, None, None] * p_term1 + scale2_sq[:, None, None] * p_term2
     del p_term1, p_term2
 
-    return {
+    res_mfa: dict[str, Any] = {
         "w_s": w_s,
         "alpha": alpha,
         "alpha_sum": alpha_sum,
@@ -142,6 +170,9 @@ def _prep_mfa_pca_batch(
         "part_pca_max": part_pca_max,
         "rank_ok": rank_ok,
     }
+    if full_numerical_rank is not None:
+        res_mfa["numerical_rank"] = full_numerical_rank
+    return res_mfa
 
 
 def _prep_paired_moments_batch(
@@ -209,13 +240,22 @@ def _prep_schur_sufficient_stats(
     G_cc = 0.5 * (G_cc + xp.swapaxes(G_cc, -1, -2))
     g_cy = (Cw_T @ yc[:, :, None])[:, :, 0]
 
-    evals_c, evecs_c = xp.linalg.eigh(G_cc)
-    evals_c = xp.maximum(evals_c, 0.0)
-    inv_eig = 1.0 / (evals_c[:, None, :] + alphas_xp[None, :, None])
-    evecs_c_T = xp.swapaxes(evecs_c, -1, -2)
-    inv_c = (evecs_c[:, None, :, :] * inv_eig[:, :, None, :]) @ evecs_c_T[:, None, :, :]
-    beta_c0 = (inv_c @ g_cy[:, None, :, None])[:, :, :, 0]
-    preds_cov = y_mean[:, None, None] + (Cc_val @ xp.swapaxes(beta_c0, -1, -2))
+    p_cov = int(X_cov_tr.shape[2])
+    if p_cov == 0:
+        B_n = int(X_cov_tr.shape[0])
+        A_n = int(alphas_xp.shape[0])
+        n_val = int(X_cov_val.shape[1])
+        inv_c = xp.zeros((B_n, A_n, 0, 0), dtype=xp.float64)
+        beta_c0 = xp.zeros((B_n, A_n, 0), dtype=xp.float64)
+        preds_cov = xp.broadcast_to(y_mean[:, None, None], (B_n, n_val, A_n)).copy()
+    else:
+        evals_c, evecs_c = xp.linalg.eigh(G_cc)
+        evals_c = xp.maximum(evals_c, 0.0)
+        inv_eig = 1.0 / (evals_c[:, None, :] + alphas_xp[None, :, None])
+        evecs_c_T = xp.swapaxes(evecs_c, -1, -2)
+        inv_c = (evecs_c[:, None, :, :] * inv_eig[:, :, None, :]) @ evecs_c_T[:, None, :, :]
+        beta_c0 = (inv_c @ g_cy[:, None, :, None])[:, :, :, 0]
+        preds_cov = y_mean[:, None, None] + (Cc_val @ xp.swapaxes(beta_c0, -1, -2))
     stats_out: dict[str, Any] = {"preds_cov": preds_cov}
 
     if compute_pca_suff:
@@ -268,13 +308,20 @@ def batched_division_prep(
     *,
     compute_pca_suff: bool = True,
     compute_cov_preds: bool = False,
+    compute_full_rank: bool = False,
 ) -> dict[str, Any]:
     """Compute batched MFA-PCA coordinates, paired moments, and max_k Schur sufficient statistics."""
     tr_p = dconst["tr_p"]
     val_p = dconst["val_p"]
 
-    w_tr_sum, w_tr, w_val, X_cov_tr, X_cov_val = _prep_covariates_batch(xp, dconst, M_tr, M_val)
-    mfa = _prep_mfa_pca_batch(xp, gcache, dconst, M_tr, w_tr_sum, cfg)
+    if compute_full_rank:
+        w_tr_sum, w_tr, w_val, X_cov_tr, X_cov_val, valid_cov_mask = _prep_covariates_batch(
+            xp, dconst, M_tr, M_val, return_valid_mask=True
+        )
+    else:
+        w_tr_sum, w_tr, w_val, X_cov_tr, X_cov_val = _prep_covariates_batch(xp, dconst, M_tr, M_val)
+        valid_cov_mask = None
+    mfa = _prep_mfa_pca_batch(xp, gcache, dconst, M_tr, w_tr_sum, cfg, compute_full_rank=compute_full_rank)
     W_max, T_max = _prep_paired_moments_batch(
         xp,
         dconst,
@@ -310,6 +357,9 @@ def batched_division_prep(
         "K_p2_tr": dconst["K_p2_tr"],
         "K_p2_vt": dconst["K_p2_vt"],
     }
+    if compute_full_rank:
+        out["numerical_rank"] = mfa["numerical_rank"]
+        out["valid_cov_mask"] = valid_cov_mask
 
     if compute_pca_suff or compute_cov_preds:
         out.update(
@@ -513,6 +563,13 @@ def batched_ridge_sse_and_preds(
         Z_std_val = (Z_val_base - z_mean[:, None, :]) / z_scale[:, None, :]
         X_tr = xp.concatenate([X_cov_tr, Z_std_tr], axis=2)
         X_val = xp.concatenate([X_cov_val, Z_std_val], axis=2)
+
+    if int(X_tr.shape[2]) == 0:
+        preds = xp.broadcast_to(
+            y_mean[:, None, None], (int(X_tr.shape[0]), int(X_val.shape[1]), int(alphas_xp.shape[0]))
+        ).copy()
+        sse = xp.sum(w_val[:, :, None] * ((y_val[None, :, None] - preds) ** 2), axis=1)
+        return sse, preds
 
     x_mean = (w_tr[:, None, :] @ X_tr)[:, 0, :]
     X_c = X_tr - x_mean[:, None, :]

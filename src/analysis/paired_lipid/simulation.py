@@ -33,6 +33,9 @@ from src.analysis.paired_lipid.calibration import (
     evaluate_bootstrap_calibration as evaluate_bootstrap_calibration,
 )
 from src.analysis.paired_lipid.calibration import (
+    evaluate_mde_signal_curve as evaluate_mde_signal_curve,
+)
+from src.analysis.paired_lipid.calibration import (
     evaluate_scenario_calibration_suite as evaluate_scenario_calibration_suite,
 )
 from src.analysis.paired_lipid.calibration import (
@@ -44,8 +47,17 @@ from src.analysis.paired_lipid.calibration import (
 from src.analysis.paired_lipid.calibration import (
     wilson_score_interval as wilson_score_interval,
 )
+from src.analysis.paired_lipid.nested_cv import (
+    INTERVAL_METHODS as INTERVAL_METHODS,
+)
+from src.analysis.paired_lipid.nested_cv import (
+    IntervalMethod as IntervalMethod,
+)
 from src.analysis.paired_lipid.synthetic import (
     _MAP_CHUNK_SAMPLES as _MAP_CHUNK_SAMPLES,
+)
+from src.analysis.paired_lipid.synthetic import (
+    DEFAULT_N_SINGLE_SAMPLE as DEFAULT_N_SINGLE_SAMPLE,
 )
 from src.analysis.paired_lipid.synthetic import (
     LABEL_RANGE as LABEL_RANGE,
@@ -56,6 +68,9 @@ from src.analysis.paired_lipid.synthetic import (
 
 __all__ = [
     "CALIBRATION_SEED_RANGES",
+    "DEFAULT_N_SINGLE_SAMPLE",
+    "INTERVAL_METHODS",
+    "IntervalMethod",
     "LABEL_RANGE",
     "SeedSet",
     "_MAP_CHUNK_SAMPLES",
@@ -67,6 +82,7 @@ __all__ = [
     "_ldl_factor_recovery_r2",
     "check_gate_attainable",
     "evaluate_bootstrap_calibration",
+    "evaluate_mde_signal_curve",
     "evaluate_scenario_calibration_suite",
     "generate_synthetic_cohort",
     "min_reps_for_gate",

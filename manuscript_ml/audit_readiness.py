@@ -8,6 +8,8 @@ and ``limitations_table.csv``.
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import sys
 from collections import Counter
 from dataclasses import asdict
@@ -35,21 +37,81 @@ from src.analysis.paired_lipid.cohort import (  # noqa: E402
 )
 
 
+def _audit_clinical_dictionary(
+    master_path: Path,
+    dictionary_path: Path | None = None,
+) -> dict[str, Any]:
+    """Verify clinical_master_dictionary.csv SHA-256 and exact column-order parity against clinical_master.csv."""
+    dict_path = dictionary_path if dictionary_path is not None else (master_path.parent / "clinical_master_dictionary.csv")
+    if not dict_path.is_file():
+        return {
+            "present": False,
+            "path": str(dict_path),
+            "sha256": None,
+            "n_dictionary_columns": None,
+            "n_master_columns": None,
+            "columns_match_exact": None,
+            "missing_in_dictionary": [],
+            "extra_in_dictionary": [],
+        }
+
+    dict_bytes = dict_path.read_bytes()
+    dict_sha256 = hashlib.sha256(dict_bytes).hexdigest()
+    with dict_path.open("r", encoding="utf-8-sig", newline="") as f_dict:
+        dict_reader = csv.DictReader(f_dict)
+        dict_cols = [str(row["column"]).strip() for row in dict_reader if row.get("column")]
+
+    if not master_path.is_file():
+        return {
+            "present": True,
+            "path": str(dict_path),
+            "sha256": dict_sha256,
+            "n_dictionary_columns": len(dict_cols),
+            "n_master_columns": None,
+            "columns_match_exact": False,
+            "missing_in_dictionary": [],
+            "extra_in_dictionary": list(dict_cols),
+        }
+
+    with master_path.open("r", encoding="utf-8-sig", newline="") as f_master:
+        master_reader = csv.reader(f_master)
+        master_cols = [str(c).strip() for c in next(master_reader, [])]
+
+    dict_set = set(dict_cols)
+    master_set = set(master_cols)
+    return {
+        "present": True,
+        "path": str(dict_path),
+        "sha256": dict_sha256,
+        "n_dictionary_columns": len(dict_cols),
+        "n_master_columns": len(master_cols),
+        "columns_match_exact": bool(master_cols == dict_cols),
+        "missing_in_dictionary": [c for c in master_cols if c not in dict_set],
+        "extra_in_dictionary": [c for c in dict_cols if c not in master_set],
+    }
+
+
 def run_readiness_audit(
     *,
     clinical_master_path: str | Path = PROJECT_ROOT / "data" / "clinical_master.csv",
+    clinical_dictionary_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     n_planned_bootstraps: int = 2000,
     n_planned_sim_reps: int = 1000,
+    measured_runtime_seconds: float | None = None,
     config_path: str | Path | None = None,
 ) -> dict[str, Path]:
-    """Audit current measurement identities and joins without model fitting."""
+    """Audit current measurement identities, dictionary parity, and joins without model fitting."""
     target_dir = ensure_output_dir(output_dir)
     cfg, raw_cfg = load_manuscript_config(config_path)
     readiness_cfg = raw_cfg["readiness"]
     expected_verified = int(readiness_cfg["expected_identity_verified"])
 
     master_path = Path(clinical_master_path)
+    explicit_dict = Path(clinical_dictionary_path) if clinical_dictionary_path is not None else None
+    dict_audit = _audit_clinical_dictionary(master_path, explicit_dict)
+    dictionary_ok = bool(dict_audit["present"] and dict_audit["columns_match_exact"])
+
     if master_path.is_file():
         _, clin_audit = load_clinical_master_verified(master_path)
         clin_ready = clin_audit.get("stroke_identity_verified") == expected_verified
@@ -93,12 +155,31 @@ def run_readiness_audit(
         store_meta=store_meta,
     )
     cohort_join = measured_readiness["cohort_join"]
+    ready_for_cohort = bool(measured_readiness["ready_for_cohort_evaluation"] and dictionary_ok)
 
+    n_outer = int(cfg.n_outer_splits)
+    n_inner = int(cfg.n_inner_splits)
+    n_inner_divisions = n_outer * n_inner
     n_pca = len(cfg.pca_dimensions)
     n_lam = len(cfg.lambda_grid)
     n_dir = len(cfg.retained_directions)
     n_alpha = len(cfg.ridge_alpha_grid)
+    n_pls = len(cfg.pls_component_grid)
+
     paired_candidates_per_division = n_pca * n_lam * n_dir * n_alpha
+    established_candidates_per_division = n_alpha + n_alpha + (n_pca * n_alpha) + n_pls
+    total_candidates_per_division = paired_candidates_per_division + established_candidates_per_division
+    paired_division_fits = n_inner_divisions * paired_candidates_per_division
+    inner_division_fits = n_inner_divisions * total_candidates_per_division
+    outer_core_fits = n_outer * 5
+    total_division_fits = inner_division_fits + outer_core_fits
+
+    if measured_runtime_seconds is not None:
+        comp_status = "measured_in_current_audit"
+    elif ready_for_cohort:
+        comp_status = "cohort_join_verified_campaign_not_timed_in_audit"
+    else:
+        comp_status = "cohort_join_incomplete_or_store_unavailable"
 
     manifest: dict[str, Any] = {
         "study_design_reference": "docs/research_design.md",
@@ -106,17 +187,31 @@ def run_readiness_audit(
         "measurement_readiness": {
             "clinical_master_present": master_path.is_file(),
             "clinical_audit": clin_audit,
+            "clinical_dictionary": dict_audit,
+            "dictionary_columns_match_exact": dict_audit["columns_match_exact"],
             "preprocessed_store_present": store_manifest_exists,
             "expected_identity_verified": measured_readiness["expected_identity_verified"],
             "identity_verified_matches_expected": measured_readiness["identity_verified_matches_expected"],
             "ready_for_cohort_join": bool(cohort_join["status"] == "ok"),
             "cohort_join": cohort_join,
-            "ready_for_cohort_evaluation": measured_readiness["ready_for_cohort_evaluation"],
+            "ready_for_cohort_evaluation": ready_for_cohort,
         },
         "computational_readiness": {
-            "status": "real_data_runtime_not_measured",
+            "status": comp_status,
+            "measured_runtime_seconds": (
+                float(measured_runtime_seconds) if measured_runtime_seconds is not None else None
+            ),
             "requires_separate_campaign_approval": True,
+            "n_outer_folds": n_outer,
+            "n_inner_folds": n_inner,
+            "n_inner_divisions": n_inner_divisions,
             "paired_candidates_per_inner_fold": paired_candidates_per_division,
+            "established_comparator_candidates_per_inner_fold": established_candidates_per_division,
+            "total_candidates_per_inner_fold": total_candidates_per_division,
+            "paired_division_candidate_fits_per_refit": paired_division_fits,
+            "inner_division_candidate_fits_per_refit": inner_division_fits,
+            "outer_core_model_fits_per_refit": outer_core_fits,
+            "total_division_candidate_fits_per_refit": total_division_fits,
             "planned_bootstrap_refits": n_planned_bootstraps,
             "planned_simulation_repetitions_per_scenario": n_planned_sim_reps,
         },
@@ -135,8 +230,16 @@ def run_readiness_audit(
         "readiness_audit",
         config_path=config_path,
         cfg=cfg,
-        settings={"n_planned_bootstraps": n_planned_bootstraps, "n_planned_sim_reps": n_planned_sim_reps},
-        source_meta={"clinical_audit": clin_audit, "preprocessed_dir": str(store_path)},
+        settings={
+            "n_planned_bootstraps": n_planned_bootstraps,
+            "n_planned_sim_reps": n_planned_sim_reps,
+            "measured_runtime_seconds": measured_runtime_seconds,
+        },
+        source_meta={
+            "clinical_audit": clin_audit,
+            "clinical_dictionary": dict_audit,
+            "preprocessed_dir": str(store_path),
+        },
     )
 
     return {
@@ -149,8 +252,20 @@ def run_readiness_audit(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit readiness gates and estimate computational budget.")
     parser.add_argument("--clinical-master", type=str, default=str(PROJECT_ROOT / "data" / "clinical_master.csv"))
+    parser.add_argument(
+        "--clinical-dictionary",
+        type=str,
+        default=None,
+        help="Optional path to clinical_master_dictionary.csv (defaults to sibling of --clinical-master).",
+    )
     parser.add_argument("--planned-bootstraps", type=int, default=2000)
     parser.add_argument("--planned-sim-reps", type=int, default=1000)
+    parser.add_argument(
+        "--measured-runtime-seconds",
+        type=float,
+        default=None,
+        help="Optional measured wall-clock runtime (seconds) from a dry-run timing benchmark.",
+    )
     add_common_stage_args(parser)
     return parser.parse_args(argv)
 
@@ -159,9 +274,11 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     outputs = run_readiness_audit(
         clinical_master_path=args.clinical_master,
+        clinical_dictionary_path=args.clinical_dictionary,
         output_dir=args.output_dir,
         n_planned_bootstraps=args.planned_bootstraps,
         n_planned_sim_reps=args.planned_sim_reps,
+        measured_runtime_seconds=args.measured_runtime_seconds,
         config_path=args.config,
     )
     print_stage_outputs("audit_readiness", outputs)

@@ -80,7 +80,7 @@ When drafting the new manuscript, **do not copy outdated statements** from `spec
 1. **Dead / saturated pixel screen**: Minimum spectral SD $= 1.0$; saturation threshold $= 65{,}000$.
 2. **Positive cosmic-ray correction**: Spatial-neighbor $z$-threshold $= 8$, maximum width $= 3$ channels, 8 neighbors, half-window $= 10$, maximum corrected fraction $= 0.02$.
 3. **Edge trimming & frozen-grid linear interpolation**: $\sim 15\text{ cm}^{-1}$ edge trim; linear interpolation onto $734\text{--}1788\text{ cm}^{-1}$ and $2451\text{--}3197\text{ cm}^{-1}$ ($1\text{ cm}^{-1}$ step) with zero extrapolation.
-4. **Baseline correction**: arPLS ($\lambda = 10^6$, $p = 0.01$, max 100 iterations, convergence $0.001$); signed residuals preserved without zero-clipping.
+4. **Baseline correction**: arPLS ($\lambda = 10^6$, max 100 iterations, convergence $0.001$); signed residuals preserved without zero-clipping.
 5. **Quality control SNR gate**: Minimum $\mathrm{SNR} = 5$ in region-specific anchor windows; minimum 4 retained pixels per map.
 6. **Smoothing**: Savitzky–Golay order 2 (7-channel window in fingerprint; 9-channel window in C–H).
 7. **Block-specific normalization**:
