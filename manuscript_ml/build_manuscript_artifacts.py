@@ -32,6 +32,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from manuscript_ml import ensure_output_dir, print_stage_outputs, write_json_atomic  # noqa: E402
+from src.analysis.io_utils import write_text_atomic as _write_text_atomic  # noqa: E402
 from src.analysis.raman_bands import RAMAN_BANDS  # noqa: E402
 
 _PREVIEW_BANNER = "SYNTHETIC PREVIEW — NOT COHORT EVIDENCE"
@@ -104,18 +105,6 @@ def _fmt_ci(ci: Any, decimals: int = 3) -> str:
     return f"[{lo}, {hi}]"
 
 
-def _write_text_atomic(path: Path, text: str) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
-    return path
-
-
 def _detect_cohort_data_mode(primary_dir: Path, sensitivity_dir: Path) -> str:
     modes: set[str] = set()
     manifest_path = primary_dir / "eligibility_and_split_manifest.json"
@@ -165,7 +154,7 @@ def _build_synthetic_scenarios_table(df: pd.DataFrame) -> str:
         preset = _tex_escape(row.get("covariate_preset", ""))
         dp = _fmt_num(row.get("mean_delta_mse_paired"))
         dc = _fmt_num(row.get("mean_delta_vs_strongest_comparator"))
-        icc = _fmt_num(row.get("mean_spectral_icc"))
+        icc = _fmt_num(row.get("mean_spectral_icc_a1", row.get("mean_spectral_icc")))
         r2 = _fmt_num(row.get("mean_recovery_r2_ldl_factor"))
         lines.append(f"{scen} & {n_val} & {preset} & {dp} & {dc} & {icc} & {r2} \\\\")
     lines.extend([r"\bottomrule", r"\end{tabularx}}", ""])

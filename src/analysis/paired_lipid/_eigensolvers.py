@@ -8,7 +8,11 @@ from typing import Any
 import numpy as np
 from scipy import linalg
 
-from src.analysis.paired_lipid._backend import _to_np
+from src.analysis.paired_lipid._backend import (
+    _cupyx_supports_batched_triangular,
+    _get_cupyx_linalg,
+    _to_np,
+)
 
 
 def _fast_top1_eigvalsh(xp: Any, G_batch: Any, sw: Any, Q0: Any) -> Any:
@@ -28,6 +32,43 @@ def _fast_top1_eigvalsh(xp: Any, G_batch: Any, sw: Any, Q0: Any) -> Any:
     return xp.linalg.eigvalsh(H)[:, -1]
 
 
+def _fast_top1_eigvalsh_from_gram(
+    xp: Any,
+    K_div: Any,
+    k_mu: Any,
+    mu_sq: Any,
+    sw: Any,
+    Q0: Any,
+) -> Any:
+    """Matrix-free 2-step subspace Rayleigh-Ritz in contiguous (B, q, n_s) layout."""
+    B, n_s = sw.shape
+    q = int(Q0.shape[1])
+    Q0_t = xp.ascontiguousarray(Q0.T)
+
+    def _apply_g_t(V_t: Any) -> Any:
+        U_t = V_t * sw[:, None, :]
+        KU_t = (U_t.reshape(B * q, n_s) @ K_div).reshape(B, q, n_s)
+        sU = xp.sum(U_t, axis=2)
+        kU = xp.sum(U_t * k_mu[:, None, :], axis=2)
+        out = KU_t - sU[:, :, None] * k_mu[:, None, :] - (kU - sU * mu_sq[:, None])[:, :, None]
+        out *= sw[:, None, :]
+        return out
+
+    Y_t = _apply_g_t(Q0_t[None, :, :] * sw[:, None, :])
+    Y_t = _apply_g_t(Y_t)
+    YtY = Y_t @ xp.swapaxes(Y_t, -1, -2)
+    YtY = 0.5 * (YtY + xp.swapaxes(YtY, -1, -2))
+    d, V = xp.linalg.eigh(YtY)
+    d_max = xp.maximum(d[:, -1:], 1e-24)
+    valid = d > (1e-18 * d_max)
+    inv_s = xp.where(valid, 1.0 / xp.sqrt(xp.maximum(d, 1e-30)), 0.0)
+    Q_t = xp.swapaxes(V * inv_s[:, None, :], -1, -2) @ Y_t
+    GQ_t = _apply_g_t(Q_t)
+    H = Q_t @ xp.swapaxes(GQ_t, -1, -2)
+    H = 0.5 * (H + xp.swapaxes(H, -1, -2))
+    return xp.linalg.eigvalsh(H)[:, -1]
+
+
 def _orthonormalize_eigh(xp: Any, Yn: Any, YtY: Any) -> Any:
     """Fallback symmetric orthonormalization via eigendecomposition of Yn^T @ Yn."""
     d, V = xp.linalg.eigh(YtY)
@@ -38,19 +79,19 @@ def _orthonormalize_eigh(xp: Any, Yn: Any, YtY: Any) -> Any:
 
 def _solve_lower_triangular_batch(xp: Any, L: Any, rhs: Any) -> Any:
     """Solve L @ X = rhs for a batched lower-triangular Cholesky factor L."""
-    if xp is not np:
-        try:
-            import cupyx.scipy.linalg as cpx_linalg  # type: ignore[import-not-found]
-
-            return cpx_linalg.solve_triangular(L, rhs, lower=True, check_finite=False)
-        except Exception:
-            pass
+    if xp is not np and _cupyx_supports_batched_triangular():
+        cpx_linalg = _get_cupyx_linalg()
+        if cpx_linalg is not None:
+            try:
+                return cpx_linalg.solve_triangular(L, rhs, lower=True, check_finite=False)
+            except Exception:
+                pass
     return xp.linalg.solve(L, rhs)
 
 
 def _rayleigh_ritz_32(xp: Any, G_sym: Any, Y: Any) -> tuple[Any, Any, Any]:
     """Column-normalized 32x32 Rayleigh-Ritz step using batched Cholesky-QR with eigh fallback."""
-    norms = xp.linalg.norm(Y, axis=1, keepdims=True)
+    norms = xp.sqrt(xp.sum(Y * Y, axis=1, keepdims=True))
     Yn = Y / xp.maximum(norms, 1e-30)
     YtY = xp.swapaxes(Yn, -1, -2) @ Yn
     YtY = 0.5 * (YtY + xp.swapaxes(YtY, -1, -2))
@@ -102,12 +143,15 @@ def _chefsi_top_k_gpu(
     n_cycles: int = 3,
     poly_deg: int = 4,
     residual_tol: float = 1e-12,
+    max_extra_cycles: int = 3,
 ) -> tuple[Any, Any]:
-    """Warm-started Chebyshev-filtered subspace iteration (q=32) with exact residual verification.
+    """Warm-started Chebyshev-filtered subspace iteration (q=32) with adaptive residual verification.
 
-    Uses batched GEMMs, batched Cholesky-QR, and 32x32 warp-batched ``eigh``; any draw with
-    fewer than 32 active samples or eigenpair residual exceeding ``residual_tol`` is solved
-    exactly via ``_exact_top_k_eigh_active`` so fp64 accuracy is strictly preserved.
+    Uses batched GEMMs, batched Cholesky-QR, and 32x32 warp-batched ``eigh``. After ``n_cycles``
+    initial cycles, any still-unconverged subset receives up to ``max_extra_cycles`` additional
+    cycles as long as residuals decrease by at least 2x; remaining draws (or draws with fewer than
+    32 active samples) are solved exactly via ``_exact_top_k_eigh_active`` so fp64 accuracy is
+    strictly preserved.
     """
     B, n_s, _ = G_sym.shape
     n_act = _to_np(xp, xp.sum(sw > 0, axis=1)).astype(int)
@@ -115,60 +159,115 @@ def _chefsi_top_k_gpu(
     if not np.any(can_chefsi):
         return _exact_top_k_eigh_active(xp, G_sym, max_k, sw)
 
-    if np.all(can_chefsi):
+    all_can_chefsi = bool(np.all(can_chefsi))
+    active_host = np.arange(B, dtype=int) if all_can_chefsi else np.flatnonzero(can_chefsi)
+    if all_can_chefsi:
         G_run = G_sym
         sw_run = sw
     else:
-        c_idx = xp.asarray(np.flatnonzero(can_chefsi))
+        c_idx = xp.asarray(active_host)
         G_run = G_sym[c_idx]
         sw_run = sw[c_idx]
 
-    Y0 = G_run @ (sw_run[:, :, None] * Q0_comb[None, :, :])
-    theta, U, GU = _rayleigh_ritz_32(xp, G_run, Y0)
-    del Y0
-    for _ in range(n_cycles):
-        b_cut = xp.maximum(theta[:, 0], 1e-15)
+    def _run_cycle(G_cur: Any, theta_cur: Any, U_cur: Any, GU_cur: Any) -> tuple[Any, Any, Any]:
+        b_cut = xp.maximum(theta_cur[:, 0], 1e-15)
         inv_e = 2.0 / b_cut[:, None, None]
-        Y_prev = U
-        Y_curr = inv_e * GU - U
-        del GU
+        Y_prev = U_cur
+        Y_curr = inv_e * GU_cur - U_cur
+        del GU_cur
         for _ in range(1, poly_deg):
-            GY = G_run @ Y_curr
+            GY = G_cur @ Y_curr
             Y_next = 2.0 * (inv_e * GY - Y_curr) - Y_prev
             del GY
             Y_prev = Y_curr
             Y_curr = Y_next
         del Y_prev
-        theta, U, GU = _rayleigh_ritz_32(xp, G_run, Y_curr)
-        del Y_curr
+        return _rayleigh_ritz_32(xp, G_cur, Y_curr)
 
-    ev_k = xp.maximum(theta[:, -max_k:][:, ::-1], 0.0)
-    u_k = U[:, :, -max_k:][:, :, ::-1]
-    gu_k = GU[:, :, -max_k:][:, :, ::-1]
-    res_norm = xp.max(xp.linalg.norm(gu_k - u_k * ev_k[:, None, :], axis=1), axis=1)
-    rel_res = _to_np(xp, res_norm / xp.maximum(ev_k[:, 0], 1e-12))
-    converged_sub = np.isfinite(rel_res) & (rel_res <= residual_tol)
+    def _check_residuals(theta_cur: Any, U_cur: Any, GU_cur: Any) -> tuple[Any, Any, np.ndarray, np.ndarray]:
+        ev_k = xp.maximum(theta_cur[:, -max_k:][:, ::-1], 0.0)
+        u_k = U_cur[:, :, -max_k:][:, :, ::-1]
+        gu_k = GU_cur[:, :, -max_k:][:, :, ::-1]
+        diff = gu_k - u_k * ev_k[:, None, :]
+        res_norm = xp.max(xp.sqrt(xp.sum(diff * diff, axis=1)), axis=1)
+        rel_res = _to_np(xp, res_norm / xp.maximum(ev_k[:, 0], 1e-12))
+        conv = np.isfinite(rel_res) & (rel_res <= residual_tol)
+        return ev_k, u_k, rel_res, conv
 
-    if np.all(can_chefsi) and np.all(converged_sub):
+    Y0 = G_run @ (sw_run[:, :, None] * Q0_comb[None, :, :])
+    theta, U, GU = _rayleigh_ritz_32(xp, G_run, Y0)
+    del Y0
+    for _ in range(n_cycles):
+        theta, U, GU = _run_cycle(G_run, theta, U, GU)
+
+    ev_k, u_k, rel_res, converged_sub = _check_residuals(theta, U, GU)
+    if all_can_chefsi and np.all(converged_sub):
         return ev_k, u_k
 
     ev_out = xp.zeros((B, max_k), dtype=xp.float64)
     u_out = xp.zeros((B, n_s, max_k), dtype=xp.float64)
     conv_global = np.zeros(B, dtype=bool)
-    if np.all(can_chefsi):
-        conv_global = converged_sub
-        if np.any(converged_sub):
-            ok_xp = xp.asarray(np.flatnonzero(converged_sub))
-            ev_out[ok_xp] = ev_k[ok_xp]
-            u_out[ok_xp] = u_k[ok_xp]
+    if np.any(converged_sub):
+        sub_ok = xp.asarray(np.flatnonzero(converged_sub))
+        glob_ok = xp.asarray(active_host[converged_sub])
+        ev_out[glob_ok] = ev_k[sub_ok]
+        u_out[glob_ok] = u_k[sub_ok]
+        conv_global[active_host[converged_sub]] = True
+    del ev_k, u_k
+
+    # Adaptively continue only on still-unconverged draws so near-converged batches avoid cuSOLVER fallback.
+    rem_mask = ~converged_sub
+    if max_extra_cycles > 0 and np.any(rem_mask):
+        rem_res = rel_res[rem_mask]
+        finite_rem = rem_res[np.isfinite(rem_res)]
+        prev_med = float(np.median(finite_rem)) if finite_rem.size > 0 else float("inf")
+        if np.isfinite(prev_med):
+            rem_sub = np.flatnonzero(rem_mask)
+            rem_host = active_host[rem_sub]
+            if rem_sub.size < active_host.size:
+                rem_sub_xp = xp.asarray(rem_sub)
+                G_r = G_sym[xp.asarray(rem_host)]
+                theta_r = theta[rem_sub_xp]
+                U_r = U[rem_sub_xp]
+                GU_r = GU[rem_sub_xp]
+            else:
+                G_r = G_run
+                theta_r = theta
+                U_r = U
+                GU_r = GU
+            del theta, U, GU
+            for _ in range(max_extra_cycles):
+                theta_r, U_r, GU_r = _run_cycle(G_r, theta_r, U_r, GU_r)
+                ev_r, u_r, rel_r, conv_r = _check_residuals(theta_r, U_r, GU_r)
+                if np.any(conv_r):
+                    ok_loc = xp.asarray(np.flatnonzero(conv_r))
+                    ok_glob = xp.asarray(rem_host[conv_r])
+                    ev_out[ok_glob] = ev_r[ok_loc]
+                    u_out[ok_glob] = u_r[ok_loc]
+                    conv_global[rem_host[conv_r]] = True
+                del ev_r, u_r
+                still_mask = ~conv_r
+                if not np.any(still_mask):
+                    break
+                still_res = rel_r[still_mask]
+                finite_still = still_res[np.isfinite(still_res)]
+                cur_med = float(np.median(finite_still)) if finite_still.size > 0 else float("inf")
+                if not np.isfinite(cur_med) or cur_med > 0.5 * prev_med:
+                    break
+                prev_med = cur_med
+                still_loc = np.flatnonzero(still_mask)
+                if still_loc.size < rem_host.size:
+                    still_xp = xp.asarray(still_loc)
+                    rem_host = rem_host[still_loc]
+                    G_r = G_r[still_xp]
+                    theta_r = theta_r[still_xp]
+                    U_r = U_r[still_xp]
+                    GU_r = GU_r[still_xp]
+            del theta_r, U_r, GU_r, G_r
+        else:
+            del theta, U, GU
     else:
-        c_host = np.flatnonzero(can_chefsi)
-        conv_global[c_host] = converged_sub
-        if np.any(converged_sub):
-            sub_ok = xp.asarray(np.flatnonzero(converged_sub))
-            glob_ok = xp.asarray(c_host[converged_sub])
-            ev_out[glob_ok] = ev_k[sub_ok]
-            u_out[glob_ok] = u_k[sub_ok]
+        del theta, U, GU
 
     bad_host = np.flatnonzero(~conv_global)
     if bad_host.size > 0:
@@ -208,11 +307,8 @@ def _exact_top_k_eigh_active(xp: Any, G_sym: Any, max_k: int, sw: Any) -> tuple[
         del G_sub
         k = min(max_k, int(m))
         ev_out[b_idx, :k] = xp.maximum(ev[:, -k:][:, ::-1], 0.0)
-        u_grp = xp.zeros((b_idx.size, n_s, max_k), dtype=xp.float64)
-        u_grp[xp.arange(b_idx.size)[:, None], idx, :k] = u[:, :, -k:][:, :, ::-1]
+        u_out[b_idx[:, None], idx, :k] = u[:, :, -k:][:, :, ::-1]
         del ev, u
-        u_out[b_idx] = u_grp
-        del u_grp
     return ev_out, u_out
 
 
@@ -247,6 +343,7 @@ def _top_k_eigh(
                 subset_by_index=[n_act - k_b, n_act - 1],
                 driver="evr",
                 check_finite=False,
+                overwrite_a=True,
             )
             ev_out[b, :k_b] = np.maximum(ev_b[::-1], 0.0)
             u_out[b, act, :k_b] = u_b[:, ::-1]

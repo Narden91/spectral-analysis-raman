@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +22,46 @@ from src.analysis.paired_lipid.cohort import (
 def _symmetrize(matrix: np.ndarray) -> np.ndarray:
     """Return the exact symmetric part ``0.5 * (M + M.T)`` of a square matrix."""
     return 0.5 * (matrix + matrix.T)
+
+
+_MAX_CACHED_GRAM_SAMPLES = 2048
+
+
+def _finite_column_mean(X: np.ndarray) -> np.ndarray:
+    """Compute column means over finite entries without warning on all-non-finite columns."""
+    if X.size == 0:
+        return np.zeros(X.shape[1], dtype=np.float64)
+    finite = np.isfinite(X)
+    if np.all(finite):
+        return np.mean(X, axis=0, dtype=np.float64)
+    counts = np.sum(finite, axis=0)
+    sums = np.sum(np.where(finite, X, 0.0), axis=0, dtype=np.float64)
+    return np.where(counts > 0, sums / np.maximum(counts, 1), 0.0)
+
+
+def _get_sample_gram_blocks(dataset: CohortDataset) -> tuple[np.ndarray, np.ndarray] | None:
+    """Memoize pre-centered symmetrized sample Gram blocks (K1, K2) on small/moderate cohorts.
+
+    Pre-centering by each block's finite column mean leaves every fold-weighted centered Gram,
+    paired sample difference, and centered PLS Gram invariant while eliminating baseline-offset
+    cancellation in double precision.
+    """
+    if dataset.n_samples > _MAX_CACHED_GRAM_SAMPLES:
+        return None
+    cached = dataset._cache.get("sample_gram_blocks")
+    if cached is not None:
+        return cached
+    X1 = np.asarray(dataset.sample_1300, dtype=np.float64)
+    X2 = np.asarray(dataset.sample_2850, dtype=np.float64)
+    X1_c = X1 - _finite_column_mean(X1)
+    X2_c = X2 - _finite_column_mean(X2)
+    K1 = _symmetrize(X1_c @ X1_c.T)
+    K2 = _symmetrize(X2_c @ X2_c.T)
+    K1.setflags(write=False)
+    K2.setflags(write=False)
+    pair = (K1, K2)
+    dataset._cache["sample_gram_blocks"] = pair
+    return pair
 
 
 def _normalize_weights(weights: np.ndarray, *, context: str) -> np.ndarray:
@@ -133,7 +174,7 @@ class CovariatePreprocessor:
     @classmethod
     def fit(
         cls,
-        cov_frame: pd.DataFrame,
+        cov_frame: pd.DataFrame | None,
         train_indices: np.ndarray,
         participant_weights: np.ndarray,
         *,
@@ -141,10 +182,12 @@ class CovariatePreprocessor:
         raw_cache: dict[str, Any] | None = None,
     ) -> CovariatePreprocessor:
         raw_mat, raw_cols = cls.raw_design_matrix(cov_frame, preset=preset, raw_cache=raw_cache)
-        w_norm_all = _normalize_weights(participant_weights, context="CovariatePreprocessor.fit")
+        raw_w_all = np.asarray(participant_weights, dtype=float)
+        w_norm_all = _normalize_weights(raw_w_all, context="CovariatePreprocessor.fit")
         active = w_norm_all > 0.0
         sub_mat = raw_mat[np.asarray(train_indices, dtype=int)[active]]
         w = w_norm_all[active]
+        raw_w = raw_w_all[active]
 
         kept_cols: list[str] = []
         base_indices_list: list[int] = []
@@ -162,10 +205,10 @@ class CovariatePreprocessor:
                 dropped_cols.append(col)
                 continue
             f_vals = vals[finite]
-            f_w = w[finite]
-            order = np.argsort(f_vals)
-            cdf = np.cumsum(f_w[order]) / np.sum(f_w)
-            med = float(f_vals[order[np.searchsorted(cdf, 0.5)]])
+            f_w = raw_w[finite]
+            order = np.argsort(f_vals, kind="mergesort")
+            cdf = np.cumsum(f_w[order])
+            med = float(f_vals[order[np.searchsorted(cdf, 0.5 * cdf[-1])]])
             imputed = np.where(finite, vals, med)
             has_missing = not np.all(finite)
             if np.ptp(imputed) <= 1e-12:
@@ -210,7 +253,7 @@ class CovariatePreprocessor:
 
     def transform(
         self,
-        cov_frame: pd.DataFrame,
+        cov_frame: pd.DataFrame | None,
         indices: np.ndarray,
         *,
         raw_cache: dict[str, Any] | None = None,
@@ -264,7 +307,7 @@ class CovariatePreprocessor:
     @classmethod
     def raw_design_matrix(
         cls,
-        cov_frame: pd.DataFrame,
+        cov_frame: pd.DataFrame | None,
         *,
         preset: str,
         raw_cache: dict[str, Any] | None = None,
@@ -274,6 +317,12 @@ class CovariatePreprocessor:
         if raw_cache is not None and cache_key in raw_cache:
             cached_mat, cached_cols = raw_cache[cache_key]
             return cached_mat, tuple(cached_cols)
+        if cov_frame is None:
+            raise ValueError(
+                f"Covariate preset {preset!r} is missing from raw_cache and no covariate_frame was provided; "
+                "construct PreparedExternalTest.from_dataset(..., preset=...) with the matching preset "
+                "or omit preset to retain raw_cov_frame."
+            )
         raw_df = cls._build_raw_design(cov_frame, preset=preset)
         mat = np.ascontiguousarray(raw_df.to_numpy(dtype=np.float64), dtype=np.float64)
         mat.setflags(write=False)
@@ -286,7 +335,7 @@ class CovariatePreprocessor:
     @classmethod
     def _get_raw_matrix(
         cls,
-        cov_frame: pd.DataFrame,
+        cov_frame: pd.DataFrame | None,
         *,
         preset: str,
         raw_cache: dict[str, Any] | None = None,
@@ -390,15 +439,45 @@ class WeightedSpectralPreprocessor:
         # Effective total sample count for sample covariance denominator.
         m_total = float(np.sum(p_to_mult[s_p]))
         denom_factor = m_total / max(m_total - 1.0, 1.0)
-        sqrt_w = np.sqrt(w_samples * denom_factor)[:, None]
+        sqrt_w_1d = np.sqrt(w_samples * denom_factor)
+        sqrt_w = sqrt_w_1d[:, None]
+        n_s = int(s_indices.size)
 
-        # Build each block's weighted matrix and sample Gram matrix once; reuse both for
-        # leading-eigenvalue MFA scaling, combined Gram eigendecomposition and loading recovery.
-        SW1 = sqrt_w * (X1 - mean1)
-        SW2 = sqrt_w * (X2 - mean2)
-        n_s = SW1.shape[0]
-        G1 = _symmetrize(SW1 @ SW1.T)
-        G2 = _symmetrize(SW2 @ SW2.T)
+        # Reuse memoized sample Gram matrices (X @ X.T) when available so repeated folds avoid
+        # rebuilding (n_s x p_b) @ (p_b x n_s) products on high-dimensional Raman blocks.
+        SW1: np.ndarray | None = None
+        SW2: np.ndarray | None = None
+        gram_blocks = _get_sample_gram_blocks(dataset)
+        if gram_blocks is not None:
+            K1_all, K2_all = gram_blocks
+            K1_sub = K1_all[s_indices][:, s_indices]
+            K2_sub = K2_all[s_indices][:, s_indices]
+            sw_outer = sqrt_w_1d[:, None] * sqrt_w_1d[None, :]
+            k1_mu = w_samples @ K1_sub
+            mu1_sq = float(w_samples @ k1_mu)
+            G1 = (K1_sub - (k1_mu[:, None] + k1_mu[None, :]) + mu1_sq) * sw_outer
+            k2_mu = w_samples @ K2_sub
+            mu2_sq = float(w_samples @ k2_mu)
+            G2 = (K2_sub - (k2_mu[:, None] + k2_mu[None, :]) + mu2_sq) * sw_outer
+            # Fall back to primal centered products if subset mean shifts risk cancellation.
+            tr_g1 = max(float(np.trace(G1)), 0.0)
+            tr_g2 = max(float(np.trace(G2)), 0.0)
+            if (
+                not np.isfinite(mu1_sq)
+                or mu1_sq > 1e2 * tr_g1
+                or not np.isfinite(mu2_sq)
+                or mu2_sq > 1e2 * tr_g2
+            ):
+                SW1 = sqrt_w * (X1 - mean1)
+                SW2 = sqrt_w * (X2 - mean2)
+                G1 = _symmetrize(SW1 @ SW1.T)
+                G2 = _symmetrize(SW2 @ SW2.T)
+        else:
+            SW1 = sqrt_w * (X1 - mean1)
+            SW2 = sqrt_w * (X2 - mean2)
+            G1 = _symmetrize(SW1 @ SW1.T)
+            G2 = _symmetrize(SW2 @ SW2.T)
+
         if not (np.all(np.isfinite(G1)) and np.all(np.isfinite(G2))):
             raise ValueError("Non-finite spectral block Gram matrix in WeightedSpectralPreprocessor.fit.")
 
@@ -425,7 +504,7 @@ class WeightedSpectralPreprocessor:
         eigvecs = eigvecs[:, order]
         s_vals = np.sqrt(eigvals)
 
-        max_dim = max(SW1.shape[0], SW1.shape[1] + SW2.shape[1])
+        max_dim = max(n_s, X1.shape[1] + X2.shape[1])
         eps = float(np.finfo(float).eps)
         s0 = max(float(s_vals[0]) if s_vals.size else 1.0, 1.0)
         # Forming SW @ SW.T squares singular values, raising zero modes to O(sqrt(max_dim * eps) * s0).
@@ -436,6 +515,10 @@ class WeightedSpectralPreprocessor:
         primal_tol = max(max_dim * eps * s0, float(cfg.rank_tolerance))
         max_cfg_k = max(cfg.pca_dimensions)
         if s_vals.size < max_cfg_k or float(s_vals[max_cfg_k - 1]) <= gram_safe_tol:
+            if SW1 is None:
+                SW1 = sqrt_w * (X1 - mean1)
+            if SW2 is None:
+                SW2 = sqrt_w * (X2 - mean2)
             _, s_vals, vt = linalg.svd(
                 np.hstack([SW1 * scale1, SW2 * scale2]),
                 full_matrices=False,
@@ -452,8 +535,22 @@ class WeightedSpectralPreprocessor:
             s_kept = s_vals[:max_k].copy()
             u_kept = eigvecs[:, :max_k]
             inv_s = 1.0 / s_kept[:, None]
-            comps_1300 = (scale1 * inv_s) * (u_kept.T @ SW1)
-            comps_2850 = (scale2 * inv_s) * (u_kept.T @ SW2)
+            if SW1 is not None and SW2 is not None:
+                comps_1300 = (scale1 * inv_s) * (u_kept.T @ SW1)
+                comps_2850 = (scale2 * inv_s) * (u_kept.T @ SW2)
+            else:
+                u_w = u_kept * sqrt_w
+                u_w_sum = np.sum(u_w, axis=0)
+                tr_g1_f = max(float(np.trace(G1)), 0.0)
+                tr_g2_f = max(float(np.trace(G2)), 0.0)
+                if float(mean1 @ mean1) > 1e2 * tr_g1_f:
+                    comps_1300 = (scale1 * inv_s) * (u_w.T @ (X1 - mean1))
+                else:
+                    comps_1300 = (scale1 * inv_s) * (u_w.T @ X1 - u_w_sum[:, None] * mean1[None, :])
+                if float(mean2 @ mean2) > 1e2 * tr_g2_f:
+                    comps_2850 = (scale2 * inv_s) * (u_w.T @ (X2 - mean2))
+                else:
+                    comps_2850 = (scale2 * inv_s) * (u_w.T @ X2 - u_w_sum[:, None] * mean2[None, :])
             comps = np.hstack([comps_1300, comps_2850])
 
         # Deterministic sign rule: largest-magnitude loading element in each component is positive.
@@ -534,6 +631,9 @@ class PairedMoments:
     mean_ab_shift: np.ndarray
     n_paired_multiplicity: float
     n_paired_distinct: int
+    _whitening_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, float]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     @classmethod
     def from_sample_coordinates(
@@ -590,25 +690,54 @@ class PairedMoments:
         *,
         eigenvalue_tolerance: float = 1e-10,
     ) -> tuple[np.ndarray, np.ndarray, float]:
-        """Solve T v = rho (W + lam * tau * I) v for the top-k subspace in O(k^3)."""
-        W_k = self.W_max[:k, :k]
-        T_k = self.T_max[:k, :k]
-        if not (np.all(np.isfinite(W_k)) and np.all(np.isfinite(T_k))):
-            raise ValueError("Non-finite covariance matrices in paired eigensolver.")
+        """Solve T v = rho (W + lam * tau * I) v for the top-k subspace in O(k^3).
 
-        tr_t = float(np.trace(T_k))
-        tau = tr_t / float(k)
-        if not np.isfinite(tau) or tau <= eigenvalue_tolerance:
-            raise ValueError(f"Non-positive or degenerate tau={tau} in paired eigensolver.")
+        Caches the symmetric eigendecomposition of W_k per dimension k so sweeps over
+        lambda_grid reuse one W_k factorization instead of refitting generalized eigh.
+        """
+        k_int = int(k)
+        cached = self._whitening_cache.get(k_int)
+        if cached is None:
+            W_k = self.W_max[:k_int, :k_int]
+            T_k = self.T_max[:k_int, :k_int]
+            if not (np.all(np.isfinite(W_k)) and np.all(np.isfinite(T_k))):
+                raise ValueError("Non-finite covariance matrices in paired eigensolver.")
 
-        denom = _symmetrize(W_k + float(lam) * tau * np.eye(k, dtype=float))
+            tr_t = float(np.trace(T_k))
+            tau = tr_t / float(k_int)
+            if not np.isfinite(tau) or tau <= eigenvalue_tolerance:
+                raise ValueError(f"Non-positive or degenerate tau={tau} in paired eigensolver.")
 
-        eigvals, eigvecs = linalg.eigh(T_k, denom, check_finite=True)
-        order = np.argsort(eigvals)[::-1]
-        eigvals = np.asarray(eigvals[order], dtype=float)
-        eigvecs = np.asarray(eigvecs[:, order], dtype=float)
+            d_w, q_w = np.linalg.eigh(_symmetrize(W_k))
+            T_tilde = _symmetrize(q_w.T @ _symmetrize(T_k) @ q_w)
+            cached = (d_w, q_w, T_tilde, tau)
+            self._whitening_cache[k_int] = cached
+        else:
+            d_w, q_w, T_tilde, tau = cached
+            if not np.isfinite(tau) or tau <= eigenvalue_tolerance:
+                raise ValueError(f"Non-positive or degenerate tau={tau} in paired eigensolver.")
+
+        lam_f = float(lam)
+        if not math.isfinite(lam_f):
+            raise ValueError(f"Non-finite regularization lambda={lam} in paired eigensolver.")
+
+        denom_eigs = d_w + lam_f * tau
+        if not np.all(np.isfinite(denom_eigs)):
+            raise ValueError("Non-finite regularized denominator in paired eigensolver.")
+        max_denom = float(np.max(denom_eigs)) if denom_eigs.size else 0.0
+        min_denom = float(np.min(denom_eigs)) if denom_eigs.size else 0.0
+        if min_denom <= 0.0 or min_denom <= 1e-14 * max_denom:
+            raise linalg.LinAlgError("Singular or non-positive-definite denominator in paired eigensolver.")
+
+        inv_sqrt = 1.0 / np.sqrt(denom_eigs)
+        M_mat = _symmetrize(T_tilde * (inv_sqrt[:, None] * inv_sqrt[None, :]))
+        eigvals, U_mat = np.linalg.eigh(M_mat)
+        eigvals = np.asarray(eigvals[::-1], dtype=float)
+        eigvecs = np.asarray(q_w @ (inv_sqrt[:, None] * U_mat[:, ::-1]), dtype=float)
 
         # Normalize in the regularized denominator metric and enforce deterministic signs.
+        W_k = self.W_max[:k_int, :k_int]
+        denom = _symmetrize(W_k + lam_f * tau * np.eye(k_int, dtype=float))
         metric_norms = np.sqrt(np.maximum(np.sum(eigvecs * (denom @ eigvecs), axis=0), 1e-15))
         eigvecs = eigvecs / metric_norms[None, :]
         _enforce_deterministic_signs(eigvecs, axis=0)

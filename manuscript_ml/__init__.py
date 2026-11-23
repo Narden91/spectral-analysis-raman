@@ -422,7 +422,7 @@ def clear_dataset_cache() -> None:
     _resolve_experiment_dataset_cached.cache_clear()
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=8)
 def _resolve_experiment_dataset_cached(
     use_synthetic: bool,
     clinical_master_path: str,

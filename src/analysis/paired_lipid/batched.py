@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from typing import Any
 
@@ -12,6 +13,9 @@ from src.analysis.paired_lipid._backend import (
 )
 from src.analysis.paired_lipid._backend import (
     _probe_cupy as _probe_cupy,
+)
+from src.analysis.paired_lipid._backend import (
+    _single_thread_blas as _single_thread_blas,
 )
 from src.analysis.paired_lipid._backend import (
     _to_np as _to_np,
@@ -33,6 +37,9 @@ from src.analysis.paired_lipid._batched_models import (
 )
 from src.analysis.paired_lipid._batched_models import (
     batched_pls_sse_and_preds as batched_pls_sse_and_preds,
+)
+from src.analysis.paired_lipid._batched_models import (
+    batched_ridge_preds_single_alpha as batched_ridge_preds_single_alpha,
 )
 from src.analysis.paired_lipid._batched_models import (
     batched_ridge_sse_and_preds as batched_ridge_sse_and_preds,
@@ -60,6 +67,9 @@ from src.analysis.paired_lipid._eigensolvers import (
 )
 from src.analysis.paired_lipid._gram_cache import (
     _get_dataset_gram_cache as _get_dataset_gram_cache,
+)
+from src.analysis.paired_lipid._gram_cache import (
+    _get_single_sample_gram_cache as _get_single_sample_gram_cache,
 )
 from src.analysis.paired_lipid._gram_cache import (
     _precompute_division_constants as _precompute_division_constants,
@@ -113,10 +123,10 @@ def _check_fast_batch_eligibility(
     gcache: dict[str, Any],
 ) -> np.ndarray:
     """Return boolean mask of bootstrap draws eligible for vectorized full-grid Schur evaluation."""
+    del gcache
     n_b = M_all.shape[0]
     if (
-        gcache["has_missing_cov"]
-        or list(cfg.retained_directions) != [1, 2, 3]
+        list(cfg.retained_directions) != [1, 2, 3]
         or min(cfg.pca_dimensions) < max(cfg.retained_directions)
     ):
         return np.zeros(n_b, dtype=bool)
@@ -329,23 +339,21 @@ def _predict_grouped_ridge_outer(
     alphas_xp: Any,
     out_preds: Any,
 ) -> None:
-    """Fit outer ridge across all alphas for a draw subset and gather selected predictions on device."""
+    """Fit outer ridge for each draw's single selected alpha and store predictions on device."""
     if b_idx.size == 0:
         return
     b_xp = xp.asarray(b_idx)
-    _, pr = batched_ridge_sse_and_preds(
+    sel_alphas = alphas_xp[xp.asarray(alpha_indices)]
+    out_preds[b_xp] = batched_ridge_preds_single_alpha(
         xp,
         outer_div["X_cov_tr"][b_xp],
         outer_div["X_cov_val"][b_xp],
         Z_otr,
         Z_ote,
         outer_div["y_tr"],
-        outer_div["y_val"],
         outer_div["w_tr"][b_xp],
-        outer_div["w_val"][b_xp],
-        alphas_xp,
+        sel_alphas,
     )
-    out_preds[b_xp] = pr[xp.arange(b_idx.size), :, xp.asarray(alpha_indices)]
 
 
 def _run_batched_multiplicity_draws(
@@ -362,6 +370,7 @@ def _run_batched_multiplicity_draws(
     execution_metadata: dict[str, Any] | None = None,
     fallback_draws_out: set[int] | None = None,
     return_oof_sd: bool = False,
+    single_sample_downstream: bool = False,
 ) -> tuple[np.ndarray, np.ndarray] | dict[str, np.ndarray]:
     """Evaluate multiplicity bootstrap draws in batches on GPU (CuPy) or CPU (NumPy)."""
     n_sub, n_p = M_sub.shape
@@ -381,16 +390,38 @@ def _run_batched_multiplicity_draws(
     lam_xp = xp.asarray(list(cfg.lambda_grid), dtype=xp.float64)
     r_list = [int(r) for r in cfg.retained_directions]
     max_pls_c = max(cfg.pls_component_grid)
-    part_band_xp = xp.asarray(gcache["part_band_mat"], dtype=xp.float64)
+    part_band_src = (
+        _get_single_sample_gram_cache(dataset, gcache)["part_band_mat_single"]
+        if single_sample_downstream
+        else gcache["part_band_mat"]
+    )
+    part_band_xp = xp.asarray(part_band_src, dtype=xp.float64)
 
     fold_dconsts = []
-    for (tr_idx, te_idx), in_splits in zip(outer_splits, inner_splits_per_fold):
-        in_dconsts = [
-            _precompute_division_constants(xp, gcache, dataset, tr_idx[in_tr_rel], tr_idx[in_val_rel], cfg)
-            for in_tr_rel, in_val_rel in in_splits
-        ]
-        out_dconst = _precompute_division_constants(xp, gcache, dataset, tr_idx, te_idx, cfg)
-        fold_dconsts.append((tr_idx, te_idx, in_dconsts, out_dconst))
+    with _single_thread_blas():
+        for (tr_idx, te_idx), in_splits in zip(outer_splits, inner_splits_per_fold):
+            in_dconsts = [
+                _precompute_division_constants(
+                    xp,
+                    gcache,
+                    dataset,
+                    tr_idx[in_tr_rel],
+                    tr_idx[in_val_rel],
+                    cfg,
+                    single_sample_downstream=single_sample_downstream,
+                )
+                for in_tr_rel, in_val_rel in in_splits
+            ]
+            out_dconst = _precompute_division_constants(
+                xp,
+                gcache,
+                dataset,
+                tr_idx,
+                te_idx,
+                cfg,
+                single_sample_downstream=single_sample_downstream,
+            )
+            fold_dconsts.append((tr_idx, te_idx, in_dconsts, out_dconst))
 
     if batch_size is None:
         n_samples_outer = max((int(out_dc["K1_div"].shape[0]) for _, _, _, out_dc in fold_dconsts), default=n_p)
@@ -400,155 +431,158 @@ def _run_batched_multiplicity_draws(
     oof_paired = xp.zeros((n_sub, n_p), dtype=xp.float64)
     oof_strongest = xp.zeros((n_sub, n_p), dtype=xp.float64)
 
-    for b_start in range(0, n_sub, batch_size):
-        b_end = min(b_start + batch_size, n_sub)
-        B = b_end - b_start
-        M_batch = xp.asarray(M_sub[b_start:b_end], dtype=xp.float64)
-        batch_ok = np.ones(B, dtype=bool)
-        b_arange_xp = xp.arange(B)
+    blas_ctx = _single_thread_blas() if xp is np else contextlib.nullcontext()
+    with blas_ctx:
+        for b_start in range(0, n_sub, batch_size):
+            b_end = min(b_start + batch_size, n_sub)
+            B = b_end - b_start
+            M_batch = xp.asarray(M_sub[b_start:b_end], dtype=xp.float64)
+            batch_ok = np.ones(B, dtype=bool)
+            b_arange_xp = xp.arange(B)
 
-        for tr_idx, te_idx, in_dconsts, out_dconst in fold_dconsts:
-            sel = batched_select_inner_settings(
-                xp, gcache, in_dconsts, M_batch, y_all_xp, alphas_xp, part_band_xp, cfg
-            )
-            batch_ok &= sel["rank_ok"]
+            for tr_idx, te_idx, in_dconsts, out_dconst in fold_dconsts:
+                sel = batched_select_inner_settings(
+                    xp, gcache, in_dconsts, M_batch, y_all_xp, alphas_xp, part_band_xp, cfg
+                )
+                batch_ok &= sel["rank_ok"]
 
-            best_cov_a = sel["best_cov_a"]
-            best_band_a = sel["best_band_a"]
-            best_pca_k_idx = sel["best_pca_k_idx"]
-            best_pca_a = sel["best_pca_a"]
-            best_pls_c_idx = sel["best_pls_c_idx"]
-            best_comp_idx = sel["best_comp_idx"]
-            best_r_idx = sel["best_r_idx"]
-            best_k_idx = sel["best_k_idx"]
-            best_pair_l_idx = sel["best_pair_l_idx"]
-            best_pair_a = sel["best_pair_a"]
+                best_cov_a = sel["best_cov_a"]
+                best_band_a = sel["best_band_a"]
+                best_pca_k_idx = sel["best_pca_k_idx"]
+                best_pca_a = sel["best_pca_a"]
+                best_pls_c_idx = sel["best_pls_c_idx"]
+                best_comp_idx = sel["best_comp_idx"]
+                best_r_idx = sel["best_r_idx"]
+                best_k_idx = sel["best_k_idx"]
+                best_pair_l_idx = sel["best_pair_l_idx"]
+                best_pair_a = sel["best_pair_a"]
 
-            outer_div = batched_division_prep(
-                xp,
-                gcache,
-                out_dconst,
-                M_batch[:, tr_idx],
-                M_batch[:, te_idx],
-                y_all_xp,
-                alphas_xp,
-                cfg,
-                compute_pca_suff=False,
-                compute_cov_preds=True,
-            )
-            batch_ok &= _to_np(xp, outer_div["rank_ok"]) > 0.5
-            pca_otr = outer_div["part_pca_max"][:, tr_idx, :]
-            pca_ote = outer_div["part_pca_max"][:, te_idx, :]
-
-            # Solve outer paired generalized eigensystem only for valid draws' selected (k, lam).
-            V_outer_sel: dict[int, Any] = {}
-            b_k_by_k: dict[int, np.ndarray] = {}
-            for k_idx, k in enumerate(k_list):
-                b_k = np.flatnonzero(batch_ok & (best_k_idx == k_idx))
-                if b_k.size == 0:
-                    continue
-                b_k_xp = xp.asarray(b_k)
-                lam_sel = lam_xp[xp.asarray(best_pair_l_idx[b_k])]
-                V_k = _whitened_generalized_eigh(
+                tr_xp = out_dconst["tr_p"]
+                te_xp = out_dconst["val_p"]
+                outer_div = batched_division_prep(
                     xp,
-                    outer_div["W_max"][b_k_xp, :k, :k],
-                    outer_div["T_max"][b_k_xp, :k, :k],
-                    lam_sel,
-                    grid_mode=False,
-                    eigenvalue_tolerance=cfg.eigenvalue_tolerance,
+                    gcache,
+                    out_dconst,
+                    M_batch[:, tr_xp],
+                    M_batch[:, te_xp],
+                    y_all_xp,
+                    alphas_xp,
+                    cfg,
+                    compute_pca_suff=False,
+                    compute_cov_preds=True,
                 )
-                v_finite = _to_np(xp, xp.all(xp.isfinite(V_k), axis=(-2, -1))) > 0.5
-                if not np.all(v_finite):
-                    batch_ok[b_k[~v_finite]] = False
-                V_outer_sel[k_idx] = V_k
-                b_k_by_k[k_idx] = b_k
+                batch_ok &= _to_np(xp, outer_div["rank_ok"]) > 0.5
+                pca_otr = outer_div["part_pca_max"][:, tr_xp, :]
+                pca_ote = outer_div["part_pca_max"][:, te_xp, :]
 
-            pred_paired_ote = xp.zeros((B, te_idx.size), dtype=xp.float64)
-            for r_idx, r in enumerate(r_list):
-                mask_b = np.flatnonzero(batch_ok & (best_r_idx == r_idx))
-                if mask_b.size == 0:
-                    continue
-                Z_otr_sel = xp.zeros((mask_b.size, tr_idx.size, r), dtype=xp.float64)
-                Z_ote_sel = xp.zeros((mask_b.size, te_idx.size, r), dtype=xp.float64)
+                # Solve outer paired generalized eigensystem only for valid draws' selected (k, lam).
+                V_outer_sel: dict[int, Any] = {}
+                b_k_by_k: dict[int, np.ndarray] = {}
                 for k_idx, k in enumerate(k_list):
-                    sub_m = np.flatnonzero(best_k_idx[mask_b] == k_idx)
-                    if sub_m.size == 0:
+                    b_k = np.flatnonzero(batch_ok & (best_k_idx == k_idx))
+                    if b_k.size == 0:
                         continue
-                    b_ids = mask_b[sub_m]
-                    b_ids_xp = xp.asarray(b_ids)
-                    b_k_all = b_k_by_k[k_idx]
-                    pos_in_bk = xp.asarray(np.searchsorted(b_k_all, b_ids))
-                    V_sel = V_outer_sel[k_idx][pos_in_bk, :, :r]
-                    sub_m_xp = xp.asarray(sub_m)
-                    Z_otr_sel[sub_m_xp] = pca_otr[b_ids_xp, :, :k] @ V_sel
-                    Z_ote_sel[sub_m_xp] = pca_ote[b_ids_xp, :, :k] @ V_sel
-
-                _predict_grouped_ridge_outer(
-                    xp, outer_div, mask_b, Z_otr_sel, Z_ote_sel, best_pair_a[mask_b], alphas_xp, pred_paired_ote
-                )
-
-            pred_comp_sel = xp.zeros((B, te_idx.size), dtype=xp.float64)
-            b_band = np.flatnonzero(batch_ok & (best_comp_idx == 0))
-            _predict_grouped_ridge_outer(
-                xp,
-                outer_div,
-                b_band,
-                part_band_xp[tr_idx],
-                part_band_xp[te_idx],
-                best_band_a[b_band],
-                alphas_xp,
-                pred_comp_sel,
-            )
-
-            for k_idx, k in enumerate(k_list):
-                b_pca = np.flatnonzero(batch_ok & (best_comp_idx == 1) & (best_pca_k_idx == k_idx))
-                if b_pca.size > 0:
-                    b_pca_xp = xp.asarray(b_pca)
-                    _predict_grouped_ridge_outer(
+                    b_k_xp = xp.asarray(b_k)
+                    lam_sel = lam_xp[xp.asarray(best_pair_l_idx[b_k])]
+                    V_k = _whitened_generalized_eigh(
                         xp,
-                        outer_div,
-                        b_pca,
-                        pca_otr[b_pca_xp, :, :k],
-                        pca_ote[b_pca_xp, :, :k],
-                        best_pca_a[b_pca],
-                        alphas_xp,
-                        pred_comp_sel,
+                        outer_div["W_max"][b_k_xp, :k, :k],
+                        outer_div["T_max"][b_k_xp, :k, :k],
+                        lam_sel,
+                        grid_mode=False,
+                        eigenvalue_tolerance=cfg.eigenvalue_tolerance,
+                    )
+                    v_finite = _to_np(xp, xp.all(xp.isfinite(V_k), axis=(-2, -1))) > 0.5
+                    if not np.all(v_finite):
+                        batch_ok[b_k[~v_finite]] = False
+                    V_outer_sel[k_idx] = V_k
+                    b_k_by_k[k_idx] = b_k
+
+                pred_paired_ote = xp.zeros((B, te_idx.size), dtype=xp.float64)
+                for r_idx, r in enumerate(r_list):
+                    mask_b = np.flatnonzero(batch_ok & (best_r_idx == r_idx))
+                    if mask_b.size == 0:
+                        continue
+                    Z_otr_sel = xp.zeros((mask_b.size, tr_idx.size, r), dtype=xp.float64)
+                    Z_ote_sel = xp.zeros((mask_b.size, te_idx.size, r), dtype=xp.float64)
+                    for k_idx, k in enumerate(k_list):
+                        sub_m = np.flatnonzero(best_k_idx[mask_b] == k_idx)
+                        if sub_m.size == 0:
+                            continue
+                        b_ids = mask_b[sub_m]
+                        b_ids_xp = xp.asarray(b_ids)
+                        b_k_all = b_k_by_k[k_idx]
+                        pos_in_bk = xp.asarray(np.searchsorted(b_k_all, b_ids))
+                        V_sel = V_outer_sel[k_idx][pos_in_bk, :, :r]
+                        sub_m_xp = xp.asarray(sub_m)
+                        Z_otr_sel[sub_m_xp] = pca_otr[b_ids_xp, :, :k] @ V_sel
+                        Z_ote_sel[sub_m_xp] = pca_ote[b_ids_xp, :, :k] @ V_sel
+
+                    _predict_grouped_ridge_outer(
+                        xp, outer_div, mask_b, Z_otr_sel, Z_ote_sel, best_pair_a[mask_b], alphas_xp, pred_paired_ote
                     )
 
-            b_pls = np.flatnonzero(batch_ok & (best_comp_idx == 2))
-            if b_pls.size > 0:
-                b_pls_xp = xp.asarray(b_pls)
-                pls_div = {
-                    "w_tr": outer_div["w_tr"][b_pls_xp],
-                    "w_val": outer_div["w_val"][b_pls_xp],
-                    "y_tr": outer_div["y_tr"],
-                    "y_val": outer_div["y_val"],
-                    "X_cov_tr": outer_div["X_cov_tr"][b_pls_xp],
-                    "X_cov_val": outer_div["X_cov_val"][b_pls_xp],
-                    "scale1_sq": outer_div["scale1_sq"][b_pls_xp],
-                    "scale2_sq": outer_div["scale2_sq"][b_pls_xp],
-                    "K_p1_tr": outer_div["K_p1_tr"],
-                    "K_p1_vt": outer_div["K_p1_vt"],
-                    "K_p2_tr": outer_div["K_p2_tr"],
-                    "K_p2_vt": outer_div["K_p2_vt"],
-                }
-                _, pr_pls = batched_pls_sse_and_preds(xp, pls_div, max_pls_c)
-                pred_comp_sel[b_pls_xp] = pr_pls[xp.arange(b_pls.size), :, xp.asarray(best_pls_c_idx[b_pls])]
+                pred_comp_sel = xp.zeros((B, te_idx.size), dtype=xp.float64)
+                b_band = np.flatnonzero(batch_ok & (best_comp_idx == 0))
+                _predict_grouped_ridge_outer(
+                    xp,
+                    outer_div,
+                    b_band,
+                    part_band_xp[tr_xp],
+                    part_band_xp[te_xp],
+                    best_band_a[b_band],
+                    alphas_xp,
+                    pred_comp_sel,
+                )
 
-            te_xp = xp.asarray(te_idx)
-            oof_cov[b_start:b_end, te_xp] = outer_div["preds_cov"][b_arange_xp, :, xp.asarray(best_cov_a)]
-            oof_paired[b_start:b_end, te_xp] = pred_paired_ote
-            oof_strongest[b_start:b_end, te_xp] = pred_comp_sel
-            del outer_div
+                for k_idx, k in enumerate(k_list):
+                    b_pca = np.flatnonzero(batch_ok & (best_comp_idx == 1) & (best_pca_k_idx == k_idx))
+                    if b_pca.size > 0:
+                        b_pca_xp = xp.asarray(b_pca)
+                        _predict_grouped_ridge_outer(
+                            xp,
+                            outer_div,
+                            b_pca,
+                            pca_otr[b_pca_xp, :, :k],
+                            pca_ote[b_pca_xp, :, :k],
+                            best_pca_a[b_pca],
+                            alphas_xp,
+                            pred_comp_sel,
+                        )
 
-        if not np.all(batch_ok):
-            bad_local = np.flatnonzero(~batch_ok)
-            bad_global_xp = xp.asarray(b_start + bad_local)
-            oof_cov[bad_global_xp] = xp.nan
-            oof_paired[bad_global_xp] = xp.nan
-            oof_strongest[bad_global_xp] = xp.nan
-            if fallback_draws_out is not None:
-                fallback_draws_out.update(int(b_start + idx) for idx in bad_local)
+                b_pls = np.flatnonzero(batch_ok & (best_comp_idx == 2))
+                if b_pls.size > 0:
+                    b_pls_xp = xp.asarray(b_pls)
+                    pls_div = {
+                        "w_tr": outer_div["w_tr"][b_pls_xp],
+                        "w_val": outer_div["w_val"][b_pls_xp],
+                        "y_tr": outer_div["y_tr"],
+                        "y_val": outer_div["y_val"],
+                        "X_cov_tr": outer_div["X_cov_tr"][b_pls_xp],
+                        "X_cov_val": outer_div["X_cov_val"][b_pls_xp],
+                        "scale1_sq": outer_div["scale1_sq"][b_pls_xp],
+                        "scale2_sq": outer_div["scale2_sq"][b_pls_xp],
+                        "K_p1_tr": outer_div["K_p1_tr"],
+                        "K_p1_vt": outer_div["K_p1_vt"],
+                        "K_p2_tr": outer_div["K_p2_tr"],
+                        "K_p2_vt": outer_div["K_p2_vt"],
+                    }
+                    _, pr_pls = batched_pls_sse_and_preds(xp, pls_div, max_pls_c)
+                    pred_comp_sel[b_pls_xp] = pr_pls[xp.arange(b_pls.size), :, xp.asarray(best_pls_c_idx[b_pls])]
+
+                oof_cov[b_start:b_end, te_xp] = outer_div["preds_cov"][b_arange_xp, :, xp.asarray(best_cov_a)]
+                oof_paired[b_start:b_end, te_xp] = pred_paired_ote
+                oof_strongest[b_start:b_end, te_xp] = pred_comp_sel
+                del outer_div
+
+            if not np.all(batch_ok):
+                bad_local = np.flatnonzero(~batch_ok)
+                bad_global_xp = xp.asarray(b_start + bad_local)
+                oof_cov[bad_global_xp] = xp.nan
+                oof_paired[bad_global_xp] = xp.nan
+                oof_strongest[bad_global_xp] = xp.nan
+                if fallback_draws_out is not None:
+                    fallback_draws_out.update(int(b_start + idx) for idx in bad_local)
 
     M_sub_xp = xp.asarray(M_sub, dtype=xp.float64)
     w_norm_all = M_sub_xp / xp.sum(M_sub_xp, axis=1, keepdims=True)

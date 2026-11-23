@@ -14,7 +14,6 @@ Produces:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,6 +35,7 @@ from manuscript_ml import (  # noqa: E402
     write_run_provenance,
 )
 from src.analysis.io_utils import write_csv_atomic  # noqa: E402
+from src.analysis.io_utils import write_npz_atomic as _write_npz_atomic  # noqa: E402
 from src.analysis.paired_lipid.nested_cv import (  # noqa: E402
     INTERVAL_METHODS,
     IntervalMethod,
@@ -82,18 +82,6 @@ _DISCRIM_REPORT_KEYS: tuple[str, ...] = (
     "band_discriminability",
     "pls_discriminability",
 )
-
-
-def _write_npz_atomic(path: Path, arrays: dict[str, np.ndarray]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.stem}.tmp_{os.getpid()}.npz")
-    try:
-        np.savez(tmp_path, **arrays)
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-    return path
 
 
 def _flatten_repeatability_rows(fold_repeatability: list[dict[str, Any]]) -> pd.DataFrame:

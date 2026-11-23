@@ -7,15 +7,18 @@ import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Literal, NamedTuple, get_args
 
 import numpy as np
 import pandas as pd
 from scipy import linalg, stats
 
+from src.analysis.paired_lipid._backend import _single_thread_blas
 from src.analysis.paired_lipid.batched import (
     _check_fast_batch_eligibility,
     _get_dataset_gram_cache,
+    _get_single_sample_gram_cache,
     _precompute_division_constants,
     _run_batched_multiplicity_draws,
     batched_select_inner_settings,
@@ -94,8 +97,11 @@ def _maritz_jarrett_quantile_se(values: np.ndarray, q: float) -> float:
     return float(math.sqrt(max(var, 0.0)))
 
 
-def _canonical_raman_band_labels(wn_1300: np.ndarray, wn_2850: np.ndarray) -> list[str]:
-    """Tag each canonical spectral channel with its inclusive RAMAN_BANDS name, or empty string."""
+@lru_cache(maxsize=128)
+def _cached_canonical_raman_band_labels(wn_1300_bytes: bytes, wn_2850_bytes: bytes) -> tuple[str, ...]:
+    """Memoize inclusive RAMAN_BANDS channel labels for a spectral grid pair."""
+    wn_1300 = np.frombuffer(wn_1300_bytes, dtype=np.float64)
+    wn_2850 = np.frombuffer(wn_2850_bytes, dtype=np.float64)
     labels_1300 = [""] * int(wn_1300.size)
     labels_2850 = [""] * int(wn_2850.size)
     for name, band in RAMAN_BANDS.items():
@@ -106,7 +112,33 @@ def _canonical_raman_band_labels(wn_1300: np.ndarray, wn_2850: np.ndarray) -> li
         else:
             for idx in np.flatnonzero((wn_2850 >= lo) & (wn_2850 <= hi)):
                 labels_2850[int(idx)] = name
-    return labels_1300 + labels_2850
+    return tuple(labels_1300 + labels_2850)
+
+
+def _canonical_raman_band_labels(wn_1300: np.ndarray, wn_2850: np.ndarray) -> list[str]:
+    """Tag each canonical spectral channel with its inclusive RAMAN_BANDS name, or empty string."""
+    w1 = np.ascontiguousarray(wn_1300, dtype=np.float64).tobytes()
+    w2 = np.ascontiguousarray(wn_2850, dtype=np.float64).tobytes()
+    return list(_cached_canonical_raman_band_labels(w1, w2))
+
+
+def _get_participant_band_matrix(
+    dataset: CohortDataset,
+    *,
+    single_sample_downstream: bool = False,
+) -> np.ndarray:
+    """Return cached participant-aggregated 21-band feature matrix."""
+    key = f"_part_band__single_{single_sample_downstream}"
+    cached = dataset._cache.get(key)
+    if cached is not None:
+        return cached
+    sample_band_mat, _ = extract_sample_band_matrix(dataset)
+    part_band = aggregate_samples_to_participants(
+        sample_band_mat, dataset, single_sample_only=single_sample_downstream
+    )
+    part_band.setflags(write=False)
+    dataset._cache[key] = part_band
+    return part_band
 
 
 def _get_participant_spectra(
@@ -139,11 +171,12 @@ class PreparedExternalTest:
     endpoint: str
     spec_1300: np.ndarray
     spec_2850: np.ndarray
-    raw_cov_frame: pd.DataFrame
+    raw_cov_frame: pd.DataFrame | None
     y_ext: np.ndarray
     n_participants: int
     part_band_mat: np.ndarray | None = None
     raw_cache: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    single_sample_downstream: bool = False
     all_indices: np.ndarray = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -155,34 +188,38 @@ class PreparedExternalTest:
         ext_ds: CohortDataset,
         endpoint: str,
         *,
-        single_sample_downstream: bool = False,
+        single_sample_downstream: bool | None = None,
         preset: str | None = None,
     ) -> PreparedExternalTest:
         """Precompute participant-averaged spectra, 21-band features, and optional raw covariates once."""
         if endpoint not in ext_ds.outcomes:
             raise ValueError(f"Endpoint '{endpoint}' not present in external test dataset outcomes.")
+        eff_single_sample = _effective_single_sample_downstream(ext_ds, single_sample_downstream)
         part_1300, part_2850 = _get_participant_spectra(
-            ext_ds, single_sample_downstream=single_sample_downstream
+            ext_ds, single_sample_downstream=eff_single_sample
         )
-        ext_sample_band, _ = extract_sample_band_matrix(ext_ds)
-        ext_part_band = aggregate_samples_to_participants(
-            ext_sample_band, ext_ds, single_sample_only=single_sample_downstream
+        ext_part_band = _get_participant_band_matrix(
+            ext_ds, single_sample_downstream=eff_single_sample
         )
-        ext_part_band.setflags(write=False)
         raw_cache: dict[str, Any] = {}
+        retained_cov_frame: pd.DataFrame | None = ext_ds.covariate_frame
         if preset is not None:
             CovariatePreprocessor.raw_design_matrix(
                 ext_ds.covariate_frame, preset=preset, raw_cache=raw_cache
             )
+            # Drop the full pandas DataFrame once the float64 preset array is cached so parallel
+            # worker IPC pickles only contiguous NumPy buffers.
+            retained_cov_frame = None
         return cls(
             endpoint=endpoint,
             spec_1300=part_1300,
             spec_2850=part_2850,
-            raw_cov_frame=ext_ds.covariate_frame,
+            raw_cov_frame=retained_cov_frame,
             y_ext=np.asarray(ext_ds.outcomes[endpoint], dtype=float),
             n_participants=ext_ds.n_participants,
             part_band_mat=ext_part_band,
             raw_cache=raw_cache,
+            single_sample_downstream=eff_single_sample,
         )
 
 
@@ -207,17 +244,27 @@ def _prepare_external_test(
                 "PreparedExternalTest.part_band_mat is required for external comparator scoring; "
                 "construct via PreparedExternalTest.from_dataset(...)."
             )
+        if external_test.single_sample_downstream != bool(single_sample_downstream):
+            raise ValueError(
+                f"PreparedExternalTest single_sample_downstream={external_test.single_sample_downstream} "
+                f"does not match requested single_sample_downstream={bool(single_sample_downstream)}; "
+                "construct PreparedExternalTest.from_dataset(..., single_sample_downstream=...) with the matching mode."
+            )
+        cache_key = f"raw_cov_matrix__{preset}"
+        if external_test.raw_cov_frame is None and cache_key not in external_test.raw_cache:
+            raise ValueError(
+                f"PreparedExternalTest has no cached raw covariates for preset {preset!r} and "
+                "does not retain raw_cov_frame; pass matching preset=... to PreparedExternalTest.from_dataset(...)."
+            )
         return external_test
     if target_col not in external_test.outcomes:
         raise ValueError(f"Endpoint '{target_col}' not present in external test dataset outcomes.")
     part_1300, part_2850 = _get_participant_spectra(
         external_test, single_sample_downstream=single_sample_downstream
     )
-    ext_sample_band, _ = extract_sample_band_matrix(external_test)
-    ext_part_band = aggregate_samples_to_participants(
-        ext_sample_band, external_test, single_sample_only=single_sample_downstream
+    ext_part_band = _get_participant_band_matrix(
+        external_test, single_sample_downstream=single_sample_downstream
     )
-    ext_part_band.setflags(write=False)
     CovariatePreprocessor.raw_design_matrix(
         external_test.covariate_frame, preset=preset, raw_cache=external_test._cache
     )
@@ -230,6 +277,7 @@ def _prepare_external_test(
         n_participants=external_test.n_participants,
         part_band_mat=ext_part_band,
         raw_cache=external_test._cache,
+        single_sample_downstream=bool(single_sample_downstream),
     )
 
 
@@ -241,6 +289,33 @@ def _select_strongest_comparator_name(band_mse: float, pca_mse: float, pls_mse: 
         ("pls_regression", round(float(pls_mse), 12)),
     )
     return min(enumerate(comp_candidates), key=lambda item: (item[1][1], item[0]))[1][0]
+
+
+def _predict_fused_spectral_ridge(
+    spec_prep: WeightedSpectralPreprocessor,
+    fit: MultiAlphaRidgeResult,
+    X_cov: np.ndarray,
+    X1: np.ndarray,
+    X2: np.ndarray,
+    k: int,
+    V_r: np.ndarray | None = None,
+) -> np.ndarray:
+    """Fuse MFA scaling, PCA loadings, optional paired projection, and ridge weights into 1D block vectors."""
+    b0 = float(fit.intercepts[0])
+    b_cov = fit.coef_cov[0]
+    b_spec = fit.coef_spec[0]
+    cov_part = (b0 + X_cov @ b_cov) if X_cov.shape[1] > 0 else np.full(X_cov.shape[0], b0, dtype=float)
+    if b_spec.size == 0:
+        return cov_part
+    beta_eff = b_spec / fit.z_scale
+    z_offset = float(fit.z_mean @ beta_eff)
+    pca_w = (V_r @ beta_eff) if V_r is not None else beta_eff
+    comps = spec_prep.pca_components[:k]
+    p1 = spec_prep.mean_1300.size
+    w1 = spec_prep.scale_1300 * (comps[:, :p1].T @ pca_w)
+    w2 = spec_prep.scale_2850 * (comps[:, p1:].T @ pca_w)
+    spec_offset = float(spec_prep.mean_1300 @ w1 + spec_prep.mean_2850 @ w2) + z_offset
+    return cov_part + (X1 @ w1 + X2 @ w2 - spec_offset)
 
 
 def _score_external_fold(
@@ -261,10 +336,15 @@ def _score_external_fold(
             prepared_ext.raw_cov_frame, prepared_ext.all_indices, raw_cache=prepared_ext.raw_cache
         )
     pred_cov_ext, _ = predict_ridge_grid(fit_cov_outer, X_cov_ext, None, alpha_idx=0)
-    ext_part_z = outer_spec_prep.project_linear_subspace(
-        prepared_ext.spec_1300, prepared_ext.spec_2850, sel_k, V_outer_r
+    pred_pair_ext = _predict_fused_spectral_ridge(
+        outer_spec_prep,
+        fit_paired_outer,
+        X_cov_ext,
+        prepared_ext.spec_1300,
+        prepared_ext.spec_2850,
+        sel_k,
+        V_outer_r,
     )
-    pred_pair_ext, _ = predict_ridge_grid(fit_paired_outer, X_cov_ext, ext_part_z, alpha_idx=0)
     sq_cov_ext = (prepared_ext.y_ext - pred_cov_ext) ** 2
     sq_pair_ext = (prepared_ext.y_ext - pred_pair_ext) ** 2
     ext_mse: dict[str, float] = {
@@ -329,6 +409,7 @@ def _select_inner_fast(
     *,
     gcache: dict[str, Any] | None = None,
     in_dconsts: list[dict[str, Any]] | None = None,
+    single_sample_downstream: bool = False,
 ) -> _InnerSelection | None:
     """Select every comparator's settings via the shared closed-form batched engine (B=1)."""
     if gcache is None:
@@ -336,10 +417,21 @@ def _select_inner_fast(
     if in_dconsts is None:
         in_dconsts = [
             _precompute_division_constants(
-                np, gcache, dataset, outer_train_idx[in_tr_rel], outer_train_idx[in_val_rel], cfg
+                np,
+                gcache,
+                dataset,
+                outer_train_idx[in_tr_rel],
+                outer_train_idx[in_val_rel],
+                cfg,
+                single_sample_downstream=single_sample_downstream,
             )
             for in_tr_rel, in_val_rel in inner_splits
         ]
+    part_band_mat = (
+        _get_single_sample_gram_cache(dataset, gcache)["part_band_mat_single"]
+        if single_sample_downstream
+        else gcache["part_band_mat"]
+    )
     sel = batched_select_inner_settings(
         np,
         gcache,
@@ -347,7 +439,7 @@ def _select_inner_fast(
         mult_all[None, :],
         np.asarray(y_all, dtype=np.float64),
         np.asarray(cfg.ridge_alpha_grid, dtype=np.float64),
-        gcache["part_band_mat"],
+        part_band_mat,
         cfg,
         compute_inner_diagnostics=True,
     )
@@ -418,9 +510,8 @@ def _select_inner_sequential(
     max_pls_c = max(cfg.pls_component_grid)
     invalid_candidates: list[dict[str, Any]] = []
     if part_band_mat is None:
-        sample_band_mat, _ = extract_sample_band_matrix(dataset)
-        part_band_mat = aggregate_samples_to_participants(
-            sample_band_mat, dataset, single_sample_only=single_sample_downstream
+        part_band_mat = _get_participant_band_matrix(
+            dataset, single_sample_downstream=single_sample_downstream
         )
     if part_spectra is None:
         part_spectra = _get_participant_spectra(
@@ -659,55 +750,62 @@ def _select_inner_settings(
     """Dispatch inner-CV selection to the batched fast path when rank and eligibility allow."""
     max_k = max(cfg.pca_dimensions)
     selection: _InnerSelection | None = None
-    if (
-        not single_sample_downstream
-        and not include_band_paired
-        and list(cfg.retained_directions) == [1, 2, 3]
-        and outer_spec_prep.numerical_rank >= max_k
-    ):
-        gcache = _get_dataset_gram_cache(dataset, cfg)
-        if not gcache["has_missing_cov"] and bool(
-            _check_fast_batch_eligibility(
-                dataset,
-                [(outer_train_idx, outer_test_idx)],
-                [inner_splits],
-                mult_all[None, :],
-                cfg,
-                gcache,
-            )[0]
+    with _single_thread_blas():
+        if (
+            not include_band_paired
+            and list(cfg.retained_directions) == [1, 2, 3]
+            and outer_spec_prep.numerical_rank >= max_k
         ):
-            in_dconsts = [
-                _precompute_division_constants(
-                    np, gcache, dataset, outer_train_idx[in_tr_rel], outer_train_idx[in_val_rel], cfg
-                )
-                for in_tr_rel, in_val_rel in inner_splits
-            ]
-            if all(int(dc["base_comb_rank"]) >= max_k for dc in in_dconsts):
-                selection = _select_inner_fast(
+            gcache = _get_dataset_gram_cache(dataset, cfg)
+            if bool(
+                _check_fast_batch_eligibility(
                     dataset,
-                    y_all,
-                    outer_train_idx,
-                    inner_splits,
-                    mult_all,
+                    [(outer_train_idx, outer_test_idx)],
+                    [inner_splits],
+                    mult_all[None, :],
                     cfg,
-                    gcache=gcache,
-                    in_dconsts=in_dconsts,
-                )
+                    gcache,
+                )[0]
+            ):
+                in_dconsts = [
+                    _precompute_division_constants(
+                        np,
+                        gcache,
+                        dataset,
+                        outer_train_idx[in_tr_rel],
+                        outer_train_idx[in_val_rel],
+                        cfg,
+                        single_sample_downstream=single_sample_downstream,
+                    )
+                    for in_tr_rel, in_val_rel in inner_splits
+                ]
+                if all(int(dc["base_comb_rank"]) >= max_k for dc in in_dconsts):
+                    selection = _select_inner_fast(
+                        dataset,
+                        y_all,
+                        outer_train_idx,
+                        inner_splits,
+                        mult_all,
+                        cfg,
+                        gcache=gcache,
+                        in_dconsts=in_dconsts,
+                        single_sample_downstream=single_sample_downstream,
+                    )
 
-    if selection is None:
-        selection = _select_inner_sequential(
-            dataset,
-            y_all,
-            outer_train_idx,
-            inner_splits,
-            mult_all,
-            cfg,
-            outer_spec_prep,
-            single_sample_downstream=single_sample_downstream,
-            include_band_paired=include_band_paired,
-            part_band_mat=part_band_mat,
-            part_spectra=part_spectra,
-        )
+        if selection is None:
+            selection = _select_inner_sequential(
+                dataset,
+                y_all,
+                outer_train_idx,
+                inner_splits,
+                mult_all,
+                cfg,
+                outer_spec_prep,
+                single_sample_downstream=single_sample_downstream,
+                include_band_paired=include_band_paired,
+                part_band_mat=part_band_mat,
+                part_spectra=part_spectra,
+            )
     return selection
 
 
@@ -733,8 +831,8 @@ def _select_inner_models_and_fit_outer(
     if sample_band_mat is None:
         sample_band_mat, _ = extract_sample_band_matrix(dataset)
     if part_band_mat is None:
-        part_band_mat = aggregate_samples_to_participants(
-            sample_band_mat, dataset, single_sample_only=single_sample_downstream
+        part_band_mat = _get_participant_band_matrix(
+            dataset, single_sample_downstream=single_sample_downstream
         )
     if part_spectra is None:
         part_spectra = _get_participant_spectra(
@@ -743,7 +841,8 @@ def _select_inner_models_and_fit_outer(
     part_1300, part_2850 = part_spectra
 
     outer_w_tr = mult_all[outer_train_idx]
-    outer_spec_prep = WeightedSpectralPreprocessor.fit(dataset, outer_train_idx, outer_w_tr, cfg=cfg)
+    with _single_thread_blas():
+        outer_spec_prep = WeightedSpectralPreprocessor.fit(dataset, outer_train_idx, outer_w_tr, cfg=cfg)
     alphas = list(cfg.ridge_alpha_grid)
 
     selection = _select_inner_settings(
@@ -1001,9 +1100,8 @@ def _select_inner_models_and_fit_outer(
             ext_p1, ext_p2 = _get_participant_spectra(
                 ext_ds, single_sample_downstream=single_sample_downstream
             )
-            ext_sb, _ = extract_sample_band_matrix(ext_ds)
-            ext_pb = aggregate_samples_to_participants(
-                ext_sb, ext_ds, single_sample_only=single_sample_downstream
+            ext_pb = _get_participant_band_matrix(
+                ext_ds, single_sample_downstream=single_sample_downstream
             )
             CovariatePreprocessor.raw_design_matrix(
                 ext_ds.covariate_frame, preset=cfg.covariate_preset, raw_cache=ext_ds._cache
@@ -1017,6 +1115,7 @@ def _select_inner_models_and_fit_outer(
                 n_participants=ext_ds.n_participants,
                 part_band_mat=ext_pb,
                 raw_cache=ext_ds._cache,
+                single_sample_downstream=bool(single_sample_downstream),
             )
         X_cov_ext = outer_cov_prep.transform(
             prepared_ext.raw_cov_frame, prepared_ext.all_indices, raw_cache=prepared_ext.raw_cache
@@ -1032,10 +1131,14 @@ def _select_inner_models_and_fit_outer(
                 fit_band_outer, X_cov_ext, prepared_ext.part_band_mat, alpha_idx=0
             )
         elif strongest_comp_name == "pca_ridge":
-            ext_part_pca = outer_spec_prep.transform_pca(
-                prepared_ext.spec_1300, prepared_ext.spec_2850, k=sel_pca_k
+            pred_comp_ext = _predict_fused_spectral_ridge(
+                outer_spec_prep,
+                fit_pca_outer,
+                X_cov_ext,
+                prepared_ext.spec_1300,
+                prepared_ext.spec_2850,
+                sel_pca_k,
             )
-            pred_comp_ext, _ = predict_ridge_grid(fit_pca_outer, X_cov_ext, ext_part_pca, alpha_idx=0)
         elif strongest_comp_name == "pls_regression":
             pred_comp_ext, _ = fit_pls_outer.predict_from_raw_blocks(
                 outer_spec_prep,
@@ -1159,7 +1262,6 @@ def score_external_primary_pair(
     outer_splits, inner_splits_per_fold = (
         make_nested_splits(dataset, cfg, cfg.primary_seed) if splits is None else splits
     )
-    sample_band_mat: np.ndarray | None = None
     part_band_mat: np.ndarray | None = None
     part_spectra: tuple[np.ndarray, np.ndarray] | None = None
 
@@ -1169,146 +1271,150 @@ def score_external_primary_pair(
     external_part_delta_sum = np.zeros(prepared_ext.n_participants, dtype=float)
     external_part_delta_comp_sum = np.zeros(prepared_ext.n_participants, dtype=float)
 
-    for fold_idx, ((tr_idx, te_idx), in_splits) in enumerate(zip(outer_splits, inner_splits_per_fold)):
-        if np.sum(mult[te_idx] > 0) == 0:
-            raise ValueError(f"Outer fold {fold_idx} has zero weighted test participants.")
-        outer_w_tr = mult[tr_idx]
-        outer_spec_prep = WeightedSpectralPreprocessor.fit(dataset, tr_idx, outer_w_tr, cfg=cfg)
-        selection = _select_inner_settings(
-            dataset,
-            y_all,
-            tr_idx,
-            te_idx,
-            in_splits,
-            mult,
-            cfg,
-            outer_spec_prep,
-            single_sample_downstream=eff_single_sample,
-            include_band_paired=False,
-        )
-        outer_cov_prep = CovariatePreprocessor.fit(
-            dataset.covariate_frame, tr_idx, outer_w_tr, preset=cfg.covariate_preset, raw_cache=dataset._cache
-        )
-        X_cov_otr = outer_cov_prep.transform(dataset.covariate_frame, tr_idx, raw_cache=dataset._cache)
-        X_cov_ext = outer_cov_prep.transform(
-            prepared_ext.raw_cov_frame, prepared_ext.all_indices, raw_cache=prepared_ext.raw_cache
-        )
-        y_otr = y_all[tr_idx]
-
-        fit_cov_outer = fit_ridge_grid(
-            X_cov_otr, None, y_otr, outer_w_tr, [alphas[selection.cov_alpha_idx]]
-        )
-
-        sel_k, sel_lam, sel_r, sel_a_idx = selection.paired_setting
-        sample_pca_outer = outer_spec_prep.transform_pca(
-            dataset.sample_1300, dataset.sample_2850, k=sel_k
-        )
-        outer_moments = PairedMoments.from_sample_coordinates(
-            sample_pca_outer, dataset, tr_idx, outer_w_tr
-        )
-        V_outer_k, _, _ = outer_moments.solve_directions(
-            sel_k, sel_lam, eigenvalue_tolerance=cfg.eigenvalue_tolerance
-        )
-        V_outer_r = V_outer_k[:, :sel_r]
-        sample_paired_z = sample_pca_outer @ V_outer_r
-        part_paired_z = aggregate_samples_to_participants(
-            sample_paired_z, dataset, single_sample_only=eff_single_sample
-        )
-        fit_paired_outer = fit_ridge_grid(
-            X_cov_otr,
-            part_paired_z[tr_idx],
-            y_otr,
-            outer_w_tr,
-            [alphas[sel_a_idx]],
-        )
-
-        # Fit only the single established comparator selected in inner validation for this outer fold.
-        strongest_comp_name = _select_strongest_comparator_name(
-            selection.band_mse, selection.pca_mse, selection.pls_mse
-        )
-        pred_comp_ext: np.ndarray | None = None
-        if strongest_comp_name == "fixed_band_ridge":
-            if prepared_ext.part_band_mat is None:
-                raise ValueError(
-                    "PreparedExternalTest.part_band_mat is required to score fixed_band_ridge externally; "
-                    "construct via PreparedExternalTest.from_dataset(...)."
-                )
-            if part_band_mat is None:
-                sample_band_mat, _ = extract_sample_band_matrix(dataset)
-                part_band_mat = aggregate_samples_to_participants(
-                    sample_band_mat, dataset, single_sample_only=eff_single_sample
-                )
-            fit_band_outer = fit_ridge_grid(
-                X_cov_otr,
-                part_band_mat[tr_idx],
-                y_otr,
-                outer_w_tr,
-                [alphas[selection.band_alpha_idx]],
-            )
-            pred_comp_ext, _ = predict_ridge_grid(
-                fit_band_outer, X_cov_ext, prepared_ext.part_band_mat, alpha_idx=0
-            )
-        elif strongest_comp_name == "pca_ridge":
-            sel_pca_k, sel_pca_a_idx = selection.pca_setting
-            sample_pca_comp = (
-                sample_pca_outer[:, :sel_pca_k]
-                if sel_pca_k <= sel_k
-                else outer_spec_prep.transform_pca(dataset.sample_1300, dataset.sample_2850, k=sel_pca_k)
-            )
-            part_pca_comp = aggregate_samples_to_participants(
-                sample_pca_comp, dataset, single_sample_only=eff_single_sample
-            )
-            fit_pca_outer = fit_ridge_grid(
-                X_cov_otr,
-                part_pca_comp[tr_idx],
-                y_otr,
-                outer_w_tr,
-                [alphas[sel_pca_a_idx]],
-            )
-            ext_part_pca = outer_spec_prep.transform_pca(
-                prepared_ext.spec_1300, prepared_ext.spec_2850, k=sel_pca_k
-            )
-            pred_comp_ext, _ = predict_ridge_grid(fit_pca_outer, X_cov_ext, ext_part_pca, alpha_idx=0)
-        elif strongest_comp_name == "pls_regression":
-            if part_spectra is None:
-                part_spectra = _get_participant_spectra(
-                    dataset, single_sample_downstream=eff_single_sample
-                )
-            part_1300, part_2850 = part_spectra
-            part_scaled_tr = outer_spec_prep.transform_scaled_blocks(part_1300[tr_idx], part_2850[tr_idx])
-            fit_pls_outer = WeightedPLSResult.fit(
-                X_cov_otr,
-                part_scaled_tr,
-                y_otr,
-                outer_w_tr,
-                selection.pls_components,
-            )
-            pred_comp_ext, _ = fit_pls_outer.predict_from_raw_blocks(
+    with _single_thread_blas():
+        for fold_idx, ((tr_idx, te_idx), in_splits) in enumerate(zip(outer_splits, inner_splits_per_fold)):
+            if np.sum(mult[te_idx] > 0) == 0:
+                raise ValueError(f"Outer fold {fold_idx} has zero weighted test participants.")
+            outer_w_tr = mult[tr_idx]
+            outer_spec_prep = WeightedSpectralPreprocessor.fit(dataset, tr_idx, outer_w_tr, cfg=cfg)
+            selection = _select_inner_settings(
+                dataset,
+                y_all,
+                tr_idx,
+                te_idx,
+                in_splits,
+                mult,
+                cfg,
                 outer_spec_prep,
-                X_cov_ext,
-                prepared_ext.spec_1300,
-                prepared_ext.spec_2850,
-                n_components=selection.pls_components,
+                single_sample_downstream=eff_single_sample,
+                include_band_paired=False,
+            )
+            outer_cov_prep = CovariatePreprocessor.fit(
+                dataset.covariate_frame, tr_idx, outer_w_tr, preset=cfg.covariate_preset, raw_cache=dataset._cache
+            )
+            X_cov_otr = outer_cov_prep.transform(dataset.covariate_frame, tr_idx, raw_cache=dataset._cache)
+            X_cov_ext = outer_cov_prep.transform(
+                prepared_ext.raw_cov_frame, prepared_ext.all_indices, raw_cache=prepared_ext.raw_cache
+            )
+            y_otr = y_all[tr_idx]
+
+            fit_cov_outer = fit_ridge_grid(
+                X_cov_otr, None, y_otr, outer_w_tr, [alphas[selection.cov_alpha_idx]]
             )
 
-        ext_mse, ext_deltas, ext_deltas_comp = _score_external_fold(
-            prepared_ext,
-            outer_cov_prep,
-            outer_spec_prep,
-            fit_cov_outer,
-            fit_paired_outer,
-            sel_k,
-            V_outer_r,
-            X_cov_ext=X_cov_ext,
-            pred_comp_ext=pred_comp_ext,
-        )
-        external_fold_deltas.append(ext_mse["covariate_ridge"] - ext_mse["paired_linear_ridge"])
-        external_part_delta_sum += ext_deltas
-        if ext_deltas_comp is not None:
-            external_fold_deltas_comp.append(
-                ext_mse["strongest_comparator"] - ext_mse["paired_linear_ridge"]
+            sel_k, sel_lam, sel_r, sel_a_idx = selection.paired_setting
+            sample_pca_outer = outer_spec_prep.transform_pca(
+                dataset.sample_1300, dataset.sample_2850, k=sel_k
             )
-            external_part_delta_comp_sum += ext_deltas_comp
+            outer_moments = PairedMoments.from_sample_coordinates(
+                sample_pca_outer, dataset, tr_idx, outer_w_tr
+            )
+            V_outer_k, _, _ = outer_moments.solve_directions(
+                sel_k, sel_lam, eigenvalue_tolerance=cfg.eigenvalue_tolerance
+            )
+            V_outer_r = V_outer_k[:, :sel_r]
+            sample_paired_z = sample_pca_outer @ V_outer_r
+            part_paired_z = aggregate_samples_to_participants(
+                sample_paired_z, dataset, single_sample_only=eff_single_sample
+            )
+            fit_paired_outer = fit_ridge_grid(
+                X_cov_otr,
+                part_paired_z[tr_idx],
+                y_otr,
+                outer_w_tr,
+                [alphas[sel_a_idx]],
+            )
+
+            # Fit only the single established comparator selected in inner validation for this outer fold.
+            strongest_comp_name = _select_strongest_comparator_name(
+                selection.band_mse, selection.pca_mse, selection.pls_mse
+            )
+            pred_comp_ext: np.ndarray | None = None
+            if strongest_comp_name == "fixed_band_ridge":
+                if prepared_ext.part_band_mat is None:
+                    raise ValueError(
+                        "PreparedExternalTest.part_band_mat is required to score fixed_band_ridge externally; "
+                        "construct via PreparedExternalTest.from_dataset(...)."
+                    )
+                if part_band_mat is None:
+                    part_band_mat = _get_participant_band_matrix(
+                        dataset, single_sample_downstream=eff_single_sample
+                    )
+                fit_band_outer = fit_ridge_grid(
+                    X_cov_otr,
+                    part_band_mat[tr_idx],
+                    y_otr,
+                    outer_w_tr,
+                    [alphas[selection.band_alpha_idx]],
+                )
+                pred_comp_ext, _ = predict_ridge_grid(
+                    fit_band_outer, X_cov_ext, prepared_ext.part_band_mat, alpha_idx=0
+                )
+            elif strongest_comp_name == "pca_ridge":
+                sel_pca_k, sel_pca_a_idx = selection.pca_setting
+                sample_pca_comp = (
+                    sample_pca_outer[:, :sel_pca_k]
+                    if sel_pca_k <= sel_k
+                    else outer_spec_prep.transform_pca(dataset.sample_1300, dataset.sample_2850, k=sel_pca_k)
+                )
+                part_pca_comp = aggregate_samples_to_participants(
+                    sample_pca_comp, dataset, single_sample_only=eff_single_sample
+                )
+                fit_pca_outer = fit_ridge_grid(
+                    X_cov_otr,
+                    part_pca_comp[tr_idx],
+                    y_otr,
+                    outer_w_tr,
+                    [alphas[sel_pca_a_idx]],
+                )
+                pred_comp_ext = _predict_fused_spectral_ridge(
+                    outer_spec_prep,
+                    fit_pca_outer,
+                    X_cov_ext,
+                    prepared_ext.spec_1300,
+                    prepared_ext.spec_2850,
+                    sel_pca_k,
+                )
+            elif strongest_comp_name == "pls_regression":
+                if part_spectra is None:
+                    part_spectra = _get_participant_spectra(
+                        dataset, single_sample_downstream=eff_single_sample
+                    )
+                part_1300, part_2850 = part_spectra
+                part_scaled_tr = outer_spec_prep.transform_scaled_blocks(part_1300[tr_idx], part_2850[tr_idx])
+                fit_pls_outer = WeightedPLSResult.fit(
+                    X_cov_otr,
+                    part_scaled_tr,
+                    y_otr,
+                    outer_w_tr,
+                    selection.pls_components,
+                )
+                pred_comp_ext, _ = fit_pls_outer.predict_from_raw_blocks(
+                    outer_spec_prep,
+                    X_cov_ext,
+                    prepared_ext.spec_1300,
+                    prepared_ext.spec_2850,
+                    n_components=selection.pls_components,
+                )
+
+            ext_mse, ext_deltas, ext_deltas_comp = _score_external_fold(
+                prepared_ext,
+                outer_cov_prep,
+                outer_spec_prep,
+                fit_cov_outer,
+                fit_paired_outer,
+                sel_k,
+                V_outer_r,
+                X_cov_ext=X_cov_ext,
+                pred_comp_ext=pred_comp_ext,
+            )
+            external_fold_deltas.append(ext_mse["covariate_ridge"] - ext_mse["paired_linear_ridge"])
+            external_part_delta_sum += ext_deltas
+            if ext_deltas_comp is not None:
+                external_fold_deltas_comp.append(
+                    ext_mse["strongest_comparator"] - ext_mse["paired_linear_ridge"]
+                )
+                external_part_delta_comp_sum += ext_deltas_comp
 
     n_folds_ext = max(len(external_fold_deltas), 1)
     out: dict[str, Any] = {
@@ -1389,8 +1495,8 @@ def evaluate_nested_cohort(
     )
 
     sample_band_mat, _ = extract_sample_band_matrix(dataset)
-    part_band_mat = aggregate_samples_to_participants(
-        sample_band_mat, dataset, single_sample_only=eff_single_sample
+    part_band_mat = _get_participant_band_matrix(
+        dataset, single_sample_downstream=eff_single_sample
     )
     part_spectra = _get_participant_spectra(
         dataset, single_sample_downstream=eff_single_sample
@@ -1687,13 +1793,9 @@ def run_multiplicity_bootstrap(
     gcache = _get_dataset_gram_cache(dataset, cfg)
     base_weights = observed.astype(np.float64)[None, :]
     M_with_base = np.vstack([base_weights, M_all])
-    if eff_single_sample:
-        # Batched Gram cache averages paired samples; single_sample downstream must use sequential refits.
-        elig_with_base = np.zeros(n_bootstraps + 1, dtype=bool)
-    else:
-        elig_with_base = _check_fast_batch_eligibility(
-            dataset, outer_splits, inner_splits_per_fold, M_with_base, cfg, gcache
-        )
+    elig_with_base = _check_fast_batch_eligibility(
+        dataset, outer_splits, inner_splits_per_fold, M_with_base, cfg, gcache
+    )
     base_elig = bool(elig_with_base[0])
     fast_mask = elig_with_base[1:]
     fast_idx = np.flatnonzero(fast_mask)
@@ -1731,6 +1833,8 @@ def run_multiplicity_bootstrap(
             batched_kwargs["fallback_draws_out"] = batched_fallback_sub
         if _supports_keyword(_run_batched_multiplicity_draws, "return_oof_sd"):
             batched_kwargs["return_oof_sd"] = True
+        if eff_single_sample and _supports_keyword(_run_batched_multiplicity_draws, "single_sample_downstream"):
+            batched_kwargs["single_sample_downstream"] = True
         batched_out = _run_batched_multiplicity_draws(
             dataset,
             y_all,
@@ -1788,8 +1892,8 @@ def run_multiplicity_bootstrap(
     eval_extra_kwargs: dict[str, Any] = {}
     if allow_missing_outcome:
         eval_extra_kwargs["allow_missing_outcome"] = True
-    if eff_single_sample:
-        eval_extra_kwargs["single_sample_downstream"] = True
+    if single_sample_downstream is not None or eff_single_sample:
+        eval_extra_kwargs["single_sample_downstream"] = eff_single_sample
 
     if point_est_delta is None or point_est_comp is None:
         base_eval = evaluate_nested_cohort(
@@ -1843,36 +1947,28 @@ def run_multiplicity_bootstrap(
             failed_draws += 1
             failure_reasons.append(str(exc))
 
-    delta_paired: list[float] = []
-    delta_vs_comp: list[float] = []
-    delta_strong: list[float] = []
-    oof_sds_paired: list[float] = []
-    oof_sds_vs_comp: list[float] = []
-    oof_sds_strong: list[float] = []
-    for b in range(n_bootstraps):
-        dp = float(d_pair_arr[b])
-        dc = float(d_comp_arr[b])
-        ds_val = float(d_strong_arr[b])
-        sdp = float(sd_pair_arr[b])
-        sdc = float(sd_comp_arr[b])
-        sds_val = float(sd_strong_arr[b])
-        if not (np.isfinite(dp) and np.isfinite(dc)):
+    finite_ok = np.isfinite(d_pair_arr) & np.isfinite(d_comp_arr)
+    if interval_method == "studentized_t":
+        sd_ok = (
+            np.isfinite(sd_pair_arr)
+            & (sd_pair_arr > 1e-12)
+            & np.isfinite(sd_comp_arr)
+            & (sd_comp_arr > 1e-12)
+        )
+    else:
+        sd_ok = np.ones(n_bootstraps, dtype=bool)
+
+    keep_mask = finite_ok & sd_ok
+    bad_indices = np.flatnonzero(~keep_mask)
+    for b_idx in bad_indices:
+        b = int(b_idx)
+        if not finite_ok[b]:
             if b not in exception_draws:
                 failed_draws += 1
                 failure_reasons.append("nonfinite_bootstrap_estimate")
-            continue
-        if interval_method == "studentized_t" and not (
-            np.isfinite(sdp) and sdp > 1e-12 and np.isfinite(sdc) and sdc > 1e-12
-        ):
+        else:
             failed_draws += 1
             failure_reasons.append("degenerate_oof_loss_diff_sd")
-            continue
-        delta_paired.append(dp)
-        delta_vs_comp.append(dc)
-        delta_strong.append(ds_val)
-        oof_sds_paired.append(sdp)
-        oof_sds_vs_comp.append(sdc)
-        oof_sds_strong.append(sds_val)
 
     base_sd_ok = (
         interval_method != "studentized_t"
@@ -1884,19 +1980,20 @@ def run_multiplicity_bootstrap(
 
     # Per study design: if any bootstrap refit cannot produce the locked comparison (or studentized SD),
     # mark that dataset's interval procedure as failed rather than discarding resamples.
+    n_succeeded = int(np.count_nonzero(keep_mask))
     interval_valid = (
         n_bootstraps > 0
         and failed_draws == 0
-        and len(delta_paired) == n_bootstraps
+        and n_succeeded == n_bootstraps
         and base_sd_ok
     )
 
-    arr_p = np.asarray(delta_paired, dtype=float)
-    arr_c = np.asarray(delta_vs_comp, dtype=float)
-    arr_s = np.asarray(delta_strong, dtype=float)
-    arr_sdp = np.asarray(oof_sds_paired, dtype=float)
-    arr_sdc = np.asarray(oof_sds_vs_comp, dtype=float)
-    arr_sds = np.asarray(oof_sds_strong, dtype=float)
+    arr_p = np.asarray(d_pair_arr[keep_mask], dtype=float)
+    arr_c = np.asarray(d_comp_arr[keep_mask], dtype=float)
+    arr_s = np.asarray(d_strong_arr[keep_mask], dtype=float)
+    arr_sdp = np.asarray(sd_pair_arr[keep_mask], dtype=float)
+    arr_sdc = np.asarray(sd_comp_arr[keep_mask], dtype=float)
+    arr_sds = np.asarray(sd_strong_arr[keep_mask], dtype=float)
 
     stat_p = _summarize_bootstrap_contrast(
         point_est_delta, sd_0_delta, arr_p, arr_sdp, interval_method=interval_method, valid=interval_valid
@@ -1935,7 +2032,7 @@ def run_multiplicity_bootstrap(
         "ci_95_percentile_strongest_vs_covariate": stat_s["ci_percentile"],
         "interval_procedure_succeeded": interval_valid,
         "n_bootstraps_requested": n_bootstraps,
-        "n_bootstraps_succeeded": len(delta_paired),
+        "n_bootstraps_succeeded": n_succeeded,
         "n_failed_refits": failed_draws,
         "n_fallback_draws": len(all_fallback_idx),
         "execution": execution,
@@ -1992,9 +2089,333 @@ def _residualize_and_partial_r(
         rank_design = 1
         s_res = s_vals_vec - float(np.mean(s_vals_vec))
         y_res = y_vals_vec - float(np.mean(y_vals_vec))
-    denom = float(linalg.norm(s_res) * linalg.norm(y_res))
+    denom = math.sqrt(max(float(np.dot(s_res, s_res)), 0.0) * max(float(np.dot(y_res, y_res)), 0.0))
     partial_r = float(np.dot(s_res, y_res) / denom) if denom > 1e-12 else 0.0
     return partial_r, s_res, y_res, denom, rank_design
+
+
+def _batched_anchor_bootstrap_partial_r(
+    design: np.ndarray,
+    s_v: np.ndarray,
+    y_v: np.ndarray,
+    idx_mat: np.ndarray,
+    eps_f: float,
+) -> np.ndarray:
+    """Vectorized bootstrap re-residualization via chunked weighted Gram eigh with exact SVD fallback."""
+    n_resamples, n_v = idx_mat.shape
+    p = int(design.shape[1])
+    if n_resamples == 0 or n_v == 0:
+        return np.empty(0, dtype=float)
+
+    chunk_size = 512
+    r_out = np.zeros(n_resamples, dtype=np.float64)
+    ok_all = np.zeros(n_resamples, dtype=bool)
+
+    with _single_thread_blas():
+        if p == 0:
+            if n_v - 1 < 2:
+                return np.empty(0, dtype=float)
+            s_sq = s_v * s_v
+            y_sq = y_v * y_v
+            for start in range(0, n_resamples, chunk_size):
+                end = min(start + chunk_size, n_resamples)
+                idx_c = idx_mat[start:end]
+                B_c = end - start
+                M = np.zeros((B_c, n_v), dtype=np.float64)
+                np.add.at(M, (np.arange(B_c)[:, None], idx_c), 1.0)
+                s_mean = (M @ s_v) / float(n_v)
+                y_mean = (M @ y_v) / float(n_v)
+                s_res_c = s_v[None, :] - s_mean[:, None]
+                y_res_c = y_v[None, :] - y_mean[:, None]
+                ss = np.sum(M * s_res_c * s_res_c, axis=1)
+                yy = np.sum(M * y_res_c * y_res_c, axis=1)
+                sy = np.sum(M * s_res_c * y_res_c, axis=1)
+                dn = np.sqrt(np.maximum(ss, 0.0) * np.maximum(yy, 0.0))
+                ss_raw = M @ s_sq
+                yy_raw = M @ y_sq
+                amp = np.sqrt(
+                    np.maximum(
+                        np.where(ss > 0.0, ss_raw / np.maximum(ss, 1e-300), np.inf),
+                        np.where(yy > 0.0, yy_raw / np.maximum(yy, 1e-300), np.inf),
+                    )
+                )
+                need_fb = (~np.isfinite(dn)) | (~np.isfinite(amp)) | ((eps_f * amp) > 1e-11)
+                ok_c = (~need_fb) & (dn > 1e-12)
+                r_c = np.zeros(B_c, dtype=np.float64)
+                r_c[ok_c] = sy[ok_c] / dn[ok_c]
+                for b in np.flatnonzero(need_fb):
+                    b_idx = idx_c[int(b)]
+                    r_b, _, _, dn_b, rank_b = _residualize_and_partial_r(
+                        design[b_idx], s_v[b_idx], y_v[b_idx], eps_f
+                    )
+                    if n_v - rank_b >= 2 and dn_b > 1e-12:
+                        ok_c[int(b)] = True
+                        r_c[int(b)] = r_b
+                ok_all[start:end] = ok_c
+                r_out[start:end] = r_c
+            return r_out[ok_all]
+
+        D_outer = (design[:, :, None] * design[:, None, :]).reshape(n_v, p * p)
+        ds_rows = design * s_v[:, None]
+        dy_rows = design * y_v[:, None]
+        nonzero_cols = (design != 0.0).astype(np.float64)
+        s_sq = s_v * s_v
+        y_sq = y_v * y_v
+        eye_p = np.eye(p, dtype=np.float64)[None, :, :]
+        max_dim = float(max(n_v, p))
+        gram_tol_factor = 10.0 * math.sqrt(max_dim * eps_f)
+
+        for start in range(0, n_resamples, chunk_size):
+            end = min(start + chunk_size, n_resamples)
+            idx_c = idx_mat[start:end]
+            B_c = end - start
+
+            M = np.zeros((B_c, n_v), dtype=np.float64)
+            np.add.at(M, (np.arange(B_c)[:, None], idx_c), 1.0)
+            G_b = (M @ D_outer).reshape(B_c, p, p)
+            G_b = 0.5 * (G_b + np.swapaxes(G_b, -1, -2))
+            ds_vec = M @ ds_rows
+            dy_vec = M @ dy_rows
+
+            finite_g = np.all(np.isfinite(G_b), axis=(1, 2))
+            G_safe = np.where(finite_g[:, None, None], G_b, eye_p)
+            ev, V = np.linalg.eigh(G_safe)
+            ev = np.maximum(ev, 0.0)
+            sv = np.sqrt(ev)
+            s0 = sv[:, -1:]
+            gram_safe_tol = gram_tol_factor * s0
+            # Exact-zero columns in a resampled draw contribute exact zero eigenvalues without ambiguity;
+            # any remaining mode <= gram_safe_tol or normal-equation error amplification routes to exact SVD.
+            n_zero_cols = np.sum((M @ nonzero_cols) == 0.0, axis=1)
+            kept = sv > gram_safe_tol
+            ranks = np.sum(kept, axis=1)
+            inv_ev = np.where(kept, 1.0 / np.maximum(ev, 1e-300), 0.0)
+            vt_ds = np.einsum("bji,bj->bi", V, ds_vec)
+            vt_dy = np.einsum("bji,bj->bi", V, dy_vec)
+            beta_s = np.einsum("bij,bj->bi", V, inv_ev * vt_ds)
+            beta_y = np.einsum("bij,bj->bi", V, inv_ev * vt_dy)
+
+            s_res_u = s_v[None, :] - beta_s @ design.T
+            y_res_u = y_v[None, :] - beta_y @ design.T
+            ss = np.sum(M * s_res_u * s_res_u, axis=1)
+            yy = np.sum(M * y_res_u * y_res_u, axis=1)
+            sy = np.sum(M * s_res_u * y_res_u, axis=1)
+            dn = np.sqrt(np.maximum(ss, 0.0) * np.maximum(yy, 0.0))
+
+            sv_kept_min = np.min(np.where(kept, sv, np.inf), axis=1)
+            has_kept = ranks > 0
+            kappa_sq = np.where(has_kept, (s0[:, 0] / np.maximum(sv_kept_min, 1e-300)) ** 2, np.inf)
+            ss_raw = M @ s_sq
+            yy_raw = M @ y_sq
+            amp_s = np.where(ss > 0.0, ss_raw / np.maximum(ss, 1e-300), np.inf)
+            amp_y = np.where(yy > 0.0, yy_raw / np.maximum(yy, 1e-300), np.inf)
+            amp = np.sqrt(np.maximum(amp_s, amp_y))
+            unstable = (~has_kept) | (~np.isfinite(amp)) | ((kappa_sq * eps_f * amp) > 1e-11)
+            need_fb = (~finite_g) | (s0[:, 0] <= 0.0) | (ranks < (p - n_zero_cols)) | unstable
+
+            ok_c = (~need_fb) & ((n_v - ranks) >= 2) & (dn > 1e-12)
+            r_c = np.zeros(B_c, dtype=np.float64)
+            r_c[ok_c] = sy[ok_c] / dn[ok_c]
+
+            for b in np.flatnonzero(need_fb):
+                b_idx = idx_c[int(b)]
+                r_b, _, _, dn_b, rank_b = _residualize_and_partial_r(
+                    design[b_idx], s_v[b_idx], y_v[b_idx], eps_f
+                )
+                if n_v - rank_b >= 2 and dn_b > 1e-12:
+                    ok_c[int(b)] = True
+                    r_c[int(b)] = r_b
+
+            ok_all[start:end] = ok_c
+            r_out[start:end] = r_c
+
+    return r_out[ok_all]
+
+
+def _batched_anchor_bootstrap_partial_r_missing(
+    raw_cov_valid: np.ndarray,
+    s_v: np.ndarray,
+    y_v: np.ndarray,
+    idx_mat: np.ndarray,
+    eps_f: float,
+) -> np.ndarray:
+    """Vectorized bootstrap re-residualization with per-draw weighted median imputation & missing indicators."""
+    n_resamples, n_v = idx_mat.shape
+    if n_resamples == 0 or n_v == 0:
+        return np.empty(0, dtype=float)
+
+    fin_full = np.isfinite(raw_cov_valid)
+    p_raw = int(raw_cov_valid.shape[1])
+    base_idx: list[int] = []
+    miss_idx: list[int] = []
+    # Deduplicate bitwise-identical missingness indicators (e.g., age_years and age_years_sq)
+    # because duplicate columns span the exact same residualization subspace and rank.
+    seen_miss_patterns: set[bytes] = set()
+    for c_i in range(p_raw):
+        f_c = fin_full[:, c_i]
+        if not np.any(f_c):
+            continue
+        if float(np.ptp(raw_cov_valid[f_c, c_i])) > 1e-12:
+            base_idx.append(c_i)
+        if not np.all(f_c):
+            miss_pat = (~f_c).tobytes()
+            if miss_pat not in seen_miss_patterns:
+                seen_miss_patterns.add(miss_pat)
+                miss_idx.append(c_i)
+
+    p_b = len(base_idx)
+    p_m = len(miss_idx)
+    p_tot = 1 + p_b + p_m
+    if p_tot == 1:
+        return _batched_anchor_bootstrap_partial_r(
+            np.ones((n_v, 1), dtype=np.float64), s_v, y_v, idx_mat, eps_f
+        )
+
+    if p_b > 0:
+        X_b = raw_cov_valid[:, base_idx]
+        fin_b = np.ascontiguousarray(fin_full[:, base_idx], dtype=bool)
+        X_b_filled = np.ascontiguousarray(np.where(fin_b, X_b, 0.0), dtype=np.float64)
+        sort_ord = np.empty((p_b, n_v), dtype=np.int64)
+        sort_vals = np.empty((p_b, n_v), dtype=np.float64)
+        sort_fin = np.empty((p_b, n_v), dtype=np.float64)
+        for j in range(p_b):
+            fi = np.flatnonzero(fin_b[:, j])
+            ni = np.flatnonzero(~fin_b[:, j])
+            so = fi[np.argsort(X_b[fi, j], kind="mergesort")]
+            full_o = np.concatenate([so, ni]).astype(np.int64, copy=False)
+            sort_ord[j] = full_o
+            sort_vals[j] = X_b_filled[full_o, j]
+            sort_fin[j] = fin_b[full_o, j].astype(np.float64)
+        col_arange = np.arange(p_b, dtype=np.int64)[None, :]
+    else:
+        fin_b = np.empty((n_v, 0), dtype=bool)
+        X_b_filled = np.empty((n_v, 0), dtype=np.float64)
+        sort_ord = np.empty((0, n_v), dtype=np.int64)
+        sort_vals = np.empty((0, n_v), dtype=np.float64)
+        sort_fin = np.empty((0, n_v), dtype=np.float64)
+        col_arange = np.empty((1, 0), dtype=np.int64)
+
+    X_miss = (
+        np.ascontiguousarray((~fin_full[:, miss_idx]).astype(np.float64))
+        if p_m > 0
+        else np.empty((n_v, 0), dtype=np.float64)
+    )
+
+    chunk_size = 512
+    r_out = np.zeros(n_resamples, dtype=np.float64)
+    ok_all = np.zeros(n_resamples, dtype=bool)
+    sy_mat = np.ascontiguousarray(np.column_stack([s_v, y_v]), dtype=np.float64)
+    s_sq = s_v * s_v
+    y_sq = y_v * y_v
+    eye_p = np.eye(p_tot, dtype=np.float64)[None, :, :]
+
+    with _single_thread_blas():
+        for start in range(0, n_resamples, chunk_size):
+            end = min(start + chunk_size, n_resamples)
+            idx_c = idx_mat[start:end]
+            B_c = end - start
+
+            M = np.zeros((B_c, n_v), dtype=np.float64)
+            np.add.at(M, (np.arange(B_c)[:, None], idx_c), 1.0)
+            w = M / float(n_v)
+            active = M > 0.0
+
+            D_b = np.zeros((B_c, n_v, p_tot), dtype=np.float64)
+            D_b[:, :, 0] = 1.0
+            active_cols = np.zeros((B_c, p_tot), dtype=bool)
+            active_cols[:, 0] = True
+
+            if p_b > 0:
+                m_sorted = M[:, sort_ord] * sort_fin[None, :, :]
+                cdf = np.cumsum(m_sorted, axis=2)
+                tot_fin = cdf[:, :, -1]
+                any_fin = tot_fin > 0.0
+                med_idx = np.argmax((cdf > 0.0) & (cdf >= (0.5 * tot_fin)[:, :, None]), axis=2)
+                medians = np.where(any_fin, sort_vals[col_arange, med_idx], 0.0)
+
+                X_imp = np.where(fin_b[None, :, :], X_b_filled[None, :, :], medians[:, None, :])
+                c_mean = (w[:, None, :] @ X_imp)[:, 0, :]
+                C_mat = X_imp - c_mean[:, None, :]
+                c_var = np.sum(w[:, :, None] * (C_mat * C_mat), axis=1)
+                act_fin = active[:, :, None] & fin_b[None, :, :]
+                x_hi = np.where(act_fin, X_b_filled[None, :, :], -np.inf)
+                x_lo = np.where(act_fin, X_b_filled[None, :, :], np.inf)
+                c_ptp = np.max(x_hi, axis=1) - np.min(x_lo, axis=1)
+                valid_c = any_fin & np.isfinite(c_ptp) & (c_ptp > 1e-12)
+                c_scale = np.where(valid_c, np.sqrt(np.maximum(c_var, 1e-12)), 1.0)
+                D_b[:, :, 1 : 1 + p_b] = np.where(valid_c[:, None, :], C_mat / c_scale[:, None, :], 0.0)
+                active_cols[:, 1 : 1 + p_b] = valid_c
+
+            if p_m > 0:
+                active_f = active.astype(np.float64)
+                n_act_miss = active_f @ X_miss
+                n_act_tot = np.sum(active_f, axis=1, keepdims=True)
+                valid_m = (n_act_miss > 0.0) & (n_act_miss < n_act_tot)
+                m_mean = w @ X_miss
+                M_mat = X_miss[None, :, :] - m_mean[:, None, :]
+                m_var = np.sum(w[:, :, None] * (M_mat * M_mat), axis=1)
+                m_scale = np.where(valid_m, np.sqrt(np.maximum(m_var, 1e-12)), 1.0)
+                D_b[:, :, 1 + p_b :] = np.where(valid_m[:, None, :], M_mat / m_scale[:, None, :], 0.0)
+                active_cols[:, 1 + p_b :] = valid_m
+
+            Dm = D_b * M[:, :, None]
+            Dm_T = np.swapaxes(Dm, -1, -2)
+            G_b = Dm_T @ D_b
+            G_b = 0.5 * (G_b + np.swapaxes(G_b, -1, -2))
+            dsy = Dm_T @ sy_mat
+
+            finite_g = np.all(np.isfinite(G_b), axis=(1, 2))
+            G_safe = np.where(finite_g[:, None, None], G_b, eye_p)
+            ev, V = np.linalg.eigh(G_safe)
+            ev = np.maximum(ev, 0.0)
+            sv = np.sqrt(ev)
+            s0 = sv[:, -1:]
+            n_active_cols = np.sum(active_cols, axis=1)
+            max_dim_b = np.maximum(float(n_v), n_active_cols.astype(np.float64))
+            gram_safe_tol = (10.0 * np.sqrt(max_dim_b * eps_f))[:, None] * s0
+            kept = sv > gram_safe_tol
+            ranks = np.sum(kept, axis=1)
+            inv_ev = np.where(kept, 1.0 / np.maximum(ev, 1e-300), 0.0)
+            vt_dsy = np.swapaxes(V, -1, -2) @ dsy
+            beta_sy = V @ (inv_ev[:, :, None] * vt_dsy)
+
+            res_sy = sy_mat[None, :, :] - (D_b @ beta_sy)
+            s_res_u = res_sy[:, :, 0]
+            y_res_u = res_sy[:, :, 1]
+            ss = np.sum(M * s_res_u * s_res_u, axis=1)
+            yy = np.sum(M * y_res_u * y_res_u, axis=1)
+            sy = np.sum(M * s_res_u * y_res_u, axis=1)
+            dn = np.sqrt(np.maximum(ss, 0.0) * np.maximum(yy, 0.0))
+
+            sv_kept_min = np.min(np.where(kept, sv, np.inf), axis=1)
+            has_kept = ranks > 0
+            kappa_sq = np.where(has_kept, (s0[:, 0] / np.maximum(sv_kept_min, 1e-300)) ** 2, np.inf)
+            ss_raw = M @ s_sq
+            yy_raw = M @ y_sq
+            amp_s = np.where(ss > 0.0, ss_raw / np.maximum(ss, 1e-300), np.inf)
+            amp_y = np.where(yy > 0.0, yy_raw / np.maximum(yy, 1e-300), np.inf)
+            amp = np.sqrt(np.maximum(amp_s, amp_y))
+            unstable = (~has_kept) | (~np.isfinite(amp)) | ((kappa_sq * eps_f * amp) > 1e-11)
+            need_fb = (~finite_g) | (s0[:, 0] <= 0.0) | (ranks < n_active_cols) | unstable
+
+            ok_c = (~need_fb) & ((n_v - ranks) >= 2) & (dn > 1e-12)
+            r_c = np.zeros(B_c, dtype=np.float64)
+            r_c[ok_c] = sy[ok_c] / dn[ok_c]
+
+            for b in np.flatnonzero(need_fb):
+                bi = int(b)
+                b_idx = idx_c[bi]
+                cols_b = np.flatnonzero(active_cols[bi])
+                d_b = D_b[bi][b_idx][:, cols_b]
+                r_b, _, _, dn_b, rank_b = _residualize_and_partial_r(d_b, s_v[b_idx], y_v[b_idx], eps_f)
+                if n_v - rank_b >= 2 and dn_b > 1e-12:
+                    ok_c[bi] = True
+                    r_c[bi] = r_b
+
+            ok_all[start:end] = ok_c
+            r_out[start:end] = r_c
+
+    return r_out[ok_all]
 
 
 def summarize_anchor_associations(
@@ -2014,8 +2435,9 @@ def summarize_anchor_associations(
     outer_splits = eval_result["splits"][0] if "splits" in eval_result else None
     rng = np.random.default_rng(seed)
 
-    # Reuse the valid-subset covariate design and SVD basis across anchors sharing the same valid mask.
+    # Reuse full-cohort and per-fold covariate SVD bases across anchors sharing the same valid mask.
     basis_cache: dict[bytes, tuple[np.ndarray, np.ndarray, bool]] = {}
+    fold_basis_cache: dict[bytes, list[tuple[np.ndarray, np.ndarray, int]]] = {}
     rows: list[dict[str, Any]] = []
     eps_f = float(np.finfo(float).eps)
     for anchor in anchors:
@@ -2060,7 +2482,7 @@ def summarize_anchor_associations(
         s_res = s_v - u_kept @ (u_kept.T @ s_v)
         y_res = y_v - u_kept @ (u_kept.T @ y_v)
 
-        denom = float(linalg.norm(s_res) * linalg.norm(y_res))
+        denom = math.sqrt(max(float(np.dot(s_res, s_res)), 0.0) * max(float(np.dot(y_res, y_res)), 0.0))
         if denom > 1e-12 and float(np.ptp(s_res)) > 1e-12 and float(np.ptp(y_res)) > 1e-12:
             partial_r = float(np.dot(s_res, y_res) / denom)
             spearman_rho = float(stats.spearmanr(s_res, y_res).statistic)
@@ -2071,53 +2493,63 @@ def summarize_anchor_associations(
         # Per-fold partial correlations avoid pooling heterogeneous outer-fold models.
         fold_rs: list[float] = []
         if outer_splits is not None:
-            for _, te_idx in outer_splits:
-                fold_valid = te_idx[valid[te_idx]]
-                if fold_valid.size < 5:
-                    continue
-                f_cov_prep = CovariatePreprocessor.fit(
-                    dataset.covariate_frame,
-                    fold_valid,
-                    np.ones(fold_valid.size, dtype=float),
-                    preset=cfg.covariate_preset,
-                    raw_cache=dataset._cache,
-                )
-                X_cov_f = f_cov_prep.transform(
-                    dataset.covariate_frame, fold_valid, raw_cache=dataset._cache
-                )
-                d_f = np.column_stack([np.ones(fold_valid.size, dtype=float), X_cov_f])
-                r_f, _, _, dn_f, rank_f = _residualize_and_partial_r(
-                    d_f, spec_contrib[fold_valid], y_a[fold_valid], eps_f
-                )
-                # Require >= 2 residual degrees of freedom so saturated folds do not inject bogus zeros.
-                if int(fold_valid.size) - rank_f >= 2 and dn_f > 1e-12:
-                    fold_rs.append(r_f)
-
-        if n_resamples > 0:
-            # Re-residualize on resampled covariates per participant draw so covariate-adjustment
-            # uncertainty is preserved; refit CovariatePreprocessor per draw when missingness exists.
-            idx_mat = rng.integers(0, n_v, size=(n_resamples, n_v))
-            boot_rs: list[float] = []
-            for b_idx in idx_mat:
-                if has_cov_missing:
-                    boot_mult = np.bincount(b_idx, minlength=n_v).astype(float)
-                    cp_b = CovariatePreprocessor.fit(
+            cached_folds = fold_basis_cache.get(mask_key)
+            if cached_folds is None:
+                cached_folds = []
+                for _, te_idx in outer_splits:
+                    fold_valid = te_idx[valid[te_idx]]
+                    if fold_valid.size < 5:
+                        continue
+                    f_cov_prep = CovariatePreprocessor.fit(
                         dataset.covariate_frame,
-                        valid_idx,
-                        boot_mult,
+                        fold_valid,
+                        np.ones(fold_valid.size, dtype=float),
                         preset=cfg.covariate_preset,
                         raw_cache=dataset._cache,
                     )
-                    X_cov_b = cp_b.transform(
-                        dataset.covariate_frame, valid_idx[b_idx], raw_cache=dataset._cache
+                    X_cov_f = f_cov_prep.transform(
+                        dataset.covariate_frame, fold_valid, raw_cache=dataset._cache
                     )
-                    d_b = np.column_stack([np.ones(n_v, dtype=float), X_cov_b])
+                    d_f = np.column_stack([np.ones(fold_valid.size, dtype=float), X_cov_f])
+                    u_f, sv_f, _ = linalg.svd(d_f, full_matrices=False, check_finite=False)
+                    if sv_f.size > 0 and sv_f[0] > 0.0:
+                        tol_f = max(d_f.shape) * eps_f * float(sv_f[0])
+                        u_kept_f = u_f[:, sv_f > tol_f]
+                        rank_f = int(u_kept_f.shape[1])
+                    else:
+                        u_kept_f = np.empty((fold_valid.size, 0), dtype=float)
+                        rank_f = 1
+                    cached_folds.append((fold_valid, u_kept_f, rank_f))
+                fold_basis_cache[mask_key] = cached_folds
+
+            for fold_valid, u_kept_f, rank_f in cached_folds:
+                # Require >= 2 residual degrees of freedom so saturated folds do not inject bogus zeros.
+                if int(fold_valid.size) - rank_f < 2:
+                    continue
+                sf = spec_contrib[fold_valid]
+                yf = y_a[fold_valid]
+                if u_kept_f.shape[1] > 0:
+                    s_f_res = sf - u_kept_f @ (u_kept_f.T @ sf)
+                    y_f_res = yf - u_kept_f @ (u_kept_f.T @ yf)
                 else:
-                    d_b = design[b_idx]
-                r_b, _, _, dn_b, rank_b = _residualize_and_partial_r(d_b, s_v[b_idx], y_v[b_idx], eps_f)
-                if n_v - rank_b >= 2 and dn_b > 1e-12:
-                    boot_rs.append(r_b)
-            arr_r = np.asarray(boot_rs, dtype=float)
+                    s_f_res = sf - float(np.mean(sf))
+                    y_f_res = yf - float(np.mean(yf))
+                dn_f = math.sqrt(
+                    max(float(np.dot(s_f_res, s_f_res)), 0.0) * max(float(np.dot(y_f_res, y_f_res)), 0.0)
+                )
+                if dn_f > 1e-12:
+                    fold_rs.append(float(np.dot(s_f_res, y_f_res) / dn_f))
+
+        if n_resamples > 0:
+            # Re-residualize on resampled covariates per participant draw so covariate-adjustment
+            # uncertainty is preserved, including per-draw imputation and missingness indicators.
+            idx_mat = rng.integers(0, n_v, size=(n_resamples, n_v))
+            if not has_cov_missing:
+                arr_r = _batched_anchor_bootstrap_partial_r(design, s_v, y_v, idx_mat, eps_f)
+            else:
+                arr_r = _batched_anchor_bootstrap_partial_r_missing(
+                    raw_cov_mat[valid_idx], s_v, y_v, idx_mat, eps_f
+                )
         else:
             arr_r = np.empty(0, dtype=float)
         sign_stability = float(np.mean(np.sign(arr_r) == np.sign(partial_r))) if arr_r.size else float("nan")

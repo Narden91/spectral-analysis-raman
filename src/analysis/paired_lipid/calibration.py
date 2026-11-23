@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -16,7 +17,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from src.analysis.io_utils import write_csv_atomic
+from src.analysis.io_utils import write_csv_atomic, write_npz_atomic
+from src.analysis.paired_lipid._backend import _single_thread_blas
 from src.analysis.paired_lipid.batched import resolve_array_backend
 from src.analysis.paired_lipid.cohort import CohortDataset, PairedLipidConfig
 from src.analysis.paired_lipid.nested_cv import (
@@ -107,39 +109,43 @@ def _eval_single_calibration_rep(
     test_ds: CohortDataset | PreparedExternalTest,
     compact_grid: bool,
     interval_method: IntervalMethod = "studentized_t",
+    *,
+    single_thread_blas: bool = False,
 ) -> _CalibrationRepResult:
     """Run one synthetic calibration replicate: bootstrap intervals and external target scores."""
-    ds, _ = generate_synthetic_cohort(
-        n_participants=n_participants,
-        seed=rep_seed,
-        compact_grid=compact_grid,
-        **gen_kwargs,
-    )
-    boot = run_multiplicity_bootstrap(
-        ds,
-        cfg=cfg,
-        n_bootstraps=n_bootstraps,
-        bootstrap_seed=rep_seed + 1,
-        use_gpu=use_gpu,
-        interval_method=interval_method,
-    )
-    ext_eval = score_external_primary_pair(ds, test_ds, cfg=cfg)
-    ext_part_comp = ext_eval.get("external_participant_deltas_vs_comparator")
-    return _CalibrationRepResult(
-        point_delta_mse=float(boot["point_estimate_delta_mse"]),
-        ci_lo_delta_mse=float(boot["ci_95_delta_mse"][0]),
-        ci_hi_delta_mse=float(boot["ci_95_delta_mse"][1]),
-        succeeded=bool(boot["interval_procedure_succeeded"]),
-        ext_delta_mse=float(ext_eval["external_delta_mse"]),
-        ext_part_deltas_mse=np.asarray(ext_eval["external_participant_deltas"], dtype=float),
-        point_vs_comp=float(boot["point_estimate_vs_comparator"]),
-        ci_lo_vs_comp=float(boot["ci_95_vs_comparator"][0]),
-        ci_hi_vs_comp=float(boot["ci_95_vs_comparator"][1]),
-        ext_delta_vs_comp=float(ext_eval.get("external_delta_vs_comparator", float("nan"))),
-        ext_part_deltas_vs_comp=(
-            np.asarray(ext_part_comp, dtype=float) if ext_part_comp is not None else np.empty(0, dtype=float)
-        ),
-    )
+    blas_ctx = _single_thread_blas() if single_thread_blas else contextlib.nullcontext()
+    with blas_ctx:
+        ds, _ = generate_synthetic_cohort(
+            n_participants=n_participants,
+            seed=rep_seed,
+            compact_grid=compact_grid,
+            **gen_kwargs,
+        )
+        boot = run_multiplicity_bootstrap(
+            ds,
+            cfg=cfg,
+            n_bootstraps=n_bootstraps,
+            bootstrap_seed=rep_seed + 1,
+            use_gpu=use_gpu,
+            interval_method=interval_method,
+        )
+        ext_eval = score_external_primary_pair(ds, test_ds, cfg=cfg)
+        ext_part_comp = ext_eval.get("external_participant_deltas_vs_comparator")
+        return _CalibrationRepResult(
+            point_delta_mse=float(boot["point_estimate_delta_mse"]),
+            ci_lo_delta_mse=float(boot["ci_95_delta_mse"][0]),
+            ci_hi_delta_mse=float(boot["ci_95_delta_mse"][1]),
+            succeeded=bool(boot["interval_procedure_succeeded"]),
+            ext_delta_mse=float(ext_eval["external_delta_mse"]),
+            ext_part_deltas_mse=np.asarray(ext_eval["external_participant_deltas"], dtype=float),
+            point_vs_comp=float(boot["point_estimate_vs_comparator"]),
+            ci_lo_vs_comp=float(boot["ci_95_vs_comparator"][0]),
+            ci_hi_vs_comp=float(boot["ci_95_vs_comparator"][1]),
+            ext_delta_vs_comp=float(ext_eval.get("external_delta_vs_comparator", float("nan"))),
+            ext_part_deltas_vs_comp=(
+                np.asarray(ext_part_comp, dtype=float) if ext_part_comp is not None else np.empty(0, dtype=float)
+            ),
+        )
 
 
 def _two_way_anova_ms_from_sufficient_stats(
@@ -199,15 +205,7 @@ def _calibration_fingerprint(
 
 def _save_calibration_checkpoint(path: Path, state: Mapping[str, Any]) -> None:
     """Atomically write compact O(R + C) calibration checkpoint state to an ``.npz`` archive."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        with tmp_path.open("wb") as handle:
-            np.savez(handle, **state)
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+    write_npz_atomic(path, state)
 
 
 def _load_calibration_checkpoint(path: Path, expected_fingerprint: str) -> dict[str, Any]:
@@ -500,77 +498,79 @@ def evaluate_bootstrap_calibration(
         else:
             chunk_size = max(16, (os.cpu_count() or 4) * 2) if use_parallel else 10
 
-        parallel_cls: Any = None
+        parallel_cm: Any = contextlib.nullcontext(None)
         delayed_fn: Any = None
         if use_parallel:
             from joblib import Parallel, delayed
 
-            parallel_cls = Parallel
+            parallel_cm = Parallel(n_jobs=n_jobs)
             delayed_fn = delayed
 
-        for c_start in range(0, len(pending_indices), chunk_size):
-            chunk_idxs = pending_indices[c_start : c_start + chunk_size]
-            if use_parallel and len(chunk_idxs) > 1:
-                chunk_results: list[_CalibrationRepResult] = parallel_cls(n_jobs=n_jobs)(
-                    delayed_fn(_eval_single_calibration_rep)(
-                        int(rep_seeds[rep_idx]),
-                        n_participants,
-                        gen_kwargs,
-                        n_bootstraps,
-                        eff_cfg,
-                        False,
-                        prepared_test,
-                        compact_grid,
-                        interval_method,
+        with parallel_cm as parallel_pool:
+            for c_start in range(0, len(pending_indices), chunk_size):
+                chunk_idxs = pending_indices[c_start : c_start + chunk_size]
+                if parallel_pool is not None and len(chunk_idxs) > 1:
+                    chunk_results: list[_CalibrationRepResult] = parallel_pool(
+                        delayed_fn(_eval_single_calibration_rep)(
+                            int(rep_seeds[rep_idx]),
+                            n_participants,
+                            gen_kwargs,
+                            n_bootstraps,
+                            eff_cfg,
+                            False,
+                            prepared_test,
+                            compact_grid,
+                            interval_method,
+                            single_thread_blas=True,
+                        )
+                        for rep_idx in chunk_idxs
                     )
-                    for rep_idx in chunk_idxs
-                )
-            else:
-                chunk_results = [
-                    _eval_single_calibration_rep(
-                        int(rep_seeds[rep_idx]),
-                        n_participants,
-                        gen_kwargs,
-                        n_bootstraps,
-                        eff_cfg,
-                        effective_use_gpu,
-                        prepared_test,
-                        compact_grid,
-                        interval_method,
+                else:
+                    chunk_results = [
+                        _eval_single_calibration_rep(
+                            int(rep_seeds[rep_idx]),
+                            n_participants,
+                            gen_kwargs,
+                            n_bootstraps,
+                            eff_cfg,
+                            effective_use_gpu,
+                            prepared_test,
+                            compact_grid,
+                            interval_method,
+                        )
+                        for rep_idx in chunk_idxs
+                    ]
+
+                for rep_idx, rep_res in zip(chunk_idxs, chunk_results):
+                    state["completed"][rep_idx] = True
+                    state["point_delta_mse"][rep_idx] = rep_res.point_delta_mse
+                    state["ci_lo_delta_mse"][rep_idx] = rep_res.ci_lo_delta_mse
+                    state["ci_hi_delta_mse"][rep_idx] = rep_res.ci_hi_delta_mse
+                    state["succeeded"][rep_idx] = rep_res.succeeded
+                    state["ext_delta_mse"][rep_idx] = rep_res.ext_delta_mse
+                    if rep_res.ext_part_deltas_mse.size == n_ext:
+                        row_m = rep_res.ext_part_deltas_mse
+                        state["ext_col_sum_mse"] += row_m
+                        state["ext_row_ss_mse"][rep_idx] = float(np.sum((row_m - float(np.mean(row_m))) ** 2))
+                    else:
+                        state["ext_part_valid_mse"] = np.array(False, dtype=bool)
+
+                    state["point_vs_comp"][rep_idx] = rep_res.point_vs_comp
+                    state["ci_lo_vs_comp"][rep_idx] = rep_res.ci_lo_vs_comp
+                    state["ci_hi_vs_comp"][rep_idx] = rep_res.ci_hi_vs_comp
+                    state["ext_delta_vs_comp"][rep_idx] = rep_res.ext_delta_vs_comp
+                    if rep_res.ext_part_deltas_vs_comp.size == n_ext:
+                        row_c = rep_res.ext_part_deltas_vs_comp
+                        state["ext_col_sum_comp"] += row_c
+                        state["ext_row_ss_comp"][rep_idx] = float(np.sum((row_c - float(np.mean(row_c))) ** 2))
+                    else:
+                        state["ext_part_valid_comp"] = np.array(False, dtype=bool)
+
+                if ckpt_file is not None:
+                    _save_calibration_checkpoint(
+                        ckpt_file,
+                        {"fingerprint": np.array(fingerprint), **state},
                     )
-                    for rep_idx in chunk_idxs
-                ]
-
-            for rep_idx, rep_res in zip(chunk_idxs, chunk_results):
-                state["completed"][rep_idx] = True
-                state["point_delta_mse"][rep_idx] = rep_res.point_delta_mse
-                state["ci_lo_delta_mse"][rep_idx] = rep_res.ci_lo_delta_mse
-                state["ci_hi_delta_mse"][rep_idx] = rep_res.ci_hi_delta_mse
-                state["succeeded"][rep_idx] = rep_res.succeeded
-                state["ext_delta_mse"][rep_idx] = rep_res.ext_delta_mse
-                if rep_res.ext_part_deltas_mse.size == n_ext:
-                    row_m = rep_res.ext_part_deltas_mse
-                    state["ext_col_sum_mse"] += row_m
-                    state["ext_row_ss_mse"][rep_idx] = float(np.sum((row_m - float(np.mean(row_m))) ** 2))
-                else:
-                    state["ext_part_valid_mse"] = np.array(False, dtype=bool)
-
-                state["point_vs_comp"][rep_idx] = rep_res.point_vs_comp
-                state["ci_lo_vs_comp"][rep_idx] = rep_res.ci_lo_vs_comp
-                state["ci_hi_vs_comp"][rep_idx] = rep_res.ci_hi_vs_comp
-                state["ext_delta_vs_comp"][rep_idx] = rep_res.ext_delta_vs_comp
-                if rep_res.ext_part_deltas_vs_comp.size == n_ext:
-                    row_c = rep_res.ext_part_deltas_vs_comp
-                    state["ext_col_sum_comp"] += row_c
-                    state["ext_row_ss_comp"][rep_idx] = float(np.sum((row_c - float(np.mean(row_c))) ** 2))
-                else:
-                    state["ext_part_valid_comp"] = np.array(False, dtype=bool)
-
-            if ckpt_file is not None:
-                _save_calibration_checkpoint(
-                    ckpt_file,
-                    {"fingerprint": np.array(fingerprint), **state},
-                )
 
     succeeded_flags = [bool(v) for v in state["succeeded"]]
     prim = _summarize_interval_calibration(
@@ -849,30 +849,34 @@ def _eval_single_scenario_rep(
     compact_grid: bool,
     spec: Mapping[str, Any],
     cfg: PairedLipidConfig,
+    *,
+    single_thread_blas: bool = False,
 ) -> _ScenarioRepResult:
     """Evaluate one synthetic scenario replicate on the locked nested-CV pipeline."""
-    gen_kwargs = {k: v for k, v in spec.items() if k not in _SCENARIO_META_KEYS}
-    ds, truth = generate_synthetic_cohort(
-        n_participants=n_participants, seed=seed, compact_grid=compact_grid, **gen_kwargs
-    )
-    res = evaluate_nested_cohort(ds, cfg=cfg)
-    comp = res["comparisons_vs_covariate_ridge"]
-    fold_iccs = [
-        float(r["paired_spectral_icc"]["icc_a1"])
-        for r in res["fold_repeatability"]
-        if "paired_spectral_icc" in r and r["paired_spectral_icc"]["estimable"]
-    ]
-    mean_icc = float(np.mean(fold_iccs)) if fold_iccs else None
-    return _ScenarioRepResult(
-        delta_mse_paired=float(comp["paired_linear_ridge"]["delta_mse"]),
-        delta_mse_pca=float(comp["pca_ridge"]["delta_mse"]),
-        delta_mse_pls=float(comp["pls_regression"]["delta_mse"]),
-        delta_mse_fixed_band=float(comp["fixed_band_ridge"]["delta_mse"]),
-        delta_vs_strongest=float(res["paired_vs_strongest_comparator"]["delta_mse"]),
-        mean_spectral_icc=mean_icc,
-        recovery_r2_ldl_factor=_ldl_factor_recovery_r2(res, truth["z_bio"][:, 0]),
-        corr_ldl_tg=float(np.corrcoef(ds.outcomes["ldl_mmol_l"], ds.outcomes["triglycerides_mmol_l"])[0, 1]),
-    )
+    blas_ctx = _single_thread_blas() if single_thread_blas else contextlib.nullcontext()
+    with blas_ctx:
+        gen_kwargs = {k: v for k, v in spec.items() if k not in _SCENARIO_META_KEYS}
+        ds, truth = generate_synthetic_cohort(
+            n_participants=n_participants, seed=seed, compact_grid=compact_grid, **gen_kwargs
+        )
+        res = evaluate_nested_cohort(ds, cfg=cfg)
+        comp = res["comparisons_vs_covariate_ridge"]
+        fold_iccs = [
+            float(r["paired_spectral_icc"]["icc_a1"])
+            for r in res["fold_repeatability"]
+            if "paired_spectral_icc" in r and r["paired_spectral_icc"]["estimable"]
+        ]
+        mean_icc = float(np.mean(fold_iccs)) if fold_iccs else None
+        return _ScenarioRepResult(
+            delta_mse_paired=float(comp["paired_linear_ridge"]["delta_mse"]),
+            delta_mse_pca=float(comp["pca_ridge"]["delta_mse"]),
+            delta_mse_pls=float(comp["pls_regression"]["delta_mse"]),
+            delta_mse_fixed_band=float(comp["fixed_band_ridge"]["delta_mse"]),
+            delta_vs_strongest=float(res["paired_vs_strongest_comparator"]["delta_mse"]),
+            mean_spectral_icc=mean_icc,
+            recovery_r2_ldl_factor=_ldl_factor_recovery_r2(res, truth["z_bio"][:, 0]),
+            corr_ldl_tg=float(np.corrcoef(ds.outcomes["ldl_mmol_l"], ds.outcomes["triglycerides_mmol_l"])[0, 1]),
+        )
 
 
 def run_synthetic_scenario_suite(
@@ -911,7 +915,7 @@ def run_synthetic_scenario_suite(
         from joblib import Parallel, delayed
 
         task_results: list[_ScenarioRepResult] = Parallel(n_jobs=eff_jobs)(
-            delayed(_eval_single_scenario_rep)(seed, n_p, compact_grid, spec, task_cfg)
+            delayed(_eval_single_scenario_rep)(seed, n_p, compact_grid, spec, task_cfg, single_thread_blas=True)
             for _, _, seed, n_p, spec, task_cfg in tasks
         )
     else:

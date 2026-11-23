@@ -515,20 +515,25 @@ def outer_test_repeatability(
 
     if fit_pls_outer is not None and outer_spec_prep is not None:
         n_comp_pls = int(fit_pls_outer.max_components)
-        y_pls_a, s_pls_a = fit_pls_outer.predict_from_raw_blocks(
+        comp_col = min(max(n_comp_pls, 1), fit_pls_outer.max_components) - 1
+        y_pls_a_all, s_pls_a_all = fit_pls_outer.predict_from_raw_blocks(
             outer_spec_prep,
             X_cov_pair_te,
             dataset.sample_1300[idx_a_te],
             dataset.sample_2850[idx_a_te],
-            n_components=n_comp_pls,
+            n_components=None,
         )
-        y_pls_b, s_pls_b = fit_pls_outer.predict_from_raw_blocks(
+        y_pls_b_all, s_pls_b_all = fit_pls_outer.predict_from_raw_blocks(
             outer_spec_prep,
             X_cov_pair_te,
             dataset.sample_1300[idx_b_te],
             dataset.sample_2850[idx_b_te],
-            n_components=n_comp_pls,
+            n_components=None,
         )
+        y_pls_a = y_pls_a_all[:, comp_col]
+        s_pls_a = s_pls_a_all[:, comp_col]
+        y_pls_b = y_pls_b_all[:, comp_col]
+        s_pls_b = s_pls_b_all[:, comp_col]
         pls_full_icc = compute_icc_a1(y_pls_a, y_pls_b)
         pls_spec_icc = compute_icc_a1(s_pls_a, s_pls_b)
         pls_sd_s, pls_var_share = _spectral_scale_metrics(y_pls_a, y_pls_b, s_pls_a, s_pls_b)
@@ -539,15 +544,9 @@ def outer_test_repeatability(
         comp_icc_map["pls_regression"] = (pls_full_icc, pls_spec_icc, pls_sd_s, pls_var_share)
 
         # Sample-level cumulative PLS spectral contributions across 1..c components for discriminability.
-        zeros_cov_all = np.zeros((dataset.n_samples, fit_pls_outer.p_cov), dtype=float)
-        _, sample_pls_spec_all = fit_pls_outer.predict_from_raw_blocks(
-            outer_spec_prep,
-            zeros_cov_all,
-            dataset.sample_1300,
-            dataset.sample_2850,
-            n_components=None,
+        info["pls_discriminability"] = compute_discriminability_and_retrieval(
+            s_pls_a_all, s_pls_b_all, lbl_a, lbl_b, local_window=cfg.local_candidate_window
         )
-        info["pls_discriminability"] = _discrim(sample_pls_spec_all)
 
     if strongest_comparator_name is not None and strongest_comparator_name in comp_icc_map:
         sc_full, sc_spec, sc_sd, sc_share = comp_icc_map[strongest_comparator_name]

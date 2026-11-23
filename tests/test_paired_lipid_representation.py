@@ -2896,3 +2896,1520 @@ def test_review_round2_hardening_guards_and_latex_tables(
     assert len(wrec) == 0
     rep_tex = art_empty["table_repeatability_and_angles"].read_text(encoding="utf-8")
     assert r"\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}X" in rep_tex
+
+
+def test_optimization_vectorization_caching_and_edge_cases(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from scipy import linalg
+
+    from manuscript_ml.build_manuscript_artifacts import build_manuscript_artifacts
+    from src.analysis.paired_lipid._eigensolvers import (
+        _fast_top1_eigvalsh,
+        _fast_top1_eigvalsh_from_gram,
+    )
+    from src.analysis.paired_lipid._gram_cache import (
+        _get_dataset_gram_cache,
+        _precompute_division_constants,
+    )
+    from src.analysis.paired_lipid.cohort import CohortDataset
+    from src.analysis.paired_lipid.models import (
+        CovariatePreprocessor,
+        PairedMoments,
+        WeightedSpectralPreprocessor,
+        fit_ridge_grid,
+        predict_ridge_grid,
+    )
+    from src.analysis.paired_lipid.nested_cv import (
+        _batched_anchor_bootstrap_partial_r,
+        _predict_fused_spectral_ridge,
+        _residualize_and_partial_r,
+    )
+
+    # 1. Matrix-free top-1 eigenvalue matches materialized _fast_top1_eigvalsh on CPU (and GPU if available).
+    rng = np.random.default_rng(3101)
+    n_s, q = 36, 8
+    A = rng.normal(size=(n_s, 10))
+    K = 0.5 * (A @ A.T + (A @ A.T).T)
+    M = rng.multinomial(n_s, np.full(n_s, 1.0 / n_s), size=6).astype(np.float64)
+    M[0] = 1.0
+    w_s = M / np.sum(M, axis=1, keepdims=True)
+    sw = np.sqrt(w_s * (n_s / max(n_s - 1.0, 1.0)))
+    k_mu = w_s @ K
+    mu_sq = np.sum(w_s * k_mu, axis=1)
+    Q0 = rng.normal(size=(n_s, q))
+    G_mat = (K[None, :, :] - (k_mu[:, :, None] + k_mu[:, None, :]) + mu_sq[:, None, None]) * (
+        sw[:, :, None] * sw[:, None, :]
+    )
+    ev_mat = _fast_top1_eigvalsh(np, G_mat, sw, Q0)
+    ev_mf = _fast_top1_eigvalsh_from_gram(np, K, k_mu, mu_sq, sw, Q0)
+    np.testing.assert_allclose(ev_mf, ev_mat, rtol=1e-12, atol=1e-12)
+    if _gpu_available():
+        from src.analysis.paired_lipid._backend import _get_gpu_xp, _to_np
+
+        cp = _get_gpu_xp()
+        assert cp is not None
+        ev_mf_gpu = _to_np(
+            cp,
+            _fast_top1_eigvalsh_from_gram(
+                cp, cp.asarray(K), cp.asarray(k_mu), cp.asarray(mu_sq), cp.asarray(sw), cp.asarray(Q0)
+            ),
+        )
+        np.testing.assert_allclose(ev_mf_gpu, ev_mat, rtol=1e-12, atol=1e-12)
+
+    # 2. WeightedSpectralPreprocessor.fit cached sample Gram matches primal path, low-rank fallback,
+    #    and ignores NaNs in non-training samples.
+    ds, _ = generate_synthetic_cohort(
+        n_participants=40,
+        n_single_sample=2,
+        seed=3102,
+        compact_grid=True,
+        n_nuisance_modes=8,
+        nuisance_part_scale=0.5,
+        nuisance_sample_scale=1.0,
+    )
+    cfg = PairedLipidConfig()
+    tr_idx = np.arange(32, dtype=int)
+    w_tr = np.ones(tr_idx.size, dtype=float)
+    sp_cached = WeightedSpectralPreprocessor.fit(ds, tr_idx, w_tr, cfg=cfg)
+    assert "sample_gram_blocks" in ds._cache
+
+    # Inject a NaN into an unused test sample and verify training fit is completely unaffected.
+    s1300_nan = ds.sample_1300.copy()
+    unused_s = int(np.flatnonzero(ds.sample_participant_idx == 39)[0])
+    s1300_nan[unused_s, 0] = np.nan
+    ds_nan_unused = CohortDataset(
+        participant_ids=ds.participant_ids.copy(),
+        outcomes={k: v.copy() for k, v in ds.outcomes.items()},
+        covariate_frame=ds.covariate_frame.copy(),
+        wavenumbers_1300=ds.wavenumbers_1300.copy(),
+        wavenumbers_2850=ds.wavenumbers_2850.copy(),
+        sample_1300=s1300_nan,
+        sample_2850=ds.sample_2850.copy(),
+        sample_participant_idx=ds.sample_participant_idx.copy(),
+        sample_ids=ds.sample_ids.copy(),
+        sample_parsed_labels=ds.sample_parsed_labels.copy(),
+        participant_sample_counts=ds.participant_sample_counts.copy(),
+        paired_participant_indices=ds.paired_participant_indices.copy(),
+        pair_sample_a_indices=ds.pair_sample_a_indices.copy(),
+        pair_sample_b_indices=ds.pair_sample_b_indices.copy(),
+    )
+    sp_unused_nan = WeightedSpectralPreprocessor.fit(ds_nan_unused, tr_idx, w_tr, cfg=cfg)
+    np.testing.assert_allclose(sp_unused_nan.pca_singular_values, sp_cached.pca_singular_values, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(sp_unused_nan.pca_components, sp_cached.pca_components, rtol=1e-12, atol=1e-12)
+
+    # Low-rank dataset triggers primal SVD fallback cleanly even when sample_gram_blocks is cached.
+    u_low = rng.normal(size=(ds.n_samples, 3))
+    s1300_low = u_low @ rng.normal(size=(3, ds.sample_1300.shape[1]))
+    s2850_low = u_low @ rng.normal(size=(3, ds.sample_2850.shape[1]))
+    ds_low = CohortDataset(
+        participant_ids=ds.participant_ids.copy(),
+        outcomes={k: v.copy() for k, v in ds.outcomes.items()},
+        covariate_frame=ds.covariate_frame.copy(),
+        wavenumbers_1300=ds.wavenumbers_1300.copy(),
+        wavenumbers_2850=ds.wavenumbers_2850.copy(),
+        sample_1300=s1300_low,
+        sample_2850=s2850_low,
+        sample_participant_idx=ds.sample_participant_idx.copy(),
+        sample_ids=ds.sample_ids.copy(),
+        sample_parsed_labels=ds.sample_parsed_labels.copy(),
+        participant_sample_counts=ds.participant_sample_counts.copy(),
+        paired_participant_indices=ds.paired_participant_indices.copy(),
+        pair_sample_a_indices=ds.pair_sample_a_indices.copy(),
+        pair_sample_b_indices=ds.pair_sample_b_indices.copy(),
+    )
+    sp_low = WeightedSpectralPreprocessor.fit(ds_low, tr_idx, w_tr, cfg=cfg)
+    assert sp_low.numerical_rank == 3
+    assert sp_low.pca_components.shape[0] == 3
+
+    # Huge constant offset triggers the primal-centering cancellation guard and preserves full accuracy.
+    ds_shifted = CohortDataset(
+        participant_ids=ds.participant_ids.copy(),
+        outcomes={k: v.copy() for k, v in ds.outcomes.items()},
+        covariate_frame=ds.covariate_frame.copy(),
+        wavenumbers_1300=ds.wavenumbers_1300.copy(),
+        wavenumbers_2850=ds.wavenumbers_2850.copy(),
+        sample_1300=ds.sample_1300 + 1e7,
+        sample_2850=ds.sample_2850 + 1e7,
+        sample_participant_idx=ds.sample_participant_idx.copy(),
+        sample_ids=ds.sample_ids.copy(),
+        sample_parsed_labels=ds.sample_parsed_labels.copy(),
+        participant_sample_counts=ds.participant_sample_counts.copy(),
+        paired_participant_indices=ds.paired_participant_indices.copy(),
+        pair_sample_a_indices=ds.pair_sample_a_indices.copy(),
+        pair_sample_b_indices=ds.pair_sample_b_indices.copy(),
+    )
+    sp_shifted = WeightedSpectralPreprocessor.fit(ds_shifted, tr_idx, w_tr, cfg=cfg)
+    np.testing.assert_allclose(sp_shifted.pca_singular_values, sp_cached.pca_singular_values, rtol=1e-7, atol=1e-7)
+    np.testing.assert_allclose(sp_shifted.pca_components, sp_cached.pca_components, rtol=1e-6, atol=1e-6)
+
+    # 3. PairedMoments.solve_directions cached W_k factorization matches direct scipy.linalg.eigh
+    #    across lambda sweeps, respects changing eigenvalue_tolerance, and fails closed on singular W.
+    sample_pca = sp_cached.transform_pca(ds.sample_1300, ds.sample_2850)
+    pm = PairedMoments.from_sample_coordinates(sample_pca, ds, tr_idx, w_tr)
+    for k_test in (5, 10):
+        W_k = pm.W_max[:k_test, :k_test]
+        T_k = pm.T_max[:k_test, :k_test]
+        tau_ref = float(np.trace(T_k)) / float(k_test)
+        for lam in (0.001, 0.1, 10.0):
+            vecs, vals, tau = pm.solve_directions(k_test, lam)
+            assert tau == pytest.approx(tau_ref, rel=1e-13, abs=1e-13)
+            denom = 0.5 * (W_k + W_k.T) + lam * tau_ref * np.eye(k_test)
+            ref_vals, ref_vecs = linalg.eigh(T_k, denom)
+            order = np.argsort(ref_vals)[::-1]
+            ref_vals = ref_vals[order]
+            ref_vecs = ref_vecs[:, order]
+            np.testing.assert_allclose(vals, ref_vals, rtol=1e-11, atol=1e-11)
+            # Check eigenvector alignment up to sign on distinct eigenvalues
+            dots = np.abs(np.sum(vecs * (denom @ ref_vecs), axis=0))
+            norms_ref = np.sqrt(np.sum(ref_vecs * (denom @ ref_vecs), axis=0))
+            np.testing.assert_allclose(dots / norms_ref, np.ones(k_test), rtol=1e-9, atol=1e-9)
+    with pytest.raises(ValueError, match="tau"):
+        pm.solve_directions(5, 0.1, eigenvalue_tolerance=1e12)
+    pm_sing = PairedMoments(
+        W_max=np.zeros((5, 5), dtype=float),
+        T_max=np.eye(5, dtype=float),
+        mean_ab_shift=np.zeros(5, dtype=float),
+        n_paired_multiplicity=10.0,
+        n_paired_distinct=10,
+    )
+    with pytest.raises(linalg.LinAlgError):
+        pm_sing.solve_directions(5, 0.0)
+
+    # 4. Preset-independent spectral division cache shares K1_div across presets and upgrades cleanly to GPU.
+    ds_hi, _ = generate_synthetic_cohort(
+        n_participants=72,
+        n_single_sample=2,
+        seed=3103,
+        compact_grid=True,
+        n_nuisance_modes=16,
+        nuisance_part_scale=0.6,
+        nuisance_sample_scale=1.5,
+    )
+    cfg_prim = PairedLipidConfig(covariate_preset="primary")
+    cfg_rf = replace(cfg_prim, covariate_preset="pre_event_risk_factors")
+    tr_hi = np.arange(56, dtype=int)
+    val_hi = np.arange(56, 72, dtype=int)
+    gc_prim = _get_dataset_gram_cache(ds_hi, cfg_prim)
+    gc_rf = _get_dataset_gram_cache(ds_hi, cfg_rf)
+    dc_prim_cpu = _precompute_division_constants(np, gc_prim, ds_hi, tr_hi, val_hi, cfg_prim)
+    dc_rf_cpu = _precompute_division_constants(np, gc_rf, ds_hi, tr_hi, val_hi, cfg_rf)
+    assert dc_prim_cpu["K1_div"] is dc_rf_cpu["K1_div"]
+    assert dc_prim_cpu["Q0_comb"] is None
+    assert dc_rf_cpu["X_raw_tr"].shape[1] > dc_prim_cpu["X_raw_tr"].shape[1]
+    if _gpu_available():
+        from src.analysis.paired_lipid._backend import _get_gpu_xp
+
+        cp = _get_gpu_xp()
+        assert cp is not None
+        dc_rf_gpu = _precompute_division_constants(cp, gc_rf, ds_hi, tr_hi, val_hi, cfg_rf)
+        dc_prim_gpu = _precompute_division_constants(cp, gc_prim, ds_hi, tr_hi, val_hi, cfg_prim)
+        assert dc_rf_gpu["Q0_comb"] is not None
+        assert dc_prim_gpu["Q0_comb"] is not None
+
+    # 5. Fused external spectral ridge scoring matches unfused transform + predict_ridge_grid to 1e-12.
+    cov_p = CovariatePreprocessor.fit(ds.covariate_frame, tr_idx, w_tr, preset="primary", raw_cache=ds._cache)
+    X_cov_tr = cov_p.transform(ds.covariate_frame, tr_idx, raw_cache=ds._cache)
+    te_idx = np.arange(32, 40, dtype=int)
+    X_cov_te = cov_p.transform(ds.covariate_frame, te_idx, raw_cache=ds._cache)
+    y_tr = ds.outcomes["ldl_mmol_l"][tr_idx]
+    part_1300 = aggregate_samples_to_participants(ds.sample_1300, ds)
+    part_2850 = aggregate_samples_to_participants(ds.sample_2850, ds)
+    part_pca_10 = sp_cached.transform_pca(part_1300, part_2850, k=10)
+    fit_pca = fit_ridge_grid(X_cov_tr, part_pca_10[tr_idx], y_tr, w_tr, [1.0])
+    pred_pca_ref, _ = predict_ridge_grid(fit_pca, X_cov_te, part_pca_10[te_idx], alpha_idx=0)
+    pred_pca_fused = _predict_fused_spectral_ridge(
+        sp_cached, fit_pca, X_cov_te, part_1300[te_idx], part_2850[te_idx], 10
+    )
+    np.testing.assert_allclose(pred_pca_fused, pred_pca_ref, rtol=1e-12, atol=1e-12)
+
+    V_10, _, _ = pm.solve_directions(10, 0.1)
+    V_r = V_10[:, :3]
+    part_z = sp_cached.project_linear_subspace(part_1300, part_2850, 10, V_r)
+    fit_pair = fit_ridge_grid(X_cov_tr, part_z[tr_idx], y_tr, w_tr, [1.0])
+    pred_pair_ref, _ = predict_ridge_grid(fit_pair, X_cov_te, part_z[te_idx], alpha_idx=0)
+    pred_pair_fused = _predict_fused_spectral_ridge(
+        sp_cached, fit_pair, X_cov_te, part_1300[te_idx], part_2850[te_idx], 10, V_r
+    )
+    np.testing.assert_allclose(pred_pair_fused, pred_pair_ref, rtol=1e-12, atol=1e-12)
+
+    # 6. Vectorized anchor bootstrap handles collinear, near-collinear (1e-10), rare binary, and empty edge cases.
+    n_v = 24
+    rare_bin = np.zeros(n_v, dtype=float)
+    rare_bin[:2] = 1.0
+    col_x = rng.normal(size=n_v)
+    col_near = col_x + 1e-10 * rng.normal(size=n_v)
+    design_edge = np.column_stack([np.ones(n_v), col_x, 2.0 * col_x, col_near, rare_bin])
+    s_edge = rng.normal(size=n_v)
+    y_edge = rng.normal(size=n_v)
+    idx_mat = rng.integers(0, n_v, size=(120, n_v))
+    eps_f = float(np.finfo(float).eps)
+    vec_rs = _batched_anchor_bootstrap_partial_r(design_edge, s_edge, y_edge, idx_mat, eps_f)
+    ref_rs = []
+    for b_idx in idx_mat:
+        r_b, _, _, dn_b, rank_b = _residualize_and_partial_r(design_edge[b_idx], s_edge[b_idx], y_edge[b_idx], eps_f)
+        if n_v - rank_b >= 2 and dn_b > 1e-12:
+            ref_rs.append(r_b)
+    np.testing.assert_allclose(vec_rs, np.asarray(ref_rs, dtype=float), rtol=1e-11, atol=1e-11)
+    assert _batched_anchor_bootstrap_partial_r(design_edge, s_edge, y_edge, np.empty((0, n_v), dtype=int), eps_f).size == 0
+    assert _batched_anchor_bootstrap_partial_r(design_edge, np.ones(n_v), y_edge, idx_mat[:10], eps_f).size == 0
+
+    # 7. build_manuscript_artifacts populates ICC column from mean_spectral_icc_a1.
+    scen_dir = tmp_path / "scen_icc"
+    scen_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "scenario": "linear_biological_signal",
+                "n_participants": 92,
+                "covariate_preset": "primary",
+                "mean_delta_mse_paired": 0.234,
+                "mean_delta_vs_strongest_comparator": 0.056,
+                "mean_spectral_icc_a1": 0.812,
+                "mean_recovery_r2_ldl_factor": 0.678,
+            }
+        ]
+    ).to_csv(scen_dir / "simulation_scenarios_summary.csv", index=False)
+    scen_arts = build_manuscript_artifacts(input_dir=scen_dir, output_dir=tmp_path / "scen_arts")
+    scen_tex = scen_arts["table_synthetic_scenarios"].read_text(encoding="utf-8")
+    assert "0.812" in scen_tex
+    assert " & -- & " not in scen_tex
+
+    # 8. Memoized synthetic cohort generator is bit-for-bit reproducible across calls and edge n_single_sample=0.
+    ds_a, _ = generate_synthetic_cohort(
+        n_participants=30,
+        n_single_sample=0,
+        seed=3104,
+        compact_grid=True,
+        n_nuisance_modes=16,
+        nuisance_part_scale=0.5,
+        nuisance_sample_scale=1.0,
+        map_spatial_scale=0.3,
+        map_spatial_corr=0.7,
+    )
+    ds_b, _ = generate_synthetic_cohort(
+        n_participants=30,
+        n_single_sample=0,
+        seed=3104,
+        compact_grid=True,
+        n_nuisance_modes=16,
+        nuisance_part_scale=0.5,
+        nuisance_sample_scale=1.0,
+        map_spatial_scale=0.3,
+        map_spatial_corr=0.7,
+    )
+    np.testing.assert_array_equal(ds_a.sample_1300, ds_b.sample_1300)
+    np.testing.assert_array_equal(ds_a.sample_2850, ds_b.sample_2850)
+    np.testing.assert_array_equal(ds_a.pair_sample_a_indices, ds_b.pair_sample_a_indices)
+    np.testing.assert_array_equal(ds_a.pair_sample_b_indices, ds_b.pair_sample_b_indices)
+    assert ds_a.paired_participant_indices.size == 30
+
+
+def test_review_hardening_numerical_stability_gpu_and_io(tmp_path: Path) -> None:
+    import warnings
+    from collections.abc import Mapping
+    from concurrent.futures import ThreadPoolExecutor
+    from typing import Any
+
+    from scipy import linalg
+
+    from src.analysis.io_utils import write_npz_atomic, write_text_atomic
+    from src.analysis.paired_lipid import calibration as cal_mod
+    from src.analysis.paired_lipid._batched_models import (
+        batched_ridge_preds_single_alpha,
+        batched_ridge_sse_and_preds,
+    )
+    from src.analysis.paired_lipid.cohort import CohortDataset
+    from src.analysis.paired_lipid.models import PairedMoments, WeightedSpectralPreprocessor
+    from src.analysis.paired_lipid.nested_cv import (
+        _batched_anchor_bootstrap_partial_r,
+        _residualize_and_partial_r,
+    )
+
+    cfg = PairedLipidConfig()
+
+    # 1. Pre-centered sample Gram cache preserves full precision on moderate offsets (+10, +50),
+    #    raises cleanly on training-sample NaN, and bypasses cache above 2048 samples.
+    ds, _ = generate_synthetic_cohort(n_participants=40, n_single_sample=2, seed=3201, compact_grid=True)
+    tr_idx = np.arange(32, dtype=int)
+    w_tr = np.ones(tr_idx.size, dtype=float)
+    sp_ref = WeightedSpectralPreprocessor.fit(ds, tr_idx, w_tr, cfg=cfg)
+    for offset in (10.0, 50.0, 1e4):
+        ds_off = CohortDataset(
+            participant_ids=ds.participant_ids.copy(),
+            outcomes={k: v.copy() for k, v in ds.outcomes.items()},
+            covariate_frame=ds.covariate_frame.copy(),
+            wavenumbers_1300=ds.wavenumbers_1300.copy(),
+            wavenumbers_2850=ds.wavenumbers_2850.copy(),
+            sample_1300=ds.sample_1300 + offset,
+            sample_2850=ds.sample_2850 + offset,
+            sample_participant_idx=ds.sample_participant_idx.copy(),
+            sample_ids=ds.sample_ids.copy(),
+            sample_parsed_labels=ds.sample_parsed_labels.copy(),
+            participant_sample_counts=ds.participant_sample_counts.copy(),
+            paired_participant_indices=ds.paired_participant_indices.copy(),
+            pair_sample_a_indices=ds.pair_sample_a_indices.copy(),
+            pair_sample_b_indices=ds.pair_sample_b_indices.copy(),
+        )
+        sp_off = WeightedSpectralPreprocessor.fit(ds_off, tr_idx, w_tr, cfg=cfg)
+        np.testing.assert_allclose(sp_off.pca_singular_values, sp_ref.pca_singular_values, rtol=1e-11, atol=1e-11)
+        np.testing.assert_allclose(
+            np.abs(sp_off.pca_components), np.abs(sp_ref.pca_components), rtol=1e-9, atol=1e-9
+        )
+
+    s1300_nan_tr = ds.sample_1300.copy()
+    s1300_nan_tr[0, 0] = np.nan
+    ds_nan_tr = CohortDataset(
+        participant_ids=ds.participant_ids.copy(),
+        outcomes={k: v.copy() for k, v in ds.outcomes.items()},
+        covariate_frame=ds.covariate_frame.copy(),
+        wavenumbers_1300=ds.wavenumbers_1300.copy(),
+        wavenumbers_2850=ds.wavenumbers_2850.copy(),
+        sample_1300=s1300_nan_tr,
+        sample_2850=ds.sample_2850.copy(),
+        sample_participant_idx=ds.sample_participant_idx.copy(),
+        sample_ids=ds.sample_ids.copy(),
+        sample_parsed_labels=ds.sample_parsed_labels.copy(),
+        participant_sample_counts=ds.participant_sample_counts.copy(),
+        paired_participant_indices=ds.paired_participant_indices.copy(),
+        pair_sample_a_indices=ds.pair_sample_a_indices.copy(),
+        pair_sample_b_indices=ds.pair_sample_b_indices.copy(),
+    )
+    with pytest.raises(ValueError, match="Non-finite"):
+        WeightedSpectralPreprocessor.fit(ds_nan_tr, tr_idx, w_tr, cfg=cfg)
+
+    ds_large, _ = generate_synthetic_cohort(n_participants=1050, n_single_sample=0, seed=3202, compact_grid=True)
+    assert ds_large.n_samples == 2100
+    sp_large = WeightedSpectralPreprocessor.fit(ds_large, np.arange(80, dtype=int), np.ones(80, dtype=float), cfg=cfg)
+    assert "sample_gram_blocks" not in ds_large._cache
+    assert sp_large.pca_singular_values.size > 0
+
+    # 2. PairedMoments.solve_directions is scale-invariant on tiny PSD matrices and raises ValueError on NaN lambda.
+    W_small = 1e-15 * np.eye(6, dtype=float)
+    T_small = 2e-15 * np.eye(6, dtype=float)
+    pm_small = PairedMoments(
+        W_max=W_small,
+        T_max=T_small,
+        mean_ab_shift=np.zeros(6, dtype=float),
+        n_paired_multiplicity=10.0,
+        n_paired_distinct=10,
+    )
+    ev_ref, _ = linalg.eigh(T_small, W_small + 0.1 * (np.trace(T_small) / 6.0) * np.eye(6, dtype=float))
+    _, ev_small, _ = pm_small.solve_directions(6, 0.1, eigenvalue_tolerance=0.0)
+    np.testing.assert_allclose(ev_small, ev_ref[::-1], rtol=1e-12, atol=1e-12)
+    with pytest.raises(ValueError, match="Non-finite"):
+        pm_small.solve_directions(6, float("nan"), eigenvalue_tolerance=0.0)
+
+    # 3. _batched_anchor_bootstrap_partial_r guards normal-equation amplification (kappa ~ 1e5,
+    #    large signal projection), handles p == 0 empty design, and chunks across > 512 resamples.
+    rng = np.random.default_rng(3203)
+    n_v = 40
+    eps_f = float(np.finfo(float).eps)
+    x1 = rng.normal(size=n_v)
+    x2 = x1 + 1e-5 * rng.normal(size=n_v)
+    design_ill = np.column_stack([np.ones(n_v), x1, x2])
+    s_ill = 1e5 * x1 + 1e5 * (x2 - x1) / 1e-5 + rng.normal(scale=1e-2, size=n_v)
+    y_ill = 1e5 * x1 - 1e5 * (x2 - x1) / 1e-5 + rng.normal(scale=1e-2, size=n_v)
+    idx_ill = rng.integers(0, n_v, size=(560, n_v))
+    vec_ill = _batched_anchor_bootstrap_partial_r(design_ill, s_ill, y_ill, idx_ill, eps_f)
+    ref_ill = np.asarray(
+        [
+            r_b
+            for b_idx in idx_ill
+            for r_b, _, _, dn_b, rank_b in [
+                _residualize_and_partial_r(design_ill[b_idx], s_ill[b_idx], y_ill[b_idx], eps_f)
+            ]
+            if n_v - rank_b >= 2 and dn_b > 1e-12
+        ],
+        dtype=float,
+    )
+    np.testing.assert_allclose(vec_ill, ref_ill, rtol=1e-11, atol=1e-11)
+
+    d_zero_cols = np.empty((n_v, 0), dtype=float)
+    vec_p0 = _batched_anchor_bootstrap_partial_r(d_zero_cols, s_ill, y_ill, idx_ill[:24], eps_f)
+    ref_p0 = np.asarray(
+        [_residualize_and_partial_r(d_zero_cols[b], s_ill[b], y_ill[b], eps_f)[0] for b in idx_ill[:24]],
+        dtype=float,
+    )
+    np.testing.assert_allclose(vec_p0, ref_p0, rtol=1e-12, atol=1e-12)
+
+    # 4. batched_ridge_preds_single_alpha matches multi-alpha ridge on CPU/GPU and handles collinear alpha=0 cleanly.
+    B_r, n_tr_r, n_val_r, p_cov_r, p_z_r = 12, 36, 10, 4, 15
+    X_cov_tr = rng.normal(size=(B_r, n_tr_r, p_cov_r))
+    X_cov_val = rng.normal(size=(B_r, n_val_r, p_cov_r))
+    Z_tr = rng.normal(size=(n_tr_r, p_z_r))
+    Z_val = rng.normal(size=(n_val_r, p_z_r))
+    y_tr_r = rng.normal(size=n_tr_r)
+    y_val_r = rng.normal(size=n_val_r)
+    w_tr_r = np.full((B_r, n_tr_r), 1.0 / n_tr_r)
+    w_val_r = np.full((B_r, n_val_r), 1.0 / n_val_r)
+    alphas_r = np.array([1e-3, 1e-1, 1.0, 10.0, 100.0])
+    sel_a = rng.integers(0, alphas_r.size, size=B_r)
+    Z_col = Z_tr.copy()
+    Z_col[:, -1] = Z_col[:, 0]
+    alphas_col = np.where(np.arange(B_r) == 0, 0.0, 1.0)
+
+    backends: list[tuple[str, Any]] = [("cpu", np)]
+    if _gpu_available():
+        from src.analysis.paired_lipid._backend import _get_gpu_xp
+
+        cp_mod = _get_gpu_xp()
+        assert cp_mod is not None
+        backends.append(("gpu", cp_mod))
+
+    for _, xp in backends:
+        _, pr_all = batched_ridge_sse_and_preds(
+            xp,
+            xp.asarray(X_cov_tr),
+            xp.asarray(X_cov_val),
+            xp.asarray(Z_tr),
+            xp.asarray(Z_val),
+            xp.asarray(y_tr_r),
+            xp.asarray(y_val_r),
+            xp.asarray(w_tr_r),
+            xp.asarray(w_val_r),
+            xp.asarray(alphas_r),
+        )
+        pr_ref = pr_all[xp.arange(B_r), :, xp.asarray(sel_a)]
+        pr_one = batched_ridge_preds_single_alpha(
+            xp,
+            xp.asarray(X_cov_tr),
+            xp.asarray(X_cov_val),
+            xp.asarray(Z_tr),
+            xp.asarray(Z_val),
+            xp.asarray(y_tr_r),
+            xp.asarray(w_tr_r),
+            xp.asarray(alphas_r[sel_a]),
+        )
+        np.testing.assert_allclose(
+            np.asarray(xp.asnumpy(pr_one) if xp is not np else pr_one),
+            np.asarray(xp.asnumpy(pr_ref) if xp is not np else pr_ref),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        with warnings.catch_warnings(record=True) as wrec:
+            warnings.simplefilter("always")
+            pr_col = batched_ridge_preds_single_alpha(
+                xp,
+                xp.asarray(X_cov_tr),
+                xp.asarray(X_cov_val),
+                xp.asarray(Z_col),
+                xp.asarray(Z_val),
+                xp.asarray(y_tr_r),
+                xp.asarray(w_tr_r),
+                xp.asarray(alphas_col),
+            )
+        assert len(wrec) == 0
+        assert bool(np.all(np.isfinite(xp.asnumpy(pr_col) if xp is not np else pr_col)))
+
+    # 5. Adaptive GPU CheFSI continuation and fused Gram assembly match CPU on 16-nuisance synthetic cohort.
+    if _gpu_available():
+        ds_nuis, _ = generate_synthetic_cohort(
+            n_participants=92,
+            n_single_sample=2,
+            seed=3204,
+            compact_grid=True,
+            n_nuisance_modes=16,
+            nuisance_part_scale=0.5,
+            nuisance_sample_scale=1.0,
+        )
+        b_cpu = run_multiplicity_bootstrap(ds_nuis, cfg=cfg, n_bootstraps=12, bootstrap_seed=3205, use_gpu=False)
+        b_gpu = run_multiplicity_bootstrap(ds_nuis, cfg=cfg, n_bootstraps=12, bootstrap_seed=3205, use_gpu=True)
+        np.testing.assert_allclose(
+            b_gpu["bootstrap_draws_delta_mse"], b_cpu["bootstrap_draws_delta_mse"], rtol=1e-11, atol=1e-11
+        )
+        np.testing.assert_allclose(
+            b_gpu["bootstrap_draws_vs_comparator"], b_cpu["bootstrap_draws_vs_comparator"], rtol=1e-11, atol=1e-11
+        )
+
+    # 6. Thread-safe atomic writers leave no stray temporary files and preserve integrity.
+    io_dir = tmp_path / "atomic_threads"
+    io_dir.mkdir()
+    npz_target = io_dir / "shared.npz"
+    txt_target = io_dir / "shared.txt"
+
+    def _write_worker(idx: int) -> None:
+        write_npz_atomic(npz_target, {"arr": np.full(8, float(idx))})
+        write_text_atomic(txt_target, f"worker-{idx}\n")
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        list(ex.map(_write_worker, range(16)))
+    assert npz_target.is_file() and txt_target.is_file()
+    assert not list(io_dir.glob("*.tmp*"))
+    with np.load(npz_target, allow_pickle=False) as loaded:
+        assert loaded["arr"].shape == (8,)
+
+    # 7. Multi-worker calibration checkpoint crash/resume matches unbroken run exactly.
+    ckpt_ref = tmp_path / "cal_ref.npz"
+    ckpt_resume = tmp_path / "cal_resume.npz"
+    res_ref = cal_mod.evaluate_bootstrap_calibration(
+        n_repetitions=4,
+        n_bootstraps=60,
+        n_participants=60,
+        n_test_participants=120,
+        n_jobs=2,
+        use_gpu=False,
+        compact_grid=True,
+        checkpoint_path=ckpt_ref,
+        checkpoint_chunk_size=2,
+    )
+    orig_save = cal_mod._save_calibration_checkpoint
+    call_counter = {"n": 0}
+
+    def _fail_second_save(path: Path, state: Mapping[str, Any]) -> None:
+        call_counter["n"] += 1
+        if call_counter["n"] == 2:
+            raise RuntimeError("simulated checkpoint failure")
+        orig_save(path, state)
+
+    cal_mod._save_calibration_checkpoint = _fail_second_save  # type: ignore[assignment]
+    try:
+        with pytest.raises(RuntimeError, match="simulated checkpoint failure"):
+            cal_mod.evaluate_bootstrap_calibration(
+                n_repetitions=4,
+                n_bootstraps=60,
+                n_participants=60,
+                n_test_participants=120,
+                n_jobs=2,
+                use_gpu=False,
+                compact_grid=True,
+                checkpoint_path=ckpt_resume,
+                checkpoint_chunk_size=2,
+            )
+    finally:
+        cal_mod._save_calibration_checkpoint = orig_save
+
+    res_resumed = cal_mod.evaluate_bootstrap_calibration(
+        n_repetitions=4,
+        n_bootstraps=60,
+        n_participants=60,
+        n_test_participants=120,
+        n_jobs=2,
+        use_gpu=False,
+        compact_grid=True,
+        checkpoint_path=ckpt_resume,
+        checkpoint_chunk_size=2,
+    )
+    for key in (
+        "target_delta_mse",
+        "mean_point_estimate",
+        "unconditional_coverage",
+        "mean_interval_width",
+        "target_delta_vs_comparator",
+    ):
+        np.testing.assert_allclose(res_resumed[key], res_ref[key], rtol=0.0, atol=1e-14)
+
+
+def test_missing_covariates_and_single_sample_batched_parity() -> None:
+    from dataclasses import replace
+
+    from src.analysis.paired_lipid._batched_models import _prep_covariates_batch
+    from src.analysis.paired_lipid._gram_cache import (
+        _get_dataset_gram_cache,
+        _precompute_division_constants,
+    )
+    from src.analysis.paired_lipid.models import CovariatePreprocessor, WeightedSpectralPreprocessor
+    from src.analysis.paired_lipid.nested_cv import (
+        _batched_anchor_bootstrap_partial_r_missing,
+        _residualize_and_partial_r,
+        _select_inner_fast,
+        _select_inner_sequential,
+        make_nested_splits,
+    )
+
+    cfg = PairedLipidConfig()
+
+    # 1. Missing covariates: zero fallback draws on CPU & GPU, exact parity vs sequential evaluate_nested_cohort.
+    ds_miss, _ = generate_synthetic_cohort(
+        n_participants=92,
+        n_single_sample=4,
+        seed=4101,
+        compact_grid=True,
+        covariate_missing_rate=0.18,
+    )
+    splits_m = make_nested_splits(ds_miss, cfg, cfg.primary_seed)
+    boot_cpu = run_multiplicity_bootstrap(
+        ds_miss, cfg=cfg, n_bootstraps=12, bootstrap_seed=4102, use_gpu=False
+    )
+    assert boot_cpu["execution"]["device"] == "cpu"
+    assert boot_cpu["n_fallback_draws"] == 0
+
+    rng_m = np.random.default_rng(4102)
+    M_m = np.zeros((12, ds_miss.n_participants), dtype=float)
+    dm = rng_m.integers(0, ds_miss.n_participants, size=(12, ds_miss.n_participants))
+    np.add.at(M_m, (np.arange(12)[:, None], dm), 1.0)
+
+    ev_base_m = evaluate_nested_cohort(ds_miss, cfg=cfg, precomputed_splits=splits_m, compute_diagnostics=False)
+    assert boot_cpu["point_estimate_delta_mse"] == pytest.approx(
+        ev_base_m["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+    )
+    assert boot_cpu["point_estimate_vs_comparator"] == pytest.approx(
+        ev_base_m["paired_vs_strongest_comparator"]["delta_mse"], abs=1e-10
+    )
+    for b in range(4):
+        seq_ev = evaluate_nested_cohort(
+            ds_miss,
+            cfg=cfg,
+            participant_multiplicities=M_m[b],
+            precomputed_splits=splits_m,
+            compute_diagnostics=False,
+        )
+        assert boot_cpu["bootstrap_draws_delta_mse"][b] == pytest.approx(
+            seq_ev["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+        )
+        assert boot_cpu["bootstrap_draws_vs_comparator"][b] == pytest.approx(
+            seq_ev["paired_vs_strongest_comparator"]["delta_mse"], abs=1e-10
+        )
+
+    # _select_inner_fast vs _select_inner_sequential parity on missing covariates (including dropped_covariates).
+    tr0, te0 = splits_m[0][0]
+    in0 = splits_m[1][0]
+    w_all = np.ones(ds_miss.n_participants, dtype=float)
+    outer_sp = WeightedSpectralPreprocessor.fit(ds_miss, tr0, w_all[tr0], cfg=cfg)
+    sel_fast = _select_inner_fast(ds_miss, ds_miss.outcomes[cfg.primary_endpoint], tr0, in0, w_all, cfg)
+    sel_seq = _select_inner_sequential(
+        ds_miss,
+        ds_miss.outcomes[cfg.primary_endpoint],
+        tr0,
+        in0,
+        w_all,
+        cfg,
+        outer_sp,
+        single_sample_downstream=False,
+        include_band_paired=False,
+    )
+    assert sel_fast is not None
+    assert sel_fast.paired_setting == sel_seq.paired_setting
+    assert sel_fast.pca_setting == sel_seq.pca_setting
+    assert sel_fast.pls_components == sel_seq.pls_components
+    assert sel_fast.inner_dropped_covariates == sel_seq.inner_dropped_covariates
+    assert sel_fast.paired_mse == pytest.approx(sel_seq.paired_mse, abs=1e-10)
+
+    if _gpu_available():
+        boot_gpu = run_multiplicity_bootstrap(
+            ds_miss, cfg=cfg, n_bootstraps=12, bootstrap_seed=4102, use_gpu=True
+        )
+        assert boot_gpu["execution"]["device"] == "gpu"
+        assert boot_gpu["n_fallback_draws"] == 0
+        np.testing.assert_allclose(
+            boot_gpu["bootstrap_draws_delta_mse"], boot_cpu["bootstrap_draws_delta_mse"], rtol=1e-10, atol=1e-10
+        )
+        np.testing.assert_allclose(
+            boot_gpu["bootstrap_draws_vs_comparator"],
+            boot_cpu["bootstrap_draws_vs_comparator"],
+            rtol=1e-10,
+            atol=1e-10,
+        )
+
+    # 2. Missing-covariate edge cases: constant+NaN, validation-only NaN, all-NaN col, all-active-NaN draw, 50/50 median.
+    cov_edge = pd.DataFrame(
+        {
+            "age_years": [60.0, 65.0, 70.0, 75.0, 80.0, 85.0, np.nan, 72.0],
+            "sex": ["female", "male", "female", "male", "female", "male", "female", "male"],
+            "statin": [1.0, 1.0, np.nan, 1.0, np.nan, 1.0, 1.0, np.nan],
+            "sample_label_trend": [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 5.0, 6.0],
+        }
+    )
+    # Put validation-only NaN in age_years (row 6) and all-NaN in sample_label_trend across tr_p (rows 0..5).
+    tr_e = np.arange(6, dtype=int)
+    val_e = np.arange(6, 8, dtype=int)
+    raw_edge, cols_edge = CovariatePreprocessor.raw_design_matrix(cov_edge, preset="primary")
+    ds_edge, _ = generate_synthetic_cohort(n_participants=8, n_single_sample=0, seed=4103, compact_grid=True)
+    ds_edge_mod = replace(ds_edge, covariate_frame=cov_edge)
+    gc_e = _get_dataset_gram_cache(ds_edge_mod, cfg)
+    dc_e = _precompute_division_constants(np, gc_e, ds_edge_mod, tr_e, val_e, cfg)
+    # Draw 0: exact 50/50 split on sex (3 female, 3 male), statin constant+NaN; Draw 1: only non-missing statin rows active;
+    # Draw 2: only missing statin rows active (all-active-NaN for statin!).
+    M_tr_e = np.array(
+        [
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            [2.0, 2.0, 0.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 2.0, 0.0, 3.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    M_val_e = np.ones((3, 2), dtype=np.float64)
+    _, _, _, X_tr_b, X_val_b, valid_c_b = _prep_covariates_batch(np, dc_e, M_tr_e, M_val_e, return_valid_mask=True)
+    for b in range(3):
+        cp_ref = CovariatePreprocessor.fit(cov_edge, tr_e, M_tr_e[b], preset="primary")
+        X_tr_ref = cp_ref.transform(cov_edge, tr_e)
+        X_val_ref = cp_ref.transform(cov_edge, val_e)
+        # Non-zero columns in batched output must match CovariatePreprocessor.transform identically.
+        nz_cols = np.any((X_tr_b[b] != 0.0), axis=0) | np.any((X_val_b[b] != 0.0), axis=0)
+        np.testing.assert_allclose(X_tr_b[b][:, nz_cols], X_tr_ref, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(X_val_b[b][:, nz_cols], X_val_ref, rtol=1e-12, atol=1e-12)
+        dropped_b = set(dc_e["dropped_cov_cols_base"]) | {
+            col for col, ok in zip(dc_e["kept_cov_cols"], valid_c_b[b]) if not ok
+        }
+        assert dropped_b == set(cp_ref.dropped_columns)
+    assert raw_edge.shape[1] == len(cols_edge)
+
+    # Collinear missingness indicators (quadratic_age_and_label with missing age_years).
+    cfg_quad = replace(cfg, covariate_preset="quadratic_age_and_label")
+    boot_quad = run_multiplicity_bootstrap(
+        ds_miss, cfg=cfg_quad, n_bootstraps=6, bootstrap_seed=4104, use_gpu=False
+    )
+    assert boot_quad["n_fallback_draws"] == 0
+    ev_quad = evaluate_nested_cohort(ds_miss, cfg=cfg_quad, compute_diagnostics=False)
+    assert boot_quad["point_estimate_delta_mse"] == pytest.approx(
+        ev_quad["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+    )
+
+    # 3. single_sample_downstream (both subset_mode="single_sample" and combined with missing covariates).
+    ds_ss, _ = generate_synthetic_cohort(
+        n_participants=92,
+        n_single_sample=4,
+        seed=4105,
+        compact_grid=True,
+        subset_mode="single_sample",
+    )
+    splits_s = make_nested_splits(ds_ss, cfg, cfg.primary_seed)
+    boot_ss_cpu = run_multiplicity_bootstrap(
+        ds_ss, cfg=cfg, n_bootstraps=12, bootstrap_seed=4106, use_gpu=False
+    )
+    assert boot_ss_cpu["execution"]["device"] == "cpu"
+    assert boot_ss_cpu["n_fallback_draws"] == 0
+    ev_ss = evaluate_nested_cohort(ds_ss, cfg=cfg, precomputed_splits=splits_s, compute_diagnostics=False)
+    assert boot_ss_cpu["point_estimate_delta_mse"] == pytest.approx(
+        ev_ss["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+    )
+    assert boot_ss_cpu["point_estimate_vs_comparator"] == pytest.approx(
+        ev_ss["paired_vs_strongest_comparator"]["delta_mse"], abs=1e-10
+    )
+
+    rng_s = np.random.default_rng(4106)
+    M_s = np.zeros((12, ds_ss.n_participants), dtype=float)
+    dm_s = rng_s.integers(0, ds_ss.n_participants, size=(12, ds_ss.n_participants))
+    np.add.at(M_s, (np.arange(12)[:, None], dm_s), 1.0)
+    for b in range(4):
+        seq_ss = evaluate_nested_cohort(
+            ds_ss,
+            cfg=cfg,
+            participant_multiplicities=M_s[b],
+            precomputed_splits=splits_s,
+            single_sample_downstream=True,
+            compute_diagnostics=False,
+        )
+        assert boot_ss_cpu["bootstrap_draws_delta_mse"][b] == pytest.approx(
+            seq_ss["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+        )
+        assert boot_ss_cpu["bootstrap_draws_vs_comparator"][b] == pytest.approx(
+            seq_ss["paired_vs_strongest_comparator"]["delta_mse"], abs=1e-10
+        )
+
+    if _gpu_available():
+        boot_ss_gpu = run_multiplicity_bootstrap(
+            ds_ss, cfg=cfg, n_bootstraps=12, bootstrap_seed=4106, use_gpu=True
+        )
+        assert boot_ss_gpu["execution"]["device"] == "gpu"
+        assert boot_ss_gpu["n_fallback_draws"] == 0
+        np.testing.assert_allclose(
+            boot_ss_gpu["bootstrap_draws_delta_mse"],
+            boot_ss_cpu["bootstrap_draws_delta_mse"],
+            rtol=1e-10,
+            atol=1e-10,
+        )
+
+    # Combined single_sample_downstream + missing covariates simultaneously.
+    ds_combo, _ = generate_synthetic_cohort(
+        n_participants=92,
+        n_single_sample=4,
+        seed=4107,
+        compact_grid=True,
+        subset_mode="single_sample",
+        covariate_missing_rate=0.15,
+    )
+    boot_combo = run_multiplicity_bootstrap(
+        ds_combo, cfg=cfg, n_bootstraps=8, bootstrap_seed=4108, use_gpu=False
+    )
+    assert boot_combo["n_fallback_draws"] == 0
+    ev_combo = evaluate_nested_cohort(ds_combo, cfg=cfg, compute_diagnostics=False)
+    assert boot_combo["point_estimate_delta_mse"] == pytest.approx(
+        ev_combo["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+    )
+
+    # 4. Anchor missing-covariate vectorized bootstrap parity (primary, collinear quadratic, all-NaN, empty).
+    eps_f = float(np.finfo(float).eps)
+    s_anc = ev_base_m["oof_spectral_contributions"]["paired_linear_ridge"]
+    y_anc = ds_miss.outcomes["ldl_mmol_l"]
+    idx_anc = np.random.default_rng(4109).integers(0, ds_miss.n_participants, size=(60, ds_miss.n_participants))
+    for preset_name in ("primary", "quadratic_age_and_label"):
+        raw_p, _ = CovariatePreprocessor.raw_design_matrix(
+            ds_miss.covariate_frame, preset=preset_name, raw_cache=ds_miss._cache
+        )
+        vec_r = _batched_anchor_bootstrap_partial_r_missing(raw_p, s_anc, y_anc, idx_anc, eps_f)
+        ref_r: list[float] = []
+        valid_i = np.arange(ds_miss.n_participants, dtype=int)
+        for b_idx in idx_anc:
+            bm = np.bincount(b_idx, minlength=ds_miss.n_participants).astype(float)
+            cp_b = CovariatePreprocessor.fit(
+                ds_miss.covariate_frame, valid_i, bm, preset=preset_name, raw_cache=ds_miss._cache
+            )
+            Xb = cp_b.transform(ds_miss.covariate_frame, b_idx, raw_cache=ds_miss._cache)
+            db = np.column_stack([np.ones(ds_miss.n_participants), Xb])
+            rb, _, _, dnb, rkb = _residualize_and_partial_r(db, s_anc[b_idx], y_anc[b_idx], eps_f)
+            if ds_miss.n_participants - rkb >= 2 and dnb > 1e-12:
+                ref_r.append(rb)
+        np.testing.assert_allclose(vec_r, np.asarray(ref_r), rtol=1e-11, atol=1e-11)
+
+    all_nan_cov = np.full((ds_miss.n_participants, 2), np.nan, dtype=float)
+    vec_all_nan = _batched_anchor_bootstrap_partial_r_missing(all_nan_cov, s_anc, y_anc, idx_anc[:10], eps_f)
+    assert vec_all_nan.size == 10 and np.all(np.isfinite(vec_all_nan))
+    assert (
+        _batched_anchor_bootstrap_partial_r_missing(
+            all_nan_cov, s_anc, y_anc, np.empty((0, ds_miss.n_participants), dtype=int), eps_f
+        ).size
+        == 0
+    )
+
+
+def test_batched_pls_early_stop_subset_shift_fallback_and_ipc_blas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pickle
+    from dataclasses import replace
+    from typing import Any
+
+    import src.analysis.paired_lipid.calibration as cal_mod
+    import src.analysis.paired_lipid.nested_cv as ncv_mod
+    from src.analysis.paired_lipid._backend import _get_threadpool_controller
+    from src.analysis.paired_lipid._batched_models import _prep_mfa_pca_batch, batched_pls_sse_and_preds
+    from src.analysis.paired_lipid._gram_cache import (
+        _get_dataset_gram_cache,
+        _precompute_division_constants,
+    )
+    from src.analysis.paired_lipid.models import WeightedPLSResult
+    from src.analysis.paired_lipid.nested_cv import PreparedExternalTest, score_external_primary_pair
+
+    # 1. batched_pls_sse_and_preds freezes components on w_norm <= 1e-12 and t_sq <= 1e-12 just like WeightedPLSResult.fit.
+    rng = np.random.default_rng(4201)
+    n_tr, n_val, p_cov, p_spec = 24, 8, 2, 10
+    X_cov_tr_0 = rng.normal(size=(n_tr, p_cov))
+    X_cov_val_0 = rng.normal(size=(n_val, p_cov))
+    X1_tr = rng.normal(size=(n_tr, p_spec))
+    X1_val = rng.normal(size=(n_val, p_spec))
+    # Construct rank-1 spectral block (plus tiny 1e-10 residual direction for t_sq <= 1e-12).
+    u_tr = rng.normal(size=(n_tr, 1))
+    u_val = rng.normal(size=(n_val, 1))
+    v_dir = rng.normal(size=(1, p_spec))
+    v_tiny = rng.normal(size=(1, p_spec))
+    v_tiny /= np.linalg.norm(v_tiny)
+    X1_rank1_tr = u_tr @ v_dir + 1e-10 * (rng.normal(size=(n_tr, 1)) @ v_tiny)
+    X1_rank1_val = u_val @ v_dir + 1e-10 * (rng.normal(size=(n_val, 1)) @ v_tiny)
+
+    w_tr_1d = np.ones(n_tr, dtype=float) / float(n_tr)
+    w_val_1d = np.ones(n_val, dtype=float)
+    y_const = np.full(n_tr, 3.25, dtype=float)
+    y_const_val = np.full(n_val, 3.25, dtype=float)
+    # Exact rank-1 target (w_norm hits 0 after component 1).
+    y_rank1_tr = 2.0 * u_tr[:, 0] + 1.5
+    y_rank1_val = 2.0 * u_val[:, 0] + 1.5
+    # Large target on near-rank-1 X with tiny 1e-10 second direction (triggers t_sq <= 1e-12 after component 1).
+    y_tsq_tr = 1e5 * rng.normal(size=n_tr)
+    y_tsq_val = 1e5 * rng.normal(size=n_val)
+
+    backends: list[Any] = [np]
+    if _gpu_available():
+        from src.analysis.paired_lipid._backend import _get_gpu_xp
+
+        cp_mod = _get_gpu_xp()
+        assert cp_mod is not None
+        backends.append(cp_mod)
+
+    for xp in backends:
+        for case_name, Xc_tr, Xc_val, Xs_tr, Xs_val, yt, yv in (
+            ("const_y", X_cov_tr_0, X_cov_val_0, X1_tr, X1_val, y_const, y_const_val),
+            (
+                "rank1_exact",
+                np.zeros((n_tr, 0)),
+                np.zeros((n_val, 0)),
+                u_tr @ v_dir,
+                u_val @ v_dir,
+                y_rank1_tr,
+                y_rank1_val,
+            ),
+            (
+                "tiny_t_sq",
+                np.zeros((n_tr, 0)),
+                np.zeros((n_val, 0)),
+                X1_rank1_tr,
+                X1_rank1_val,
+                y_tsq_tr,
+                y_tsq_val,
+            ),
+        ):
+            ref_pls = WeightedPLSResult.fit(Xc_tr, Xs_tr, yt, np.ones(n_tr), max_components=5)
+            ref_preds, _ = ref_pls.predict(Xc_val, Xs_val)
+            K1_tr = Xs_tr @ Xs_tr.T
+            K1_vt = Xs_val @ Xs_tr.T
+            div = {
+                "w_tr": xp.asarray(w_tr_1d[None, :], dtype=xp.float64),
+                "w_val": xp.asarray(w_val_1d[None, :], dtype=xp.float64),
+                "y_tr": xp.asarray(yt, dtype=xp.float64),
+                "y_val": xp.asarray(yv, dtype=xp.float64),
+                "X_cov_tr": xp.asarray(Xc_tr[None, :, :], dtype=xp.float64),
+                "X_cov_val": xp.asarray(Xc_val[None, :, :], dtype=xp.float64),
+                "scale1_sq": xp.asarray([1.0], dtype=xp.float64),
+                "scale2_sq": xp.asarray([0.0], dtype=xp.float64),
+                "K_p1_tr": xp.asarray(K1_tr, dtype=xp.float64),
+                "K_p1_vt": xp.asarray(K1_vt, dtype=xp.float64),
+                "K_p2_tr": xp.zeros_like(xp.asarray(K1_tr, dtype=xp.float64)),
+                "K_p2_vt": xp.zeros_like(xp.asarray(K1_vt, dtype=xp.float64)),
+            }
+            _, batch_preds = batched_pls_sse_and_preds(xp, div, max_comp=5)
+            bp_np = np.asarray(xp.asnumpy(batch_preds) if xp is not np else batch_preds)[0]
+            np.testing.assert_allclose(bp_np, ref_preds, rtol=1e-10, atol=1e-10, err_msg=case_name)
+            if case_name == "const_y":
+                np.testing.assert_allclose(bp_np, float(np.mean(yt)), rtol=0.0, atol=1e-12)
+            else:
+                # Subsequent components must stay frozen at component 1.
+                for c in range(1, 5):
+                    np.testing.assert_allclose(bp_np[:, c], bp_np[:, 0], rtol=0.0, atol=1e-12)
+
+        # Mixed batch: draw 0 active on all rows (varying y), draw 1 active only on rows with constant y.
+        y_mix_tr = rng.normal(size=n_tr)
+        y_mix_tr[:6] = 5.0
+        y_mix_val = rng.normal(size=n_val)
+        w_mix = np.zeros((2, n_tr), dtype=float)
+        w_mix[0] = 1.0 / float(n_tr)
+        w_mix[1, :6] = 1.0 / 6.0
+        K1_mix_tr = X1_tr @ X1_tr.T
+        K1_mix_vt = X1_val @ X1_tr.T
+        div_mix = {
+            "w_tr": xp.asarray(w_mix, dtype=xp.float64),
+            "w_val": xp.asarray(np.vstack([w_val_1d, w_val_1d]), dtype=xp.float64),
+            "y_tr": xp.asarray(y_mix_tr, dtype=xp.float64),
+            "y_val": xp.asarray(y_mix_val, dtype=xp.float64),
+            "X_cov_tr": xp.asarray(np.stack([X_cov_tr_0, X_cov_tr_0], axis=0), dtype=xp.float64),
+            "X_cov_val": xp.asarray(np.stack([X_cov_val_0, X_cov_val_0], axis=0), dtype=xp.float64),
+            "scale1_sq": xp.asarray([1.0, 1.0], dtype=xp.float64),
+            "scale2_sq": xp.asarray([0.0, 0.0], dtype=xp.float64),
+            "K_p1_tr": xp.asarray(K1_mix_tr, dtype=xp.float64),
+            "K_p1_vt": xp.asarray(K1_mix_vt, dtype=xp.float64),
+            "K_p2_tr": xp.zeros_like(xp.asarray(K1_mix_tr, dtype=xp.float64)),
+            "K_p2_vt": xp.zeros_like(xp.asarray(K1_mix_vt, dtype=xp.float64)),
+        }
+        _, mix_preds = batched_pls_sse_and_preds(xp, div_mix, max_comp=5)
+        mix_np = np.asarray(xp.asnumpy(mix_preds) if xp is not np else mix_preds)
+        ref_0, _ = WeightedPLSResult.fit(X_cov_tr_0, X1_tr, y_mix_tr, w_mix[0], max_components=5).predict(
+            X_cov_val_0, X1_val
+        )
+        np.testing.assert_allclose(mix_np[0], ref_0, rtol=1e-10, atol=1e-10)
+        np.testing.assert_allclose(mix_np[1], 5.0, rtol=0.0, atol=1e-12)
+
+    # 2. _prep_mfa_pca_batch marks rank_ok=False when subset-mean shift risks Gram cancellation (mu1_sq > 1e2 * tr(G1)).
+    cfg = PairedLipidConfig()
+    ds_shift, _ = generate_synthetic_cohort(n_participants=50, n_single_sample=2, seed=4202, compact_grid=True)
+    # Shift one subset of participants in sample_1300 by +1e4 so the remaining subset has huge mean shift
+    # relative to the full-cohort centered Gram matrix while maintaining O(1) internal variance.
+    s1300_shift = ds_shift.sample_1300.copy()
+    hi_mask = ds_shift.sample_participant_idx >= 42
+    s1300_shift[hi_mask] += 1e4
+    ds_shifted = replace(ds_shift, sample_1300=s1300_shift)
+    tr_lo = np.arange(40, dtype=int)
+    val_hi = np.arange(40, 50, dtype=int)
+    gc_sh = _get_dataset_gram_cache(ds_shifted, cfg)
+    dc_sh = _precompute_division_constants(np, gc_sh, ds_shifted, tr_lo, val_hi, cfg)
+    mfa_sh = _prep_mfa_pca_batch(
+        np, gc_sh, dc_sh, np.ones((1, tr_lo.size), dtype=np.float64), np.array([[float(tr_lo.size)]]), cfg
+    )
+    assert bool(mfa_sh["rank_ok"][0]) is False
+
+    # End-to-end bootstrap routes shifted draws to primal fallback and matches evaluate_nested_cohort.
+    boot_sh = run_multiplicity_bootstrap(ds_shifted, cfg=cfg, n_bootstraps=3, bootstrap_seed=4203, use_gpu=False)
+    ev_sh = evaluate_nested_cohort(ds_shifted, cfg=cfg, compute_diagnostics=False)
+    assert boot_sh["point_estimate_delta_mse"] == pytest.approx(
+        ev_sh["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+    )
+
+    # 3. PreparedExternalTest drops raw_cov_frame when preset is given, reduces pickle size, and fails closed on mismatch.
+    ds_tr, _ = generate_synthetic_cohort(n_participants=40, n_single_sample=2, seed=4204, compact_grid=True)
+    ds_te, _ = generate_synthetic_cohort(n_participants=600, n_single_sample=10, seed=4205, compact_grid=True)
+    prep_preset = PreparedExternalTest.from_dataset(ds_te, cfg.primary_endpoint, preset=cfg.covariate_preset)
+    prep_full = PreparedExternalTest.from_dataset(ds_te, cfg.primary_endpoint, preset=None)
+    assert prep_preset.raw_cov_frame is None
+    assert prep_full.raw_cov_frame is not None
+    assert len(pickle.dumps(prep_preset)) < len(pickle.dumps(prep_full))
+    ext_a = score_external_primary_pair(ds_tr, prep_preset, cfg=cfg)
+    ext_b = score_external_primary_pair(ds_tr, prep_full, cfg=cfg)
+    assert ext_a["external_delta_mse"] == pytest.approx(ext_b["external_delta_mse"], abs=1e-12)
+    cfg_nolbl = replace(cfg, covariate_preset="no_label_trend")
+    with pytest.raises(ValueError, match="no cached raw covariates for preset"):
+        score_external_primary_pair(ds_tr, prep_preset, cfg=cfg_nolbl)
+    # preset=None retains raw_cov_frame and supports any preset dynamically.
+    ext_nolbl = score_external_primary_pair(ds_tr, prep_full, cfg=cfg_nolbl)
+    assert np.isfinite(ext_nolbl["external_delta_mse"])
+
+    # 4. BLAS thread pools are capped at 1 inside score_external_primary_pair and parallel calibration workers.
+    tpc = _get_threadpool_controller()
+    if tpc is not None:
+        observed_threads: list[int] = []
+        orig_score_fold = ncv_mod._score_external_fold
+
+        def _spy_score_fold(*args: Any, **kwargs: Any) -> Any:
+            for lib in tpc.lib_controllers:
+                if lib.user_api == "blas":
+                    observed_threads.append(int(lib.num_threads))
+            return orig_score_fold(*args, **kwargs)
+
+        monkeypatch.setattr(ncv_mod, "_score_external_fold", _spy_score_fold)
+        score_external_primary_pair(ds_tr, prep_preset, cfg=cfg)
+        assert observed_threads and all(t == 1 for t in observed_threads)
+
+        worker_threads: list[int] = []
+        orig_gen = cal_mod.generate_synthetic_cohort
+
+        def _spy_gen(*args: Any, **kwargs: Any) -> Any:
+            for lib in tpc.lib_controllers:
+                if lib.user_api == "blas":
+                    worker_threads.append(int(lib.num_threads))
+            return orig_gen(*args, **kwargs)
+
+        monkeypatch.setattr(cal_mod, "generate_synthetic_cohort", _spy_gen)
+        cal_mod._eval_single_scenario_rep(
+            seed=4206,
+            n_participants=36,
+            compact_grid=True,
+            spec={"scenario": "s", "covariate_preset": "primary"},
+            cfg=cfg,
+            single_thread_blas=True,
+        )
+        assert worker_threads and all(t == 1 for t in worker_threads)
+        worker_threads.clear()
+        cal_mod._eval_single_calibration_rep(
+            rep_seed=4208,
+            n_participants=36,
+            gen_kwargs={"signal_strength": 0.5},
+            n_bootstraps=2,
+            cfg=cfg,
+            use_gpu=False,
+            test_ds=prep_preset,
+            compact_grid=True,
+            single_thread_blas=True,
+        )
+        assert worker_threads and all(t == 1 for t in worker_threads)
+
+
+def test_backend_and_triangular_fallback_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+    import types
+    from typing import Any
+
+    import src.analysis.paired_lipid._backend as backend_mod
+    import src.analysis.paired_lipid._batched_models as bm_mod
+    import src.analysis.paired_lipid._eigensolvers as eig_mod
+    from src.analysis.paired_lipid._gram_cache import (
+        _get_dataset_gram_cache,
+        _precompute_division_constants,
+    )
+
+    def _clear_backend_caches() -> None:
+        backend_mod._probe_cupy.cache_clear()
+        backend_mod._get_cupyx_linalg.cache_clear()
+        backend_mod._cupyx_supports_batched_triangular.cache_clear()
+        backend_mod._get_fused_mfa_gram_kernel.cache_clear()
+        backend_mod._get_threadpool_controller.cache_clear()
+
+    orig_import = builtins.__import__
+    try:
+        # 1. CuPy unavailable fallback paths in _backend.py.
+        _clear_backend_caches()
+
+        def _block_cupy(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "cupy" or name.startswith("cupy.") or name.startswith("cupyx"):
+                raise ImportError("simulated missing cupy")
+            return orig_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _block_cupy)
+        assert backend_mod._probe_cupy() is None
+        assert backend_mod._get_cupyx_linalg() is None
+        assert backend_mod._cupyx_supports_batched_triangular() is False
+        assert backend_mod._get_fused_mfa_gram_kernel() is None
+        xp_fb, meta_fb = backend_mod.resolve_array_backend(True, 16)
+        assert xp_fb is np
+        assert meta_fb["gpu_fallback"] is True
+        assert meta_fb["gpu_fallback_reason"] == "CuPy/CUDA device unavailable"
+        assert backend_mod.suggest_batch_size(np, 1000, 180) == 128
+
+        # 2. threadpoolctl unavailable fallback path in _backend.py.
+        monkeypatch.setattr(builtins, "__import__", orig_import)
+        _clear_backend_caches()
+
+        def _block_tpc(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "threadpoolctl":
+                raise ImportError("simulated missing threadpoolctl")
+            return orig_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _block_tpc)
+        assert backend_mod._get_threadpool_controller() is None
+        with backend_mod._single_thread_blas():
+            pass
+    finally:
+        monkeypatch.setattr(builtins, "__import__", orig_import)
+        _clear_backend_caches()
+
+    # 3. _cupyx_supports_batched_triangular() == False and runtime exception fallbacks in
+    #    batched_pca_schur_sse, _solve_lower_triangular_batch, batched_ridge_sse_and_preds,
+    #    and batched_ridge_preds_single_alpha (tested via fake non-NumPy proxy so it runs on CPU-only hosts too).
+    fake_xp = types.SimpleNamespace(**{name: getattr(np, name) for name in dir(np) if not name.startswith("__")})
+
+    class _ForbidTriLinalg:
+        def solve_triangular(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("solve_triangular must not be called when batched triangular is unsupported")
+
+    class _RaiseTriLinalg:
+        def solve_triangular(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("simulated runtime solve_triangular failure")
+
+    rng = np.random.default_rng(4301)
+    B, k_dim = 4, 5
+    A_mat = rng.normal(size=(B, k_dim, k_dim))
+    L_tri = np.linalg.cholesky(A_mat @ np.swapaxes(A_mat, -1, -2) + 2.0 * np.eye(k_dim)[None, :, :])
+    rhs_tri = rng.normal(size=(B, k_dim, 2))
+    sol_ref = np.linalg.solve(L_tri, rhs_tri)
+
+    cfg = PairedLipidConfig()
+    ds, _ = generate_synthetic_cohort(n_participants=44, n_single_sample=2, seed=4302, compact_grid=True)
+    tr_p = np.arange(34, dtype=int)
+    val_p = np.arange(34, 44, dtype=int)
+    gc = _get_dataset_gram_cache(ds, cfg)
+    dc = _precompute_division_constants(np, gc, ds, tr_p, val_p, cfg)
+    M_b = np.ones((2, ds.n_participants), dtype=np.float64)
+    M_b[1, 0] = 2.0
+    alphas = np.asarray(cfg.ridge_alpha_grid, dtype=np.float64)
+    div_cpu = bm_mod.batched_division_prep(
+        np, gc, dc, M_b[:, tr_p], M_b[:, val_p], ds.outcomes[cfg.primary_endpoint], alphas, cfg
+    )
+    pca_sse_ref = bm_mod.batched_pca_schur_sse(np, div_cpu, list(cfg.pca_dimensions), alphas)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(eig_mod, "_cupyx_supports_batched_triangular", lambda: False)
+        mp.setattr(eig_mod, "_get_cupyx_linalg", lambda: _ForbidTriLinalg())
+        mp.setattr(bm_mod, "_cupyx_supports_batched_triangular", lambda: False)
+        mp.setattr(bm_mod, "_get_cupyx_linalg", lambda: _ForbidTriLinalg())
+
+        sol_guard = eig_mod._solve_lower_triangular_batch(fake_xp, L_tri, rhs_tri)
+        np.testing.assert_allclose(sol_guard, sol_ref, rtol=1e-12, atol=1e-12)
+        sse_guard = bm_mod.batched_pca_schur_sse(fake_xp, div_cpu, list(cfg.pca_dimensions), alphas)
+        np.testing.assert_allclose(sse_guard, pca_sse_ref, rtol=1e-12, atol=1e-12)
+
+        Z_tr_big = rng.normal(size=(2, tr_p.size, 14))
+        Z_val_big = rng.normal(size=(2, val_p.size, 14))
+        sse_r_ref, pr_r_ref = bm_mod.batched_ridge_sse_and_preds(
+            np, div_cpu["X_cov_tr"], div_cpu["X_cov_val"], Z_tr_big, Z_val_big,
+            div_cpu["y_tr"], div_cpu["y_val"], div_cpu["w_tr"], div_cpu["w_val"], alphas,
+        )
+        sse_r_fb, pr_r_fb = bm_mod.batched_ridge_sse_and_preds(
+            fake_xp, div_cpu["X_cov_tr"], div_cpu["X_cov_val"], Z_tr_big, Z_val_big,
+            div_cpu["y_tr"], div_cpu["y_val"], div_cpu["w_tr"], div_cpu["w_val"], alphas,
+        )
+        np.testing.assert_allclose(sse_r_fb, sse_r_ref, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(pr_r_fb, pr_r_ref, rtol=1e-12, atol=1e-12)
+
+        pr_one_fb = bm_mod.batched_ridge_preds_single_alpha(
+            fake_xp, div_cpu["X_cov_tr"], div_cpu["X_cov_val"], Z_tr_big, Z_val_big,
+            div_cpu["y_tr"], div_cpu["w_tr"], np.array([alphas[1], alphas[3]]),
+        )
+        np.testing.assert_allclose(pr_one_fb[0], pr_r_ref[0, :, 1], rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(pr_one_fb[1], pr_r_ref[1, :, 3], rtol=1e-12, atol=1e-12)
+
+    # Runtime exception inside solve_triangular falls back cleanly to xp.linalg.solve.
+    with monkeypatch.context() as mp:
+        mp.setattr(eig_mod, "_cupyx_supports_batched_triangular", lambda: True)
+        mp.setattr(eig_mod, "_get_cupyx_linalg", lambda: _RaiseTriLinalg())
+        mp.setattr(bm_mod, "_cupyx_supports_batched_triangular", lambda: True)
+        mp.setattr(bm_mod, "_get_cupyx_linalg", lambda: _RaiseTriLinalg())
+        np.testing.assert_allclose(
+            eig_mod._solve_lower_triangular_batch(fake_xp, L_tri, rhs_tri), sol_ref, rtol=1e-12, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            bm_mod.batched_pca_schur_sse(fake_xp, div_cpu, list(cfg.pca_dimensions), alphas),
+            pca_sse_ref,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    # 4. Real GPU fallback when _get_fused_mfa_gram_kernel() returns None or batched triangular is disabled.
+    if _gpu_available():
+        b_ref_gpu = run_multiplicity_bootstrap(ds, cfg=cfg, n_bootstraps=6, bootstrap_seed=4303, use_gpu=True)
+        with monkeypatch.context() as mp:
+            mp.setattr(bm_mod, "_get_fused_mfa_gram_kernel", lambda: None)
+            mp.setattr(bm_mod, "_cupyx_supports_batched_triangular", lambda: False)
+            mp.setattr(eig_mod, "_cupyx_supports_batched_triangular", lambda: False)
+            b_fb_gpu = run_multiplicity_bootstrap(ds, cfg=cfg, n_bootstraps=6, bootstrap_seed=4303, use_gpu=True)
+        np.testing.assert_allclose(
+            b_fb_gpu["bootstrap_draws_delta_mse"],
+            b_ref_gpu["bootstrap_draws_delta_mse"],
+            rtol=1e-11,
+            atol=1e-11,
+        )
+        np.testing.assert_allclose(
+            b_fb_gpu["bootstrap_draws_vs_comparator"],
+            b_ref_gpu["bootstrap_draws_vs_comparator"],
+            rtol=1e-11,
+            atol=1e-11,
+        )
+
+
+def _loky_blas_probe_worker(seed: int) -> list[int]:
+    """Top-level picklable worker verifying _single_thread_blas() caps BLAS pools inside loky subprocesses."""
+    from threadpoolctl import threadpool_info
+
+    from src.analysis.paired_lipid._backend import _single_thread_blas
+
+    with _single_thread_blas():
+        ds, _ = generate_synthetic_cohort(n_participants=36, n_single_sample=2, seed=seed, compact_grid=True)
+        _ = evaluate_nested_cohort(ds, cfg=PairedLipidConfig(), compute_diagnostics=False)
+        return [int(info["num_threads"]) for info in threadpool_info() if info.get("user_api") == "blas"]
+
+
+def test_review_round2_external_single_sample_dual_pls_schur_and_loky_blas() -> None:
+    from dataclasses import replace
+    from typing import Any
+
+    from joblib import Parallel, delayed
+
+    from src.analysis.paired_lipid._backend import _get_gpu_xp, _get_threadpool_controller
+    from src.analysis.paired_lipid._batched_models import (
+        _prep_covariates_batch,
+        batched_division_prep,
+        batched_paired_schur_sse,
+        batched_pca_schur_sse,
+        batched_pls_sse_and_preds,
+    )
+    from src.analysis.paired_lipid._eigensolvers import batched_solve_directions_grid
+    from src.analysis.paired_lipid._gram_cache import (
+        _get_dataset_gram_cache,
+        _precompute_division_constants,
+    )
+    from src.analysis.paired_lipid.calibration import evaluate_bootstrap_calibration
+    from src.analysis.paired_lipid.models import CovariatePreprocessor, WeightedPLSResult
+    from src.analysis.paired_lipid.nested_cv import (
+        PreparedExternalTest,
+        _batched_anchor_bootstrap_partial_r_missing,
+        _residualize_and_partial_r,
+        make_nested_splits,
+        score_external_primary_pair,
+    )
+
+    cfg = PairedLipidConfig()
+
+    # 1. PreparedExternalTest auto-detects subset_mode="single_sample", matches raw CohortDataset scoring
+    #    (including with covariate missingness), and fails closed when single_sample_downstream disagrees.
+    ds_tr, _ = generate_synthetic_cohort(
+        n_participants=40,
+        n_single_sample=4,
+        seed=4401,
+        compact_grid=True,
+        subset_mode="single_sample",
+        covariate_missing_rate=0.15,
+    )
+    ds_te, _ = generate_synthetic_cohort(
+        n_participants=80,
+        n_single_sample=4,
+        seed=4402,
+        compact_grid=True,
+        subset_mode="single_sample",
+        covariate_missing_rate=0.15,
+    )
+    prep_auto = PreparedExternalTest.from_dataset(ds_te, cfg.primary_endpoint, preset=cfg.covariate_preset)
+    prep_full = PreparedExternalTest.from_dataset(ds_te, cfg.primary_endpoint, preset=None)
+    assert prep_auto.single_sample_downstream is True
+    assert prep_full.single_sample_downstream is True
+    ext_raw = score_external_primary_pair(ds_tr, ds_te, cfg=cfg)
+    ext_auto = score_external_primary_pair(ds_tr, prep_auto, cfg=cfg)
+    ext_full = score_external_primary_pair(ds_tr, prep_full, cfg=cfg)
+    assert ext_auto["external_delta_mse"] == pytest.approx(ext_raw["external_delta_mse"], abs=1e-12)
+    assert ext_full["external_delta_mse"] == pytest.approx(ext_raw["external_delta_mse"], abs=1e-12)
+    ev_raw = evaluate_nested_cohort(ds_tr, cfg=cfg, external_test=ds_te, compute_diagnostics=False)
+    ev_auto = evaluate_nested_cohort(ds_tr, cfg=cfg, external_test=prep_auto, compute_diagnostics=False)
+    assert ev_auto["external_delta_mse"] == pytest.approx(ev_raw["external_delta_mse"], abs=1e-12)
+
+    prep_paired = PreparedExternalTest.from_dataset(
+        ds_te, cfg.primary_endpoint, single_sample_downstream=False, preset=cfg.covariate_preset
+    )
+    assert prep_paired.single_sample_downstream is False
+    with pytest.raises(ValueError, match="single_sample_downstream"):
+        score_external_primary_pair(ds_tr, prep_paired, cfg=cfg)
+    with pytest.raises(ValueError, match="single_sample_downstream"):
+        evaluate_nested_cohort(ds_tr, cfg=cfg, external_test=prep_paired, compute_diagnostics=False)
+
+    cal_ss = evaluate_bootstrap_calibration(
+        n_repetitions=2,
+        n_bootstraps=3,
+        n_participants=44,
+        n_test_participants=60,
+        base_seed=440,
+        cfg=cfg,
+        n_jobs=1,
+        use_gpu=False,
+        compact_grid=True,
+        scenario_kwargs={"subset_mode": "single_sample", "covariate_missing_rate": 0.12},
+    )
+    assert np.isfinite(cal_ss["target_delta_mse"])
+
+    # 2. Explicit single_sample_downstream=False override on a subset_mode="single_sample" cohort
+    #    must propagate to fallback draws so batched and fallback draws share the same estimand.
+    ds_ovr, _ = generate_synthetic_cohort(
+        n_participants=52, n_single_sample=4, seed=4403, compact_grid=True, subset_mode="single_sample"
+    )
+    splits_ovr = make_nested_splits(ds_ovr, cfg, cfg.primary_seed)
+    boot_ovr = run_multiplicity_bootstrap(
+        ds_ovr, cfg=cfg, n_bootstraps=8, bootstrap_seed=4404, single_sample_downstream=False, use_gpu=False
+    )
+    assert boot_ovr["n_fallback_draws"] > 0
+    rng_ovr = np.random.default_rng(4404)
+    M_ovr = np.zeros((8, ds_ovr.n_participants), dtype=float)
+    np.add.at(M_ovr, (np.arange(8)[:, None], rng_ovr.integers(0, ds_ovr.n_participants, size=(8, ds_ovr.n_participants))), 1.0)
+    for b in range(8):
+        ev_b = evaluate_nested_cohort(
+            ds_ovr,
+            cfg=cfg,
+            participant_multiplicities=M_ovr[b],
+            precomputed_splits=splits_ovr,
+            single_sample_downstream=False,
+            compute_diagnostics=False,
+        )
+        assert boot_ovr["bootstrap_draws_delta_mse"][b] == pytest.approx(
+            ev_b["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+        )
+
+    # 3. Dual PLS roundoff floor prevents fitting Gram deflation noise on large-scale rank-deficient X
+    #    while preserving genuine weak components on both CPU and GPU.
+    rng_pls = np.random.default_rng(4405)
+    n_tr, n_val, p_spec = 30, 10, 40
+    u_tr = rng_pls.normal(size=(n_tr, 1))
+    u_val = rng_pls.normal(size=(n_val, 1))
+    v_dir = rng_pls.normal(size=(1, p_spec))
+    X_big_tr = 1e4 * (u_tr @ v_dir)
+    X_big_val = 1e4 * (u_val @ v_dir)
+    y_noisy_tr = 2.0 * u_tr[:, 0] + 5.0 * rng_pls.normal(size=n_tr)
+    y_noisy_val = 2.0 * u_val[:, 0] + 5.0 * rng_pls.normal(size=n_val)
+    Xc0_tr = np.zeros((n_tr, 0))
+    Xc0_val = np.zeros((n_val, 0))
+    ref_big_p, _ = WeightedPLSResult.fit(Xc0_tr, X_big_tr, y_noisy_tr, np.ones(n_tr), max_components=5).predict(
+        Xc0_val, X_big_val
+    )
+    backends: list[Any] = [np]
+    cp_mod = _get_gpu_xp()
+    if cp_mod is not None:
+        backends.append(cp_mod)
+    for xp in backends:
+        div_pls = {
+            "w_tr": xp.asarray(np.ones((1, n_tr)) / float(n_tr), dtype=xp.float64),
+            "w_val": xp.asarray(np.ones((1, n_val)), dtype=xp.float64),
+            "y_tr": xp.asarray(y_noisy_tr, dtype=xp.float64),
+            "y_val": xp.asarray(y_noisy_val, dtype=xp.float64),
+            "X_cov_tr": xp.asarray(Xc0_tr[None], dtype=xp.float64),
+            "X_cov_val": xp.asarray(Xc0_val[None], dtype=xp.float64),
+            "scale1_sq": xp.asarray([1.0], dtype=xp.float64),
+            "scale2_sq": xp.asarray([0.0], dtype=xp.float64),
+            "K_p1_tr": xp.asarray(X_big_tr @ X_big_tr.T, dtype=xp.float64),
+            "K_p1_vt": xp.asarray(X_big_val @ X_big_tr.T, dtype=xp.float64),
+            "K_p2_tr": xp.zeros((n_tr, n_tr), dtype=xp.float64),
+            "K_p2_vt": xp.zeros((n_val, n_tr), dtype=xp.float64),
+        }
+        _, bp = batched_pls_sse_and_preds(xp, div_pls, max_comp=5)
+        bp_np = np.asarray(xp.asnumpy(bp) if xp is not np else bp)[0]
+        np.testing.assert_allclose(bp_np, ref_big_p, rtol=1e-10, atol=1e-10)
+
+    # 4. batched_pca_schur_sse and batched_paired_schur_sse isolate non-PD / NaN draws without crashing valid draws.
+    ds_sch, _ = generate_synthetic_cohort(n_participants=60, n_single_sample=2, seed=4406, compact_grid=True)
+    tr_s = np.arange(48, dtype=int)
+    val_s = np.arange(48, 60, dtype=int)
+    gc_s = _get_dataset_gram_cache(ds_sch, cfg)
+    dc_s = _precompute_division_constants(np, gc_s, ds_sch, tr_s, val_s, cfg)
+    M2 = np.ones((2, 60), dtype=np.float64)
+    alphas = np.asarray(cfg.ridge_alpha_grid, dtype=np.float64)
+    div_ref = batched_division_prep(
+        np, gc_s, dc_s, M2[:1, tr_s], M2[:1, val_s], ds_sch.outcomes[cfg.primary_endpoint], alphas, cfg
+    )
+    pca_ref = batched_pca_schur_sse(np, div_ref, list(cfg.pca_dimensions), alphas)[0]
+    for bad_fill in ("indefinite", "nan"):
+        div_bad = batched_division_prep(
+            np, gc_s, dc_s, M2[:, tr_s], M2[:, val_s], ds_sch.outcomes[cfg.primary_endpoint], alphas, cfg
+        )
+        if bad_fill == "indefinite":
+            div_bad["Schur_p"][1] = -1e6 * np.eye(div_bad["Schur_p"].shape[-1])[None, :, :]
+        else:
+            div_bad["Schur_p"][1] = np.nan
+        sse_pca_bad = batched_pca_schur_sse(np, div_bad, list(cfg.pca_dimensions), alphas)
+        np.testing.assert_allclose(sse_pca_bad[0], pca_ref, rtol=1e-11, atol=1e-11)
+        assert np.all(np.isnan(sse_pca_bad[1]))
+        V_grid_bad = batched_solve_directions_grid(
+            np, div_bad["W_max"], div_bad["T_max"], list(cfg.pca_dimensions), cfg.lambda_grid
+        )
+        sse_pair_bad = batched_paired_schur_sse(np, div_bad, V_grid_bad, list(cfg.pca_dimensions), alphas)
+        assert np.all(np.isfinite(sse_pair_bad[0]))
+        assert np.all(np.isnan(sse_pair_bad[1]))
+
+    # 5. Missing-cov stress edges: np.inf/-np.inf, p_b==0 with p_m>0 in full bootstrap, single all-NaN val row,
+    #    and anchor missing-cov parity with inf/-np.inf and collinear quadratic indicators.
+    ds_inf, _ = generate_synthetic_cohort(
+        n_participants=92, n_single_sample=4, seed=4407, compact_grid=True, covariate_missing_rate=0.12
+    )
+    cov_inf = ds_inf.covariate_frame.copy()
+    cov_inf.loc[0, "age_years"] = np.inf
+    cov_inf.loc[3, "age_years"] = -np.inf
+    cov_inf.loc[91, ["age_years", "sex", "statin", "sample_label_trend"]] = np.nan
+    ds_inf_mod = replace(ds_inf, covariate_frame=cov_inf)
+    ev_inf = evaluate_nested_cohort(ds_inf_mod, cfg=cfg, compute_diagnostics=False)
+    b_inf = run_multiplicity_bootstrap(ds_inf_mod, cfg=cfg, n_bootstraps=4, bootstrap_seed=4408, use_gpu=False)
+    assert b_inf["n_fallback_draws"] == 0
+    assert b_inf["point_estimate_delta_mse"] == pytest.approx(
+        ev_inf["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+    )
+
+    cov_pb0 = pd.DataFrame(
+        {
+            "age_years": [65.0 if i % 4 != 0 else np.nan for i in range(92)],
+            "sex": ["female" if i % 5 != 0 else np.nan for i in range(92)],
+            "statin": [1.0] * 92,
+            "sample_label_trend": [10.0] * 92,
+        }
+    )
+    ds_pb0 = replace(ds_inf, covariate_frame=cov_pb0)
+    ev_pb0 = evaluate_nested_cohort(ds_pb0, cfg=cfg, compute_diagnostics=False)
+    b_pb0 = run_multiplicity_bootstrap(ds_pb0, cfg=cfg, n_bootstraps=4, bootstrap_seed=4409, use_gpu=False)
+    assert b_pb0["n_fallback_draws"] == 0
+    assert b_pb0["point_estimate_delta_mse"] == pytest.approx(
+        ev_pb0["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"], abs=1e-10
+    )
+
+    gc_inf = _get_dataset_gram_cache(ds_inf_mod, cfg)
+    dc_1val = _precompute_division_constants(
+        np, gc_inf, ds_inf_mod, np.arange(91, dtype=int), np.array([91], dtype=int), cfg
+    )
+    _, _, _, _, Xval_1 = _prep_covariates_batch(np, dc_1val, np.ones((1, 91)), np.ones((1, 1)))
+    cp_1 = CovariatePreprocessor.fit(cov_inf, np.arange(91, dtype=int), np.ones(91), preset="primary")
+    np.testing.assert_allclose(Xval_1[0], cp_1.transform(cov_inf, np.array([91], dtype=int)), rtol=1e-12, atol=1e-12)
+
+    eps_f = float(np.finfo(float).eps)
+    raw_q_inf, _ = CovariatePreprocessor.raw_design_matrix(cov_inf, preset="quadratic_age_and_label")
+    idx_inf = np.random.default_rng(4410).integers(0, 92, size=(30, 92))
+    s_inf = ev_inf["oof_spectral_contributions"]["paired_linear_ridge"]
+    y_inf = ds_inf_mod.outcomes["ldl_mmol_l"]
+    vec_inf_r = _batched_anchor_bootstrap_partial_r_missing(raw_q_inf, s_inf, y_inf, idx_inf, eps_f)
+    ref_inf_r: list[float] = []
+    vi = np.arange(92, dtype=int)
+    for b_idx in idx_inf:
+        bm = np.bincount(b_idx, minlength=92).astype(float)
+        cp_b = CovariatePreprocessor.fit(cov_inf, vi, bm, preset="quadratic_age_and_label")
+        Xb = cp_b.transform(cov_inf, b_idx)
+        rb, _, _, dnb, rkb = _residualize_and_partial_r(
+            np.column_stack([np.ones(92), Xb]), s_inf[b_idx], y_inf[b_idx], eps_f
+        )
+        if 92 - rkb >= 2 and dnb > 1e-12:
+            ref_inf_r.append(rb)
+    np.testing.assert_allclose(vec_inf_r, np.asarray(ref_inf_r), rtol=1e-11, atol=1e-11)
+
+    # 6. Spawned loky child workers actually cap OpenBLAS thread pools to 1 inside _single_thread_blas().
+    if _get_threadpool_controller() is not None:
+        worker_blas_threads = Parallel(n_jobs=2)(delayed(_loky_blas_probe_worker)(4420 + i) for i in range(2))
+        assert len(worker_blas_threads) == 2
+        for thread_counts in worker_blas_threads:
+            assert thread_counts and all(t == 1 for t in thread_counts)
+
+
+
+

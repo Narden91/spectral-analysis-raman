@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -85,6 +86,104 @@ def _build_nuisance_basis(
     return np.vstack(b1), np.vstack(b2)
 
 
+@lru_cache(maxsize=32)
+def _cached_spectral_grids_and_bases(
+    compact_grid: bool,
+    include_shoulder_in_bio: bool,
+    n_nuisance_modes: int,
+    include_map_spatial_basis: bool,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray | None,
+]:
+    """Memoize wavenumber grids and fixed biological/technical/nuisance spectral basis vectors."""
+    step = 10.0 if compact_grid else 1.0
+    wn_1300 = np.arange(734.0, 1788.0 + 0.5 * step, step, dtype=float)
+    wn_2850 = np.arange(2451.0, 3197.0 + 0.5 * step, step, dtype=float)
+
+    if include_shoulder_in_bio:
+        b1_raw = (
+            _gaussian_peak(wn_1300, 1440.0, 14.0)
+            + 0.7 * _gaussian_peak(wn_1300, 1301.0, 16.0)
+            + 0.65 * _gaussian_peak(wn_1300, 1412.0, 14.0)
+            - 0.6 * _gaussian_peak(wn_1300, 1355.0, 15.0)
+            + 0.5 * _gaussian_peak(wn_1300, 1618.0, 16.0)
+        )
+        b2_raw = (
+            _gaussian_peak(wn_2850, 2853.0, 12.0)
+            + 0.6 * _gaussian_peak(wn_2850, 2890.0, 18.0)
+            - 0.65 * _gaussian_peak(wn_2850, 2918.0, 14.0)
+            + 0.55 * _gaussian_peak(wn_2850, 2832.0, 12.0)
+        )
+        bio_1300_1 = b1_raw / max(float(linalg.norm(b1_raw)), 1e-12) * math.sqrt(1.49)
+        bio_2850_1 = b2_raw / max(float(linalg.norm(b2_raw)), 1e-12) * math.sqrt(1.36)
+    else:
+        bio_1300_1 = _gaussian_peak(wn_1300, 1440.0, 14.0) + 0.7 * _gaussian_peak(wn_1300, 1301.0, 16.0)
+        bio_2850_1 = _gaussian_peak(wn_2850, 2853.0, 12.0) + 0.6 * _gaussian_peak(wn_2850, 2890.0, 18.0)
+
+    bio_1300_2 = _gaussian_peak(wn_1300, 1657.0, 18.0) - 0.5 * _gaussian_peak(wn_1300, 1089.0, 12.0)
+    bio_2850_2 = _gaussian_peak(wn_2850, 2937.0, 15.0) - 0.4 * _gaussian_peak(wn_2850, 2853.0, 12.0)
+
+    tech_1300 = _gaussian_peak(wn_1300, 1156.0, 20.0) - 0.6 * _gaussian_peak(wn_1300, 980.0, 15.0)
+    tech_2850 = _gaussian_peak(wn_2850, 3015.0, 22.0)
+
+    nuis_b1: np.ndarray | None = None
+    nuis_b2: np.ndarray | None = None
+    if n_nuisance_modes > 0:
+        nuis_b1, nuis_b2 = _build_nuisance_basis(wn_1300, wn_2850, n_modes=n_nuisance_modes)
+
+    nuis_b1_m: np.ndarray | None = None
+    nuis_b2_m: np.ndarray | None = None
+    if include_map_spatial_basis:
+        if nuis_b1 is not None and nuis_b2 is not None and nuis_b1.shape[0] >= 4:
+            nuis_b1_m = np.ascontiguousarray(nuis_b1[:4])
+            nuis_b2_m = np.ascontiguousarray(nuis_b2[:4])
+        else:
+            nuis_b1_m, nuis_b2_m = _build_nuisance_basis(wn_1300, wn_2850, n_modes=4)
+
+    for arr in (
+        wn_1300,
+        wn_2850,
+        bio_1300_1,
+        bio_2850_1,
+        bio_1300_2,
+        bio_2850_2,
+        tech_1300,
+        tech_2850,
+        nuis_b1,
+        nuis_b2,
+        nuis_b1_m,
+        nuis_b2_m,
+    ):
+        if arr is not None:
+            arr.setflags(write=False)
+
+    return (
+        wn_1300,
+        wn_2850,
+        bio_1300_1,
+        bio_2850_1,
+        bio_1300_2,
+        bio_2850_2,
+        tech_1300,
+        tech_2850,
+        nuis_b1,
+        nuis_b2,
+        nuis_b1_m,
+        nuis_b2_m,
+    )
+
+
 def _median_maps(maps: np.ndarray, out: np.ndarray, drop: np.ndarray | None) -> None:
     """Compute per-sample map median along axis 1, dropping the last map where requested."""
     if maps.shape[1] == 3:
@@ -163,37 +262,26 @@ def generate_synthetic_cohort(
         )
 
     rng = np.random.default_rng(seed)
-    step = 10.0 if compact_grid else 1.0
-    wn_1300 = np.arange(734.0, 1788.0 + 0.5 * step, step, dtype=float)
-    wn_2850 = np.arange(2451.0, 3197.0 + 0.5 * step, step, dtype=float)
-
-    # Smooth biological basis functions overlapping lipid-associated and protein-associated regions.
-    if include_shoulder_in_bio:
-        b1_raw = (
-            _gaussian_peak(wn_1300, 1440.0, 14.0)
-            + 0.7 * _gaussian_peak(wn_1300, 1301.0, 16.0)
-            + 0.65 * _gaussian_peak(wn_1300, 1412.0, 14.0)
-            - 0.6 * _gaussian_peak(wn_1300, 1355.0, 15.0)
-            + 0.5 * _gaussian_peak(wn_1300, 1618.0, 16.0)
-        )
-        b2_raw = (
-            _gaussian_peak(wn_2850, 2853.0, 12.0)
-            + 0.6 * _gaussian_peak(wn_2850, 2890.0, 18.0)
-            - 0.65 * _gaussian_peak(wn_2850, 2918.0, 14.0)
-            + 0.55 * _gaussian_peak(wn_2850, 2832.0, 12.0)
-        )
-        bio_1300_1 = b1_raw / max(float(linalg.norm(b1_raw)), 1e-12) * math.sqrt(1.49)
-        bio_2850_1 = b2_raw / max(float(linalg.norm(b2_raw)), 1e-12) * math.sqrt(1.36)
-    else:
-        bio_1300_1 = _gaussian_peak(wn_1300, 1440.0, 14.0) + 0.7 * _gaussian_peak(wn_1300, 1301.0, 16.0)
-        bio_2850_1 = _gaussian_peak(wn_2850, 2853.0, 12.0) + 0.6 * _gaussian_peak(wn_2850, 2890.0, 18.0)
-
-    bio_1300_2 = _gaussian_peak(wn_1300, 1657.0, 18.0) - 0.5 * _gaussian_peak(wn_1300, 1089.0, 12.0)
-    bio_2850_2 = _gaussian_peak(wn_2850, 2937.0, 15.0) - 0.4 * _gaussian_peak(wn_2850, 2853.0, 12.0)
-
-    # Technical nuisance/disagreement basis functions (orthogonalizable or distinct peaks).
-    tech_1300 = _gaussian_peak(wn_1300, 1156.0, 20.0) - 0.6 * _gaussian_peak(wn_1300, 980.0, 15.0)
-    tech_2850 = _gaussian_peak(wn_2850, 3015.0, 22.0)
+    has_nuisance = n_nuisance_modes > 0 and (nuisance_part_scale > 0.0 or nuisance_sample_scale > 0.0)
+    (
+        wn_1300,
+        wn_2850,
+        bio_1300_1,
+        bio_2850_1,
+        bio_1300_2,
+        bio_2850_2,
+        tech_1300,
+        tech_2850,
+        nuis_b1_cached,
+        nuis_b2_cached,
+        nuis_b1_m,
+        nuis_b2_m,
+    ) = _cached_spectral_grids_and_bases(
+        bool(compact_grid),
+        bool(include_shoulder_in_bio),
+        int(n_nuisance_modes) if has_nuisance else 0,
+        bool(map_spatial_scale > 0.0),
+    )
 
     age = rng.normal(68.0, 11.0, size=n_participants)
     sex_female = rng.binomial(1, 0.48, size=n_participants)
@@ -248,24 +336,12 @@ def generate_synthetic_cohort(
 
     n_samples = int(np.sum(sample_counts))
     sample_p_idx = np.repeat(np.arange(n_participants, dtype=int), sample_counts)
-    paired_p_list: list[int] = []
-    pair_a_list: list[int] = []
-    pair_b_list: list[int] = []
-    single_s_list: list[int] = []
-    pos = 0
-    for p_i in range(n_participants):
-        if sample_counts[p_i] == 2:
-            paired_p_list.append(p_i)
-            pair_a_list.append(pos)
-            pair_b_list.append(pos + 1)
-            pos += 2
-        else:
-            single_s_list.append(pos)
-            pos += 1
-    paired_p_indices = np.asarray(paired_p_list, dtype=int)
-    pair_a_indices = np.asarray(pair_a_list, dtype=int)
-    pair_b_indices = np.asarray(pair_b_list, dtype=int)
-    single_s_indices = np.asarray(single_s_list, dtype=int)
+    offsets = np.cumsum(sample_counts) - sample_counts
+    is_paired = sample_counts == 2
+    paired_p_indices = np.flatnonzero(is_paired)
+    pair_a_indices = offsets[paired_p_indices]
+    pair_b_indices = pair_a_indices + 1
+    single_s_indices = offsets[np.flatnonzero(~is_paired)]
     n_paired = int(paired_p_indices.size)
     n_single_actual = n_participants - n_paired
 
@@ -362,8 +438,7 @@ def generate_synthetic_cohort(
     b1_list: list[np.ndarray] = [bio_1300_1, bio_1300_2, tech_1300]
     b2_list: list[np.ndarray] = [bio_2850_1, bio_2850_2, tech_2850]
 
-    if n_nuisance_modes > 0 and (nuisance_part_scale > 0.0 or nuisance_sample_scale > 0.0):
-        nuis_b1, nuis_b2 = _build_nuisance_basis(wn_1300, wn_2850, n_modes=n_nuisance_modes)
+    if has_nuisance and nuis_b1_cached is not None and nuis_b2_cached is not None:
         decay_vec = nuisance_decay ** np.arange(n_nuisance_modes, dtype=float)
         nuis_p = (
             rng.normal(0.0, 1.0, size=(n_participants, n_nuisance_modes))
@@ -389,17 +464,12 @@ def generate_synthetic_cohort(
         if unequal_b_error_scale > 0.0 and pair_b_indices.size > 0:
             nuis_s[pair_b_indices] *= 1.0 + unequal_b_error_scale
         factors_list.append(nuis_p[sample_p_idx] + nuis_s)
-        b1_list.append(nuis_b1)
-        b2_list.append(nuis_b2)
+        b1_list.append(nuis_b1_cached)
+        b2_list.append(nuis_b2_cached)
 
     sample_factors = np.column_stack(factors_list)
     basis_1300 = np.vstack(b1_list)
     basis_2850 = np.vstack(b2_list)
-
-    if map_spatial_scale > 0.0:
-        nuis_b1_m, nuis_b2_m = _build_nuisance_basis(wn_1300, wn_2850, n_modes=4)
-    else:
-        nuis_b1_m = nuis_b2_m = None
 
     cov_df = pd.DataFrame(
         {
