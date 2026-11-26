@@ -32,6 +32,7 @@ from src.analysis.paired_lipid.nested_cv import (
 from src.analysis.paired_lipid.synthetic import (
     DEFAULT_N_SINGLE_SAMPLE,
     generate_synthetic_cohort,
+    generate_synthetic_external_test,
 )
 
 SeedSet = Literal["development", "validation"]
@@ -438,30 +439,22 @@ def evaluate_bootstrap_calibration(
     _, gpu_meta = resolve_array_backend(effective_use_gpu, n_bootstraps)
     gpu_active = bool(gpu_meta["gpu_active"])
 
-    n_ext = int(n_test_participants)
-    if ckpt_file is not None and ckpt_file.is_file():
+    has_ckpt = ckpt_file is not None and ckpt_file.is_file()
+    if has_ckpt:
+        assert ckpt_file is not None
         state = _load_calibration_checkpoint(ckpt_file, fingerprint)
+        n_ext = int(state["ext_col_sum_mse"].size)
+        if int(state["ext_col_sum_comp"].size) != n_ext:
+            raise ValueError(
+                f"Calibration checkpoint {ckpt_file} has mismatched external cohort sizes: "
+                f"ext_col_sum_mse={n_ext}, ext_col_sum_comp={int(state['ext_col_sum_comp'].size)}."
+            )
+        pending_indices = [int(i) for i in np.flatnonzero(~state["completed"])]
     else:
-        state = {
-            "completed": np.zeros(n_repetitions, dtype=bool),
-            "point_delta_mse": np.full(n_repetitions, np.nan, dtype=np.float64),
-            "ci_lo_delta_mse": np.full(n_repetitions, np.nan, dtype=np.float64),
-            "ci_hi_delta_mse": np.full(n_repetitions, np.nan, dtype=np.float64),
-            "succeeded": np.zeros(n_repetitions, dtype=bool),
-            "ext_delta_mse": np.full(n_repetitions, np.nan, dtype=np.float64),
-            "ext_row_ss_mse": np.full(n_repetitions, np.nan, dtype=np.float64),
-            "ext_col_sum_mse": np.zeros(n_ext, dtype=np.float64),
-            "ext_part_valid_mse": np.array(True, dtype=bool),
-            "point_vs_comp": np.full(n_repetitions, np.nan, dtype=np.float64),
-            "ci_lo_vs_comp": np.full(n_repetitions, np.nan, dtype=np.float64),
-            "ci_hi_vs_comp": np.full(n_repetitions, np.nan, dtype=np.float64),
-            "ext_delta_vs_comp": np.full(n_repetitions, np.nan, dtype=np.float64),
-            "ext_row_ss_comp": np.full(n_repetitions, np.nan, dtype=np.float64),
-            "ext_col_sum_comp": np.zeros(n_ext, dtype=np.float64),
-            "ext_part_valid_comp": np.array(True, dtype=bool),
-        }
+        n_ext = 0
+        state = {}
+        pending_indices = list(range(n_repetitions))
 
-    pending_indices = [int(i) for i in np.flatnonzero(~state["completed"])]
     if pending_indices:
         # Match the training single-sample proportion so the external test cohort shares the same
         # one-sample/two-sample mixture as each calibration replicate.
@@ -471,19 +464,40 @@ def evaluate_bootstrap_calibration(
             n_test_participants,
             max(0, int(round(n_test_participants * (train_n_single / float(n_participants))))),
         )
-        test_ds, _ = generate_synthetic_cohort(
+        prepared_test = generate_synthetic_external_test(
             n_participants=n_test_participants,
             seed=base_seed,
             compact_grid=compact_grid,
+            endpoint=eff_cfg.primary_endpoint,
+            preset=eff_cfg.covariate_preset,
             **test_gen_kwargs,
         )
-        prepared_test = PreparedExternalTest.from_dataset(
-            test_ds,
-            eff_cfg.primary_endpoint,
-            preset=eff_cfg.covariate_preset,
-        )
-        n_ext = prepared_test.n_participants
-        del test_ds
+        if has_ckpt:
+            if prepared_test.n_participants != n_ext:
+                raise ValueError(
+                    f"Calibration checkpoint {ckpt_file} external cohort size ({n_ext}) does not match "
+                    f"generated external test cohort size ({prepared_test.n_participants})."
+                )
+        else:
+            n_ext = prepared_test.n_participants
+            state = {
+                "completed": np.zeros(n_repetitions, dtype=bool),
+                "point_delta_mse": np.full(n_repetitions, np.nan, dtype=np.float64),
+                "ci_lo_delta_mse": np.full(n_repetitions, np.nan, dtype=np.float64),
+                "ci_hi_delta_mse": np.full(n_repetitions, np.nan, dtype=np.float64),
+                "succeeded": np.zeros(n_repetitions, dtype=bool),
+                "ext_delta_mse": np.full(n_repetitions, np.nan, dtype=np.float64),
+                "ext_row_ss_mse": np.full(n_repetitions, np.nan, dtype=np.float64),
+                "ext_col_sum_mse": np.zeros(n_ext, dtype=np.float64),
+                "ext_part_valid_mse": np.array(True, dtype=bool),
+                "point_vs_comp": np.full(n_repetitions, np.nan, dtype=np.float64),
+                "ci_lo_vs_comp": np.full(n_repetitions, np.nan, dtype=np.float64),
+                "ci_hi_vs_comp": np.full(n_repetitions, np.nan, dtype=np.float64),
+                "ext_delta_vs_comp": np.full(n_repetitions, np.nan, dtype=np.float64),
+                "ext_row_ss_comp": np.full(n_repetitions, np.nan, dtype=np.float64),
+                "ext_col_sum_comp": np.zeros(n_ext, dtype=np.float64),
+                "ext_part_valid_comp": np.array(True, dtype=bool),
+            }
 
         use_parallel = (
             not gpu_active

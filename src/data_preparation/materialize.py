@@ -7,8 +7,11 @@ files or reruns preprocessing.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
+import multiprocessing
+import os
 import shutil
 import subprocess
 import tempfile
@@ -18,9 +21,11 @@ from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 
 from src import resolve_cfg as _cfg
 from src import resolve_project_path
+from src.analysis.paired_lipid._backend import _single_thread_blas
 from src.constants import SPECTRAL_RANGES
 from src.data_preparation.cohorts import build_materialized_cohorts, write_cohort_tables
 from src.data_preparation.manifest import (
@@ -259,11 +264,124 @@ def _append_reason(values: pd.Series, reason: str, mask: np.ndarray) -> pd.Serie
     return out
 
 
+def _resolve_process_workers(n_maps: int, total_pixels: int, n_jobs: int | None) -> int:
+    """Resolve safe worker count for map-level preprocessing parallelism."""
+    if n_maps <= 1 or n_jobs == 0 or n_jobs == 1:
+        return 1
+    if os.environ.get("_PAIRED_LIPID_IN_BOOTSTRAP_WORKER") == "1":
+        return 1
+    if multiprocessing.parent_process() is not None:
+        return 1
+    try:
+        from joblib.parallel import get_active_backend
+
+        backend, _ = get_active_backend()
+        if getattr(backend, "nesting_level", 0) > 0:
+            return 1
+    except Exception:
+        pass
+
+    auto_mode = n_jobs is None or int(n_jobs) < 0
+    if auto_mode and (n_maps < 4 or total_pixels < 1000):
+        return 1
+
+    cpu_cnt = os.cpu_count() or 1
+    if n_jobs is None or int(n_jobs) == -1:
+        raw = cpu_cnt
+    elif int(n_jobs) < -1:
+        raw = max(1, cpu_cnt + 1 + int(n_jobs))
+    else:
+        raw = int(n_jobs)
+    return max(1, min(raw, n_maps))
+
+
+def _close_memmap_cache(arrays: dict[str, np.ndarray]) -> None:
+    """Close underlying memmap handles after slices have been copied out."""
+    for arr in arrays.values():
+        mmap_obj = getattr(arr, "_mmap", None)
+        if mmap_obj is not None:
+            try:
+                mmap_obj.close()
+            except Exception:
+                pass
+    arrays.clear()
+
+
+def _run_measurement_task(
+    task: tuple[int, str, str, int, int, int, np.ndarray],
+    raw_arrays: dict[str, np.ndarray],
+    axis_arrays: dict[str, np.ndarray],
+    parsed_dir: Path,
+    cfg: dict,
+    target_axes: dict[str, np.ndarray],
+) -> tuple[int, str, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame, np.ndarray]:
+    pos, _mid, code, raw_start, raw_stop, axis_row, coords = task
+    if code not in raw_arrays:
+        raw_arrays[code] = np.load(parsed_dir / f"raw_spectra_{code}.npy", mmap_mode="r")
+        axis_arrays[code] = np.load(parsed_dir / f"native_wavenumbers_{code}.npy", mmap_mode="r")
+    raw_slice = np.array(raw_arrays[code][raw_start:raw_stop], dtype=float, copy=True)
+    native_axis = np.array(axis_arrays[code][axis_row], dtype=float, copy=True)
+    result = run_preprocessing(
+        raw_slice,
+        native_axis,
+        region=_range_key(code),
+        pixel_coords=coords,
+        screen_dead=True,
+        suppress_cosmic=None,
+        correct_bl=True,
+        smooth=None,
+        interpolate=True,
+        target_wavenumbers=target_axes[code],
+        filter_quality=None,
+        normalize=True,
+        norm_for="eda",
+        return_pre_normalization=True,
+        cfg=cfg,
+    )
+    pre = np.asarray(result.stage_arrays.get("pre_normalization"), dtype=float)
+    if pre.shape != result.spectra.shape:
+        raise RuntimeError("Pre-normalization output is missing or misaligned")
+    return (
+        pos,
+        code,
+        np.asarray(result.spectra, dtype=float),
+        pre,
+        np.asarray(result.retained_mask, dtype=bool),
+        result.qc_flags.merge(result.qc_metrics, on="row_index", how="left", suffixes=("", "_metric")),
+        np.asarray(result.wavenumbers, dtype=float),
+    )
+
+
+def _process_measurement_chunk(
+    parsed_dir: Path,
+    tasks: list[tuple[int, str, str, int, int, int, np.ndarray]],
+    cfg: dict,
+    target_axes: dict[str, np.ndarray],
+    *,
+    single_thread_blas: bool = True,
+) -> list[tuple[int, str, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame, np.ndarray]]:
+    """Process one chunk of measurements inside a worker using local read-only memmaps."""
+    raw_arrays: dict[str, np.ndarray] = {}
+    axis_arrays: dict[str, np.ndarray] = {}
+    outputs: list[tuple[int, str, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame, np.ndarray]] = []
+    ctx = _single_thread_blas() if single_thread_blas else contextlib.nullcontext()
+    try:
+        with ctx:
+            for task in tasks:
+                outputs.append(_run_measurement_task(task, raw_arrays, axis_arrays, parsed_dir, cfg, target_axes))
+    finally:
+        _close_memmap_cache(raw_arrays)
+        _close_memmap_cache(axis_arrays)
+    return outputs
+
+
 def _process_measurements(
     parsed_dir: Path,
     measurements: pd.DataFrame,
     cfg: dict,
     progress_callback: ProgressCallback | None = None,
+    *,
+    n_jobs: int | None = None,
 ) -> tuple[dict[str, np.ndarray], pd.DataFrame, pd.DataFrame]:
     from src.data_preparation.dataset import IngestedRamanDataset
     from src.data_preparation.store import DataSource
@@ -272,67 +390,117 @@ def _process_measurements(
         DataSource(source_name="parsed", source_path=parsed_dir, manifest=None, manifest_hash=None, was_built=False)
     )
     rows_by_id = measurements.set_index("measurement_id", drop=False)
-    processed: list[_ProcessedMeasurement] = []
+    pixel_groups = ingested._pixels()
 
-    for position, view in enumerate(ingested.iter_measurements(), start=1):
-        code = view.spectral_range
-        row = rows_by_id.loc[view.measurement_id]
-        result = run_preprocessing(
-            view.raw_spectra,
-            view.native_wavenumbers,
-            region=_range_key(code),
-            pixel_coords=view.coordinates,
-            screen_dead=True,
-            suppress_cosmic=None,
-            correct_bl=True,
-            smooth=None,
-            interpolate=True,
-            target_wavenumbers=_frozen_target_axis(cfg, code),
-            filter_quality=None,
-            normalize=True,
-            norm_for="eda",
-            return_pre_normalization=True,
-            cfg=cfg,
-        )
-        pre = np.asarray(result.stage_arrays.get("pre_normalization"), dtype=float)
-        if pre.shape != result.spectra.shape:
-            raise RuntimeError("Pre-normalization output is missing or misaligned")
-        processed.append(
-            _ProcessedMeasurement(
-                row=row,
-                range_code=code,
-                result_spectra=np.asarray(result.spectra, dtype=float),
-                pre_normalization=pre,
-                retained_mask=np.asarray(result.retained_mask, dtype=bool),
-                qc=result.qc_flags.merge(result.qc_metrics, on="row_index", how="left", suffixes=("", "_metric")),
-                axis=np.asarray(result.wavenumbers, dtype=float),
+    tasks: list[tuple[int, str, str, int, int, int, np.ndarray]] = []
+    task_rows: list[pd.Series] = []
+    present_codes: set[str] = set()
+    total_pixels = 0
+    for pos, (_, m_row) in enumerate(ingested._measurements.iterrows()):
+        mid = str(m_row["measurement_id"])
+        code = str(m_row["spectral_range"])
+        raw_start = int(m_row["raw_start"])
+        raw_stop = int(m_row["raw_stop"])
+        native_axis_row = int(m_row["native_axis_row"])
+        coords = np.array(pixel_groups[mid][["x", "y"]].to_numpy(dtype=float), dtype=float, copy=True)
+        tasks.append((pos, mid, code, raw_start, raw_stop, native_axis_row, coords))
+        task_rows.append(rows_by_id.loc[mid])
+        present_codes.add(code)
+        total_pixels += max(0, raw_stop - raw_start)
+
+    target_axes = {code: _frozen_target_axis(cfg, code) for code in sorted(present_codes)}
+    n_maps = len(tasks)
+    workers = _resolve_process_workers(n_maps, total_pixels, n_jobs)
+    processed: list[_ProcessedMeasurement | None] = [None] * n_maps
+
+    if workers == 1:
+        raw_arrays: dict[str, np.ndarray] = {}
+        axis_arrays: dict[str, np.ndarray] = {}
+        try:
+            for pos, task in enumerate(tasks, start=1):
+                item_pos, code, spec_arr, pre_arr, rmask, qc_df, axis_arr = _run_measurement_task(
+                    task, raw_arrays, axis_arrays, parsed_dir, cfg, target_axes
+                )
+                processed[item_pos] = _ProcessedMeasurement(
+                    row=task_rows[item_pos],
+                    range_code=code,
+                    result_spectra=spec_arr,
+                    pre_normalization=pre_arr,
+                    retained_mask=rmask,
+                    qc=qc_df,
+                    axis=axis_arr,
+                )
+                if progress_callback is not None:
+                    progress_callback("Preprocessing", pos, n_maps)
+        finally:
+            _close_memmap_cache(raw_arrays)
+            _close_memmap_cache(axis_arrays)
+    else:
+        chunk_size = max(1, n_maps // (workers * 4))
+        chunks = [tasks[idx : idx + chunk_size] for idx in range(0, n_maps, chunk_size)]
+        completed = 0
+        for chunk_out in Parallel(n_jobs=workers, return_as="generator_unordered")(
+            delayed(_process_measurement_chunk)(
+                parsed_dir, chunk, cfg, target_axes, single_thread_blas=True
             )
-        )
-        if progress_callback is not None:
-            progress_callback("Preprocessing", position, len(measurements))
+            for chunk in chunks
+        ):
+            for item_pos, code, spec_arr, pre_arr, rmask, qc_df, axis_arr in chunk_out:
+                processed[item_pos] = _ProcessedMeasurement(
+                    row=task_rows[item_pos],
+                    range_code=code,
+                    result_spectra=spec_arr,
+                    pre_normalization=pre_arr,
+                    retained_mask=rmask,
+                    qc=qc_df,
+                    axis=axis_arr,
+                )
+            completed += len(chunk_out)
+            if progress_callback is not None:
+                progress_callback("Preprocessing", completed, n_maps)
 
     min_area = int(cfg.get("preprocessing", {}).get("retention", {}).get("min_pixels_per_area", 1))
     min_subject = int(cfg.get("preprocessing", {}).get("retention", {}).get("min_pixels_per_subject", 1))
     subject_counts: dict[tuple[str, str], int] = {}
     for item in processed:
-        if int(item.retained_mask.sum()) >= min_area:
+        assert item is not None
+        n_ret = int(item.retained_mask.sum())
+        if n_ret >= min_area:
             key = (str(item.row["subject_id"]), item.range_code)
-            subject_counts[key] = subject_counts.get(key, 0) + int(item.retained_mask.sum())
+            subject_counts[key] = subject_counts.get(key, 0) + n_ret
 
-    arrays: dict[str, list[np.ndarray]] = {f"normalized_{code}": [] for code in SPECTRAL_RANGES}
-    arrays.update({f"pre_normalization_{code}": [] for code in SPECTRAL_RANGES})
-    qc_parts: list[pd.DataFrame] = []
-    area_rows: list[dict[str, Any]] = []
     expected_axis: dict[str, np.ndarray | None] = {code: None for code in SPECTRAL_RANGES}
-    offsets = {code: 0 for code in SPECTRAL_RANGES}
-
+    total_kept = {code: 0 for code in SPECTRAL_RANGES}
+    area_flags: list[tuple[int, bool, bool]] = []
     for item in processed:
-        row = item.row
+        assert item is not None
         code = item.range_code
         expected_axis[code] = _assert_same_axis(expected_axis[code], item.axis, code)
         n_retained = int(item.retained_mask.sum())
         area_ok = n_retained >= min_area
-        subject_ok = subject_counts.get((str(row["subject_id"]), code), 0) >= min_subject
+        subject_ok = subject_counts.get((str(item.row["subject_id"]), code), 0) >= min_subject
+        area_flags.append((n_retained, area_ok, subject_ok))
+        if area_ok and subject_ok and n_retained > 0:
+            total_kept[code] += n_retained
+
+    result_arrays: dict[str, np.ndarray] = {}
+    for code in SPECTRAL_RANGES:
+        axis_arr = expected_axis[code]
+        width = int(axis_arr.size) if axis_arr is not None else 0
+        result_arrays[f"normalized_{code}"] = np.empty((total_kept[code], width), dtype=float)
+        result_arrays[f"pre_normalization_{code}"] = np.empty((total_kept[code], width), dtype=float)
+        result_arrays[f"wavenumbers_{code}"] = np.asarray(axis_arr, dtype=float)
+
+    qc_parts: list[pd.DataFrame] = []
+    area_rows: list[dict[str, Any]] = []
+    offsets = {code: 0 for code in SPECTRAL_RANGES}
+
+    for idx, (n_retained, area_ok, subject_ok) in enumerate(area_flags):
+        item = processed[idx]
+        assert item is not None
+        processed[idx] = None
+        row = item.row
+        code = item.range_code
         final_mask = item.retained_mask & area_ok & subject_ok
         qc = item.qc.sort_values("row_index").reset_index(drop=True)
         if len(qc) != len(final_mask):
@@ -353,8 +521,8 @@ def _process_measurements(
             output_stop = output_start + len(kept)
             qc.loc[kept, "normalized_row"] = np.arange(output_start, output_stop, dtype=int)
             qc.loc[kept, "pre_normalization_row"] = np.arange(output_start, output_stop, dtype=int)
-            arrays[f"normalized_{code}"].append(item.result_spectra)
-            arrays[f"pre_normalization_{code}"].append(item.pre_normalization)
+            result_arrays[f"normalized_{code}"][output_start:output_stop] = item.result_spectra
+            result_arrays[f"pre_normalization_{code}"][output_start:output_stop] = item.pre_normalization
             offsets[code] = output_stop
         qc_parts.append(qc)
         area_rows.append(
@@ -369,13 +537,6 @@ def _process_measurements(
             }
         )
 
-    result_arrays: dict[str, np.ndarray] = {}
-    for code in SPECTRAL_RANGES:
-        width = int(expected_axis[code].size) if expected_axis[code] is not None else 0
-        for basis in ("normalized", "pre_normalization"):
-            chunks = arrays[f"{basis}_{code}"]
-            result_arrays[f"{basis}_{code}"] = np.vstack(chunks) if chunks else np.empty((0, width), dtype=float)
-        result_arrays[f"wavenumbers_{code}"] = np.asarray(expected_axis[code], dtype=float)
     return result_arrays, pd.concat(qc_parts, ignore_index=True), pd.DataFrame(area_rows)
 
 
@@ -496,6 +657,7 @@ def build_preprocessed_store(
     *,
     force: bool = False,
     progress_callback: ProgressCallback | None = None,
+    n_jobs: int | None = None,
 ) -> MaterializedStore:
     config = _cfg(cfg)
     parsed_dir = store_dir("parsed", config)
@@ -510,7 +672,9 @@ def build_preprocessed_store(
     def write(staging: Path) -> MaterializedStore:
         measurements = pd.read_parquet(parsed_dir / "measurements.parquet")
         subjects = pd.read_parquet(parsed_dir / "subjects.parquet")
-        arrays, qc, areas = _process_measurements(parsed_dir, measurements, config, progress_callback)
+        arrays, qc, areas = _process_measurements(
+            parsed_dir, measurements, config, progress_callback, n_jobs=n_jobs
+        )
         for key, values in arrays.items():
             _write_npy(staging / f"{key}.npy", values)
         measurements.to_parquet(staging / "measurements.parquet", index=False)
@@ -531,9 +695,12 @@ def prepare_data_stores(
     *,
     force: bool = False,
     progress_callback: ProgressCallback | None = None,
+    n_jobs: int | None = None,
 ) -> tuple[MaterializedStore, MaterializedStore]:
     """Build the complete, analysis-ready store pair from raw data."""
     config = _cfg(cfg)
     parsed = build_parsed_store(config, force=force, progress_callback=progress_callback)
-    preprocessed = build_preprocessed_store(config, force=force, progress_callback=progress_callback)
+    preprocessed = build_preprocessed_store(
+        config, force=force, progress_callback=progress_callback, n_jobs=n_jobs
+    )
     return parsed, preprocessed

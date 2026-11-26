@@ -132,6 +132,8 @@ def run_primary_evaluation(
     use_gpu: bool | None = None,
     batch_size: int | None = None,
     interval_method: IntervalMethod | None = None,
+    n_jobs: int | None = None,
+    state_out: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     """Run the primary held-out LDL-C nested cross-validation and repeatability analysis."""
     target_dir = ensure_output_dir(output_dir)
@@ -227,6 +229,7 @@ def run_primary_evaluation(
             interval_method=eff_interval_method,
             use_gpu=use_gpu,
             batch_size=batch_size,
+            n_jobs=n_jobs,
         )
         draws_path = _write_npz_atomic(
             target_dir / "bootstrap_draws.npz",
@@ -337,6 +340,32 @@ def run_primary_evaluation(
         source_meta=source_meta,
     )
 
+    if state_out is not None:
+        state_out.clear()
+        state_out.update(
+            {
+                "cfg": cfg,
+                "dataset": dataset,
+                "source_meta": source_meta,
+                "eval_res": eval_res,
+                "endpoint": cfg.primary_endpoint,
+                "outer_seed": int(eval_res["outer_seed"]),
+                "single_sample_downstream": False,
+                "allow_missing_outcome": False,
+            }
+        )
+        if n_bootstraps > 0:
+            state_out.update(
+                {
+                    "boot_res": boot_res,
+                    "n_bootstraps": n_bootstraps,
+                    "bootstrap_seed": bootstrap_seed,
+                    "interval_method": eff_interval_method,
+                    "use_gpu": use_gpu,
+                    "batch_size": batch_size,
+                }
+            )
+
     return {
         "run_provenance_primary_evaluation": prov_path,
         "eligibility_and_split_manifest": manifest_path,
@@ -361,6 +390,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Bootstrap interval estimator ('studentized_t' or 'percentile'); defaults to config.",
     )
     parser.add_argument("--batch-size", type=int, default=None, help="Optional batched bootstrap chunk size.")
+    parser.add_argument("--n-jobs", type=int, default=None, help="Optional worker count for CPU bootstrap draws.")
     gpu_group = parser.add_mutually_exclusive_group()
     gpu_group.add_argument("--use-gpu", dest="use_gpu", action="store_true", default=None, help="Force GPU execution.")
     gpu_group.add_argument("--no-gpu", dest="use_gpu", action="store_false", help="Force CPU execution.")
@@ -380,6 +410,7 @@ def main(argv: list[str] | None = None) -> None:
         use_gpu=args.use_gpu,
         batch_size=args.batch_size,
         interval_method=args.interval_method,
+        n_jobs=args.n_jobs,
     )
     print_stage_outputs("run_primary_evaluation", outputs)
 

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics import adjusted_rand_score
 from sklearn.preprocessing import StandardScaler
@@ -20,6 +23,7 @@ from src.analysis.clinical_feature_associations import (
 )
 from src.analysis.discriminant_spectra import run_subgroup_mean_spectra
 from src.analysis.io_utils import write_csv_atomic
+from src.analysis.paired_lipid._backend import _single_thread_blas
 from src.analysis.phase_status import (
     EVIDENCE_EXPLORATORY_SIGNAL,
     EVIDENCE_NO_SUPPORTED_SIGNAL,
@@ -146,7 +150,36 @@ def _prepare_feature_matrix(features: pd.DataFrame) -> tuple[pd.DataFrame, np.nd
     return numeric, X
 
 
+def _resolve_parallel_workers(n_tasks: int, n_jobs: int | None) -> int:
+    if n_tasks <= 1 or n_jobs == 0 or n_jobs == 1:
+        return 1
+    if os.environ.get("_PAIRED_LIPID_IN_BOOTSTRAP_WORKER") == "1":
+        return 1
+    if multiprocessing.parent_process() is not None:
+        return 1
+    try:
+        import joblib.parallel
+
+        active_backend, _ = joblib.parallel.get_active_backend()
+        if getattr(active_backend, "nesting_level", 0) > 0:
+            return 1
+    except Exception:
+        pass
+    cpu_cnt = os.cpu_count() or 1
+    if n_jobs is None or int(n_jobs) == -1:
+        raw = cpu_cnt
+    elif int(n_jobs) < -1:
+        raw = max(1, cpu_cnt + 1 + int(n_jobs))
+    else:
+        raw = int(n_jobs)
+    if raw <= 1:
+        return 1
+    return min(raw, n_tasks)
+
+
 def _cluster_labels(X: np.ndarray, n_clusters: int) -> np.ndarray:
+    if n_clusters <= 1:
+        return np.zeros(X.shape[0], dtype=int)
     model = AgglomerativeClustering(n_clusters=n_clusters, linkage="ward")
     return model.fit_predict(X)
 
@@ -162,26 +195,79 @@ def _within_cluster_dispersion(X: np.ndarray, labels: np.ndarray) -> float:
     return max(dispersion, np.finfo(float).tiny)
 
 
+def _gap_reference_chunk(tasks: list[tuple[int, np.ndarray]]) -> list[float]:
+    with _single_thread_blas():
+        out: list[float] = []
+        for k, reference in tasks:
+            reference_labels = _cluster_labels(reference, k)
+            out.append(float(np.log(_within_cluster_dispersion(reference, reference_labels))))
+        return out
+
+
 def _gap_statistic(
     X: np.ndarray,
     *,
     k_values: list[int],
     n_bootstrap: int,
     random_state: int,
+    n_jobs: int | None = None,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(random_state)
     mins = X.min(axis=0)
     maxs = X.max(axis=0)
-    rows: list[dict[str, object]] = []
+    tiny = np.finfo(float).tiny
+
+    observed_by_k: dict[int, float] = {}
+    logs_by_k: dict[int, list[float]] = {}
+    gt1_tasks: list[tuple[int, np.ndarray]] = []
+    gt1_k_slices: list[tuple[int, int, int]] = []
+
     for k in k_values:
         labels = _cluster_labels(X, k)
-        observed = _within_cluster_dispersion(X, labels)
-        reference_logs: list[float] = []
-        for _ in range(n_bootstrap):
-            reference = rng.uniform(mins, maxs, size=X.shape)
-            reference_labels = _cluster_labels(reference, k)
-            reference_logs.append(float(np.log(_within_cluster_dispersion(reference, reference_labels))))
-        reference_arr = np.array(reference_logs, dtype=float)
+        observed_by_k[k] = _within_cluster_dispersion(X, labels)
+        if k <= 1:
+            k1_logs: list[float] = []
+            for _ in range(n_bootstrap):
+                reference = rng.uniform(mins, maxs, size=X.shape)
+                disp = max(float(np.sum((reference - reference.mean(axis=0)) ** 2)), tiny)
+                k1_logs.append(float(np.log(disp)))
+            logs_by_k[k] = k1_logs
+        else:
+            start_idx = len(gt1_tasks)
+            for _ in range(n_bootstrap):
+                gt1_tasks.append((k, rng.uniform(mins, maxs, size=X.shape)))
+            gt1_k_slices.append((k, start_idx, len(gt1_tasks)))
+
+    if gt1_tasks:
+        n_tasks = len(gt1_tasks)
+        auto_mode = n_jobs is None or int(n_jobs) < 0
+        if auto_mode and (n_tasks < 64 or n_tasks * (X.shape[0] ** 2) < 500_000):
+            workers = 1
+        else:
+            workers = _resolve_parallel_workers(n_tasks, n_jobs)
+
+        if workers > 1:
+            chunks = [gt1_tasks[i::workers] for i in range(workers)]
+            chunk_outputs = Parallel(n_jobs=workers)(
+                delayed(_gap_reference_chunk)(chunk) for chunk in chunks if chunk
+            )
+            flat_logs = [0.0] * n_tasks
+            for w_idx, part in enumerate(chunk_outputs):
+                for local_idx, val in enumerate(part):
+                    flat_logs[w_idx + local_idx * workers] = val
+        else:
+            flat_logs = _gap_reference_chunk(gt1_tasks)
+
+        for k, start_idx, stop_idx in gt1_k_slices:
+            logs_by_k[k] = flat_logs[start_idx:stop_idx]
+    else:
+        for k, _, _ in gt1_k_slices:
+            logs_by_k[k] = []
+
+    rows: list[dict[str, object]] = []
+    for k in k_values:
+        observed = observed_by_k[k]
+        reference_arr = np.array(logs_by_k[k], dtype=float)
         rows.append(
             {
                 "n_clusters": k,
@@ -217,6 +303,20 @@ def _select_gap_k(gap: pd.DataFrame) -> int:
     return 1
 
 
+def _ari_bootstrap_chunk(
+    X: np.ndarray,
+    baseline_labels: np.ndarray,
+    idx_list: list[np.ndarray],
+    n_clusters: int,
+) -> list[float]:
+    with _single_thread_blas():
+        out: list[float] = []
+        for unique_idx in idx_list:
+            labels = _cluster_labels(X[unique_idx], n_clusters)
+            out.append(float(adjusted_rand_score(baseline_labels[unique_idx], labels)))
+        return out
+
+
 def _bootstrap_ari(
     X: np.ndarray,
     baseline_labels: np.ndarray,
@@ -224,17 +324,42 @@ def _bootstrap_ari(
     n_clusters: int,
     n_bootstrap: int,
     random_state: int,
+    n_jobs: int | None = None,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(random_state)
-    scores: list[float] = []
     n_samples = X.shape[0]
+    min_unique = max(n_clusters, 3)
+    valid_indices: list[np.ndarray] = []
     for _ in range(n_bootstrap):
         sampled = rng.integers(0, n_samples, size=n_samples)
         unique_idx = np.unique(sampled)
-        if len(unique_idx) < max(n_clusters, 3):
+        if len(unique_idx) < min_unique:
             continue
-        labels = _cluster_labels(X[unique_idx], n_clusters)
-        scores.append(float(adjusted_rand_score(baseline_labels[unique_idx], labels)))
+        valid_indices.append(unique_idx)
+
+    n_tasks = len(valid_indices)
+    if n_tasks == 0:
+        scores: list[float] = []
+    else:
+        auto_mode = n_jobs is None or int(n_jobs) < 0
+        if auto_mode and (n_tasks < 64 or n_tasks * (n_samples ** 2) < 500_000):
+            workers = 1
+        else:
+            workers = _resolve_parallel_workers(n_tasks, n_jobs)
+
+        if workers > 1:
+            chunks = [valid_indices[i::workers] for i in range(workers)]
+            chunk_outputs = Parallel(n_jobs=workers)(
+                delayed(_ari_bootstrap_chunk)(X, baseline_labels, chunk, n_clusters)
+                for chunk in chunks
+                if chunk
+            )
+            scores = [0.0] * n_tasks
+            for w_idx, part in enumerate(chunk_outputs):
+                for local_idx, val in enumerate(part):
+                    scores[w_idx + local_idx * workers] = val
+        else:
+            scores = _ari_bootstrap_chunk(X, baseline_labels, valid_indices, n_clusters)
 
     score_arr = np.array(scores, dtype=float)
     return pd.DataFrame(
@@ -304,6 +429,7 @@ def run_disease_subgroups(
     max_clusters = int(subgroup_cfg.get("max_clusters", 4))
     n_bootstrap = int(subgroup_cfg.get("n_bootstrap", 100))
     random_state = int(subgroup_cfg.get("random_state", 42))
+    n_jobs = subgroup_cfg.get("n_jobs", None)
     k_values = [
         k
         for k in range(1, max_clusters + 1)
@@ -321,6 +447,7 @@ def run_disease_subgroups(
         k_values=k_values,
         n_bootstrap=n_bootstrap,
         random_state=random_state,
+        n_jobs=n_jobs,
     )
     selected_k = _select_gap_k(gap)
     gap_path = target_dir / "disease_subgroup_gap_statistic.csv"
@@ -355,6 +482,7 @@ def run_disease_subgroups(
         n_clusters=selected_k,
         n_bootstrap=n_bootstrap,
         random_state=random_state + 1,
+        n_jobs=n_jobs,
     )
 
     assignments = pd.DataFrame(

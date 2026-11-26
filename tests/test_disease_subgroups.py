@@ -199,3 +199,82 @@ def test_select_gap_k_returns_interior_k_when_gap_turns_over() -> None:
         }
     )
     assert _select_gap_k(gap) == 2
+
+
+def test_cluster_labels_k1_fast_path() -> None:
+    import numpy as np
+    from sklearn.cluster import AgglomerativeClustering
+
+    from src.analysis.disease_subgroups import _cluster_labels
+
+    X = np.random.default_rng(1).normal(size=(18, 6))
+    got = _cluster_labels(X, 1)
+    ref = AgglomerativeClustering(n_clusters=1, linkage="ward").fit_predict(X)
+    np.testing.assert_array_equal(got, ref)
+
+
+def test_gap_statistic_and_bootstrap_ari_serial_equals_parallel() -> None:
+    import numpy as np
+
+    from src.analysis.disease_subgroups import (
+        _bootstrap_ari,
+        _cluster_labels,
+        _gap_statistic,
+    )
+
+    X = np.random.default_rng(10).normal(size=(24, 8))
+    gap_s = _gap_statistic(X, k_values=[1, 2, 3], n_bootstrap=12, random_state=42, n_jobs=1)
+    gap_p = _gap_statistic(X, k_values=[1, 2, 3], n_bootstrap=12, random_state=42, n_jobs=2)
+    np.testing.assert_allclose(gap_p["gap"], gap_s["gap"], atol=1e-14)
+    np.testing.assert_allclose(
+        gap_p["reference_log_dispersion_se"], gap_s["reference_log_dispersion_se"], atol=1e-14
+    )
+
+    labels = _cluster_labels(X, 2)
+    ari_s = _bootstrap_ari(X, labels, n_clusters=2, n_bootstrap=12, random_state=43, n_jobs=1)
+    ari_p = _bootstrap_ari(X, labels, n_clusters=2, n_bootstrap=12, random_state=43, n_jobs=2)
+    np.testing.assert_allclose(ari_p["mean_bootstrap_ari"], ari_s["mean_bootstrap_ari"], atol=1e-14)
+    np.testing.assert_allclose(ari_p["sd_bootstrap_ari"], ari_s["sd_bootstrap_ari"], atol=1e-14)
+
+
+def test_disease_subgroups_nested_pool_guard() -> None:
+    import numpy as np
+    from joblib import Parallel, delayed
+
+    from src.analysis.disease_subgroups import (
+        _bootstrap_ari,
+        _cluster_labels,
+        _gap_statistic,
+    )
+
+    X = np.random.default_rng(20).normal(size=(20, 6))
+    gap_s = _gap_statistic(X, k_values=[1, 2], n_bootstrap=8, random_state=5, n_jobs=1)
+    labels = _cluster_labels(X, 2)
+    ari_s = _bootstrap_ari(X, labels, n_clusters=2, n_bootstrap=8, random_state=6, n_jobs=1)
+
+    nested_gap = Parallel(n_jobs=2)(
+        delayed(_gap_statistic)(X, k_values=[1, 2], n_bootstrap=8, random_state=5, n_jobs=2)
+        for _ in range(2)
+    )
+    nested_ari = Parallel(n_jobs=2)(
+        delayed(_bootstrap_ari)(X, labels, n_clusters=2, n_bootstrap=8, random_state=6, n_jobs=2)
+        for _ in range(2)
+    )
+    np.testing.assert_allclose(nested_gap[0]["gap"], gap_s["gap"], atol=1e-14)
+    np.testing.assert_allclose(nested_ari[0]["mean_bootstrap_ari"], ari_s["mean_bootstrap_ari"], atol=1e-14)
+
+
+def test_gap_statistic_zero_bootstrap_handles_gt1_clusters() -> None:
+    import numpy as np
+
+    from src.analysis.disease_subgroups import _gap_statistic
+
+    X = np.random.default_rng(31).normal(size=(16, 4))
+    gap = _gap_statistic(X, k_values=[1, 2], n_bootstrap=0, random_state=1, n_jobs=1)
+    assert list(gap["n_clusters"]) == [1, 2]
+    assert list(gap["n_bootstrap"]) == [0, 0]
+    assert np.all(np.isfinite(gap["observed_log_dispersion"]))
+    assert np.all(np.isnan(gap["reference_log_dispersion_mean"]))
+    assert np.all(np.isnan(gap["gap"]))
+    np.testing.assert_array_equal(gap["reference_log_dispersion_sd"].to_numpy(), np.zeros(2))
+    np.testing.assert_array_equal(gap["reference_log_dispersion_se"].to_numpy(), np.zeros(2))

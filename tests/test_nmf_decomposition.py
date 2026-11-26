@@ -136,3 +136,36 @@ def test_annotate_component_empty_loadings():
     loadings = np.array([0.0, 0.0])
     label = _annotate_component(loadings, wavenumbers)
     assert isinstance(label, str)
+
+
+def test_fit_nmf_multi_init_serial_equals_parallel():
+    X = _make_synthetic_spectra(n_subjects=24, n_channels=60, n_components=3, random_state=9)
+    serial = _fit_nmf_multi_init(
+        X, n_components=3, alpha_w=0.1, alpha_h=0.0, n_init=6, random_state=42, n_jobs=1
+    )
+    parallel = _fit_nmf_multi_init(
+        X, n_components=3, alpha_w=0.1, alpha_h=0.0, n_init=6, random_state=42, n_jobs=2
+    )
+    np.testing.assert_allclose(parallel.best_error, serial.best_error, atol=1e-14)
+    np.testing.assert_allclose(parallel.reconstruction_error_std, serial.reconstruction_error_std, atol=1e-14)
+    np.testing.assert_allclose(parallel.W, serial.W, atol=1e-14)
+    np.testing.assert_allclose(parallel.H, serial.H, atol=1e-14)
+    np.testing.assert_allclose(parallel.component_stability, serial.component_stability, atol=1e-14)
+    assert parallel.n_successful_initializations == serial.n_successful_initializations
+
+
+def test_fit_nmf_multi_init_nested_pool_guard():
+    from joblib import Parallel, delayed
+
+    X = _make_synthetic_spectra(n_subjects=20, n_channels=40, n_components=2, random_state=5)
+    serial = _fit_nmf_multi_init(
+        X, n_components=2, alpha_w=0.05, alpha_h=0.0, n_init=4, random_state=11, n_jobs=1
+    )
+    nested = Parallel(n_jobs=2)(
+        delayed(_fit_nmf_multi_init)(
+            X, n_components=2, alpha_w=0.05, alpha_h=0.0, n_init=4, random_state=11, n_jobs=2
+        )
+        for _ in range(2)
+    )
+    np.testing.assert_allclose(nested[0].best_error, serial.best_error, atol=1e-14)
+    np.testing.assert_allclose(nested[0].H, serial.H, atol=1e-14)

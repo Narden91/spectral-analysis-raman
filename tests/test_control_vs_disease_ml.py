@@ -2,24 +2,32 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import time
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.inspection import permutation_importance
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score
 from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import StandardScaler
 
 from src.analysis.control_vs_disease_ml import (
     _append_null_distribution_rows,
     _classification_metrics,
     _cohort_summary,
+    _cv_predict,
     _fit_tuned_model,
     _fixed_plan_balanced_accuracy,
+    _inner_cv_folds,
     _labels,
     _load_cohort,
     _locked_joint_stratified_split_plan,
@@ -28,10 +36,15 @@ from src.analysis.control_vs_disease_ml import (
     _permuted_score,
     _repeat_zero_balanced_accuracy,
     _representation_matrix,
+    _resolve_parallel_workers,
+    _rf_permutation_importance,
     _run_repeated_nested_cv,
+    _run_repeated_nested_cv_with_importance,
+    _scale_outer_folds,
     _sex_only_baseline,
     _sex_stratified_refit,
     _stream_parallel,
+    _stream_parallel_chunked,
     _tune_threshold,
     _tune_threshold_and_score,
     run_bootstrap_ci,
@@ -1379,3 +1392,344 @@ def test_resume_rejects_changed_checkpoint_identity(tmp_path, base_ml_cfg):
     with pytest.raises(ValueError, match="No ML resume checkpoint matches"):
         _CheckpointStore.create(**kwargs, resume=True)
     assert list(original.directory.parent.iterdir()) == [original.directory]
+
+
+# ---------------------------------------------------------------------------
+# Optimization parity & concurrency safeguards (Target #10)
+# ---------------------------------------------------------------------------
+
+
+def _reference_pls_da_fit(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    component_grid: list[int],
+    n_inner_splits: int,
+    random_state: int,
+) -> tuple[int, float, np.ndarray]:
+    """Explicit un-shared multi-fit PLS-DA reference matching legacy loop."""
+    folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state)
+    best_n_comp, best_threshold, best_score = component_grid[0], 0.5, -np.inf
+    if folds is not None:
+        max_valid = min(min(len(tr_idx) for tr_idx, _ in folds), X_train.shape[1])
+        valid_grid = [c for c in component_grid if 1 <= c <= max_valid] or [1]
+        for n_comp in valid_grid:
+            oof = np.zeros(len(y_train), dtype=float)
+            for tr_idx, te_idx in folds:
+                sc = StandardScaler()
+                pls = PLSRegression(n_components=n_comp, scale=False)
+                pls.fit(sc.fit_transform(X_train[tr_idx]), y_train[tr_idx])
+                oof[te_idx] = pls.predict(sc.transform(X_train[te_idx])).ravel()
+            threshold, score = _tune_threshold_and_score(y_train, oof, "balanced_accuracy")
+            if score > best_score:
+                best_score, best_n_comp, best_threshold = score, n_comp, threshold
+    final_n = max(1, min(best_n_comp, min(X_train.shape[0] - 2, X_train.shape[1])))
+    scaler = StandardScaler()
+    model = PLSRegression(n_components=final_n, scale=False)
+    model.fit(scaler.fit_transform(X_train), y_train)
+    return final_n, best_threshold, model.predict(scaler.transform(X_train)).ravel()
+
+
+@pytest.mark.parametrize(
+    "grid",
+    [
+        [1, 2, 3, 4, 6, 8],
+        [8, 2, 6, 1],
+        [2, 2, 5, 100],
+    ],
+)
+def test_pls_da_single_fit_prefix_matches_reference_loop(grid: list[int]) -> None:
+    rng = np.random.default_rng(101)
+    X = rng.normal(size=(48, 20))
+    y = np.tile([0, 1], 24)
+    X[:, :4] += 0.9 * y[:, None]
+
+    fit = _fit_tuned_model(
+        "pls_da",
+        X,
+        y,
+        ml_cfg={"pls_components_grid": grid},
+        n_inner_splits=3,
+        threshold_metric="balanced_accuracy",
+        random_state=42,
+        n_jobs=1,
+    )
+    ref_n, ref_thresh, ref_scores = _reference_pls_da_fit(X, y, grid, 3, 42)
+    assert fit.estimator.n_components == ref_n
+    assert fit.threshold == pytest.approx(ref_thresh, abs=1e-13)
+    np.testing.assert_allclose(fit.predict_proba(X), ref_scores, atol=1e-13, rtol=1e-13)
+
+
+def test_pls_da_single_fit_prefix_matches_on_rank_deficient_input() -> None:
+    rng = np.random.default_rng(102)
+    X = rng.normal(size=(36, 16))
+    X[:, 2:] = X[:, :2] @ rng.normal(size=(2, 14))
+    y = np.tile([0, 1], 18)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fit = _fit_tuned_model(
+            "pls_da",
+            X,
+            y,
+            ml_cfg={"pls_components_grid": [1, 2, 3, 5, 8]},
+            n_inner_splits=3,
+            threshold_metric="balanced_accuracy",
+            random_state=42,
+            n_jobs=1,
+        )
+        ref_n, ref_thresh, ref_scores = _reference_pls_da_fit(X, y, [1, 2, 3, 5, 8], 3, 42)
+    assert fit.estimator.n_components == ref_n
+    assert fit.threshold == pytest.approx(ref_thresh, abs=1e-12)
+    np.testing.assert_allclose(fit.predict_proba(X), ref_scores, atol=1e-12, rtol=1e-12)
+
+
+@pytest.mark.parametrize("n_jobs", [2, -1])
+def test_random_forest_flattened_parallelism_matches_serial_cv_predict_and_repeated(n_jobs: int) -> None:
+    rng = np.random.default_rng(103)
+    X = rng.normal(size=(48, 24))
+    y = np.tile([0, 1], 24)
+    X[:, :4] += 1.1 * y[:, None]
+    ml_cfg = {
+        "n_outer_splits": 4,
+        "n_outer_repeats": 2,
+        "n_inner_splits": 3,
+        "threshold_metric": "balanced_accuracy",
+        "random_state": 42,
+        "rf_n_estimators_grid": [20, 40],
+        "rf_max_depth_grid": [None, 3, 6],
+    }
+    outer_cv = list(StratifiedKFold(n_splits=4, shuffle=True, random_state=42).split(X, y))
+
+    p_serial, s_serial = _cv_predict(
+        "random_forest",
+        X,
+        y,
+        outer_cv,
+        ml_cfg=ml_cfg,
+        n_inner_splits=3,
+        threshold_metric="balanced_accuracy",
+        random_state=42,
+        n_jobs=1,
+    )
+    p_parallel, s_parallel = _cv_predict(
+        "random_forest",
+        X,
+        y,
+        outer_cv,
+        ml_cfg=ml_cfg,
+        n_inner_splits=3,
+        threshold_metric="balanced_accuracy",
+        random_state=42,
+        n_jobs=n_jobs,
+    )
+    np.testing.assert_array_equal(p_serial, p_parallel)
+    np.testing.assert_allclose(s_serial, s_parallel, atol=1e-12)
+
+    oof_serial = _run_repeated_nested_cv("random_forest", X, y, ml_cfg=ml_cfg, n_jobs=1)
+    oof_parallel = _run_repeated_nested_cv("random_forest", X, y, ml_cfg=ml_cfg, n_jobs=n_jobs)
+    pd.testing.assert_frame_equal(oof_serial, oof_parallel)
+
+
+@pytest.mark.parametrize("model_name", ["pls_da", "l1_logistic", "random_forest"])
+@pytest.mark.parametrize("n_jobs", [1, 2])
+def test_single_pass_observed_phase_matches_separate_cv_and_importance(
+    model_name: str, n_jobs: int, base_ml_cfg: dict
+) -> None:
+    frame = _make_feature_matrix(n_control=15, n_disease=18, signal_strength=1.2, random_state=104)
+    X, feature_names = _representation_matrix(frame, "whole", base_ml_cfg["whole_spectra"])
+    y = _labels(frame)
+    ml_cfg = dict(base_ml_cfg["analysis"]["control_vs_disease_ml"])
+    ml_cfg["rf_n_estimators_grid"] = [25]
+    ml_cfg["importance_permutation_repeats"] = 3
+    outer_split_plan = [
+        list(StratifiedKFold(n_splits=ml_cfg["n_outer_splits"], shuffle=True, random_state=42 + r).split(X, y))
+        for r in range(ml_cfg["n_outer_repeats"])
+    ]
+
+    ref_oof = _run_repeated_nested_cv(model_name, X, y, ml_cfg=ml_cfg, n_jobs=1, outer_split_plan=outer_split_plan)
+    ref_long, ref_summary = _outer_fold_feature_importance(
+        model_name, X, y, feature_names, ml_cfg=ml_cfg, n_jobs=1, outer_split_plan=outer_split_plan
+    )
+
+    single_oof, single_long, single_summary = _run_repeated_nested_cv_with_importance(
+        model_name, X, y, feature_names, ml_cfg=ml_cfg, n_jobs=n_jobs, outer_split_plan=outer_split_plan
+    )
+    pd.testing.assert_frame_equal(ref_oof, single_oof)
+    pd.testing.assert_frame_equal(ref_long, single_long)
+    pd.testing.assert_frame_equal(ref_summary, single_summary)
+
+
+def test_rf_permutation_importance_matches_sklearn_exactly() -> None:
+    rng = np.random.default_rng(105)
+    X = rng.normal(size=(80, 35))
+    y = np.tile([0, 1], 40)
+    X[:, :5] += 1.0 * y[:, None]
+    rf = RandomForestClassifier(
+        n_estimators=60, max_depth=4, class_weight="balanced_subsample", random_state=42, n_jobs=1
+    ).fit(X[:60], y[:60])
+
+    ref = permutation_importance(
+        rf, X[60:], y[60:], n_repeats=5, random_state=143, n_jobs=1, scoring="balanced_accuracy"
+    )
+    fast_mean, fast_std = _rf_permutation_importance(
+        rf, X[60:], y[60:], n_repeats=5, random_state=143, n_jobs=1
+    )
+    np.testing.assert_allclose(fast_mean, ref.importances_mean, atol=1e-13, rtol=0.0)
+    np.testing.assert_allclose(fast_std, ref.importances_std, atol=1e-13, rtol=0.0)
+
+
+@pytest.mark.parametrize("model_name", ["pls_da", "l1_logistic"])
+@pytest.mark.parametrize("n_jobs", [1, 2])
+def test_permutation_test_cached_outer_scalers_match_uncached_reference(
+    model_name: str, n_jobs: int
+) -> None:
+    rng = np.random.default_rng(106)
+    X = rng.normal(size=(40, 14))
+    y = np.tile([0, 1], 20)
+    strata = np.array(["female" if i % 2 == 0 else "male" for i in range(40)], dtype=object)
+    X[:, :3] += 1.0 * y[:, None]
+    ml_cfg = {
+        "n_outer_splits": 4,
+        "n_outer_repeats": 2,
+        "n_inner_splits": 3,
+        "n_permutations": 6,
+        "permutation_min": 6,
+        "permutation_check_interval": 2,
+        "threshold_metric": "balanced_accuracy",
+        "random_state": 42,
+        "pls_components_grid": [1, 2, 4, 6],
+        "logistic_c_grid": [0.1, 1.0],
+    }
+    plan = _locked_joint_stratified_split_plan(y, strata, n_outer_splits=4, n_outer_repeats=2, random_state=42)
+    outer_scaled_before = _scale_outer_folds(X, plan[0])
+    outer_scaled_snapshot = [(tr.copy(), te.copy()) for tr, te in outer_scaled_before]
+
+    p_fast, dist_fast = run_permutation_test(
+        model_name,
+        X,
+        y,
+        observed_balanced_accuracy=0.80,
+        strata=strata,
+        ml_cfg=ml_cfg,
+        n_jobs=n_jobs,
+        random_state=77,
+        outer_split_plan=plan,
+    )
+
+    # Uncached reference path using fresh StandardScaler per outer and inner fold.
+    seeds = np.random.default_rng(77).integers(0, np.iinfo(np.int32).max, size=6, dtype=np.int64)
+    ref_dist = np.empty(6, dtype=float)
+    for idx_s, sd in enumerate(seeds):
+        r_rng = np.random.default_rng(int(sd))
+        y_perm = _permute_labels(y, r_rng, strata)
+        yp = np.zeros_like(y_perm)
+        for tr_idx, te_idx in plan[0]:
+            X_tr, y_tr = X[tr_idx], y_perm[tr_idx]
+            X_te = X[te_idx]
+            in_folds = _inner_cv_folds(X_tr, y_tr, 3, 42)
+            assert in_folds is not None
+            best_score = -np.inf
+            best_thresh = 0.5
+            best_param: float | int = 1 if model_name == "pls_da" else 0.1
+            if model_name == "pls_da":
+                for nc in [1, 2, 4, 6]:
+                    oof = np.zeros(len(y_tr), dtype=float)
+                    for it, iv in in_folds:
+                        sc = StandardScaler()
+                        pls = PLSRegression(n_components=nc, scale=False)
+                        pls.fit(sc.fit_transform(X_tr[it]), y_tr[it])
+                        oof[iv] = pls.predict(sc.transform(X_tr[iv])).ravel()
+                    th, ba = _tune_threshold_and_score(y_tr, oof, "balanced_accuracy")
+                    if ba > best_score:
+                        best_score, best_param, best_thresh = ba, nc, th
+                f_sc = StandardScaler()
+                f_m = PLSRegression(n_components=int(best_param), scale=False)
+                f_m.fit(f_sc.fit_transform(X_tr), y_tr)
+                scores = f_m.predict(f_sc.transform(X_te)).ravel()
+            else:
+                for c_val in [0.1, 1.0]:
+                    oof = np.zeros(len(y_tr), dtype=float)
+                    for it, iv in in_folds:
+                        sc = StandardScaler()
+                        lr = LogisticRegression(
+                            solver="liblinear", l1_ratio=1.0, dual=False, C=c_val,
+                            class_weight="balanced", random_state=42, max_iter=10_000, tol=1e-4,
+                        )
+                        lr.fit(sc.fit_transform(X_tr[it]), y_tr[it])
+                        oof[iv] = lr.predict_proba(sc.transform(X_tr[iv]))[:, 1]
+                    th, ba = _tune_threshold_and_score(y_tr, oof, "balanced_accuracy")
+                    if ba > best_score:
+                        best_score, best_param, best_thresh = ba, c_val, th
+                f_sc = StandardScaler()
+                f_m = LogisticRegression(
+                    solver="liblinear", l1_ratio=1.0, dual=False, C=float(best_param),
+                    class_weight="balanced", random_state=42, max_iter=10_000, tol=1e-4,
+                )
+                f_m.fit(f_sc.fit_transform(X_tr), y_tr)
+                scores = f_m.predict_proba(f_sc.transform(X_te))[:, 1]
+            yp[te_idx] = (scores >= best_thresh).astype(int)
+        ref_dist[idx_s] = balanced_accuracy_score(y_perm, yp)
+
+    ref_p = float((1 + np.sum(ref_dist >= 0.80)) / (len(ref_dist) + 1))
+    assert p_fast == pytest.approx(ref_p, abs=1e-12)
+    np.testing.assert_allclose(dist_fast, ref_dist, atol=1e-12)
+    for (tr_a, te_a), (tr_b, te_b) in zip(outer_scaled_before, outer_scaled_snapshot, strict=True):
+        np.testing.assert_array_equal(tr_a, tr_b)
+        np.testing.assert_array_equal(te_a, te_b)
+
+
+def _worker_blas_threads() -> list[int]:
+    import scipy.linalg  # noqa: F401
+    from threadpoolctl import threadpool_info
+
+    return [int(info["num_threads"]) for info in threadpool_info() if info.get("user_api") == "blas"]
+
+
+def test_resolve_parallel_workers_respects_nested_pool_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _resolve_parallel_workers(1, -1) == 1
+    assert _resolve_parallel_workers(8, 1) == 1
+    assert _resolve_parallel_workers(8, 0) == 1
+
+    monkeypatch.setenv("_PAIRED_LIPID_IN_BOOTSTRAP_WORKER", "1")
+    assert _resolve_parallel_workers(8, -1) == 1
+    monkeypatch.delenv("_PAIRED_LIPID_IN_BOOTSTRAP_WORKER", raising=False)
+
+    monkeypatch.setattr(multiprocessing, "parent_process", lambda: object())
+    assert _resolve_parallel_workers(8, -1) == 1
+    monkeypatch.undo()
+
+    import joblib.parallel
+
+    monkeypatch.setattr(
+        joblib.parallel,
+        "get_active_backend",
+        lambda: (SimpleNamespace(nesting_level=1), 1),
+    )
+    assert _resolve_parallel_workers(8, -1) == 1
+
+
+def test_loky_workers_enforce_single_thread_blas() -> None:
+    observed_stream: list[list[int]] = []
+    _stream_parallel(
+        2,
+        _worker_blas_threads,
+        [(0, ()), (1, ())],
+        lambda _seed, threads: observed_stream.append(threads),
+    )
+    assert len(observed_stream) == 2
+    for pool_threads in observed_stream:
+        assert pool_threads and all(count == 1 for count in pool_threads)
+
+    observed_chunked: list[list[int]] = []
+    _stream_parallel_chunked(
+        2,
+        _worker_blas_threads,
+        [(0, ()), (1, ()), (2, ()), (3, ())],
+        lambda _seed, threads: observed_chunked.append(threads),
+        chunk_size=2,
+        should_continue=lambda: True,
+    )
+    assert len(observed_chunked) == 4
+    for pool_threads in observed_chunked:
+        assert pool_threads and all(count == 1 for count in pool_threads)
+

@@ -277,7 +277,13 @@ def _prep_mfa_pca_batch(
             gram *= sqrt_w[:, None, :]
 
         eigvals_top, eigvecs_top = _top_k_eigh(
-            xp, gram, max_k, sqrt_w, dconst.get("Q0_comb"), is_symmetric=True
+            xp,
+            gram,
+            max_k,
+            sqrt_w,
+            dconst.get("Q0_comb"),
+            is_symmetric=True,
+            q0_comb_ratio=dconst.get("Q0_comb_ratio"),
         )
         s_kept = xp.sqrt(eigvals_top)
         s0 = xp.maximum(s_kept[:, 0], 1.0)
@@ -393,12 +399,14 @@ def _prep_schur_sufficient_stats(
     y_val: Any,
     w_tr: Any,
     w_val: Any,
-    part_pca_max: Any,
+    part_pca_max: Any | None,
     tr_p: np.ndarray,
     val_p: np.ndarray,
     alphas_xp: Any,
     *,
     compute_pca_suff: bool,
+    pca_tr: Any | None = None,
+    pca_val: Any | None = None,
 ) -> dict[str, Any]:
     """Compute covariate-only ridge predictions and Schur complement stats for max_k PCA."""
     y_mean = xp.sum(w_tr * y_tr[None, :], axis=1)
@@ -434,8 +442,10 @@ def _prep_schur_sufficient_stats(
         r_val_0 = y_val[None, :, None] - preds_cov
         sse_0 = xp.sum(w_val[:, :, None] * (r_val_0 * r_val_0), axis=1)
 
-        pca_tr = part_pca_max[:, tr_p, :]
-        pca_val = part_pca_max[:, val_p, :]
+        if pca_tr is None or pca_val is None:
+            assert part_pca_max is not None
+            pca_tr = part_pca_max[:, tr_p, :]
+            pca_val = part_pca_max[:, val_p, :]
         p_mean = (w_tr[:, None, :] @ pca_tr)[:, 0, :]
         Pc_tr = pca_tr - p_mean[:, None, :]
         Pc_val = pca_val - p_mean[:, None, :]
@@ -481,6 +491,7 @@ def batched_division_prep(
     compute_pca_suff: bool = True,
     compute_cov_preds: bool = False,
     compute_full_rank: bool = False,
+    spec_traj_slice: Any | None = None,
 ) -> dict[str, Any]:
     """Compute batched MFA-PCA coordinates, paired moments, and max_k Schur sufficient statistics."""
     tr_p = dconst["tr_p"]
@@ -493,6 +504,59 @@ def batched_division_prep(
     else:
         w_tr_sum, w_tr, w_val, X_cov_tr, X_cov_val = _prep_covariates_batch(xp, dconst, M_tr, M_val)
         valid_cov_mask = None
+
+    y_tr = y_all_xp[tr_p]
+    y_val = y_all_xp[val_p]
+
+    if spec_traj_slice is not None:
+        pca_tr_xp = xp.asarray(spec_traj_slice.part_pca_tr, dtype=xp.float64)
+        pca_val_xp = xp.asarray(spec_traj_slice.part_pca_val, dtype=xp.float64)
+        out: dict[str, Any] = {
+            "tr_p": tr_p,
+            "val_p": val_p,
+            "w_tr": w_tr,
+            "w_val": w_val,
+            "y_tr": y_tr,
+            "y_val": y_val,
+            "X_cov_tr": X_cov_tr,
+            "X_cov_val": X_cov_val,
+            "part_pca_tr": pca_tr_xp,
+            "part_pca_val": pca_val_xp,
+            "W_max": xp.asarray(spec_traj_slice.W_max, dtype=xp.float64),
+            "T_max": xp.asarray(spec_traj_slice.T_max, dtype=xp.float64),
+            "scale1_sq": xp.asarray(spec_traj_slice.scale1_sq, dtype=xp.float64),
+            "scale2_sq": xp.asarray(spec_traj_slice.scale2_sq, dtype=xp.float64),
+            "rank_ok": xp.asarray(spec_traj_slice.rank_ok, dtype=bool),
+            "K_p1_tr": dconst["K_p1_tr"],
+            "K_p1_vt": dconst["K_p1_vt"],
+            "K_p2_tr": dconst["K_p2_tr"],
+            "K_p2_vt": dconst["K_p2_vt"],
+        }
+        if compute_full_rank:
+            if spec_traj_slice.numerical_rank is not None:
+                out["numerical_rank"] = xp.asarray(spec_traj_slice.numerical_rank, dtype=xp.int64)
+            out["valid_cov_mask"] = valid_cov_mask
+        if compute_pca_suff or compute_cov_preds:
+            out.update(
+                _prep_schur_sufficient_stats(
+                    xp,
+                    X_cov_tr,
+                    X_cov_val,
+                    y_tr,
+                    y_val,
+                    w_tr,
+                    w_val,
+                    None,
+                    tr_p,
+                    val_p,
+                    alphas_xp,
+                    compute_pca_suff=compute_pca_suff,
+                    pca_tr=pca_tr_xp,
+                    pca_val=pca_val_xp,
+                )
+            )
+        return out
+
     mfa = _prep_mfa_pca_batch(xp, gcache, dconst, M_tr, w_tr_sum, cfg, compute_full_rank=compute_full_rank)
     W_max, T_max = _prep_paired_moments_batch(
         xp,
@@ -506,10 +570,7 @@ def batched_division_prep(
         mfa["part_pca_max"],
     )
 
-    y_tr = y_all_xp[tr_p]
-    y_val = y_all_xp[val_p]
-
-    out: dict[str, Any] = {
+    out = {
         "tr_p": tr_p,
         "val_p": val_p,
         "w_tr": w_tr,
@@ -897,7 +958,15 @@ def batched_ridge_preds_single_alpha(
     return intercepts[:, None] + (X_val @ coefs[:, :, None])[:, :, 0]
 
 
-def batched_pls_sse_and_preds(xp: Any, div: dict[str, Any], max_comp: int) -> tuple[Any, Any]:
+def batched_pls_sse_and_preds(
+    xp: Any,
+    div: dict[str, Any],
+    max_comp: int,
+    *,
+    return_preds: bool = True,
+    return_sse: bool = True,
+    target_comp_idx: Any | None = None,
+) -> tuple[Any, Any]:
     """Dual Gram NIPALS for batched multi-component weighted PLS regression."""
     w_tr = div["w_tr"]
     w_val = div["w_val"]
@@ -908,8 +977,17 @@ def batched_pls_sse_and_preds(xp: Any, div: dict[str, Any], max_comp: int) -> tu
     scale1_sq = div["scale1_sq"]
     scale2_sq = div["scale2_sq"]
 
-    B = X_cov_tr.shape[0]
-    n_val = X_cov_val.shape[1]
+    B = int(X_cov_tr.shape[0])
+    n_val = int(X_cov_val.shape[1])
+
+    if target_comp_idx is not None:
+        caps_np = np.asarray(target_comp_idx, dtype=np.int64)
+        if caps_np.shape != (B,):
+            raise ValueError(f"target_comp_idx must have shape ({B},); got {caps_np.shape}.")
+        caps_xp = xp.asarray(caps_np, dtype=xp.int64)
+    else:
+        caps_np = None
+        caps_xp = None
 
     cov_mean = (w_tr[:, None, :] @ X_cov_tr)[:, 0, :]
     C_tr = X_cov_tr - cov_mean[:, None, :]
@@ -921,11 +999,151 @@ def batched_pls_sse_and_preds(xp: Any, div: dict[str, Any], max_comp: int) -> tu
     K_p2_tr = div["K_p2_tr"]
     K_p2_vt = div["K_p2_vt"]
 
-    # Combine scaled spectral Gram slices before centering once to halve (B, n_tr, n_tr) buffers.
     k_mu_tr = scale1_sq[:, None] * (w_tr @ K_p1_tr) + scale2_sq[:, None] * (w_tr @ K_p2_tr)
     mu_sq = xp.sum(w_tr * k_mu_tr, axis=1)
     k_mu_vt = scale1_sq[:, None] * (w_tr @ K_p1_vt.T) + scale2_sq[:, None] * (w_tr @ K_p2_vt.T)
 
+    n_tr = int(X_cov_tr.shape[1])
+    eps_f = float(np.finfo(float).eps)
+
+    if xp is np and B >= 8:
+        p_cov = int(C_tr.shape[2])
+        diag_k0 = (
+            scale1_sq[:, None] * np.diagonal(K_p1_tr)[None, :]
+            + scale2_sq[:, None] * np.diagonal(K_p2_tr)[None, :]
+            - 2.0 * k_mu_tr
+            + mu_sq[:, None]
+            + (np.sum(C_tr * C_tr, axis=2) if p_cov > 0 else 0.0)
+        )
+        k0_w_trace = np.sum(w_tr * np.maximum(diag_k0, 0.0), axis=1)
+        t_sq_floor = np.maximum(1e-12, 1e2 * float(max(n_tr, 1)) * eps_f * k0_w_trace)
+
+        y_mean = np.sum(w_tr * y_tr[None, :], axis=1)
+        yk = y_tr[None, :] - y_mean[:, None]
+        accum = np.broadcast_to(y_mean[:, None], (B, n_val)).copy()
+        sse = np.empty((B, max_comp), dtype=np.float64) if return_sse else None
+        preds_all = (
+            np.empty((B, n_val, max_comp), dtype=np.float64)
+            if (return_preds and caps_np is None)
+            else None
+        )
+
+        hist_slots = max(max_comp - 1, 0)
+        T_hist = np.empty((B, hist_slots, n_tr), dtype=np.float64) if hist_slots > 0 else None
+        V_hist = np.empty((B, hist_slots, n_tr), dtype=np.float64) if hist_slots > 0 else None
+        Ku_hist = np.empty((B, hist_slots, n_tr), dtype=np.float64) if hist_slots > 0 else None
+        Tv_hist = np.empty((B, hist_slots, n_val), dtype=np.float64) if hist_slots > 0 else None
+
+        active = np.ones(B, dtype=bool)
+        for c in range(max_comp):
+            step_gate = active if caps_np is None else (active & (c <= caps_np))
+            if not np.any(step_gate):
+                if sse is not None:
+                    rem_sse = np.sum(w_val * ((y_val[None, :] - accum) ** 2), axis=1)
+                    sse[:, c:] = rem_sse[:, None]
+                if preds_all is not None:
+                    preds_all[:, :, c:] = accum[:, :, None]
+                break
+
+            wy = w_tr * yk
+            s_wy = np.sum(wy, axis=1)
+            k_wy0 = (
+                scale1_sq[:, None] * (wy @ K_p1_tr)
+                + scale2_sq[:, None] * (wy @ K_p2_tr)
+                - s_wy[:, None] * k_mu_tr
+                - (np.sum(k_mu_tr * wy, axis=1) - s_wy * mu_sq)[:, None]
+            )
+            if p_cov > 0:
+                ct_wy = (C_tr_T @ wy[:, :, None])[:, :, 0]
+                k_wy0 += (C_tr @ ct_wy[:, :, None])[:, :, 0]
+            else:
+                ct_wy = None
+            if c > 0:
+                assert T_hist is not None and V_hist is not None
+                Tc = T_hist[:, :c, :]
+                Vc = V_hist[:, :c, :]
+                v_wy = (Vc @ wy[:, :, None])[:, :, 0]
+                t_wy = (Tc @ wy[:, :, None])[:, :, 0]
+                k_wy = k_wy0 - (v_wy[:, None, :] @ Tc)[:, 0, :] - (t_wy[:, None, :] @ Vc)[:, 0, :]
+            else:
+                k_wy = k_wy0
+
+            w_norm_sq = np.sum(wy * k_wy, axis=1)
+            w_norm = np.sqrt(np.maximum(w_norm_sq, 0.0))
+            w_ok = step_gate & np.isfinite(w_norm_sq) & (w_norm_sq > 0.0) & np.isfinite(w_norm) & (w_norm > 1e-12)
+            w_norm_safe = np.where(w_ok, w_norm, 1.0)
+            tk = np.where(w_ok[:, None], k_wy / w_norm_safe[:, None], 0.0)
+
+            k_vt_wy0 = (
+                scale1_sq[:, None] * (wy @ K_p1_vt.T)
+                + scale2_sq[:, None] * (wy @ K_p2_vt.T)
+                - s_wy[:, None] * k_mu_vt
+                - (np.sum(k_mu_tr * wy, axis=1) - s_wy * mu_sq)[:, None]
+            )
+            if p_cov > 0:
+                assert ct_wy is not None
+                k_vt_wy0 += (C_val @ ct_wy[:, :, None])[:, :, 0]
+            if c > 0:
+                assert Ku_hist is not None and Tv_hist is not None
+                ku_wy = (Ku_hist[:, :c, :] @ wy[:, :, None])[:, :, 0]
+                k_vt_wy = k_vt_wy0 - (ku_wy[:, None, :] @ Tv_hist[:, :c, :])[:, 0, :]
+            else:
+                k_vt_wy = k_vt_wy0
+            t_val = np.where(w_ok[:, None], k_vt_wy / w_norm_safe[:, None], 0.0)
+
+            t_sq_raw = np.sum(w_tr * tk * tk, axis=1)
+            step_ok = w_ok & np.isfinite(t_sq_raw) & (t_sq_raw > t_sq_floor)
+            active = step_ok
+            t_sq_safe = np.where(step_ok, t_sq_raw, 1.0)
+            qk = np.where(step_ok, np.sum(w_tr * tk * yk, axis=1) / t_sq_safe, 0.0)
+            t_val_act = np.where(step_ok[:, None], t_val, 0.0)
+            tk_act = np.where(step_ok[:, None], tk, 0.0)
+            accum += qk[:, None] * t_val_act
+            if preds_all is not None:
+                preds_all[:, :, c] = accum
+            if sse is not None:
+                sse[:, c] = np.sum(w_val * ((y_val[None, :] - accum) ** 2), axis=1)
+
+            if c < max_comp - 1:
+                yk -= qk[:, None] * tk_act
+                u = np.where(step_ok[:, None], (w_tr * tk_act) / t_sq_safe[:, None], 0.0)
+                s_u = np.sum(u, axis=1)
+                kt_u0 = (
+                    scale1_sq[:, None] * (u @ K_p1_tr)
+                    + scale2_sq[:, None] * (u @ K_p2_tr)
+                    - s_u[:, None] * k_mu_tr
+                    - (np.sum(k_mu_tr * u, axis=1) - s_u * mu_sq)[:, None]
+                )
+                if p_cov > 0:
+                    ct_u = (C_tr_T @ u[:, :, None])[:, :, 0]
+                    kt_u0 += (C_tr @ ct_u[:, :, None])[:, :, 0]
+                if c > 0:
+                    assert T_hist is not None and V_hist is not None
+                    Tc = T_hist[:, :c, :]
+                    Vc = V_hist[:, :c, :]
+                    v_u = (Vc @ u[:, :, None])[:, :, 0]
+                    t_u = (Tc @ u[:, :, None])[:, :, 0]
+                    kt_u = kt_u0 - (v_u[:, None, :] @ Tc)[:, 0, :] - (t_u[:, None, :] @ Vc)[:, 0, :]
+                else:
+                    kt_u = kt_u0
+                u_kt_u = np.sum(u * kt_u, axis=1)
+                v_def = kt_u - (0.5 * u_kt_u)[:, None] * tk_act
+                assert (
+                    T_hist is not None
+                    and V_hist is not None
+                    and Ku_hist is not None
+                    and Tv_hist is not None
+                )
+                T_hist[:, c, :] = tk_act
+                V_hist[:, c, :] = v_def
+                Ku_hist[:, c, :] = kt_u
+                Tv_hist[:, c, :] = t_val_act
+
+        if caps_np is not None:
+            return sse, (accum if return_preds else None)
+        return sse, preds_all
+
+    # Combine scaled spectral Gram slices before centering once to halve (B, n_tr, n_tr) buffers.
     K_tr = scale1_sq[:, None, None] * K_p1_tr[None, :, :]
     K_tr += scale2_sq[:, None, None] * K_p2_tr[None, :, :]
     K_tr -= k_mu_tr[:, :, None]
@@ -943,23 +1161,27 @@ def batched_pls_sse_and_preds(xp: Any, div: dict[str, Any], max_comp: int) -> tu
 
     # Dual Gram deflation leaves O(n_tr * eps * tr_w(K_tr_0)) floating-point residual in K_tr after
     # exhausting rank(X), so guard t_sq against both the primal 1e-12 floor and Gram roundoff.
-    n_tr = int(X_cov_tr.shape[1])
-    eps_f = float(np.finfo(float).eps)
     k0_w_trace = xp.sum(w_tr * xp.maximum(xp.diagonal(K_tr, axis1=-2, axis2=-1), 0.0), axis=1)
     t_sq_floor = xp.maximum(1e-12, 1e2 * float(max(n_tr, 1)) * eps_f * k0_w_trace)
 
     y_mean = xp.sum(w_tr * y_tr[None, :], axis=1)
     yk = y_tr[None, :] - y_mean[:, None]
     accum = xp.broadcast_to(y_mean[:, None], (B, n_val)).copy()
-    preds_all = xp.zeros((B, n_val, max_comp), dtype=xp.float64)
+    preds_all = (
+        xp.zeros((B, n_val, max_comp), dtype=xp.float64)
+        if (return_preds and caps_xp is None)
+        else None
+    )
+    sse = xp.empty((B, max_comp), dtype=xp.float64) if return_sse else None
 
     active = xp.ones(B, dtype=bool)
     for c in range(max_comp):
+        step_gate = active if caps_xp is None else (active & (c <= caps_xp))
         wy = w_tr * yk
         k_wy = (K_tr @ wy[:, :, None])[:, :, 0]
         w_norm_sq = xp.sum(wy * k_wy, axis=1)
         w_norm = xp.sqrt(xp.maximum(w_norm_sq, 0.0))
-        w_ok = active & xp.isfinite(w_norm_sq) & (w_norm_sq > 0.0) & xp.isfinite(w_norm) & (w_norm > 1e-12)
+        w_ok = step_gate & xp.isfinite(w_norm_sq) & (w_norm_sq > 0.0) & xp.isfinite(w_norm) & (w_norm > 1e-12)
         w_norm_safe = xp.where(w_ok, w_norm, 1.0)
         tk = xp.where(w_ok[:, None], k_wy / w_norm_safe[:, None], 0.0)
         t_val = xp.where(w_ok[:, None], (K_vt @ wy[:, :, None])[:, :, 0] / w_norm_safe[:, None], 0.0)
@@ -971,7 +1193,10 @@ def batched_pls_sse_and_preds(xp: Any, div: dict[str, Any], max_comp: int) -> tu
         t_val_act = xp.where(step_ok[:, None], t_val, 0.0)
         tk_act = xp.where(step_ok[:, None], tk, 0.0)
         accum += qk[:, None] * t_val_act
-        preds_all[:, :, c] = accum
+        if preds_all is not None:
+            preds_all[:, :, c] = accum
+        if sse is not None and preds_all is None:
+            sse[:, c] = xp.sum(w_val * ((y_val[None, :] - accum) ** 2), axis=1)
         if c < max_comp - 1:
             yk -= qk[:, None] * tk_act
             u = xp.where(step_ok[:, None], (w_tr * tk_act) / t_sq_safe[:, None], 0.0)
@@ -982,5 +1207,8 @@ def batched_pls_sse_and_preds(xp: Any, div: dict[str, Any], max_comp: int) -> tu
             K_tr -= tk_act[:, :, None] * v_def[:, None, :]
             K_tr -= v_def[:, :, None] * tk_act[:, None, :]
 
-    sse = xp.sum(w_val[:, :, None] * ((y_val[None, :, None] - preds_all) ** 2), axis=1)
+    if sse is not None and preds_all is not None:
+        sse = xp.sum(w_val[:, :, None] * ((y_val[None, :, None] - preds_all) ** 2), axis=1)
+    if caps_xp is not None:
+        return sse, (accum if return_preds else None)
     return sse, preds_all

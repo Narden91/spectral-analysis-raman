@@ -89,7 +89,14 @@ def _solve_lower_triangular_batch(xp: Any, L: Any, rhs: Any) -> Any:
     return xp.linalg.solve(L, rhs)
 
 
-def _rayleigh_ritz_32(xp: Any, G_sym: Any, Y: Any) -> tuple[Any, Any, Any]:
+def _rayleigh_ritz_32(
+    xp: Any,
+    G_sym: Any,
+    Y: Any,
+    *,
+    check_spd_sync: bool = True,
+    return_spd: bool = False,
+) -> tuple[Any, ...]:
     """Column-normalized 32x32 Rayleigh-Ritz step using batched Cholesky-QR with eigh fallback."""
     norms = xp.sqrt(xp.sum(Y * Y, axis=1, keepdims=True))
     Yn = Y / xp.maximum(norms, 1e-30)
@@ -99,9 +106,12 @@ def _rayleigh_ritz_32(xp: Any, G_sym: Any, Y: Any) -> tuple[Any, Any, Any]:
     if Y.shape[0] == 0:
         H = xp.zeros((0, Y.shape[2], Y.shape[2]), dtype=xp.float64)
         theta, W = xp.linalg.eigh(H)
+        if return_spd:
+            return theta, Yn @ W, (G_sym @ Yn) @ W, xp.ones(0, dtype=bool)
         return theta, Yn @ W, (G_sym @ Yn) @ W
 
     Q: Any | None = None
+    spd: Any
     try:
         L = xp.linalg.cholesky(YtY)
     except Exception:
@@ -111,7 +121,12 @@ def _rayleigh_ritz_32(xp: Any, G_sym: Any, Y: Any) -> tuple[Any, Any, Any]:
         spd = xp.all(xp.isfinite(L), axis=(1, 2)) & (
             xp.all(xp.diagonal(L, axis1=-2, axis2=-1) > 1e-12, axis=1)
         )
-        if bool(xp.all(spd)):
+        if not check_spd_sync:
+            eye_q = xp.eye(Y.shape[2], dtype=xp.float64)[None, :, :]
+            L_safe = xp.where(spd[:, None, None], L, eye_q)
+            Qt = _solve_lower_triangular_batch(xp, L_safe, xp.swapaxes(Yn, -1, -2))
+            Q = xp.swapaxes(Qt, -1, -2)
+        elif bool(xp.all(spd)):
             Qt = _solve_lower_triangular_batch(xp, L, xp.swapaxes(Yn, -1, -2))
             Q = xp.swapaxes(Qt, -1, -2)
         else:
@@ -125,11 +140,14 @@ def _rayleigh_ritz_32(xp: Any, G_sym: Any, Y: Any) -> tuple[Any, Any, Any]:
                 Q[bad] = _orthonormalize_eigh(xp, Yn[bad], YtY[bad])
     else:
         Q = _orthonormalize_eigh(xp, Yn, YtY)
+        spd = xp.all(xp.isfinite(Q), axis=(1, 2))
 
     GQ = G_sym @ Q
     H = xp.swapaxes(Q, -1, -2) @ GQ
     H = 0.5 * (H + xp.swapaxes(H, -1, -2))
     theta, W = xp.linalg.eigh(H)
+    if return_spd:
+        return theta, Q @ W, GQ @ W, spd
     return theta, Q @ W, GQ @ W
 
 
@@ -147,29 +165,21 @@ def _chefsi_top_k_gpu(
 ) -> tuple[Any, Any]:
     """Warm-started Chebyshev-filtered subspace iteration (q=32) with adaptive residual verification.
 
-    Uses batched GEMMs, batched Cholesky-QR, and 32x32 warp-batched ``eigh``. After ``n_cycles``
-    initial cycles, any still-unconverged subset receives up to ``max_extra_cycles`` additional
-    cycles as long as residuals decrease by at least 2x; remaining draws (or draws with fewer than
-    32 active samples) are solved exactly via ``_exact_top_k_eigh_active`` so fp64 accuracy is
-    strictly preserved.
+    Uses batched GEMMs, branchless batched Cholesky-QR, and 32x32 warp-batched ``eigh`` with a
+    single host residual check after ``n_cycles`` initial cycles. Any still-unconverged subset
+    receives up to ``max_extra_cycles`` additional cycles as long as residuals decrease by at least
+    2x; remaining draws (or draws with fewer than 32 active samples or non-SPD Cholesky factors) are
+    solved exactly via ``_exact_top_k_eigh_active`` so fp64 accuracy is strictly preserved.
     """
     B, n_s, _ = G_sym.shape
-    n_act = _to_np(xp, xp.sum(sw > 0, axis=1)).astype(int)
-    can_chefsi = n_act >= 32
-    if not np.any(can_chefsi):
+    if B == 0 or n_s < 32:
         return _exact_top_k_eigh_active(xp, G_sym, max_k, sw)
 
-    all_can_chefsi = bool(np.all(can_chefsi))
-    active_host = np.arange(B, dtype=int) if all_can_chefsi else np.flatnonzero(can_chefsi)
-    if all_can_chefsi:
-        G_run = G_sym
-        sw_run = sw
-    else:
-        c_idx = xp.asarray(active_host)
-        G_run = G_sym[c_idx]
-        sw_run = sw[c_idx]
+    spd_init = xp.sum(sw > 0, axis=1) >= 32
 
-    def _run_cycle(G_cur: Any, theta_cur: Any, U_cur: Any, GU_cur: Any) -> tuple[Any, Any, Any]:
+    def _run_cycle(
+        G_cur: Any, theta_cur: Any, U_cur: Any, GU_cur: Any, spd_cur: Any
+    ) -> tuple[Any, Any, Any, Any]:
         b_cut = xp.maximum(theta_cur[:, 0], 1e-15)
         inv_e = 2.0 / b_cut[:, None, None]
         Y_prev = U_cur
@@ -182,63 +192,69 @@ def _chefsi_top_k_gpu(
             Y_prev = Y_curr
             Y_curr = Y_next
         del Y_prev
-        return _rayleigh_ritz_32(xp, G_cur, Y_curr)
+        theta_next, U_next, GU_next, spd_step = _rayleigh_ritz_32(
+            xp, G_cur, Y_curr, check_spd_sync=False, return_spd=True
+        )
+        return theta_next, U_next, GU_next, spd_cur & spd_step
 
-    def _check_residuals(theta_cur: Any, U_cur: Any, GU_cur: Any) -> tuple[Any, Any, np.ndarray, np.ndarray]:
+    def _check_residuals(
+        theta_cur: Any, U_cur: Any, GU_cur: Any, spd_cur: Any
+    ) -> tuple[Any, Any, np.ndarray, np.ndarray]:
         ev_k = xp.maximum(theta_cur[:, -max_k:][:, ::-1], 0.0)
         u_k = U_cur[:, :, -max_k:][:, :, ::-1]
         gu_k = GU_cur[:, :, -max_k:][:, :, ::-1]
         diff = gu_k - u_k * ev_k[:, None, :]
         res_norm = xp.max(xp.sqrt(xp.sum(diff * diff, axis=1)), axis=1)
-        rel_res = _to_np(xp, res_norm / xp.maximum(ev_k[:, 0], 1e-12))
+        rel_res_xp = xp.where(spd_cur, res_norm / xp.maximum(ev_k[:, 0], 1e-12), xp.inf)
+        rel_res = _to_np(xp, rel_res_xp)
         conv = np.isfinite(rel_res) & (rel_res <= residual_tol)
         return ev_k, u_k, rel_res, conv
 
-    Y0 = G_run @ (sw_run[:, :, None] * Q0_comb[None, :, :])
-    theta, U, GU = _rayleigh_ritz_32(xp, G_run, Y0)
+    Y0 = G_sym @ (sw[:, :, None] * Q0_comb[None, :, :])
+    theta, U, GU, spd_step0 = _rayleigh_ritz_32(xp, G_sym, Y0, check_spd_sync=False, return_spd=True)
+    spd_ok = spd_init & spd_step0
     del Y0
     for _ in range(n_cycles):
-        theta, U, GU = _run_cycle(G_run, theta, U, GU)
+        theta, U, GU, spd_ok = _run_cycle(G_sym, theta, U, GU, spd_ok)
 
-    ev_k, u_k, rel_res, converged_sub = _check_residuals(theta, U, GU)
-    if all_can_chefsi and np.all(converged_sub):
+    ev_k, u_k, rel_res, converged_sub = _check_residuals(theta, U, GU, spd_ok)
+    if np.all(converged_sub):
         return ev_k, u_k
 
     ev_out = xp.zeros((B, max_k), dtype=xp.float64)
     u_out = xp.zeros((B, n_s, max_k), dtype=xp.float64)
     conv_global = np.zeros(B, dtype=bool)
     if np.any(converged_sub):
-        sub_ok = xp.asarray(np.flatnonzero(converged_sub))
-        glob_ok = xp.asarray(active_host[converged_sub])
-        ev_out[glob_ok] = ev_k[sub_ok]
-        u_out[glob_ok] = u_k[sub_ok]
-        conv_global[active_host[converged_sub]] = True
+        ok_idx = xp.asarray(np.flatnonzero(converged_sub))
+        ev_out[ok_idx] = ev_k[ok_idx]
+        u_out[ok_idx] = u_k[ok_idx]
+        conv_global[converged_sub] = True
     del ev_k, u_k
 
-    # Adaptively continue only on still-unconverged draws so near-converged batches avoid cuSOLVER fallback.
-    rem_mask = ~converged_sub
+    # Adaptively continue only on draws that are finite/SPD and still unconverged.
+    rem_mask = (~converged_sub) & np.isfinite(rel_res)
     if max_extra_cycles > 0 and np.any(rem_mask):
         rem_res = rel_res[rem_mask]
-        finite_rem = rem_res[np.isfinite(rem_res)]
-        prev_med = float(np.median(finite_rem)) if finite_rem.size > 0 else float("inf")
+        prev_med = float(np.median(rem_res)) if rem_res.size > 0 else float("inf")
         if np.isfinite(prev_med):
-            rem_sub = np.flatnonzero(rem_mask)
-            rem_host = active_host[rem_sub]
-            if rem_sub.size < active_host.size:
-                rem_sub_xp = xp.asarray(rem_sub)
-                G_r = G_sym[xp.asarray(rem_host)]
-                theta_r = theta[rem_sub_xp]
-                U_r = U[rem_sub_xp]
-                GU_r = GU[rem_sub_xp]
+            rem_host = np.flatnonzero(rem_mask)
+            if rem_host.size < B:
+                rem_xp = xp.asarray(rem_host)
+                G_r = G_sym[rem_xp]
+                theta_r = theta[rem_xp]
+                U_r = U[rem_xp]
+                GU_r = GU[rem_xp]
+                spd_r = spd_ok[rem_xp]
             else:
-                G_r = G_run
+                G_r = G_sym
                 theta_r = theta
                 U_r = U
                 GU_r = GU
-            del theta, U, GU
+                spd_r = spd_ok
+            del theta, U, GU, spd_ok
             for _ in range(max_extra_cycles):
-                theta_r, U_r, GU_r = _run_cycle(G_r, theta_r, U_r, GU_r)
-                ev_r, u_r, rel_r, conv_r = _check_residuals(theta_r, U_r, GU_r)
+                theta_r, U_r, GU_r, spd_r = _run_cycle(G_r, theta_r, U_r, GU_r, spd_r)
+                ev_r, u_r, rel_r, conv_r = _check_residuals(theta_r, U_r, GU_r, spd_r)
                 if np.any(conv_r):
                     ok_loc = xp.asarray(np.flatnonzero(conv_r))
                     ok_glob = xp.asarray(rem_host[conv_r])
@@ -246,12 +262,10 @@ def _chefsi_top_k_gpu(
                     u_out[ok_glob] = u_r[ok_loc]
                     conv_global[rem_host[conv_r]] = True
                 del ev_r, u_r
-                still_mask = ~conv_r
+                still_mask = (~conv_r) & np.isfinite(rel_r)
                 if not np.any(still_mask):
                     break
-                still_res = rel_r[still_mask]
-                finite_still = still_res[np.isfinite(still_res)]
-                cur_med = float(np.median(finite_still)) if finite_still.size > 0 else float("inf")
+                cur_med = float(np.median(rel_r[still_mask]))
                 if not np.isfinite(cur_med) or cur_med > 0.5 * prev_med:
                     break
                 prev_med = cur_med
@@ -263,11 +277,12 @@ def _chefsi_top_k_gpu(
                     theta_r = theta_r[still_xp]
                     U_r = U_r[still_xp]
                     GU_r = GU_r[still_xp]
-            del theta_r, U_r, GU_r, G_r
+                    spd_r = spd_r[still_xp]
+            del theta_r, U_r, GU_r, G_r, spd_r
         else:
-            del theta, U, GU
+            del theta, U, GU, spd_ok
     else:
-        del theta, U, GU
+        del theta, U, GU, spd_ok
 
     bad_host = np.flatnonzero(~conv_global)
     if bad_host.size > 0:
@@ -292,8 +307,8 @@ def _exact_top_k_eigh_active(xp: Any, G_sym: Any, max_k: int, sw: Any) -> tuple[
     n_act = _to_np(xp, xp.sum(active, axis=1)).astype(int)
     pos = xp.arange(n_s)[None, :]
     order = xp.argsort(xp.where(active, pos, n_s + pos), axis=1)
-    # Keep bucket_step=32 for small batches to minimize cuSOLVER launch overhead.
-    bucket_step = 32 if B <= 256 else 8
+    # Keep bucket_step=32 for small batches and 16 for larger batches to balance cuSOLVER launches.
+    bucket_step = 32 if B <= 256 else 16
     sizes = np.minimum(-(-n_act // bucket_step) * bucket_step, n_s)
 
     ev_out = xp.zeros((B, max_k), dtype=xp.float64)
@@ -320,6 +335,7 @@ def _top_k_eigh(
     Q0_comb: Any | None = None,
     *,
     is_symmetric: bool = False,
+    q0_comb_ratio: float | None = None,
 ) -> tuple[Any, Any]:
     """Exact fp64 top-max_k eigenpairs: active-sample LAPACK dsyevr on CPU, verified CheFSI on GPU."""
     if is_symmetric:
@@ -364,6 +380,10 @@ def _top_k_eigh(
         return ev_pad, u_pad
 
     if Q0_comb is not None and Q0_comb.shape[1] == 32 and max_k <= 24:
+        if q0_comb_ratio is not None and q0_comb_ratio < 2.0:
+            return _chefsi_top_k_gpu(
+                xp, G_sym, max_k, sw, Q0_comb, n_cycles=5, poly_deg=5, max_extra_cycles=4
+            )
         return _chefsi_top_k_gpu(xp, G_sym, max_k, sw, Q0_comb)
 
     return _exact_top_k_eigh_active(xp, G_sym, max_k, sw)

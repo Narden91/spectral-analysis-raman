@@ -65,14 +65,26 @@ def load_area_metadata(data_source: DataSource | None = None) -> pd.DataFrame:
     return _cached_table(_source(data_source), "areas.parquet")
 
 
-def _pixel_rows(source: DataSource, spectral_range: str, *, retained_only: bool) -> pd.DataFrame:
+def _pixel_rows(
+    source: DataSource,
+    spectral_range: str,
+    *,
+    retained_only: bool,
+    columns: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
     code = str(spectral_range)
     if source.source_name == "parsed":
-        pixels = pd.read_parquet(source.source_path / "pixels.parquet")
+        read_cols = list(dict.fromkeys((*columns, "spectral_range", "raw_row"))) if columns is not None else None
+        pixels = pd.read_parquet(source.source_path / "pixels.parquet", columns=read_cols)
         return pixels.loc[pixels["spectral_range"].astype(str) == code].sort_values("raw_row")
     if source.source_name != "preprocessed":
         raise RuntimeError("Pixel rows require a materialized source")
-    qc = pd.read_parquet(source.source_path / "qc.parquet")
+    if columns is not None:
+        required = ("spectral_range", "retained", "normalized_row") if retained_only else ("spectral_range",)
+        read_cols = list(dict.fromkeys((*columns, *required)))
+        qc = pd.read_parquet(source.source_path / "qc.parquet", columns=read_cols)
+    else:
+        qc = pd.read_parquet(source.source_path / "qc.parquet")
     rows = qc.loc[qc["spectral_range"].astype(str) == code]
     if retained_only:
         rows = rows.loc[rows["retained"].astype(bool)].sort_values("normalized_row")
@@ -104,7 +116,12 @@ def _feature_names(spectral_range: str, axis: np.ndarray) -> np.ndarray:
 def load_spectra(data_source: DataSource | None, spectral_range: str) -> dict[str, np.ndarray]:
     source = _source(data_source)
     code = str(spectral_range)
-    rows = _pixel_rows(source, code, retained_only=source.source_name == "preprocessed")
+    cols = (
+        ("measurement_id", "subject_id", "spectral_range", "retained", "normalized_row")
+        if source.source_name == "preprocessed"
+        else None
+    )
+    rows = _pixel_rows(source, code, retained_only=source.source_name == "preprocessed", columns=cols)
     spectra, axis = _load_array(source, code, basis="normalized")
     measurements = load_file_index(source).set_index("measurement_id")
     measurement_ids = rows["measurement_id"].astype(str)
@@ -117,21 +134,125 @@ def load_spectra(data_source: DataSource | None, spectral_range: str) -> dict[st
     }
 
 
+def _median_block_into(
+    raw_block: np.ndarray,
+    out_row: np.ndarray,
+    t_flat: np.ndarray | None = None,
+) -> None:
+    k, n_cols = raw_block.shape
+    if k == 1:
+        out_row[:] = raw_block[0]
+        return
+    if t_flat is not None and k * n_cols <= t_flat.size:
+        t_buf = t_flat[: n_cols * k].reshape(n_cols, k)
+        np.copyto(t_buf, raw_block.T)
+        np.median(t_buf, axis=1, out=out_row, overwrite_input=True)
+        if np.isnan(out_row).any():
+            nan_cols = np.isnan(out_row)
+            block_nan = (
+                raw_block[:, nan_cols]
+                if raw_block.dtype == np.float64
+                else np.asarray(raw_block[:, nan_cols], dtype=float)
+            )
+            out_row[nan_cols] = np.nanmedian(block_nan, axis=0)
+        return
+    block = raw_block if raw_block.dtype == np.float64 else np.asarray(raw_block, dtype=float)
+    if not np.isnan(block).any():
+        np.median(block, axis=0, out=out_row)
+        return
+    nan_cols = np.isnan(block).any(axis=0)
+    if nan_cols.all():
+        out_row[:] = np.nanmedian(block, axis=0)
+        return
+    finite_cols = ~nan_cols
+    out_row[finite_cols] = np.median(block[:, finite_cols], axis=0)
+    out_row[nan_cols] = np.nanmedian(block[:, nan_cols], axis=0)
+
+
 def _summarize_rows(
     rows: pd.DataFrame,
     spectra: np.ndarray,
     row_column: str,
 ) -> tuple[np.ndarray, np.ndarray]:
-    usable_rows = rows.loc[rows[row_column] >= 0]
-    groups = list(usable_rows.groupby("measurement_id", sort=False))
-    measurement_ids = np.asarray([str(measurement_id) for measurement_id, _ in groups], dtype=str)
-    summaries = [
-        np.nanmedian(np.asarray(spectra[group[row_column].to_numpy(dtype=int)], dtype=float), axis=0)
-        for _, group in groups
-    ]
-    if summaries:
-        return measurement_ids, np.vstack(summaries)
-    return measurement_ids, np.empty((0, spectra.shape[1]), dtype=float)
+    n_cols = int(spectra.shape[1])
+    if rows.empty:
+        return np.asarray([], dtype=str), np.empty((0, n_cols), dtype=float)
+
+    row_series = rows[row_column]
+    row_raw = row_series.to_numpy(copy=False)
+    if row_raw.dtype.kind in "iu":
+        valid_mask = row_raw >= 0
+        valid_rows = row_raw[valid_mask].astype(np.intp, copy=False)
+    else:
+        numeric_rows = pd.to_numeric(row_series, errors="coerce")
+        valid_mask = (numeric_rows >= 0).to_numpy(dtype=bool, na_value=False)
+        valid_rows = numeric_rows.to_numpy()[valid_mask].astype(np.intp, copy=False)
+
+    if not np.any(valid_mask):
+        return np.asarray([], dtype=str), np.empty((0, n_cols), dtype=float)
+
+    mids_valid = rows["measurement_id"].to_numpy()[valid_mask]
+    codes, uniques = pd.factorize(mids_valid, sort=False)
+    if np.any(codes < 0):
+        keep = codes >= 0
+        if not np.any(keep):
+            return np.asarray([], dtype=str), np.empty((0, n_cols), dtype=float)
+        codes = codes[keep]
+        valid_rows = valid_rows[keep]
+
+    n_groups = len(uniques)
+    measurement_ids = np.asarray([str(u) for u in uniques], dtype=str)
+    out = np.empty((n_groups, n_cols), dtype=float)
+    if n_cols == 0:
+        return measurement_ids, out
+
+    if len(codes) > 1 and np.any(codes[1:] < codes[:-1]):
+        order = np.argsort(codes, kind="mergesort")
+        codes = codes[order]
+        valid_rows = valid_rows[order]
+
+    counts = np.bincount(codes, minlength=n_groups)
+    ends = np.cumsum(counts)
+    starts = ends - counts
+
+    max_noncontig_k = 0
+    max_t_k = 0
+    group_slices: list[tuple[int, np.ndarray, bool]] = []
+    for g in range(n_groups):
+        g_rows = valid_rows[starts[g] : ends[g]]
+        k = len(g_rows)
+        if k == 1:
+            group_slices.append((g, g_rows, True))
+            continue
+        is_contig = (
+            int(g_rows[-1]) - int(g_rows[0]) == k - 1
+            and bool(np.all(g_rows[1:] == g_rows[:-1] + 1))
+        )
+        if k <= 16384 and k > max_t_k:
+            max_t_k = k
+        if not is_contig and k <= 16384 and k > max_noncontig_k:
+            max_noncontig_k = k
+        group_slices.append((g, g_rows, is_contig))
+
+    buf = np.empty((max_noncontig_k, n_cols), dtype=spectra.dtype) if max_noncontig_k > 0 else None
+    t_flat = np.empty(max_t_k * n_cols, dtype=float) if max_t_k > 0 else None
+    for g, g_rows, is_contig in group_slices:
+        k = len(g_rows)
+        if k == 1:
+            out[g] = spectra[int(g_rows[0])]
+            continue
+        if is_contig:
+            raw_block = spectra[int(g_rows[0]) : int(g_rows[0]) + k]
+        else:
+            g_rows_sorted = np.sort(g_rows)
+            if buf is not None and k <= max_noncontig_k:
+                np.take(spectra, g_rows_sorted, axis=0, out=buf[:k])
+                raw_block = buf[:k]
+            else:
+                raw_block = np.take(spectra, g_rows_sorted, axis=0)
+        _median_block_into(raw_block, out[g], t_flat)
+
+    return measurement_ids, out
 
 
 def _summary_payload(
@@ -160,7 +281,12 @@ def load_area_summaries(data_source: DataSource | None, spectral_range: str) -> 
     if cached is not None:
         return cached
 
-    rows = _pixel_rows(source, code, retained_only=source.source_name == "preprocessed")
+    cols = (
+        ("measurement_id", "spectral_range", "retained", "normalized_row", "pre_normalization_row")
+        if source.source_name == "preprocessed"
+        else None
+    )
+    rows = _pixel_rows(source, code, retained_only=source.source_name == "preprocessed", columns=cols)
     measurements = load_file_index(source).set_index("measurement_id")
     spectra, axis = _load_array(source, code, basis="normalized")
     payload = _summary_payload(rows, spectra, axis, "normalized_row", measurements)

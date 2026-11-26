@@ -6,6 +6,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -91,6 +92,7 @@ def run_all_pipeline(
                 **sim_kw,
             )
         )
+    primary_state: dict[str, Any] = {}
     all_outputs.update(
         run_primary_evaluation(
             use_synthetic=use_synthetic,
@@ -102,6 +104,8 @@ def run_all_pipeline(
             use_gpu=use_gpu,
             batch_size=batch_size,
             interval_method=interval_method,
+            n_jobs=n_jobs,
+            state_out=primary_state,
             **clinical_kw,
         )
     )
@@ -116,6 +120,8 @@ def run_all_pipeline(
             interval_method=interval_method,
             use_gpu=use_gpu,
             batch_size=batch_size,
+            n_jobs=n_jobs,
+            primary_state=primary_state,
             **clinical_kw,
         )
     )

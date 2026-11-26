@@ -9,18 +9,24 @@ instrument artefacts, and make every step configurable from YAML.
 from __future__ import annotations
 
 import logging
+import math
 import warnings
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+from pybaselines._banded_utils import diff_penalty_diagonals
 from pybaselines.smooth import snip
 from pybaselines.utils import ParameterWarning
 from pybaselines.whittaker import arpls, asls
 from scipy.interpolate import interp1d
+from scipy.linalg import cho_solve_banded, cholesky_banded, solveh_banded
+from scipy.linalg.lapack import dpbsv
 from scipy.ndimage import median_filter
 from scipy.signal import find_peaks, savgol_filter
+from scipy.special import expit
 
 from src import config
 
@@ -231,6 +237,38 @@ def _update_qc_metrics(audit_metrics_df: pd.DataFrame, stage_metrics_df: pd.Data
     if stage_metrics_df.empty:
         return
     row_indices = stage_metrics_df["row_index"].to_numpy(dtype=int)
+    n_audit = len(audit_metrics_df)
+    standard_index = audit_metrics_df.index.equals(pd.RangeIndex(n_audit))
+    full_range = (
+        standard_index
+        and len(row_indices) == n_audit
+        and np.array_equal(row_indices, np.arange(n_audit))
+    )
+    if full_range:
+        for column in stage_metrics_df.columns:
+            if column != "row_index":
+                audit_metrics_df[column] = stage_metrics_df[column].to_numpy()
+        return
+
+    if standard_index and np.all((row_indices >= 0) & (row_indices < n_audit)):
+        for column in stage_metrics_df.columns:
+            if column == "row_index":
+                continue
+            vals = stage_metrics_df[column].to_numpy()
+            if column in audit_metrics_df.columns:
+                existing = audit_metrics_df[column].to_numpy(copy=True)
+                if np.can_cast(vals.dtype, existing.dtype, casting="safe"):
+                    existing[row_indices] = vals
+                    audit_metrics_df[column] = existing
+                else:
+                    audit_metrics_df.loc[row_indices, column] = vals
+            else:
+                out_dtype = vals.dtype if np.issubdtype(vals.dtype, np.floating) else float
+                arr = np.full(n_audit, np.nan, dtype=out_dtype)
+                arr[row_indices] = vals
+                audit_metrics_df[column] = arr
+        return
+
     for column in stage_metrics_df.columns:
         if column != "row_index":
             audit_metrics_df.loc[row_indices, column] = stage_metrics_df[column].to_numpy()
@@ -293,10 +331,12 @@ def _compute_qc_metrics(spectra: np.ndarray, cfg: dict | None = None) -> pd.Data
     )
 
     fluorescence_level = np.full(spectra.shape[0], np.nan, dtype=float)
-    for idx, row in enumerate(spectra):
-        valid = row[np.isfinite(row)]
-        if valid.size:
-            fluorescence_level[idx] = float(np.median(valid))
+    all_finite = finite_mask.all(axis=1)
+    if all_finite.any():
+        fluorescence_level[all_finite] = np.median(spectra[all_finite], axis=1)
+    for idx in np.flatnonzero(has_finite & ~all_finite):
+        row = spectra[idx]
+        fluorescence_level[idx] = float(np.median(row[finite_mask[idx]]))
 
     finite_abs = np.where(finite_mask, np.abs(spectra), 0.0)
     total_area = np.trapezoid(finite_abs, axis=1, dx=1.0)
@@ -469,9 +509,12 @@ def _limit_spike_width(mask: np.ndarray, max_width: int) -> np.ndarray:
     """Keep only contiguous positive excursions no wider than ``max_width``."""
     limited = np.zeros_like(mask, dtype=bool)
     maximum = max(1, int(max_width))
-    for row_index, row_mask in enumerate(mask):
-        starts = np.flatnonzero(np.diff(np.r_[False, row_mask, False].astype(int)) == 1)
-        stops = np.flatnonzero(np.diff(np.r_[False, row_mask, False].astype(int)) == -1)
+    for row_index in np.flatnonzero(mask.any(axis=1)):
+        row_mask = mask[row_index]
+        padded = np.r_[False, row_mask, False].astype(int)
+        edges = np.diff(padded)
+        starts = np.flatnonzero(edges == 1)
+        stops = np.flatnonzero(edges == -1)
         for start, stop in zip(starts, stops):
             if stop - start <= maximum:
                 limited[row_index, start:stop] = True
@@ -503,17 +546,12 @@ def _spatial_cosmic_detection(
     neighbor_count = max(1, min(int(n_neighbors), len(coords) - 1))
     nearest = np.argpartition(distances, kth=neighbor_count - 1, axis=1)[:, :neighbor_count]
 
-    replacement = np.empty_like(spectra, dtype=float)
-    spike_mask = np.zeros_like(spectra, dtype=bool)
-    for idx in range(len(spectra)):
-        neighbor_median = np.median(spectra[nearest[idx]], axis=0)
-        replacement[idx] = neighbor_median
-        residual = spectra[idx] - neighbor_median
-        mad = np.median(np.abs(residual))
-        if mad == 0:
-            mad = 1e-10
-        local_spikes = residual > (1.4826 * mad * z_threshold)
-        spike_mask[idx] = _limit_spike_width(local_spikes[np.newaxis, :], max_width)[0]
+    replacement = np.asarray(np.median(spectra[nearest], axis=1), dtype=float)
+    residual = spectra - replacement
+    mad = np.median(np.abs(residual), axis=1, keepdims=True)
+    mad[mad == 0] = 1e-10
+    local_spikes = residual > (1.4826 * mad * z_threshold)
+    spike_mask = _limit_spike_width(local_spikes, max_width)
     return spike_mask, replacement
 
 
@@ -559,6 +597,129 @@ def _suppress_cosmic_spikes(
 
 
 
+_MIN_FLOAT = float(np.finfo(float).eps)
+_ARPLS_EARLY_EXIT_MSG = (
+    'almost all baseline points are below the data, indicating that "tol" is too low and/or "max_iter" is too high'
+)
+
+
+@lru_cache(maxsize=64)
+def _banded_diff2_penalty(n_channels: int, lam: float) -> np.ndarray:
+    """Return read-only lower-banded ``lam * D^T D`` penalty for order-2 differences."""
+    pen = np.ascontiguousarray(
+        float(lam) * diff_penalty_diagonals(int(n_channels), 2, lower_only=True),
+        dtype=float,
+    )
+    pen.setflags(write=False)
+    return pen
+
+
+def _fast_whittaker_batch(
+    arr: np.ndarray,
+    *,
+    method: str,
+    lam: float,
+    p: float,
+    max_iter: int,
+    tol: float,
+) -> tuple[np.ndarray, list[int]]:
+    """Exact-parity Whittaker baseline solver (`arpls`/`als`) with cached banded penalty."""
+    if arr.shape[0] == 0:
+        return np.empty_like(arr, dtype=float), []
+    if not np.isfinite(arr).all():
+        raise ValueError("array must not contain infs or NaNs")
+
+    n_rows, n_ch = arr.shape
+    if (
+        n_ch < 3
+        or not np.isfinite(lam)
+        or lam <= 0.0
+        or max_iter < 0
+        or (method == "als" and (not np.isfinite(p) or not (0.0 < p < 1.0)))
+    ):
+        baselines = np.empty_like(arr, dtype=float)
+        warned_indices: list[int] = []
+        for index, row in enumerate(arr):
+            if method == "als":
+                baseline, _ = asls(row, lam=lam, p=p, max_iter=max_iter, tol=tol)
+            else:
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always", ParameterWarning)
+                    baseline, _ = arpls(row, lam=lam, diff_order=2, max_iter=max_iter, tol=tol)
+                if caught:
+                    warned_indices.append(index)
+            baselines[index] = baseline
+        return baselines, warned_indices
+
+    pen = _banded_diff2_penalty(n_ch, lam)
+    p0 = pen[0]
+    ab_buf = np.empty_like(pen)
+    rhs_buf = np.empty(n_ch, dtype=float)
+    expit_buf = np.empty(n_ch, dtype=float) if method == "arpls" else None
+    diff_buf = np.empty(n_ch, dtype=float)
+    w_buf = np.empty(n_ch, dtype=float)
+    ones_w = np.ones(n_ch, dtype=float)
+    ones_norm = math.sqrt(float(n_ch))
+    baselines = np.empty((n_rows, n_ch), dtype=float)
+    warned_indices = []
+    one_minus_p = 1.0 - p
+
+    np.copyto(ab_buf, pen)
+    ab_buf[0] = p0 + 1.0
+    cb0 = cholesky_banded(ab_buf, lower=True, overwrite_ab=True, check_finite=False)
+    b0_all = np.ascontiguousarray(cho_solve_banded((cb0, True), arr.T, check_finite=False).T)
+
+    for k in range(n_rows):
+        y = arr[k]
+        w_arr = ones_w
+        w_norm = ones_norm
+        b = b0_all[k]
+        for it in range(max_iter + 1):
+            if it > 0:
+                np.copyto(ab_buf, pen)
+                ab_buf[0] = p0 + w_arr
+                np.multiply(w_arr, y, out=rhs_buf)
+                _, b, info = dpbsv(ab_buf, rhs_buf, lower=True, overwrite_ab=True, overwrite_b=True)
+                if info != 0:
+                    np.copyto(ab_buf, pen)
+                    ab_buf[0] = p0 + w_arr
+                    np.multiply(w_arr, y, out=rhs_buf)
+                    b = solveh_banded(ab_buf, rhs_buf, overwrite_ab=True, overwrite_b=True, lower=True, check_finite=False)
+            if method == "arpls":
+                res = y - b
+                neg = res[res < 0]
+                if neg.size < 2:
+                    warned_indices.append(k)
+                    break
+                s = float(neg.std(ddof=1))
+                if s == 0.0:
+                    s = _MIN_FLOAT
+                assert expit_buf is not None
+                np.subtract(res, 2.0 * s - float(neg.mean()), out=expit_buf)
+                expit_buf *= -2.0 / s
+                nw = expit(expit_buf, out=expit_buf)
+                np.subtract(nw, w_arr, out=diff_buf)
+                rel = math.sqrt(float(np.dot(diff_buf, diff_buf))) / max(w_norm, _MIN_FLOAT)
+                if rel < tol:
+                    break
+                if it < max_iter:
+                    np.copyto(w_buf, nw)
+                    w_arr = w_buf
+                    w_norm = math.sqrt(float(np.dot(w_arr, w_arr)))
+            else:
+                nw = np.where(y > b, p, one_minus_p)
+                np.subtract(nw, w_arr, out=diff_buf)
+                rel = math.sqrt(float(np.dot(diff_buf, diff_buf))) / max(w_norm, _MIN_FLOAT)
+                if rel < tol:
+                    break
+                if it < max_iter:
+                    w_arr = nw
+                    w_norm = math.sqrt(float(np.dot(w_arr, w_arr)))
+        baselines[k] = b
+
+    return baselines, warned_indices
+
+
 def correct_baseline(
     spectra: np.ndarray,
     method: Optional[str] = None,
@@ -577,49 +738,73 @@ def correct_baseline(
     """
     bl_cfg = _pre_cfg(cfg=cfg).get("baseline", {})
     chosen_method = str(method if method is not None else bl_cfg.get("method", "arpls")).strip().lower()
+    if chosen_method not in {"als", "snip", "arpls"}:
+        raise ValueError(f"Unknown baseline method: {chosen_method}")
     lam_value = float(lam if lam is not None else bl_cfg.get("lam", 1000000.0))
     p_value = float(p if p is not None else bl_cfg.get("p", 0.01))
     snip_cfg = bl_cfg.get("snip", {})
-    corrected = np.empty_like(spectra, dtype=float)
-    baselines = np.empty_like(spectra, dtype=float)
+    arr = np.asarray(spectra, dtype=float)
 
     arpls_cfg = bl_cfg.get("arpls", {})
     resolved_arpls_lam = float(arpls_lam if arpls_lam is not None else arpls_cfg.get("lam", lam_value))
     resolved_arpls_ratio = float(arpls_ratio if arpls_ratio is not None else arpls_cfg.get("ratio", 0.001))
     resolved_arpls_max_iter = int(arpls_max_iter if arpls_max_iter is not None else arpls_cfg.get("max_iter", 100))
 
-    for index, row in enumerate(np.asarray(spectra, dtype=float)):
-        if chosen_method == "als":
-            baseline, _ = asls(row, lam=lam_value, p=p_value)
-        elif chosen_method == "snip":
-            max_half_window = int(snip_cfg.get("max_half_window", 50))
-            decreasing = bool(snip_cfg.get("decreasing", True))
-            smooth_half_window = int(snip_cfg.get("smooth_half_window", 3))
-            local_max_half_window = min(max_half_window, max((row.shape[0] - 1) // 2, 1))
-            baseline, _ = snip(
-                row,
-                max_half_window=local_max_half_window,
-                decreasing=decreasing,
-                smooth_half_window=smooth_half_window,
-            )
-        elif chosen_method == "arpls":
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always", ParameterWarning)
-                baseline, _ = arpls(
+    if arr.ndim == 2 and chosen_method == "arpls":
+        baselines, warned_indices = _fast_whittaker_batch(
+            arr,
+            method="arpls",
+            lam=resolved_arpls_lam,
+            p=0.5,
+            max_iter=resolved_arpls_max_iter,
+            tol=resolved_arpls_ratio,
+        )
+        for index in warned_indices:
+            logger.debug("arPLS baseline warning for spectrum %d: %s", index, _ARPLS_EARLY_EXIT_MSG)
+        corrected = arr - baselines
+    elif arr.ndim == 2 and chosen_method == "als":
+        baselines, _ = _fast_whittaker_batch(
+            arr,
+            method="als",
+            lam=lam_value,
+            p=p_value,
+            max_iter=50,
+            tol=1e-3,
+        )
+        corrected = arr - baselines
+    else:
+        corrected = np.empty_like(arr, dtype=float)
+        baselines = np.empty_like(arr, dtype=float)
+        max_half_window = int(snip_cfg.get("max_half_window", 50))
+        decreasing = bool(snip_cfg.get("decreasing", True))
+        smooth_half_window = int(snip_cfg.get("smooth_half_window", 3))
+        for index, row in enumerate(arr):
+            if chosen_method == "als":
+                baseline, _ = asls(row, lam=lam_value, p=p_value)
+            elif chosen_method == "snip":
+                local_max_half_window = min(max_half_window, max((row.shape[0] - 1) // 2, 1))
+                baseline, _ = snip(
                     row,
-                    lam=resolved_arpls_lam,
-                    diff_order=2,
-                    max_iter=resolved_arpls_max_iter,
-                    tol=resolved_arpls_ratio,
+                    max_half_window=local_max_half_window,
+                    decreasing=decreasing,
+                    smooth_half_window=smooth_half_window,
                 )
-            for warning in caught:
-                logger.debug("arPLS baseline warning for spectrum %d: %s", index, warning.message)
-        else:
-            raise ValueError(f"Unknown baseline method: {chosen_method}")
-        baselines[index] = baseline
-        corrected[index] = row - baseline
+            else:
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always", ParameterWarning)
+                    baseline, _ = arpls(
+                        row,
+                        lam=resolved_arpls_lam,
+                        diff_order=2,
+                        max_iter=resolved_arpls_max_iter,
+                        tol=resolved_arpls_ratio,
+                    )
+                for warning in caught:
+                    logger.debug("arPLS baseline warning for spectrum %d: %s", index, warning.message)
+            baselines[index] = baseline
+            corrected[index] = row - baseline
 
-    logger.debug("Baseline correction (%s) applied to %d spectra", chosen_method, spectra.shape[0])
+    logger.debug("Baseline correction (%s) applied to %d spectra", chosen_method, arr.shape[0])
     if return_baseline:
         return corrected, baselines
     return corrected
@@ -717,9 +902,27 @@ def interpolate_spectra(
         return spectra, wavenumbers
     if interp_kind == "cubic" and wavenumbers.size < 4:
         interp_kind = "linear"
+    wn_src = np.asarray(wavenumbers, dtype=float)
+    arr = np.asarray(spectra, dtype=float)
+    if (
+        interp_kind == "linear"
+        and arr.ndim == 2
+        and wn_src.ndim == 1
+        and wn_src.size >= 2
+        and arr.shape[1] == wn_src.size
+        and wn_uniform[0] >= wn_src[0]
+        and wn_uniform[-1] <= wn_src[-1]
+        and np.all(np.diff(wn_src) > 0)
+    ):
+        idx = np.clip(np.searchsorted(wn_src, wn_uniform, side="left"), 1, wn_src.size - 1)
+        lo = idx - 1
+        x_lo = wn_src[lo]
+        y_lo = arr[:, lo]
+        slope = (arr[:, idx] - y_lo) / (wn_src[idx] - x_lo)[None, :]
+        return slope * (wn_uniform - x_lo)[None, :] + y_lo, wn_uniform
     interpolator = interp1d(
-        wavenumbers,
-        spectra,
+        wn_src,
+        arr,
         kind=interp_kind,
         axis=1,
         bounds_error=True,
@@ -773,19 +976,20 @@ def _resolve_anchor_index(
     return int(np.nanargmax(mean_spec))
 
 
-def spectral_quality_mask(
+def _spectral_quality_details(
     spectra: np.ndarray,
+    *,
     snr_threshold: Optional[float] = None,
     peak_window: Optional[int] = None,
     noise_channels: Optional[int] = None,
-    min_area_percentile: Optional[float] = None,
     min_integrated_signal: Optional[float] = None,
     wavenumbers: Optional[np.ndarray] = None,
     region: Optional[str] = None,
     cfg: dict | None = None,
-) -> tuple[np.ndarray, dict[str, float]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float]]:
     if spectra.size == 0:
-        return np.array([], dtype=bool), {"anchor_index": -1.0, "area_threshold": 0.0}
+        empty = np.array([], dtype=float)
+        return empty, empty, np.array([], dtype=bool), {"anchor_index": -1.0, "area_threshold": 0.0}
     qf_cfg = _spectral_quality_cfg(cfg=cfg)
     snr_thr = float(snr_threshold if snr_threshold is not None else qf_cfg.get("snr_threshold", 5.0))
     pwin = int(peak_window if peak_window is not None else qf_cfg.get("peak_window", 5))
@@ -794,14 +998,15 @@ def spectral_quality_mask(
     if configured_floor is None:
         configured_floor = qf_cfg.get("min_integrated_signal")
 
-    anchor_idx = _resolve_anchor_index(spectra, wavenumbers, region, cfg=cfg)
+    arr = np.asarray(spectra, dtype=float)
+    anchor_idx = _resolve_anchor_index(arr, wavenumbers, region, cfg=cfg)
     lo = max(0, anchor_idx - pwin)
-    hi = min(spectra.shape[1], anchor_idx + pwin + 1)
-    signal = np.nanmax(spectra[:, lo:hi], axis=1)
-    noise_std = np.nanstd(_noise_window(np.asarray(spectra, dtype=float), noise_n), axis=1)
+    hi = min(arr.shape[1], anchor_idx + pwin + 1)
+    signal = np.nanmax(arr[:, lo:hi], axis=1)
+    noise_std = np.nanstd(_noise_window(arr, noise_n), axis=1)
     noise_std[noise_std == 0] = 1e-10
     snr = signal / noise_std
-    area = np.trapezoid(np.abs(spectra), axis=1, dx=1.0)
+    area = np.trapezoid(np.abs(arr), axis=1, dx=1.0)
     area_threshold = float(configured_floor) if configured_floor is not None else float("nan")
     area_ok = area > area_threshold if configured_floor is not None else np.ones_like(area, dtype=bool)
     valid = np.isfinite(snr) & np.isfinite(area)
@@ -813,6 +1018,30 @@ def spectral_quality_mask(
         "signal_area_median": float(np.nanmedian(area)),
         "n_valid": float(mask.sum()),
     }
+    return snr, area, mask, stats
+
+
+def spectral_quality_mask(
+    spectra: np.ndarray,
+    snr_threshold: Optional[float] = None,
+    peak_window: Optional[int] = None,
+    noise_channels: Optional[int] = None,
+    min_area_percentile: Optional[float] = None,
+    min_integrated_signal: Optional[float] = None,
+    wavenumbers: Optional[np.ndarray] = None,
+    region: Optional[str] = None,
+    cfg: dict | None = None,
+) -> tuple[np.ndarray, dict[str, float]]:
+    _, _, mask, stats = _spectral_quality_details(
+        spectra,
+        snr_threshold=snr_threshold,
+        peak_window=peak_window,
+        noise_channels=noise_channels,
+        min_integrated_signal=min_integrated_signal,
+        wavenumbers=wavenumbers,
+        region=region,
+        cfg=cfg,
+    )
     return mask, stats
 
 
@@ -972,20 +1201,16 @@ def _apply_quality_filter(
     cfg: dict | None = None,
     audit_metrics_df: pd.DataFrame | None = None,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    qf_cfg = _spectral_quality_cfg(cfg=cfg)
-    peak_window = int(qf_cfg.get("peak_window", 5))
-    noise_channels = int(qf_cfg.get("noise_channels", 20))
-    anchor_index = _resolve_anchor_index(result, wavenumbers, region_key, cfg=cfg)
-    lower = max(0, anchor_index - peak_window)
-    upper = min(result.shape[1], anchor_index + peak_window + 1)
-    signal = np.nanmax(result[:, lower:upper], axis=1)
-    noise = np.nanstd(_noise_window(result, noise_channels), axis=1)
-    noise[noise == 0] = 1e-10
-    metrics_df.loc[:, "post_baseline_snr"] = signal / noise
-    metrics_df.loc[:, "post_baseline_signal_area"] = np.trapezoid(np.abs(result), axis=1)
+    snr, area, quality_mask, quality_stats = _spectral_quality_details(
+        result,
+        wavenumbers=wavenumbers,
+        region=region_key,
+        cfg=cfg,
+    )
+    metrics_df.loc[:, "post_baseline_snr"] = snr
+    metrics_df.loc[:, "post_baseline_signal_area"] = area
     if audit_metrics_df is not None:
         _update_qc_metrics(audit_metrics_df, metrics_df)
-    quality_mask, quality_stats = spectral_quality_mask(result, wavenumbers=wavenumbers, region=region_key, cfg=cfg)
     kept_indices = np.where(retained_mask)[0]
     dropped = kept_indices[~quality_mask]
     flags_df.loc[dropped, "qc_flag"] = True

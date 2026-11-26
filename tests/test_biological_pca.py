@@ -539,3 +539,192 @@ def test_run_measurement_count_sensitivity_no_variation_returns_empty() -> None:
     results = fit_biological_pca_models(inputs, cfg=cfg)
     draws = biological_pca.run_measurement_count_sensitivity(inputs, results, cfg=cfg)
     assert draws.empty
+
+
+def test_run_pca_dual_gram_parity_and_fallbacks() -> None:
+    from sklearn.decomposition import PCA
+
+    from src.analysis.statistics import run_pca
+
+    rng = np.random.default_rng(123)
+    x_well = rng.normal(size=(30, 80))
+    for scale_flag in (False, True):
+        got = run_pca(x_well, n_components=5, scale=scale_flag, log_summary=False, warn_on_high_pc1=False)
+        x_proc = got["scaler"].transform(x_well) if scale_flag else (x_well - np.mean(x_well, axis=0, keepdims=True))
+        ref_pca = PCA(n_components=5, random_state=42, svd_solver="full").fit(x_proc)
+        ref_scores = ref_pca.transform(x_proc)
+        ref_loadings = ref_pca.components_.copy()
+        signs = np.sign(ref_loadings[np.arange(5), np.argmax(np.abs(ref_loadings), axis=1)])
+        signs[signs == 0] = 1.0
+        ref_loadings *= signs[:, np.newaxis]
+        ref_scores *= signs[np.newaxis, :]
+        np.testing.assert_allclose(got["explained_variance_ratio"], ref_pca.explained_variance_ratio_, atol=1e-12)
+        np.testing.assert_allclose(got["loadings"], ref_loadings, atol=1e-12)
+        np.testing.assert_allclose(got["scores"], ref_scores, atol=1e-12)
+        np.testing.assert_allclose(got["pca_model"].transform(x_proc), got["scores"], atol=1e-12)
+
+    # Large constant offset triggers mu^2 > 1e2 * tr(G) fallback to primal full SVD
+    x_offset = 1000.0 + 1e-3 * rng.normal(size=(25, 70))
+    got_off = run_pca(x_offset, n_components=4, scale=False, log_summary=False, warn_on_high_pc1=False)
+    ref_off = PCA(n_components=4, random_state=42, svd_solver="full").fit(x_offset - x_offset.mean(axis=0, keepdims=True))
+    np.testing.assert_allclose(got_off["explained_variance_ratio"], ref_off.explained_variance_ratio_, atol=1e-12)
+
+    # Rank-deficient matrix triggers conditioning fallback without errors
+    x_rank2 = rng.normal(size=(25, 2)) @ rng.normal(size=(2, 60))
+    got_rank = run_pca(x_rank2, n_components=5, scale=False, log_summary=False, warn_on_high_pc1=False)
+    ref_rank = PCA(n_components=5, random_state=42, svd_solver="full").fit(x_rank2 - x_rank2.mean(axis=0, keepdims=True))
+    np.testing.assert_allclose(got_rank["explained_variance_ratio"], ref_rank.explained_variance_ratio_, atol=1e-12)
+
+    # n_components == n_samples falls back cleanly because centered rank <= n_samples - 1
+    got_full_k = run_pca(x_well[:20], n_components=20, scale=False, log_summary=False, warn_on_high_pc1=False)
+    assert got_full_k["scores"].shape == (20, 20)
+
+
+def test_joint_pca_mfa_dual_gram_parity_and_offset_fallback() -> None:
+    from sklearn.decomposition import PCA
+
+    rng = np.random.default_rng(77)
+    for offset in (0.0, 1000.0):
+        fp = offset + rng.normal(scale=1.0 if offset == 0.0 else 1e-3, size=(28, 70))
+        ch = offset + rng.normal(scale=0.5 if offset == 0.0 else 5e-4, size=(28, 50))
+        got = joint_pca_mfa(np.hstack([fp, ch]), split_index=70, n_components=4)
+
+        fp_c = fp - fp.mean(axis=0, keepdims=True)
+        ch_c = ch - ch.mean(axis=0, keepdims=True)
+        ev1 = float(PCA(n_components=1, svd_solver="full").fit(fp_c).explained_variance_[0])
+        ev2 = float(PCA(n_components=1, svd_solver="full").fit(ch_c).explained_variance_[0])
+        comb = np.hstack([fp_c / np.sqrt(ev1), ch_c / np.sqrt(ev2)])
+        ref = PCA(n_components=4, svd_solver="full").fit(comb)
+        ref_scores = ref.transform(comb)
+        ref_loadings = ref.components_.copy()
+        signs = np.sign(ref_loadings[np.arange(4), np.argmax(np.abs(ref_loadings), axis=1)])
+        signs[signs == 0] = 1.0
+        ref_loadings *= signs[:, np.newaxis]
+        ref_scores *= signs[np.newaxis, :]
+        np.testing.assert_allclose(got["explained_variance_ratio"], ref.explained_variance_ratio_, atol=1e-12)
+        np.testing.assert_allclose(got["loadings"], ref_loadings, atol=1e-12)
+        np.testing.assert_allclose(got["scores"], ref_scores, atol=1e-12)
+
+
+def test_run_measurement_count_sensitivity_parity_multi_draw() -> None:
+    cfg = _cfg()
+    cfg["biological_pca"]["measurement_count_sensitivity"] = {
+        "enabled": True,
+        "n_draws": 6,
+        "random_state": 17,
+    }
+    rng = np.random.default_rng(99)
+    n_subjects = 20
+    subjects = [f"S{i:02d}" for i in range(n_subjects)]
+    axes = {
+        "1300": np.linspace(1240.0, 1340.0, 50),
+        "2850": np.linspace(2840.0, 2945.0, 40),
+    }
+    measurement_rows: dict[str, dict[str, np.ndarray]] = {}
+    mat_1300 = []
+    mat_2850 = []
+    for i, sid in enumerate(subjects):
+        n_m = 3 if i < 8 else 6
+        r1 = rng.normal(size=(n_m, 50))
+        r2 = rng.normal(size=(n_m, 40))
+        if i == 10:
+            r1[0, 3] = np.nan
+        measurement_rows[sid] = {"1300": r1, "2850": r2}
+        mat_1300.append(np.nanmedian(r1, axis=0))
+        mat_2850.append(np.nanmedian(r2, axis=0))
+    matrices = {"1300": np.vstack(mat_1300), "2850": np.vstack(mat_2850)}
+    n_meas_list = [3 if i < 8 else 6 for i in range(n_subjects)]
+    meta = pd.DataFrame(
+        {
+            "subject_id": subjects,
+            "n_measurements": n_meas_list,
+            "n_areas": n_meas_list,
+            "n_total_pixels": [m * 5 for m in n_meas_list],
+            "n_retained_pixels": [m * 5 for m in n_meas_list],
+        }
+    )
+    inputs = SubjectInputs(
+        subject_spectra=meta,
+        subject_region_counts=pd.DataFrame({"subject_id": subjects}),
+        input_provenance=pd.DataFrame(),
+        axes=axes,
+        matrices=matrices,
+        subjects=subjects,
+        measurement_rows=measurement_rows,
+    )
+    results = fit_biological_pca_models(inputs, cfg=cfg)
+    draws = biological_pca.run_measurement_count_sensitivity(inputs, results, cfg=cfg)
+
+    rng_ref = np.random.default_rng(17)
+    for draw in range(6):
+        m1 = biological_pca._resampled_subject_matrix(inputs, "1300", 3, rng_ref)
+        m2 = biological_pca._resampled_subject_matrix(inputs, "2850", 3, rng_ref)
+        ref_whole = joint_pca_mfa(np.hstack([m1, m2]), 50, 3)
+        sub = draws.loc[(draws["draw"] == draw) & (draws["model"] == "PCA_whole")]
+        np.testing.assert_allclose(
+            sub["explained_variance_ratio"].to_numpy(),
+            ref_whole["explained_variance_ratio"],
+            atol=1e-12,
+        )
+
+
+def test_run_pca_scale_true_large_offset_parity_and_transform() -> None:
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    from src.analysis.statistics import run_pca
+
+    rng = np.random.default_rng(12345)
+    t = np.linspace(0.0, 1.0, 1802)
+    z = rng.normal(size=(92, 5)) * np.linspace(3.0, 0.5, 5)
+    basis = np.vstack([np.sin((k + 1) * np.pi * t) for k in range(5)])
+    x_struct = z @ basis + 0.05 * rng.normal(size=(92, 1802))
+
+    for offset in (1000.0, 1e6):
+        x_shifted = offset + 1e-4 * x_struct
+        got = run_pca(
+            x_shifted,
+            n_components=5,
+            scale=True,
+            log_summary=False,
+            warn_on_high_pc1=False,
+        )
+        xp = StandardScaler().fit_transform(x_shifted)
+        ref = PCA(n_components=5, random_state=42, svd_solver="full").fit(xp)
+        ref_scores = ref.transform(xp)
+        ref_loadings = ref.components_.copy()
+        signs = np.sign(ref_loadings[np.arange(5), np.argmax(np.abs(ref_loadings), axis=1)])
+        signs[signs == 0] = 1.0
+        ref_loadings *= signs[:, np.newaxis]
+        ref_scores *= signs[np.newaxis, :]
+
+        np.testing.assert_allclose(got["scores"], ref_scores, atol=1e-12)
+        np.testing.assert_allclose(got["loadings"], ref_loadings, atol=1e-12)
+        np.testing.assert_allclose(
+            got["explained_variance_ratio"], ref.explained_variance_ratio_, atol=1e-12
+        )
+        np.testing.assert_allclose(got["pca_model"].mean_, ref.mean_, atol=1e-12)
+        np.testing.assert_allclose(got["pca_model"].transform(xp), got["scores"], atol=1e-12)
+
+    # Verify joint_pca_mfa also preserves <= 1e-12 parity at +1e6 offset
+    x_mfa = 1e6 + 1e-4 * x_struct
+    got_mfa = joint_pca_mfa(x_mfa, split_index=1055, n_components=5)
+    fp_c = x_mfa[:, :1055] - x_mfa[:, :1055].mean(axis=0, keepdims=True)
+    ch_c = x_mfa[:, 1055:] - x_mfa[:, 1055:].mean(axis=0, keepdims=True)
+    ev1 = float(PCA(n_components=1, svd_solver="full").fit(fp_c).explained_variance_[0])
+    ev2 = float(PCA(n_components=1, svd_solver="full").fit(ch_c).explained_variance_[0])
+    comb = np.hstack([fp_c / np.sqrt(ev1), ch_c / np.sqrt(ev2)])
+    ref_mfa = PCA(n_components=5, svd_solver="full").fit(comb)
+    ref_mfa_scores = ref_mfa.transform(comb)
+    ref_mfa_loadings = ref_mfa.components_.copy()
+    signs_mfa = np.sign(
+        ref_mfa_loadings[np.arange(5), np.argmax(np.abs(ref_mfa_loadings), axis=1)]
+    )
+    signs_mfa[signs_mfa == 0] = 1.0
+    ref_mfa_loadings *= signs_mfa[:, np.newaxis]
+    ref_mfa_scores *= signs_mfa[np.newaxis, :]
+    np.testing.assert_allclose(got_mfa["scores"], ref_mfa_scores, atol=1e-12)
+    np.testing.assert_allclose(got_mfa["loadings"], ref_mfa_loadings, atol=1e-12)
+    np.testing.assert_allclose(
+        got_mfa["explained_variance_ratio"], ref_mfa.explained_variance_ratio_, atol=1e-12
+    )

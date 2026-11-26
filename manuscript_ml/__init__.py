@@ -23,6 +23,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +39,7 @@ from src.analysis.paired_lipid.cohort import (  # noqa: E402
     PairedLipidConfig,
     SubsetMode,
     load_paired_cohort_from_store,
+    parse_sample_label,
 )
 from src.analysis.paired_lipid.nested_cv import INTERVAL_METHODS  # noqa: E402
 from src.analysis.paired_lipid.synthetic import generate_synthetic_cohort  # noqa: E402
@@ -422,6 +424,135 @@ def clear_dataset_cache() -> None:
     _resolve_experiment_dataset_cached.cache_clear()
 
 
+def _derive_subset_cohort_dataset(
+    base_ds: CohortDataset,
+    subset_mode: SubsetMode,
+    *,
+    recompute_labels_from_ids: bool,
+) -> CohortDataset:
+    """Derive ``paired_only`` or ``single_sample`` from an ``all_eligible`` CohortDataset."""
+    if subset_mode == "single_sample":
+        sample_lbls = (
+            np.fromiter(
+                (parse_sample_label(s) for s in base_ds.sample_ids),
+                dtype=float,
+                count=base_ds.n_samples,
+            )
+            if recompute_labels_from_ids
+            else base_ds.sample_parsed_labels
+        )
+        first_idx = np.cumsum(base_ds.participant_sample_counts) - base_ds.participant_sample_counts
+        first_lbls = sample_lbls[first_idx]
+        trend = np.where(np.isfinite(first_lbls), first_lbls, np.nan)
+        cov_df = base_ds.covariate_frame.copy()
+        cov_df["sample_label_trend"] = trend
+        return CohortDataset(
+            participant_ids=base_ds.participant_ids,
+            outcomes={k: v for k, v in base_ds.outcomes.items()},
+            covariate_frame=cov_df,
+            wavenumbers_1300=base_ds.wavenumbers_1300,
+            wavenumbers_2850=base_ds.wavenumbers_2850,
+            sample_1300=base_ds.sample_1300,
+            sample_2850=base_ds.sample_2850,
+            sample_participant_idx=base_ds.sample_participant_idx,
+            sample_ids=base_ds.sample_ids,
+            sample_parsed_labels=sample_lbls,
+            participant_sample_counts=base_ds.participant_sample_counts,
+            paired_participant_indices=base_ds.paired_participant_indices,
+            pair_sample_a_indices=base_ds.pair_sample_a_indices,
+            pair_sample_b_indices=base_ds.pair_sample_b_indices,
+            manifest_summary={**base_ds.manifest_summary, "subset_mode": "single_sample"},
+            exclusions=[dict(e) for e in base_ds.exclusions],
+        )
+
+    if subset_mode != "paired_only":
+        raise ValueError(f"Unsupported subset derivation mode: {subset_mode!r}.")
+
+    keep_p = base_ds.participant_sample_counts >= 2
+    if not np.any(keep_p):
+        raise ValueError("No eligible stroke participants remained after linkage and spectral checks.")
+
+    keep_p_idx = np.flatnonzero(keep_p)
+    n_kept = int(keep_p_idx.size)
+    counts_kept = base_ds.participant_sample_counts[keep_p]
+    if not np.all(counts_kept == 2):
+        raise ValueError("paired_only derivation requires exactly two samples per retained participant.")
+
+    keep_s = keep_p[base_ds.sample_participant_idx]
+    sample_ids = base_ds.sample_ids[keep_s]
+    n_kept_samples = int(sample_ids.size)
+    cov_df = base_ds.covariate_frame.iloc[keep_p_idx].reset_index(drop=True)
+
+    pair_a = np.arange(0, 2 * n_kept, 2, dtype=int)
+    pair_b = pair_a + 1
+    if recompute_labels_from_ids:
+        sample_lbls = np.fromiter(
+            (parse_sample_label(s) for s in sample_ids),
+            dtype=float,
+            count=n_kept_samples,
+        )
+        lbl_a = sample_lbls[pair_a]
+        lbl_b = sample_lbls[pair_b]
+        fin_a = np.isfinite(lbl_a)
+        fin_b = np.isfinite(lbl_b)
+        cov_df["sample_label_trend"] = np.where(
+            fin_a & fin_b,
+            0.5 * (lbl_a + lbl_b),
+            np.where(fin_a, lbl_a, np.where(fin_b, lbl_b, np.nan)),
+        )
+    else:
+        sample_lbls = base_ds.sample_parsed_labels[keep_s]
+
+    old_to_new = np.full(base_ds.n_participants, -1, dtype=int)
+    old_to_new[keep_p] = np.arange(n_kept, dtype=int)
+    sample_p_idx = old_to_new[base_ds.sample_participant_idx[keep_s]]
+
+    split_idx = len(base_ds.exclusions)
+    while split_idx > 0 and base_ds.exclusions[split_idx - 1].get("reason") == "no_eligible_samples":
+        split_idx -= 1
+    prefix_exclusions = [dict(e) for e in base_ds.exclusions[:split_idx]]
+    trailing_no_eligible = [dict(e) for e in base_ds.exclusions[split_idx:]]
+    unpaired_exclusions = [
+        {
+            "participant_id": str(pid),
+            "level": "participant",
+            "reason": "unpaired_in_paired_only_mode",
+        }
+        for pid in base_ds.participant_ids[~keep_p]
+    ]
+    new_exclusions = prefix_exclusions + sorted(
+        trailing_no_eligible + unpaired_exclusions,
+        key=lambda e: str(e["participant_id"]),
+    )
+
+    return CohortDataset(
+        participant_ids=base_ds.participant_ids[keep_p],
+        outcomes={k: v[keep_p] for k, v in base_ds.outcomes.items()},
+        covariate_frame=cov_df,
+        wavenumbers_1300=base_ds.wavenumbers_1300,
+        wavenumbers_2850=base_ds.wavenumbers_2850,
+        sample_1300=base_ds.sample_1300[keep_s],
+        sample_2850=base_ds.sample_2850[keep_s],
+        sample_participant_idx=sample_p_idx,
+        sample_ids=sample_ids,
+        sample_parsed_labels=sample_lbls,
+        participant_sample_counts=counts_kept,
+        paired_participant_indices=np.arange(n_kept, dtype=int),
+        pair_sample_a_indices=pair_a,
+        pair_sample_b_indices=pair_b,
+        manifest_summary={
+            "subset_mode": "paired_only",
+            "min_maps_per_block": int(base_ds.manifest_summary["min_maps_per_block"]),
+            "n_eligible_participants": n_kept,
+            "n_paired_participants": n_kept,
+            "n_single_sample_participants": 0,
+            "n_eligible_samples": n_kept_samples,
+            "n_exclusions": len(new_exclusions),
+        },
+        exclusions=new_exclusions,
+    )
+
+
 @lru_cache(maxsize=8)
 def _resolve_experiment_dataset_cached(
     use_synthetic: bool,
@@ -440,6 +571,29 @@ def _resolve_experiment_dataset_cached(
         secondary_endpoints=secondary_endpoints,
         min_maps_per_block=min_maps_per_block,
     )
+    if subset_mode in ("paired_only", "single_sample") and (
+        not use_synthetic or synthetic_participants <= 900
+    ):
+        base_ds, base_meta = _resolve_experiment_dataset_cached(
+            use_synthetic,
+            clinical_master_path,
+            "all_eligible",
+            synthetic_participants,
+            synthetic_seed,
+            compact_grid,
+            dataset_cfg_key,
+            source_identity,
+            readiness_json,
+        )
+        return (
+            _derive_subset_cohort_dataset(
+                base_ds,
+                subset_mode,
+                recompute_labels_from_ids=use_synthetic,
+            ),
+            copy.deepcopy(base_meta),
+        )
+
     if use_synthetic:
         dataset, truth = generate_synthetic_cohort(
             n_participants=synthetic_participants,

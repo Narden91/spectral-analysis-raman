@@ -201,3 +201,172 @@ def test_binary_cluster_maxima_serial_equals_parallel() -> None:
 
     assert serial["cluster_p_value"].equals(parallel["cluster_p_value"])
     assert serial["cluster_mass"].equals(parallel["cluster_mass"])
+
+
+def test_binary_cluster_maxima_matches_scipy_with_ties_nan_and_inf() -> None:
+    import numpy as np
+    from scipy import stats
+
+    from src.statistics.cluster_permutation import (
+        _binary_cluster_maxima,
+        rank_biserial_effect,
+    )
+
+    rng = np.random.default_rng(301)
+    values = np.round(rng.uniform(0.0, 4.0, size=(24, 30)), 0)
+    values[:, 4] = 1.0
+    values[:, 9] = np.nan
+    values[0, 12] = np.inf
+    values[1, 12] = -np.inf
+    labels = np.array([0] * 12 + [1] * 12, dtype=int)
+
+    got = _binary_cluster_maxima(
+        values,
+        labels,
+        n_permutations=20,
+        cluster_alpha=0.1,
+        rng=np.random.default_rng(55),
+        n_jobs=1,
+    )
+    seeds = np.random.default_rng(55).integers(0, np.iinfo(np.int32).max, size=20, dtype=np.int64)
+    ref = np.zeros(20, dtype=float)
+    for i, seed in enumerate(seeds):
+        order = np.random.default_rng(int(seed)).permutation(len(labels))
+        left = values[order[:12]]
+        right = values[order[12:]]
+        res = stats.mannwhitneyu(left, right, axis=0, alternative="two-sided", method="auto")
+        eff = np.asarray(rank_biserial_effect(left, right, np.asarray(res.statistic, dtype=float)), dtype=float)
+        cl = find_signed_clusters(eff, np.asarray(res.pvalue, dtype=float), alpha=0.1)
+        ref[i] = max((m for _, _, m in cl), default=0.0)
+    np.testing.assert_allclose(got, ref, atol=1e-13)
+
+
+def test_binary_cluster_maxima_small_n_exact_and_empty_group() -> None:
+    import warnings
+
+    import numpy as np
+    from scipy import stats
+
+    from src.statistics.cluster_permutation import (
+        _binary_cluster_maxima,
+        rank_biserial_effect,
+    )
+
+    rng = np.random.default_rng(302)
+    # Mixed tied + NaN + untied small-N (3 vs 3) matches SciPy column-wise exact/asymptotic dispatch
+    values = rng.normal(size=(6, 6))
+    values[:, 0] = [1.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    values[2, 1] = np.nan
+    labels = np.array([0, 0, 0, 1, 1, 1], dtype=int)
+    got = _binary_cluster_maxima(
+        values, labels, n_permutations=12, cluster_alpha=0.2, rng=np.random.default_rng(11), n_jobs=1
+    )
+    seeds = np.random.default_rng(11).integers(0, np.iinfo(np.int32).max, size=12, dtype=np.int64)
+    ref = np.zeros(12, dtype=float)
+    for i, seed in enumerate(seeds):
+        order = np.random.default_rng(int(seed)).permutation(len(labels))
+        left = values[order[:3]]
+        right = values[order[3:]]
+        res = stats.mannwhitneyu(left, right, axis=0, alternative="two-sided", method="auto")
+        eff = np.asarray(rank_biserial_effect(left, right, np.asarray(res.statistic, dtype=float)), dtype=float)
+        cl = find_signed_clusters(eff, np.asarray(res.pvalue, dtype=float), alpha=0.2)
+        ref[i] = max((m for _, _, m in cl), default=0.0)
+    np.testing.assert_allclose(got, ref, atol=1e-13)
+
+    # Empty group matches SciPy fallback behavior cleanly (zero cluster mass)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        got_empty = _binary_cluster_maxima(
+            values, np.ones(6, dtype=int), n_permutations=2, cluster_alpha=0.1, rng=np.random.default_rng(1)
+        )
+    np.testing.assert_array_equal(got_empty, np.zeros(2, dtype=float))
+
+
+def test_cluster_maxima_serial_equals_parallel_above_threshold_and_nested_guard() -> None:
+    import numpy as np
+    from joblib import Parallel, delayed
+
+    from src.statistics.cluster_permutation import (
+        _binary_cluster_maxima,
+        _spearman_cluster_maxima,
+    )
+
+    rng = np.random.default_rng(303)
+    values = rng.normal(size=(24, 40))
+    labels = np.array([0] * 12 + [1] * 12, dtype=int)
+    target = rng.normal(size=24)
+
+    bin_s = _binary_cluster_maxima(
+        values, labels, n_permutations=550, cluster_alpha=0.05, rng=np.random.default_rng(77), n_jobs=1
+    )
+    bin_p = _binary_cluster_maxima(
+        values, labels, n_permutations=550, cluster_alpha=0.05, rng=np.random.default_rng(77), n_jobs=2
+    )
+    np.testing.assert_array_equal(bin_s, bin_p)
+
+    sp_s = _spearman_cluster_maxima(
+        values, target, n_permutations=550, cluster_alpha=0.05, rng=np.random.default_rng(88), n_jobs=1
+    )
+    sp_p = _spearman_cluster_maxima(
+        values, target, n_permutations=550, cluster_alpha=0.05, rng=np.random.default_rng(88), n_jobs=2
+    )
+    np.testing.assert_array_equal(sp_s, sp_p)
+
+    # Nested joblib pool guard must avoid deadlock and preserve exact output
+    nested = Parallel(n_jobs=2)(
+        delayed(_binary_cluster_maxima)(
+            values, labels, n_permutations=550, cluster_alpha=0.05, rng=np.random.default_rng(77), n_jobs=2
+        )
+        for _ in range(2)
+    )
+    np.testing.assert_array_equal(nested[0], bin_s)
+
+
+def test_spearman_cluster_maxima_sub_epsilon_alpha_matches_reference() -> None:
+    import warnings
+
+    import numpy as np
+    from scipy import stats
+
+    from src.statistics.cluster_permutation import (
+        _spearman_cluster_maxima,
+        _spearman_cluster_maximum,
+        prepare_ranked_features,
+    )
+
+    values = np.tile(np.arange(5, dtype=float)[:, None], (1, 4))
+    target = np.arange(5, dtype=float)
+    prepared_columns, centered_features, feature_denoms = prepare_ranked_features(values)
+    ranked_target = stats.rankdata(target, method="average")
+    centered_target = ranked_target - float(np.mean(ranked_target))
+
+    for alpha in (1e-17, 1e-320):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            got = _spearman_cluster_maxima(
+                values,
+                target,
+                n_permutations=4,
+                cluster_alpha=alpha,
+                rng=np.random.default_rng(19),
+                n_jobs=1,
+            )
+        runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+        assert not runtime_warnings
+
+        seeds = np.random.default_rng(19).integers(0, np.iinfo(np.int32).max, size=4, dtype=np.int64)
+        ref = np.array(
+            [
+                _spearman_cluster_maximum(
+                    prepared_columns,
+                    centered_features,
+                    feature_denoms,
+                    centered_target,
+                    alpha,
+                    int(seed),
+                )
+                for seed in seeds
+            ],
+            dtype=float,
+        )
+        np.testing.assert_allclose(got, ref, atol=1e-12)

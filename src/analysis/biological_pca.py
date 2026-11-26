@@ -1039,35 +1039,98 @@ def run_measurement_count_sensitivity(
     rng = np.random.default_rng(random_state)
     rows: list[dict[str, object]] = []
     canonical_pc1_loading: dict[str, np.ndarray] = {}
+    canonical_ev_ratios: dict[str, dict[int, float]] = {}
     for model_name in REQUIRED_MODELS:
         loadings = canonical[model_name].loadings
         if "PC1_loading" in loadings.columns:
             canonical_pc1_loading[model_name] = loadings["PC1_loading"].to_numpy(dtype=float)
+        canonical_ev_ratios[model_name] = {
+            pc_idx: _explained_variance_pct(canonical[model_name], f"PC{pc_idx + 1}") / 100.0
+            for pc_idx in range(n_components)
+        }
+
+    # Pre-cache invariant subject medians (n_available <= target_n) and per-block buffers.
+    n_subjects = len(inputs.subjects)
+    block_templates: dict[str, np.ndarray] = {}
+    varying_indices: dict[str, np.ndarray] = {}
+    varying_arrays: dict[str, list[np.ndarray]] = {}
+    varying_has_nan: dict[str, bool] = {}
+    varying_buffers: dict[str, np.ndarray] = {}
+    draw_buffers: dict[str, np.ndarray] = {}
+    for block in BLOCKS:
+        n_features = inputs.axes[block].size
+        template = np.empty((n_subjects, n_features), dtype=float)
+        v_indices: list[int] = []
+        v_arrays: list[np.ndarray] = []
+        has_nan = False
+        for subj_idx, subject_id in enumerate(inputs.subjects):
+            block_rows = inputs.measurement_rows[subject_id][block]
+            if block_rows.shape[0] <= target_n:
+                template[subj_idx] = np.nanmedian(block_rows, axis=0)
+            else:
+                v_indices.append(subj_idx)
+                v_arrays.append(block_rows)
+                if not has_nan and np.isnan(block_rows).any():
+                    has_nan = True
+        block_templates[block] = template
+        varying_indices[block] = np.asarray(v_indices, dtype=np.intp)
+        varying_arrays[block] = v_arrays
+        varying_has_nan[block] = has_nan
+        varying_buffers[block] = np.empty((len(v_arrays), target_n, n_features), dtype=float)
+        draw_buffers[block] = template.copy()
+
+    scale_flag = bool(bp_cfg.get("scale", False))
+    split_index = inputs.axes["1300"].size
+    model_blocks: dict[str, str] = {}
+    model_masks: dict[str, np.ndarray | None] = {}
+    for model_name in REQUIRED_MODELS:
+        if model_name == "PCA_whole":
+            continue
+        model_cfg = bp_cfg["models"][model_name]
+        block = str(model_cfg["spectral_blocks"][0])
+        model_blocks[model_name] = block
+        window = model_cfg.get("window")
+        if str(window).lower() != "full":
+            lower, upper = float(window[0]), float(window[1])
+            block_axis = inputs.axes[block]
+            model_masks[model_name] = (block_axis >= lower) & (block_axis <= upper)
+        else:
+            model_masks[model_name] = None
 
     for draw in range(n_draws):
-        draw_matrices = {
-            block: _resampled_subject_matrix(inputs, block, target_n, rng) for block in BLOCKS
-        }
+        draw_matrices: dict[str, np.ndarray] = {}
+        for block in BLOCKS:
+            v_arrays = varying_arrays[block]
+            if not v_arrays:
+                draw_matrices[block] = block_templates[block]
+                continue
+            buf = varying_buffers[block]
+            for k, block_rows in enumerate(v_arrays):
+                idx = rng.choice(block_rows.shape[0], size=target_n, replace=False)
+                buf[k] = block_rows[idx]
+            if varying_has_nan[block]:
+                medians = np.nanmedian(buf, axis=1)
+            elif target_n % 2 == 1:
+                medians = np.partition(buf, target_n // 2, axis=1)[:, target_n // 2, :]
+            else:
+                medians = np.median(buf, axis=1)
+            draw_mat = draw_buffers[block]
+            draw_mat[varying_indices[block]] = medians
+            draw_matrices[block] = draw_mat
+
         for model_name in REQUIRED_MODELS:
-            model_cfg = bp_cfg["models"][model_name]
             if model_name == "PCA_whole":
-                axis_1300 = inputs.axes["1300"]
                 matrix = np.hstack([draw_matrices["1300"], draw_matrices["2850"]])
-                split_index = axis_1300.size
                 pca_result = joint_pca_mfa(matrix, split_index, n_components)
             else:
-                block = str(model_cfg["spectral_blocks"][0])
-                window = model_cfg.get("window")
-                block_axis = inputs.axes[block]
-                block_matrix = draw_matrices[block]
-                if str(window).lower() != "full":
-                    lower, upper = float(window[0]), float(window[1])
-                    mask = (block_axis >= lower) & (block_axis <= upper)
+                block_matrix = draw_matrices[model_blocks[model_name]]
+                mask = model_masks[model_name]
+                if mask is not None:
                     block_matrix = block_matrix[:, mask]
                 pca_result = run_pca(
                     block_matrix,
                     n_components=n_components,
-                    scale=bool(bp_cfg.get("scale", False)),
+                    scale=scale_flag,
                     log_summary=False,
                     warn_on_high_pc1=False,
                 )
@@ -1079,16 +1142,19 @@ def run_measurement_count_sensitivity(
                 if pc1_loading is not None
                 else float("nan")
             )
+            ev_map = canonical_ev_ratios[model_name]
             for pc_idx, ratio in enumerate(ratios):
+                can_ev = ev_map.get(pc_idx)
+                if can_ev is None:
+                    can_ev = _explained_variance_pct(canonical[model_name], f"PC{pc_idx + 1}") / 100.0
+                    ev_map[pc_idx] = can_ev
                 rows.append(
                     {
                         "draw": draw,
                         "model": model_name,
                         "PC": f"PC{pc_idx + 1}",
                         "explained_variance_ratio": float(ratio),
-                        "canonical_explained_variance_ratio": _explained_variance_pct(
-                            canonical[model_name], f"PC{pc_idx + 1}"
-                        ) / 100.0,
+                        "canonical_explained_variance_ratio": can_ev,
                         "pc1_loading_cosine_similarity": cosine if pc_idx == 0 else float("nan"),
                     }
                 )

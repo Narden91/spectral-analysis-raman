@@ -14,6 +14,8 @@ for the 1525 cm⁻¹ region per the conservative claim-boundary rule.
 from __future__ import annotations
 
 import logging
+import multiprocessing
+import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +24,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from scipy.optimize import linear_sum_assignment
 from sklearn.decomposition import NMF
 from sklearn.exceptions import ConvergenceWarning
@@ -34,6 +37,7 @@ from src.analysis.clinical_feature_associations import (
     load_subject_feature_matrix,
 )
 from src.analysis.io_utils import write_csv_atomic
+from src.analysis.paired_lipid._backend import _single_thread_blas
 from src.analysis.preregistered_panel import panel_cfg
 from src.analysis.raman_bands import RAMAN_BANDS
 
@@ -114,24 +118,42 @@ def _matched_component_stability(reference: np.ndarray, components: list[np.ndar
     return np.median(np.vstack(matched_scores), axis=0)
 
 
-def _fit_nmf_multi_init(
+def _resolve_parallel_workers(n_tasks: int, n_jobs: int | None) -> int:
+    if n_tasks <= 1 or n_jobs == 0 or n_jobs == 1:
+        return 1
+    if os.environ.get("_PAIRED_LIPID_IN_BOOTSTRAP_WORKER") == "1":
+        return 1
+    if multiprocessing.parent_process() is not None:
+        return 1
+    try:
+        import joblib.parallel
+
+        active_backend, _ = joblib.parallel.get_active_backend()
+        if getattr(active_backend, "nesting_level", 0) > 0:
+            return 1
+    except Exception:
+        pass
+    cpu_cnt = os.cpu_count() or 1
+    if n_jobs is None or int(n_jobs) == -1:
+        raw = cpu_cnt
+    elif int(n_jobs) < -1:
+        raw = max(1, cpu_cnt + 1 + int(n_jobs))
+    else:
+        raw = int(n_jobs)
+    if raw <= 1:
+        return 1
+    return min(raw, n_tasks)
+
+
+def _fit_single_nmf_seed(
     X: np.ndarray,
-    *,
     n_components: int,
     alpha_w: float,
     alpha_h: float,
-    n_init: int,
-    random_state: int,
-) -> NMFMultiInitResult:
-    """Fit seeded NMF starts and quantify matched component-spectrum stability."""
-    rng = np.random.default_rng(random_state)
-    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_init, dtype=np.int64).tolist()
-
-    errors: list[float] = []
-    solutions: list[tuple[np.ndarray, np.ndarray]] = []
-
-    for seed in seeds:
-        try:
+    seed: int,
+) -> tuple[float | None, np.ndarray | None, np.ndarray | None, str | None]:
+    try:
+        with _single_thread_blas():
             model = NMF(
                 n_components=n_components,
                 init="random",
@@ -144,10 +166,51 @@ def _fit_nmf_multi_init(
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", ConvergenceWarning)
                 W = model.fit_transform(X)
-            errors.append(_reconstruction_error(X, W, model.components_))
-            solutions.append((W, model.components_))
-        except Exception as exc:
-            logger.warning("NMF init failed (seed=%d): %s", seed, exc)
+            err = _reconstruction_error(X, W, model.components_)
+        return err, W, model.components_, None
+    except Exception as exc:
+        return None, None, None, str(exc)
+
+
+def _fit_nmf_multi_init(
+    X: np.ndarray,
+    *,
+    n_components: int,
+    alpha_w: float,
+    alpha_h: float,
+    n_init: int,
+    random_state: int,
+    n_jobs: int | None = None,
+) -> NMFMultiInitResult:
+    """Fit seeded NMF starts and quantify matched component-spectrum stability."""
+    rng = np.random.default_rng(random_state)
+    seeds = rng.integers(0, np.iinfo(np.int32).max, size=n_init, dtype=np.int64).tolist()
+
+    auto_mode = n_jobs is None or int(n_jobs) < 0
+    if auto_mode and (n_init < 4 or X.size < 4000):
+        workers = 1
+    else:
+        workers = _resolve_parallel_workers(len(seeds), n_jobs)
+
+    if workers > 1:
+        raw_results = Parallel(n_jobs=workers)(
+            delayed(_fit_single_nmf_seed)(X, n_components, alpha_w, alpha_h, int(seed))
+            for seed in seeds
+        )
+    else:
+        raw_results = [
+            _fit_single_nmf_seed(X, n_components, alpha_w, alpha_h, int(seed))
+            for seed in seeds
+        ]
+
+    errors: list[float] = []
+    solutions: list[tuple[np.ndarray, np.ndarray]] = []
+    for seed, (err, W, H, exc_msg) in zip(seeds, raw_results):
+        if exc_msg is not None or err is None or W is None or H is None:
+            logger.warning("NMF init failed (seed=%d): %s", seed, exc_msg)
+        else:
+            errors.append(err)
+            solutions.append((W, H))
 
     if not solutions:
         raise RuntimeError("All NMF initializations failed")
@@ -220,6 +283,7 @@ def run_nmf_decomposition(
     n_components = int(nmf_cfg.get("n_components", 3))
     alpha = float(nmf_cfg.get("sparsity_alpha", 0.1))
     n_init = int(nmf_cfg.get("n_init", 20))
+    n_jobs = nmf_cfg.get("n_jobs", None)
     block = "1300" if str(nmf_cfg.get("apply_to", "fingerprint")) == "fingerprint" else "2850"
     random_state = int(panel.get("random_state", 42))
     endpoints = [str(e) for e in panel.get("endpoints", {}).get("continuous", [])]
@@ -255,6 +319,7 @@ def run_nmf_decomposition(
     fit_result = _fit_nmf_multi_init(
         X_shifted, n_components=n_components_actual,
         alpha_w=alpha, alpha_h=0.0, n_init=n_init, random_state=random_state,
+        n_jobs=n_jobs,
     )
     W, H = fit_result.W, fit_result.H
     component_stability = fit_result.component_stability

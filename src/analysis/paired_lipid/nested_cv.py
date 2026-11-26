@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import math
@@ -16,16 +17,21 @@ from scipy import linalg, stats
 
 from src.analysis.paired_lipid._backend import _single_thread_blas
 from src.analysis.paired_lipid.batched import (
+    SpectralDivisionTrajectory,
     _check_fast_batch_eligibility,
+    _compute_spec_traj_batch,
     _get_dataset_gram_cache,
     _get_single_sample_gram_cache,
+    _get_spectral_gram_cache,
     _precompute_division_constants,
     _run_batched_multiplicity_draws,
+    batched_build_spectral_division_trajectories,
     batched_select_inner_settings,
 )
 from src.analysis.paired_lipid.cohort import (
     CohortDataset,
     PairedLipidConfig,
+    _get_participant_aggregation_plan,
     aggregate_samples_to_participants,
     extract_sample_band_matrix,
 )
@@ -141,6 +147,35 @@ def _get_participant_band_matrix(
     return part_band
 
 
+def _aggregate_spectra_chunked_one_two(
+    sample_matrix: np.ndarray,
+    n_participants: int,
+    plan: dict[str, Any],
+    *,
+    chunk_size: int = 2048,
+) -> np.ndarray:
+    """Aggregate 1/2-sample participant spectra in fixed participant chunks to cap transient RAM."""
+    n_cols = int(sample_matrix.shape[1])
+    out = np.empty((n_participants, n_cols), dtype=np.float64)
+    single_p = plan["single_p"]
+    if single_p.size > 0:
+        out[single_p] = sample_matrix[plan["single_s"]]
+    paired_p = plan["paired_p"]
+    n_paired = int(paired_p.size)
+    if n_paired > 0:
+        pair_a = plan["pair_a"]
+        pair_b = plan["pair_b"]
+        scratch = np.empty((min(chunk_size, n_paired), n_cols), dtype=np.float64)
+        for p0 in range(0, n_paired, chunk_size):
+            p1 = min(p0 + chunk_size, n_paired)
+            c_len = p1 - p0
+            buf = scratch[:c_len]
+            np.add(sample_matrix[pair_a[p0:p1]], sample_matrix[pair_b[p0:p1]], out=buf)
+            buf *= 0.5
+            out[paired_p[p0:p1]] = buf
+    return out
+
+
 def _get_participant_spectra(
     dataset: CohortDataset,
     *,
@@ -151,12 +186,24 @@ def _get_participant_spectra(
     cached = dataset._cache.get(key)
     if cached is not None:
         return cached
-    part_1300 = aggregate_samples_to_participants(
-        dataset.sample_1300, dataset, single_sample_only=single_sample_downstream
-    )
-    part_2850 = aggregate_samples_to_participants(
-        dataset.sample_2850, dataset, single_sample_only=single_sample_downstream
-    )
+    plan = _get_participant_aggregation_plan(dataset)
+    if single_sample_downstream:
+        part_1300 = np.ascontiguousarray(dataset.sample_1300[plan["first_indices"]], dtype=np.float64)
+        part_2850 = np.ascontiguousarray(dataset.sample_2850[plan["first_indices"]], dtype=np.float64)
+    elif dataset.n_participants > 2048 and plan["fast_one_two"]:
+        part_1300 = _aggregate_spectra_chunked_one_two(
+            dataset.sample_1300, dataset.n_participants, plan
+        )
+        part_2850 = _aggregate_spectra_chunked_one_two(
+            dataset.sample_2850, dataset.n_participants, plan
+        )
+    else:
+        part_1300 = aggregate_samples_to_participants(
+            dataset.sample_1300, dataset, single_sample_only=False
+        )
+        part_2850 = aggregate_samples_to_participants(
+            dataset.sample_2850, dataset, single_sample_only=False
+        )
     part_1300.setflags(write=False)
     part_2850.setflags(write=False)
     pair = (part_1300, part_2850)
@@ -181,6 +228,68 @@ class PreparedExternalTest:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "all_indices", np.arange(self.n_participants, dtype=int))
+
+    @classmethod
+    def from_arrays(
+        cls,
+        *,
+        endpoint: str,
+        spec_1300: np.ndarray,
+        spec_2850: np.ndarray,
+        cov_frame: pd.DataFrame,
+        y_ext: np.ndarray,
+        part_band_mat: np.ndarray,
+        single_sample_downstream: bool = False,
+        preset: str | None = None,
+    ) -> PreparedExternalTest:
+        """Wrap pre-aggregated participant-level external arrays without materializing sample matrices."""
+        s1300 = np.ascontiguousarray(spec_1300, dtype=np.float64)
+        s2850 = np.ascontiguousarray(spec_2850, dtype=np.float64)
+        pband = np.ascontiguousarray(part_band_mat, dtype=np.float64)
+        y_arr = np.ascontiguousarray(y_ext, dtype=np.float64)
+        if s1300.ndim != 2 or s2850.ndim != 2 or pband.ndim != 2 or y_arr.ndim != 1:
+            raise ValueError(
+                "PreparedExternalTest.from_arrays requires 2D spectral/band matrices and 1D y_ext; "
+                f"got shapes spec_1300={s1300.shape}, spec_2850={s2850.shape}, "
+                f"part_band_mat={pband.shape}, y_ext={y_arr.shape}."
+            )
+        n_p = int(s1300.shape[0])
+        if n_p < 1:
+            raise ValueError("PreparedExternalTest.from_arrays requires n_participants >= 1.")
+        if (
+            int(s2850.shape[0]) != n_p
+            or int(pband.shape[0]) != n_p
+            or int(y_arr.shape[0]) != n_p
+            or len(cov_frame) != n_p
+        ):
+            raise ValueError(
+                "PreparedExternalTest.from_arrays requires matching participant counts across all inputs; "
+                f"got spec_1300={n_p}, spec_2850={s2850.shape[0]}, "
+                f"part_band_mat={pband.shape[0]}, y_ext={y_arr.shape[0]}, cov_frame={len(cov_frame)}."
+            )
+        for arr in (s1300, s2850, pband, y_arr):
+            arr.setflags(write=False)
+
+        raw_cache: dict[str, Any] = {}
+        retained_cov_frame: pd.DataFrame | None = cov_frame
+        if preset is not None:
+            CovariatePreprocessor.raw_design_matrix(
+                cov_frame, preset=preset, raw_cache=raw_cache
+            )
+            # Drop the full pandas DataFrame once the float64 preset array is cached so parallel
+            # worker IPC pickles only contiguous NumPy buffers.
+            retained_cov_frame = None
+        return cls(
+            endpoint=endpoint,
+            spec_1300=s1300,
+            spec_2850=s2850,
+            raw_cov_frame=retained_cov_frame,
+            y_ext=y_arr,
+            n_participants=n_p,
+            part_band_mat=pband,
+            raw_cache=raw_cache,
+            single_sample_downstream=bool(single_sample_downstream),
+        )
 
     @classmethod
     def from_dataset(
@@ -210,12 +319,14 @@ class PreparedExternalTest:
             # Drop the full pandas DataFrame once the float64 preset array is cached so parallel
             # worker IPC pickles only contiguous NumPy buffers.
             retained_cov_frame = None
+        y_arr = np.array(ext_ds.outcomes[endpoint], dtype=np.float64, copy=True)
+        y_arr.setflags(write=False)
         return cls(
             endpoint=endpoint,
             spec_1300=part_1300,
             spec_2850=part_2850,
             raw_cov_frame=retained_cov_frame,
-            y_ext=np.asarray(ext_ds.outcomes[endpoint], dtype=float),
+            y_ext=y_arr,
             n_participants=ext_ds.n_participants,
             part_band_mat=ext_part_band,
             raw_cache=raw_cache,
@@ -234,6 +345,8 @@ def _prepare_external_test(
     if external_test is None:
         return None
     if isinstance(external_test, PreparedExternalTest):
+        if external_test.n_participants < 1:
+            raise ValueError("PreparedExternalTest must contain at least 1 participant.")
         if external_test.endpoint != target_col:
             raise ValueError(
                 f"PreparedExternalTest endpoint '{external_test.endpoint}' "
@@ -410,6 +523,7 @@ def _select_inner_fast(
     gcache: dict[str, Any] | None = None,
     in_dconsts: list[dict[str, Any]] | None = None,
     single_sample_downstream: bool = False,
+    inner_spec_trajs: list[SpectralDivisionTrajectory] | None = None,
 ) -> _InnerSelection | None:
     """Select every comparator's settings via the shared closed-form batched engine (B=1)."""
     if gcache is None:
@@ -442,6 +556,7 @@ def _select_inner_fast(
         part_band_mat,
         cfg,
         compute_inner_diagnostics=True,
+        inner_spec_trajs=inner_spec_trajs,
     )
     if not bool(sel["rank_ok"][0]):
         return None
@@ -746,6 +861,7 @@ def _select_inner_settings(
     include_band_paired: bool,
     part_band_mat: np.ndarray | None = None,
     part_spectra: tuple[np.ndarray, np.ndarray] | None = None,
+    inner_spec_trajs: list[SpectralDivisionTrajectory] | None = None,
 ) -> _InnerSelection:
     """Dispatch inner-CV selection to the batched fast path when rank and eligibility allow."""
     max_k = max(cfg.pca_dimensions)
@@ -790,6 +906,7 @@ def _select_inner_settings(
                         gcache=gcache,
                         in_dconsts=in_dconsts,
                         single_sample_downstream=single_sample_downstream,
+                        inner_spec_trajs=inner_spec_trajs,
                     )
 
         if selection is None:
@@ -825,6 +942,7 @@ def _select_inner_models_and_fit_outer(
     sample_band_mat: np.ndarray | None = None,
     part_band_mat: np.ndarray | None = None,
     part_spectra: tuple[np.ndarray, np.ndarray] | None = None,
+    spectral_fold_artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fit inner CV selection and outer-fold models with memoized spectral SVD & multi-alpha ridge."""
     mult_all = np.asarray(participant_multiplicities, dtype=float)
@@ -841,8 +959,13 @@ def _select_inner_models_and_fit_outer(
     part_1300, part_2850 = part_spectra
 
     outer_w_tr = mult_all[outer_train_idx]
-    with _single_thread_blas():
-        outer_spec_prep = WeightedSpectralPreprocessor.fit(dataset, outer_train_idx, outer_w_tr, cfg=cfg)
+    if spectral_fold_artifacts is not None:
+        outer_spec_prep = spectral_fold_artifacts["outer_spec_prep"]
+        inner_spec_trajs = spectral_fold_artifacts.get("inner_spec_trajs")
+    else:
+        with _single_thread_blas():
+            outer_spec_prep = WeightedSpectralPreprocessor.fit(dataset, outer_train_idx, outer_w_tr, cfg=cfg)
+        inner_spec_trajs = None
     alphas = list(cfg.ridge_alpha_grid)
 
     selection = _select_inner_settings(
@@ -858,6 +981,7 @@ def _select_inner_models_and_fit_outer(
         include_band_paired=include_band_paired,
         part_band_mat=part_band_mat,
         part_spectra=part_spectra,
+        inner_spec_trajs=inner_spec_trajs,
     )
     best_cov_alpha_idx = selection.cov_alpha_idx
     best_cov_mse = selection.cov_mse
@@ -901,10 +1025,14 @@ def _select_inner_models_and_fit_outer(
 
     # Outer PCA + Ridge
     sel_pca_k, sel_pca_a_idx = best_pca_setting
-    sample_pca_outer = outer_spec_prep.transform_pca(dataset.sample_1300, dataset.sample_2850)
-    part_pca_outer = aggregate_samples_to_participants(
-        sample_pca_outer, dataset, single_sample_only=single_sample_downstream
-    )
+    if spectral_fold_artifacts is not None:
+        sample_pca_outer = spectral_fold_artifacts["sample_pca_outer"]
+        part_pca_outer = spectral_fold_artifacts["part_pca_outer"]
+    else:
+        sample_pca_outer = outer_spec_prep.transform_pca(dataset.sample_1300, dataset.sample_2850)
+        part_pca_outer = aggregate_samples_to_participants(
+            sample_pca_outer, dataset, single_sample_only=single_sample_downstream
+        )
     fit_pca_outer = fit_ridge_grid(
         X_cov_otr,
         part_pca_outer[outer_train_idx, :sel_pca_k],
@@ -917,7 +1045,10 @@ def _select_inner_models_and_fit_outer(
     )
 
     # Outer PLS Regression (affine scaling commutes with equal participant averaging).
-    part_scaled_outer = outer_spec_prep.transform_scaled_blocks(part_1300, part_2850)
+    if spectral_fold_artifacts is not None:
+        part_scaled_outer = spectral_fold_artifacts["part_scaled_outer"]
+    else:
+        part_scaled_outer = outer_spec_prep.transform_scaled_blocks(part_1300, part_2850)
     fit_pls_outer = WeightedPLSResult.fit(
         X_cov_otr,
         part_scaled_outer[outer_train_idx],
@@ -931,9 +1062,12 @@ def _select_inner_models_and_fit_outer(
 
     # Outer Paired Linear + Ridge
     sel_k, sel_lam, sel_r, sel_a_idx = best_paired_setting
-    outer_moments = PairedMoments.from_sample_coordinates(
-        sample_pca_outer, dataset, outer_train_idx, outer_w_tr
-    )
+    if spectral_fold_artifacts is not None:
+        outer_moments = spectral_fold_artifacts["outer_moments"]
+    else:
+        outer_moments = PairedMoments.from_sample_coordinates(
+            sample_pca_outer, dataset, outer_train_idx, outer_w_tr
+        )
     V_outer_k, eigvals_outer, tau_outer = outer_moments.solve_directions(
         sel_k, sel_lam, eigenvalue_tolerance=cfg.eigenvalue_tolerance
     )
@@ -1429,6 +1563,287 @@ def score_external_primary_pair(
     return out
 
 
+@dataclass(slots=True)
+class SpectralTrajectory:
+    """Reusable covariate-invariant spectral MFA-PCA and paired-moment trajectory across presets."""
+
+    fingerprint: tuple[Any, ...]
+    point_artifacts: dict[str, Any] | None = None
+    bootstrap_artifacts: dict[str, Any] | None = None
+
+
+def _dataset_spectral_digest(dataset: CohortDataset) -> tuple[Any, ...]:
+    """Compute a content-addressed spectral/layout digest on ``dataset`` independent of object id."""
+    cached = dataset._cache.get("_spectral_traj_digest")
+    if cached is not None:
+        return cached
+    h = hashlib.sha256()
+    for arr, dt in (
+        (dataset.sample_1300, np.float64),
+        (dataset.sample_2850, np.float64),
+        (dataset.wavenumbers_1300, np.float64),
+        (dataset.wavenumbers_2850, np.float64),
+        (dataset.sample_participant_idx, np.int64),
+        (dataset.paired_participant_indices, np.int64),
+        (dataset.pair_sample_a_indices, np.int64),
+        (dataset.pair_sample_b_indices, np.int64),
+    ):
+        arr_c = np.ascontiguousarray(arr, dtype=dt)
+        h.update(np.asarray(arr_c.shape, dtype=np.int64).tobytes())
+        h.update(arr_c.tobytes())
+    summary = getattr(dataset, "manifest_summary", None)
+    subset_mode = str(summary.get("subset_mode", "")) if isinstance(summary, dict) else ""
+    digest = (
+        int(dataset.n_participants),
+        int(dataset.n_samples),
+        int(dataset.sample_1300.shape[1]),
+        int(dataset.sample_2850.shape[1]),
+        subset_mode,
+        h.hexdigest(),
+    )
+    dataset._cache["_spectral_traj_digest"] = digest
+    return digest
+
+
+def _splits_digest(
+    splits: tuple[
+        list[tuple[np.ndarray, np.ndarray]],
+        list[list[tuple[np.ndarray, np.ndarray]]],
+    ],
+) -> str:
+    """Hash nested outer and inner split index arrays deterministically."""
+    outer_splits, inner_splits_per_fold = splits
+    h = hashlib.sha256()
+    for (tr_idx, te_idx), in_splits in zip(outer_splits, inner_splits_per_fold):
+        for arr in (tr_idx, te_idx):
+            arr_c = np.ascontiguousarray(arr, dtype=np.int64)
+            h.update(np.asarray(arr_c.shape, dtype=np.int64).tobytes())
+            h.update(arr_c.tobytes())
+        h.update(np.int64(len(in_splits)).tobytes())
+        for in_tr_rel, in_val_rel in in_splits:
+            for arr in (in_tr_rel, in_val_rel):
+                arr_c = np.ascontiguousarray(arr, dtype=np.int64)
+                h.update(np.asarray(arr_c.shape, dtype=np.int64).tobytes())
+                h.update(arr_c.tobytes())
+    return h.hexdigest()
+
+
+def _compute_spectral_trajectory_base_fingerprint(
+    dataset: CohortDataset,
+    observed: np.ndarray,
+    splits: tuple[
+        list[tuple[np.ndarray, np.ndarray]],
+        list[list[tuple[np.ndarray, np.ndarray]]],
+    ],
+    cfg: PairedLipidConfig,
+    eff_single_sample: bool,
+) -> tuple[Any, ...]:
+    """Build fingerprint invariant to ``covariate_preset`` and ``ridge_alpha_grid``."""
+    obs_bytes = np.ascontiguousarray(observed, dtype=bool).tobytes()
+    obs_digest = hashlib.sha256(obs_bytes).hexdigest()
+    spectral_cfg_key = (
+        tuple(int(k) for k in cfg.pca_dimensions),
+        tuple(int(r) for r in cfg.retained_directions),
+        tuple(float(x) for x in cfg.lambda_grid),
+        tuple(int(c) for c in cfg.pls_component_grid),
+        int(cfg.n_outer_splits),
+        int(cfg.n_inner_splits),
+        float(cfg.rank_tolerance),
+        float(cfg.eigenvalue_tolerance),
+    )
+    return (
+        _dataset_spectral_digest(dataset),
+        obs_digest,
+        _splits_digest(splits),
+        spectral_cfg_key,
+        bool(eff_single_sample),
+    )
+
+
+def _compute_bootstrap_key(
+    n_bootstraps: int,
+    bootstrap_seed: int,
+    M_with_base: np.ndarray,
+) -> tuple[Any, ...]:
+    """Build bootstrap resampling key from count, seed, and multiplicity matrix bytes."""
+    m_bytes = np.ascontiguousarray(M_with_base, dtype=np.float64).tobytes()
+    return (int(n_bootstraps), int(bootstrap_seed), hashlib.sha256(m_bytes).hexdigest())
+
+
+def build_spectral_trajectory(
+    dataset: CohortDataset,
+    *,
+    cfg: PairedLipidConfig = PairedLipidConfig(),
+    endpoint: str | None = None,
+    outer_seed: int | None = None,
+    single_sample_downstream: bool | None = None,
+    allow_missing_outcome: bool = False,
+    n_bootstraps: int = 0,
+    bootstrap_seed: int = 20261106,
+    use_gpu: bool | None = None,
+    batch_size: int | None = None,
+    n_jobs: int | None = None,
+    include_point: bool = True,
+) -> SpectralTrajectory:
+    """Precompute covariate-invariant spectral MFA-PCA and paired-moment trajectories for reuse."""
+    if n_bootstraps < 0:
+        raise ValueError(f"n_bootstraps must be non-negative; got {n_bootstraps}.")
+    if n_bootstraps > 0 and outer_seed is not None and int(outer_seed) != int(cfg.primary_seed):
+        raise ValueError(
+            "build_spectral_trajectory with n_bootstraps > 0 requires outer_seed=None or outer_seed == cfg.primary_seed."
+        )
+    eff_single_sample = _effective_single_sample_downstream(dataset, single_sample_downstream)
+    target_col = endpoint or cfg.primary_endpoint
+    if target_col not in dataset.outcomes:
+        raise ValueError(f"Endpoint '{target_col}' not present in dataset outcomes.")
+    y_raw = np.asarray(dataset.outcomes[target_col], dtype=float)
+    observed = np.isfinite(y_raw)
+    if not observed.all() and not allow_missing_outcome:
+        raise ValueError(f"Endpoint '{target_col}' contains missing values among eligible participants.")
+
+    seed_to_use = cfg.primary_seed if outer_seed is None else int(outer_seed)
+    splits = make_nested_splits(dataset, cfg, seed_to_use)
+    outer_splits, inner_splits_per_fold = splits
+    base_fp = _compute_spectral_trajectory_base_fingerprint(
+        dataset, observed, splits, cfg, eff_single_sample
+    )
+
+    point_artifacts: dict[str, Any] | None = None
+    if include_point:
+        sample_band_mat, _ = extract_sample_band_matrix(dataset)
+        part_band_mat = _get_participant_band_matrix(
+            dataset, single_sample_downstream=eff_single_sample
+        )
+        part_spectra = _get_participant_spectra(
+            dataset, single_sample_downstream=eff_single_sample
+        )
+        part_1300, part_2850 = part_spectra
+        mult_point = observed.astype(float)
+        spec_gcache = _get_spectral_gram_cache(dataset)
+        max_k = max(cfg.pca_dimensions)
+        folds_list: list[dict[str, Any]] = []
+        for (tr_idx, te_idx), in_splits in zip(outer_splits, inner_splits_per_fold):
+            outer_w_tr = mult_point[tr_idx]
+            with _single_thread_blas():
+                outer_spec_prep = WeightedSpectralPreprocessor.fit(dataset, tr_idx, outer_w_tr, cfg=cfg)
+                sample_pca_outer = outer_spec_prep.transform_pca(dataset.sample_1300, dataset.sample_2850)
+                part_pca_outer = aggregate_samples_to_participants(
+                    sample_pca_outer, dataset, single_sample_only=eff_single_sample
+                )
+                part_scaled_outer = outer_spec_prep.transform_scaled_blocks(part_1300, part_2850)
+                outer_moments = PairedMoments.from_sample_coordinates(
+                    sample_pca_outer, dataset, tr_idx, outer_w_tr
+                )
+                inner_spec_trajs: list[SpectralDivisionTrajectory] | None = None
+                if (
+                    list(cfg.retained_directions) == [1, 2, 3]
+                    and outer_spec_prep.numerical_rank >= max_k
+                    and bool(
+                        _check_fast_batch_eligibility(
+                            dataset,
+                            [(tr_idx, te_idx)],
+                            [in_splits],
+                            mult_point[None, :],
+                            cfg,
+                            spec_gcache,
+                        )[0]
+                    )
+                ):
+                    in_spec_dcs = [
+                        _precompute_division_constants(
+                            np,
+                            spec_gcache,
+                            dataset,
+                            tr_idx[in_tr_rel],
+                            tr_idx[in_val_rel],
+                            cfg,
+                            single_sample_downstream=eff_single_sample,
+                            spectral_only=True,
+                        )
+                        for in_tr_rel, in_val_rel in in_splits
+                    ]
+                    if all(int(dc["base_comb_rank"]) >= max_k for dc in in_spec_dcs):
+                        inner_spec_trajs = [
+                            _compute_spec_traj_batch(
+                                np,
+                                dc,
+                                mult_point[None, dc["tr_p"]],
+                                cfg,
+                                compute_v_grid=True,
+                                compute_full_rank=True,
+                            )
+                            for dc in in_spec_dcs
+                        ]
+            folds_list.append(
+                {
+                    "outer_spec_prep": outer_spec_prep,
+                    "sample_pca_outer": sample_pca_outer,
+                    "part_pca_outer": part_pca_outer,
+                    "part_scaled_outer": part_scaled_outer,
+                    "outer_moments": outer_moments,
+                    "inner_spec_trajs": inner_spec_trajs,
+                }
+            )
+        point_artifacts = {
+            "sample_band_mat": sample_band_mat,
+            "part_band_mat": part_band_mat,
+            "part_spectra": part_spectra,
+            "folds": folds_list,
+        }
+
+    bootstrap_key: tuple[Any, ...] | None = None
+    bootstrap_artifacts: dict[str, Any] | None = None
+    if n_bootstraps > 0:
+        n_p = dataset.n_participants
+        rng = np.random.default_rng(bootstrap_seed)
+        M_all = np.zeros((n_bootstraps, n_p), dtype=np.float64)
+        if n_p > 0:
+            drawn_mat = rng.integers(0, n_p, size=(n_bootstraps, n_p))
+            np.add.at(M_all, (np.arange(n_bootstraps)[:, None], drawn_mat), 1.0)
+        if not observed.all():
+            M_all *= observed[None, :]
+        base_weights = observed.astype(np.float64)[None, :]
+        M_with_base = np.vstack([base_weights, M_all])
+        bootstrap_key = _compute_bootstrap_key(n_bootstraps, bootstrap_seed, M_with_base)
+        spec_gcache = _get_spectral_gram_cache(dataset)
+        elig_with_base = _check_fast_batch_eligibility(
+            dataset, outer_splits, inner_splits_per_fold, M_with_base, cfg, spec_gcache
+        )
+        base_elig = bool(elig_with_base[0])
+        fast_mask = elig_with_base[1:]
+        fast_idx = np.flatnonzero(fast_mask)
+        fallback_idx = np.flatnonzero(~fast_mask)
+        M_run = np.vstack([M_with_base[:1], M_all[fast_idx]]) if base_elig else M_all[fast_idx]
+        if M_run.shape[0] > 0:
+            fold_trajectories = batched_build_spectral_division_trajectories(
+                dataset,
+                outer_splits,
+                inner_splits_per_fold,
+                M_run,
+                cfg,
+                use_gpu=use_gpu,
+                batch_size=batch_size,
+                n_jobs=n_jobs,
+                single_sample_downstream=eff_single_sample,
+            )
+        else:
+            fold_trajectories = []
+        bootstrap_artifacts = {
+            "elig_with_base": elig_with_base,
+            "base_elig": base_elig,
+            "fast_idx": fast_idx,
+            "fallback_idx": fallback_idx,
+            "M_run": M_run,
+            "fold_trajectories": fold_trajectories,
+        }
+
+    return SpectralTrajectory(
+        fingerprint=(base_fp, bootstrap_key),
+        point_artifacts=point_artifacts,
+        bootstrap_artifacts=bootstrap_artifacts,
+    )
+
+
 def evaluate_nested_cohort(
     dataset: CohortDataset,
     *,
@@ -1446,6 +1861,7 @@ def evaluate_nested_cohort(
     external_test: CohortDataset | PreparedExternalTest | None = None,
     allow_missing_outcome: bool = False,
     compute_diagnostics: bool = True,
+    spectral_trajectory: SpectralTrajectory | None = None,
 ) -> dict[str, Any]:
     """Execute the locked 5x3 nested cross-validation procedure on the cohort.
 
@@ -1457,6 +1873,8 @@ def evaluate_nested_cohort(
     principal angles for callers that consume only predictions and error summaries.
     """
     eff_single_sample = _effective_single_sample_downstream(dataset, single_sample_downstream)
+    if spectral_trajectory is not None and include_band_paired:
+        raise ValueError("spectral_trajectory cannot be combined with include_band_paired=True.")
     target_col = endpoint or cfg.primary_endpoint
     if target_col not in dataset.outcomes:
         raise ValueError(f"Endpoint '{target_col}' not present in dataset outcomes.")
@@ -1494,13 +1912,34 @@ def evaluate_nested_cohort(
         make_nested_splits(dataset, cfg, seed_to_use) if precomputed_splits is None else precomputed_splits
     )
 
-    sample_band_mat, _ = extract_sample_band_matrix(dataset)
-    part_band_mat = _get_participant_band_matrix(
-        dataset, single_sample_downstream=eff_single_sample
-    )
-    part_spectra = _get_participant_spectra(
-        dataset, single_sample_downstream=eff_single_sample
-    )
+    point_folds: list[dict[str, Any]] | None = None
+    if spectral_trajectory is not None:
+        if not isinstance(spectral_trajectory, SpectralTrajectory):
+            raise ValueError("spectral_trajectory must be a SpectralTrajectory instance.")
+        if spectral_trajectory.point_artifacts is None:
+            raise ValueError("spectral_trajectory does not contain point_artifacts.")
+        if participant_multiplicities is not None and not np.array_equal(mult, observed.astype(float)):
+            raise ValueError(
+                "spectral_trajectory point_artifacts cannot be used with resampled participant_multiplicities."
+            )
+        expected_base_fp = _compute_spectral_trajectory_base_fingerprint(
+            dataset, observed, (outer_splits, inner_splits_per_fold), cfg, eff_single_sample
+        )
+        if spectral_trajectory.fingerprint[0] != expected_base_fp:
+            raise ValueError("spectral_trajectory fingerprint mismatch for evaluate_nested_cohort.")
+        pt_art = spectral_trajectory.point_artifacts
+        sample_band_mat = pt_art["sample_band_mat"]
+        part_band_mat = pt_art["part_band_mat"]
+        part_spectra = pt_art["part_spectra"]
+        point_folds = pt_art["folds"]
+    else:
+        sample_band_mat, _ = extract_sample_band_matrix(dataset)
+        part_band_mat = _get_participant_band_matrix(
+            dataset, single_sample_downstream=eff_single_sample
+        )
+        part_spectra = _get_participant_spectra(
+            dataset, single_sample_downstream=eff_single_sample
+        )
 
     model_names = [
         "covariate_ridge",
@@ -1544,6 +1983,7 @@ def evaluate_nested_cohort(
             sample_band_mat=sample_band_mat,
             part_band_mat=part_band_mat,
             part_spectra=part_spectra,
+            spectral_fold_artifacts=(point_folds[fold_idx] if point_folds is not None else None),
         )
         if prepared_ext is not None:
             ext_mse = fold_out["external_mse"]
@@ -1752,6 +2192,8 @@ def run_multiplicity_bootstrap(
     allow_missing_outcome: bool = False,
     interval_method: IntervalMethod = "studentized_t",
     single_sample_downstream: bool | None = None,
+    n_jobs: int | None = None,
+    spectral_trajectory: SpectralTrajectory | None = None,
 ) -> dict[str, Any]:
     """Participant-level multiplicity bootstrap keeping original fold memberships fixed."""
     if interval_method not in INTERVAL_METHODS:
@@ -1793,9 +2235,34 @@ def run_multiplicity_bootstrap(
     gcache = _get_dataset_gram_cache(dataset, cfg)
     base_weights = observed.astype(np.float64)[None, :]
     M_with_base = np.vstack([base_weights, M_all])
-    elig_with_base = _check_fast_batch_eligibility(
-        dataset, outer_splits, inner_splits_per_fold, M_with_base, cfg, gcache
-    )
+    boot_fold_trajs: list[tuple[list[SpectralDivisionTrajectory], SpectralDivisionTrajectory]] | None = None
+    if spectral_trajectory is not None:
+        if not isinstance(spectral_trajectory, SpectralTrajectory):
+            raise ValueError("spectral_trajectory must be a SpectralTrajectory instance.")
+        expected_base_fp = _compute_spectral_trajectory_base_fingerprint(
+            dataset, observed, splits, cfg, eff_single_sample
+        )
+        if spectral_trajectory.fingerprint[0] != expected_base_fp:
+            raise ValueError("spectral_trajectory base fingerprint mismatch for run_multiplicity_bootstrap.")
+        if n_bootstraps > 0:
+            if spectral_trajectory.bootstrap_artifacts is None:
+                raise ValueError("spectral_trajectory does not contain bootstrap_artifacts.")
+            expected_boot_key = _compute_bootstrap_key(n_bootstraps, bootstrap_seed, M_with_base)
+            if spectral_trajectory.fingerprint[1] != expected_boot_key:
+                raise ValueError(
+                    "spectral_trajectory bootstrap fingerprint mismatch for run_multiplicity_bootstrap."
+                )
+            boot_art = spectral_trajectory.bootstrap_artifacts
+            elig_with_base = boot_art["elig_with_base"]
+            boot_fold_trajs = boot_art["fold_trajectories"]
+        else:
+            elig_with_base = _check_fast_batch_eligibility(
+                dataset, outer_splits, inner_splits_per_fold, M_with_base, cfg, gcache
+            )
+    else:
+        elig_with_base = _check_fast_batch_eligibility(
+            dataset, outer_splits, inner_splits_per_fold, M_with_base, cfg, gcache
+        )
     base_elig = bool(elig_with_base[0])
     fast_mask = elig_with_base[1:]
     fast_idx = np.flatnonzero(fast_mask)
@@ -1835,6 +2302,10 @@ def run_multiplicity_bootstrap(
             batched_kwargs["return_oof_sd"] = True
         if eff_single_sample and _supports_keyword(_run_batched_multiplicity_draws, "single_sample_downstream"):
             batched_kwargs["single_sample_downstream"] = True
+        if n_jobs is not None and _supports_keyword(_run_batched_multiplicity_draws, "n_jobs"):
+            batched_kwargs["n_jobs"] = n_jobs
+        if boot_fold_trajs is not None and _supports_keyword(_run_batched_multiplicity_draws, "spectral_trajectories"):
+            batched_kwargs["spectral_trajectories"] = boot_fold_trajs
         batched_out = _run_batched_multiplicity_draws(
             dataset,
             y_all,
@@ -1896,13 +2367,16 @@ def run_multiplicity_bootstrap(
         eval_extra_kwargs["single_sample_downstream"] = eff_single_sample
 
     if point_est_delta is None or point_est_comp is None:
+        base_eval_kwargs = dict(eval_extra_kwargs)
+        if spectral_trajectory is not None and spectral_trajectory.point_artifacts is not None:
+            base_eval_kwargs["spectral_trajectory"] = spectral_trajectory
         base_eval = evaluate_nested_cohort(
             dataset,
             cfg=cfg,
             endpoint=endpoint,
             precomputed_splits=splits,
             compute_diagnostics=False,
-            **eval_extra_kwargs,
+            **base_eval_kwargs,
         )
         m_pair_0 = base_eval["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]
         m_comp_0 = base_eval["paired_vs_strongest_comparator"]

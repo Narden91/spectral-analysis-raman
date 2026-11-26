@@ -18,6 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -43,6 +44,8 @@ from src.analysis.paired_lipid.cohort import (  # noqa: E402
 from src.analysis.paired_lipid.nested_cv import (  # noqa: E402
     INTERVAL_METHODS,
     IntervalMethod,
+    SpectralTrajectory,
+    build_spectral_trajectory,
     evaluate_nested_cohort,
     run_multiplicity_bootstrap,
     summarize_anchor_associations,
@@ -119,6 +122,8 @@ def run_sensitivity_and_secondary(
     interval_method: IntervalMethod | None = None,
     use_gpu: bool | None = None,
     batch_size: int | None = None,
+    n_jobs: int | None = None,
+    primary_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Path]:
     """Run the configured sensitivity analyses, secondary endpoints, and anchor summaries."""
     target_dir = ensure_output_dir(output_dir)
@@ -164,6 +169,7 @@ def run_sensitivity_and_secondary(
         single_sample_downstream: bool = False,
         allow_missing_outcome: bool = False,
         compute_diagnostics: bool = False,
+        spectral_trajectory: SpectralTrajectory | None = None,
     ) -> dict[str, Any]:
         # Deterministic evaluations repeat across axes (primary preset, all_eligible subset,
         # primary seed, and anchor associations); normalize every option into a typed key so
@@ -181,15 +187,17 @@ def run_sensitivity_and_secondary(
             bool(compute_diagnostics),
         )
         if key not in eval_memo:
-            eval_memo[key] = evaluate_nested_cohort(
-                ds,
-                cfg=cfg,
-                endpoint=resolved_endpoint,
-                outer_seed=resolved_seed,
-                single_sample_downstream=single_sample_downstream,
-                allow_missing_outcome=allow_missing_outcome,
-                compute_diagnostics=compute_diagnostics,
-            )
+            eval_kwargs: dict[str, Any] = {
+                "cfg": cfg,
+                "endpoint": resolved_endpoint,
+                "outer_seed": resolved_seed,
+                "single_sample_downstream": single_sample_downstream,
+                "allow_missing_outcome": allow_missing_outcome,
+                "compute_diagnostics": compute_diagnostics,
+            }
+            if spectral_trajectory is not None:
+                eval_kwargs["spectral_trajectory"] = spectral_trajectory
+            eval_memo[key] = evaluate_nested_cohort(ds, **eval_kwargs)
         return eval_memo[key]
 
     def bootstrap_ci_fields(
@@ -199,21 +207,25 @@ def run_sensitivity_and_secondary(
         cfg: PairedLipidConfig,
         *,
         single_sample_downstream: bool = False,
+        spectral_trajectory: SpectralTrajectory | None = None,
     ) -> dict[str, Any]:
         if n_bootstraps <= 0:
             return {}
         b_key = (_dataset_memo_key(subset_mode, ds, source_meta), cfg, bool(single_sample_downstream))
         if b_key not in boot_memo:
-            boot_memo[b_key] = run_multiplicity_bootstrap(
-                ds,
-                cfg=cfg,
-                n_bootstraps=n_bootstraps,
-                bootstrap_seed=bootstrap_seed,
-                interval_method=eff_interval_method,
-                single_sample_downstream=single_sample_downstream,
-                use_gpu=use_gpu,
-                batch_size=batch_size,
-            )
+            boot_kwargs: dict[str, Any] = {
+                "cfg": cfg,
+                "n_bootstraps": n_bootstraps,
+                "bootstrap_seed": bootstrap_seed,
+                "interval_method": eff_interval_method,
+                "single_sample_downstream": single_sample_downstream,
+                "use_gpu": use_gpu,
+                "batch_size": batch_size,
+                "n_jobs": n_jobs,
+            }
+            if spectral_trajectory is not None:
+                boot_kwargs["spectral_trajectory"] = spectral_trajectory
+            boot_memo[b_key] = run_multiplicity_bootstrap(ds, **boot_kwargs)
         b_res = boot_memo[b_key]
         return {
             "interval_method": b_res["interval_method"],
@@ -227,23 +239,144 @@ def run_sensitivity_and_secondary(
         }
 
     base_ds, base_meta = get_dataset("all_eligible")
-    primary_eval = evaluate("all_eligible", base_ds, base_meta, base_cfg)
+    if primary_state is not None:
+        if not isinstance(primary_state, Mapping):
+            raise ValueError("primary_state must be a mapping when provided.")
+        required_state_keys = ("cfg", "dataset", "source_meta", "eval_res")
+        missing_state_keys = [k for k in required_state_keys if k not in primary_state]
+        if missing_state_keys:
+            raise ValueError(f"primary_state is missing required keys: {missing_state_keys}.")
+        st_cfg = primary_state["cfg"]
+        st_ds = primary_state["dataset"]
+        st_meta = primary_state["source_meta"]
+        st_eval = primary_state["eval_res"]
+        if not isinstance(st_ds, CohortDataset):
+            raise ValueError("primary_state['dataset'] must be a CohortDataset.")
+        if not isinstance(st_meta, Mapping):
+            raise ValueError("primary_state['source_meta'] must be a mapping.")
+        if not isinstance(st_eval, Mapping):
+            raise ValueError("primary_state['eval_res'] must be a mapping.")
+        if st_cfg != base_cfg:
+            raise ValueError("primary_state['cfg'] does not match sensitivity configuration.")
+        if _dataset_memo_key("all_eligible", st_ds, st_meta) != _dataset_memo_key(
+            "all_eligible", base_ds, base_meta
+        ):
+            raise ValueError("primary_state dataset/source_meta does not match sensitivity all_eligible dataset.")
+        if str(st_ds.manifest_summary.get("subset_mode", "")) != "all_eligible":
+            raise ValueError("primary_state['dataset'] must have subset_mode == 'all_eligible'.")
+        if st_ds is not base_ds and not np.array_equal(st_ds.participant_ids, base_ds.participant_ids):
+            raise ValueError("primary_state['dataset'] participant_ids do not match all_eligible dataset.")
+        st_outer_seed = int(primary_state.get("outer_seed", base_cfg.primary_seed))
+        if st_outer_seed != int(base_cfg.primary_seed):
+            raise ValueError(
+                f"primary_state['outer_seed'] ({st_outer_seed}) does not match primary_seed ({base_cfg.primary_seed})."
+            )
+        st_endpoint = str(primary_state.get("endpoint", base_cfg.primary_endpoint))
+        if st_endpoint != str(base_cfg.primary_endpoint):
+            raise ValueError(
+                f"primary_state['endpoint'] ({st_endpoint!r}) does not match primary_endpoint ({base_cfg.primary_endpoint!r})."
+            )
+        if bool(primary_state.get("single_sample_downstream", False)) is not False:
+            raise ValueError("primary_state['single_sample_downstream'] must be False for all_eligible reuse.")
+        if bool(primary_state.get("allow_missing_outcome", False)) is not False:
+            raise ValueError("primary_state['allow_missing_outcome'] must be False for all_eligible reuse.")
+        required_eval_keys = (
+            "comparisons_vs_covariate_ridge",
+            "paired_vs_strongest_comparator",
+            "oof_spectral_contributions",
+        )
+        missing_eval_keys = [k for k in required_eval_keys if k not in st_eval]
+        if missing_eval_keys:
+            raise ValueError(f"primary_state['eval_res'] is missing required keys: {missing_eval_keys}.")
+
+        base_ds_key = _dataset_memo_key("all_eligible", base_ds, base_meta)
+        eval_memo[
+            (
+                base_ds_key,
+                base_cfg,
+                base_cfg.primary_endpoint,
+                int(base_cfg.primary_seed),
+                False,
+                False,
+                False,
+            )
+        ] = dict(st_eval)
+
+        if (
+            n_bootstraps > 0
+            and "boot_res" in primary_state
+            and primary_state["boot_res"] is not None
+            and primary_state.get("n_bootstraps") == n_bootstraps
+            and int(primary_state.get("bootstrap_seed", -1)) == bootstrap_seed
+            and primary_state.get("interval_method") == eff_interval_method
+            and primary_state.get("use_gpu") == use_gpu
+            and primary_state.get("batch_size") == batch_size
+        ):
+            boot_res_obj = primary_state["boot_res"]
+            if not isinstance(boot_res_obj, Mapping):
+                raise ValueError("primary_state['boot_res'] must be a mapping when provided.")
+            required_boot_keys = (
+                "interval_method",
+                "interval_procedure_succeeded",
+                "ci_95_delta_mse",
+                "ci_95_vs_comparator",
+                "ci_95_strongest_vs_covariate",
+            )
+            missing_boot_keys = [k for k in required_boot_keys if k not in boot_res_obj]
+            if missing_boot_keys:
+                raise ValueError(f"primary_state['boot_res'] is missing required keys: {missing_boot_keys}.")
+            boot_memo[(base_ds_key, base_cfg, False)] = dict(boot_res_obj)
+
+    base_traj: SpectralTrajectory | None = build_spectral_trajectory(
+        base_ds,
+        cfg=base_cfg,
+        endpoint=base_cfg.primary_endpoint,
+        outer_seed=base_cfg.primary_seed,
+        single_sample_downstream=False,
+        allow_missing_outcome=False,
+        n_bootstraps=n_bootstraps,
+        bootstrap_seed=bootstrap_seed,
+        use_gpu=use_gpu,
+        batch_size=batch_size,
+        n_jobs=n_jobs,
+        include_point=True,
+    )
+    primary_eval = evaluate(
+        "all_eligible",
+        base_ds,
+        base_meta,
+        base_cfg,
+        spectral_trajectory=base_traj,
+    )
     primary_delta_mse = float(primary_eval["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"])
 
     # 1. Covariate preset and subset mode sensitivity
     sens_rows: list[dict[str, Any]] = []
     for preset in COVARIATE_PRESETS:
         cfg_p = replace(base_cfg, covariate_preset=preset)
-        res_p = evaluate("all_eligible", base_ds, base_meta, cfg_p)
+        res_p = evaluate(
+            "all_eligible",
+            base_ds,
+            base_meta,
+            cfg_p,
+            spectral_trajectory=base_traj,
+        )
         sens_rows.append(
             {
                 "sensitivity_axis": "covariate_preset",
                 "setting": preset,
                 "n_participants": base_ds.n_participants,
                 **_paired_metrics(res_p, primary_delta_mse=primary_delta_mse),
-                **bootstrap_ci_fields("all_eligible", base_ds, base_meta, cfg_p),
+                **bootstrap_ci_fields(
+                    "all_eligible",
+                    base_ds,
+                    base_meta,
+                    cfg_p,
+                    spectral_trajectory=base_traj,
+                ),
             }
         )
+    base_traj = None
 
     for s_mode in SUBSET_MODES:
         ds_sub, meta_sub = get_dataset(s_mode)
@@ -362,6 +495,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Bootstrap interval estimator ('studentized_t' or 'percentile'); defaults to config.",
     )
     parser.add_argument("--batch-size", type=int, default=None, help="Optional batched bootstrap chunk size.")
+    parser.add_argument("--n-jobs", type=int, default=None, help="Optional worker count for CPU bootstrap draws.")
     gpu_group = parser.add_mutually_exclusive_group()
     gpu_group.add_argument("--use-gpu", dest="use_gpu", action="store_true", default=None, help="Force GPU execution.")
     gpu_group.add_argument("--no-gpu", dest="use_gpu", action="store_false", help="Force CPU execution.")
@@ -381,6 +515,7 @@ def main(argv: list[str] | None = None) -> None:
         interval_method=args.interval_method,
         use_gpu=args.use_gpu,
         batch_size=args.batch_size,
+        n_jobs=args.n_jobs,
     )
     print_stage_outputs("run_sensitivity_and_secondary", outputs)
 

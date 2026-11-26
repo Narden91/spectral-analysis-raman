@@ -11,6 +11,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from scipy import stats
+from scipy.linalg import eigh
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
@@ -383,16 +384,80 @@ def run_pca(
     if scale:
         scaler = StandardScaler()
         spectra_processed = scaler.fit_transform(spectra)
+        means = None
     else:
         scaler = None
-        means = np.nanmean(spectra, axis=0, keepdims=True)
+        means = np.mean(spectra, axis=0, keepdims=True)
         spectra_processed = spectra - means
 
-    # svd_solver="full" is deterministic regardless of matrix size; "auto" may
-    # select the randomized solver for large matrices, introducing variance even
-    # with a fixed random_state across sklearn versions.
-    pca = PCA(n_components=n_components, random_state=random_state, svd_solver="full")
-    scores = pca.fit_transform(spectra_processed)
+    # Dual Gram eigh fast path when n_features > max(n_samples, 16) with conditioning guards.
+    n_samples, n_features = spectra_processed.shape
+    used_dual_gram = False
+    if n_samples >= 2 and n_features > max(n_samples, 16) and n_components >= 1:
+        proc_means = np.mean(spectra_processed, axis=0, keepdims=True)
+        spectra_centered = spectra_processed - proc_means
+        gram = spectra_centered @ spectra_centered.T
+        gram = 0.5 * (gram + gram.T)
+        tr_g = float(np.trace(gram))
+        shift_ok = True
+        if not scale and means is not None:
+            mu_sq = float(np.dot(means.ravel(), means.ravel()))
+            shift_ok = np.isfinite(mu_sq) and mu_sq <= 1e2 * tr_g
+        if shift_ok:
+            proc_mu_sq = float(np.dot(proc_means.ravel(), proc_means.ravel()))
+            shift_ok = np.isfinite(proc_mu_sq) and proc_mu_sq <= 1e2 * tr_g
+        if np.isfinite(tr_g) and tr_g > 0.0 and shift_ok:
+            evals_asc, evecs_asc = eigh(
+                gram,
+                subset_by_index=[n_samples - n_components, n_samples - 1],
+                driver="evr",
+                check_finite=False,
+            )
+            eigvals = evals_asc[::-1]
+            u_kept = evecs_asc[:, ::-1]
+            eps = float(np.finfo(float).eps)
+            gram_cond = max(1e4 * max(n_samples, n_features) * eps, 1e-24)
+            if (
+                np.all(np.isfinite(eigvals))
+                and np.all(eigvals > 0.0)
+                and eigvals[-1] > gram_cond * eigvals[0]
+            ):
+                s_kept = np.sqrt(eigvals)
+                loadings = (u_kept.T @ spectra_centered) / s_kept[:, np.newaxis]
+                scores = u_kept * s_kept[np.newaxis, :]
+                explained_variance = eigvals / (n_samples - 1)
+                explained_variance_ratio = eigvals / tr_g
+                pca = PCA(
+                    n_components=n_components,
+                    random_state=random_state,
+                    svd_solver="full",
+                )
+                pca.n_samples_ = n_samples
+                pca.n_features_in_ = n_features
+                pca.n_components_ = n_components
+                pca.mean_ = proc_means.ravel()
+                pca.singular_values_ = s_kept
+                pca.explained_variance_ = explained_variance
+                pca.explained_variance_ratio_ = explained_variance_ratio
+                pca.components_ = loadings
+                if n_components < min(n_samples, n_features):
+                    rem_var = max(
+                        0.0,
+                        (tr_g / (n_samples - 1)) - float(np.sum(explained_variance)),
+                    )
+                    pca.noise_variance_ = float(
+                        rem_var / (min(n_samples, n_features) - n_components)
+                    )
+                else:
+                    pca.noise_variance_ = 0.0
+                used_dual_gram = True
+
+    if not used_dual_gram:
+        # svd_solver="full" is deterministic regardless of matrix size; "auto" may
+        # select the randomized solver for large matrices, introducing variance even
+        # with a fixed random_state across sklearn versions.
+        pca = PCA(n_components=n_components, random_state=random_state, svd_solver="full")
+        scores = pca.fit_transform(spectra_processed)
 
     # Deterministic sign convention: flip each PC so the loading with the largest
     # absolute value is positive.  Scikit-learn does not guarantee sign across

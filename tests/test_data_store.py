@@ -483,3 +483,100 @@ def test_master_dictionary_is_fingerprinted_and_invalidates_store(configured_sto
     assert validate_store(store.path, "parsed", cfg, strict=True).is_valid
     pd.DataFrame({"column": ["age_years"], "unit": ["source-confirmed years"]}).to_csv(dictionary, index=False)
     assert not validate_store(store.path, "parsed", cfg, strict=True).is_valid
+
+
+def test_process_measurements_parallel_matches_serial(configured_store_paths: dict[str, Path]) -> None:
+    from src.data_preparation.materialize import _process_measurements
+
+    parsed = build_parsed_store(src.config, force=True)
+    meas_df = pd.read_parquet(parsed.path / "measurements.parquet")
+
+    arrays_1, qc_1, areas_1 = _process_measurements(parsed.path, meas_df, src.config, n_jobs=1)
+    arrays_2, qc_2, areas_2 = _process_measurements(parsed.path, meas_df, src.config, n_jobs=2)
+
+    assert set(arrays_1) == set(arrays_2)
+    for key in arrays_1:
+        np.testing.assert_allclose(arrays_2[key], arrays_1[key], atol=1e-12, rtol=0.0, equal_nan=True)
+    pd.testing.assert_frame_equal(qc_2, qc_1)
+    pd.testing.assert_frame_equal(areas_2, areas_1)
+
+    store_serial = build_preprocessed_store(src.config, force=True, n_jobs=1)
+    hash_serial = store_serial.manifest["preprocessing_config_hash"]
+    store_par = build_preprocessed_store(src.config, force=True, n_jobs=2)
+    assert store_par.manifest["preprocessing_config_hash"] == hash_serial
+
+
+def test_resolve_process_workers_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.data_preparation.materialize import _resolve_process_workers
+
+    assert _resolve_process_workers(1, 5000, None) == 1
+    assert _resolve_process_workers(4, 100, None) == 1  # below total_pixels auto threshold
+    assert _resolve_process_workers(4, 100, 2) == 2  # explicit n_jobs >= 2 honored
+    assert _resolve_process_workers(8, 5000, 1) == 1
+
+    monkeypatch.setenv("_PAIRED_LIPID_IN_BOOTSTRAP_WORKER", "1")
+    assert _resolve_process_workers(8, 5000, 4) == 1
+
+
+def test_summarize_rows_edge_cases_and_non_float64_memmap(tmp_path: Path) -> None:
+    from src.data_preparation.loaders import _summarize_rows
+
+    # Empty and all-negative row indices
+    empty_mm = np.zeros((4, 6), dtype=np.float64)
+    mids_e, vals_e = _summarize_rows(
+        pd.DataFrame({"measurement_id": ["m1", "m2"], "row_col": [-1, -1]}),
+        empty_mm,
+        "row_col",
+    )
+    assert mids_e.size == 0 and vals_e.shape == (0, 6)
+
+    # Zero-column matrix
+    mids_z, vals_z = _summarize_rows(
+        pd.DataFrame({"measurement_id": ["m1"], "row_col": [0]}),
+        np.zeros((2, 0), dtype=np.float64),
+        "row_col",
+    )
+    assert mids_z.tolist() == ["m1"] and vals_z.shape == (1, 0)
+
+    # Mixed float32 memmap with NaN, all-NaN column, None measurement_id, contiguous & non-contiguous groups
+    mm_path = tmp_path / "f32.npy"
+    arr32 = np.arange(36, dtype=np.float32).reshape(9, 4)
+    arr32[2, 1] = np.nan
+    arr32[[0, 3, 5], 3] = np.nan  # all-NaN column for group m_noncontig
+    np.save(mm_path, arr32)
+    mm32 = np.load(mm_path, mmap_mode="r")
+    try:
+        rows = pd.DataFrame(
+            {
+                "measurement_id": ["m_noncontig", None, "m_contig", "m_noncontig", "m_contig", "m_noncontig", "m_single"],
+                "row_col": [5, 1, 6, 0, 7, 3, 8],
+            }
+        )
+        mids, sums = _summarize_rows(rows, mm32, "row_col")
+        assert mids.tolist() == ["m_noncontig", "m_contig", "m_single"]
+        ref_0 = np.nanmedian(arr32[[5, 0, 3]].astype(float), axis=0)
+        ref_1 = np.nanmedian(arr32[[6, 7]].astype(float), axis=0)
+        ref_2 = arr32[8].astype(float)
+        np.testing.assert_allclose(sums[0], ref_0, atol=1e-14, equal_nan=True)
+        np.testing.assert_allclose(sums[1], ref_1, atol=1e-14, equal_nan=True)
+        np.testing.assert_allclose(sums[2], ref_2, atol=1e-14, equal_nan=True)
+    finally:
+        mm_obj = getattr(mm32, "_mmap", None)
+        if mm_obj is not None:
+            mm_obj.close()
+
+    # int32 memmap parity
+    mm_int_path = tmp_path / "i32.npy"
+    arr_int = np.arange(20, dtype=np.int32).reshape(5, 4)
+    np.save(mm_int_path, arr_int)
+    mm_int = np.load(mm_int_path, mmap_mode="r")
+    try:
+        rows_i = pd.DataFrame({"measurement_id": ["b", "a", "b"], "row_col": [4, 1, 0]})
+        mids_i, sums_i = _summarize_rows(rows_i, mm_int, "row_col")
+        assert mids_i.tolist() == ["b", "a"]
+        np.testing.assert_allclose(sums_i[0], np.median(arr_int[[4, 0]].astype(float), axis=0), atol=1e-14)
+        np.testing.assert_allclose(sums_i[1], arr_int[1].astype(float), atol=1e-14)
+    finally:
+        mm_obj = getattr(mm_int, "_mmap", None)
+        if mm_obj is not None:
+            mm_obj.close()

@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
+import os
 import time
 import warnings
 from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -36,6 +38,7 @@ import numpy as np
 import pandas as pd
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from scipy import stats
+from scipy.linalg import pinv
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.inspection import permutation_importance
@@ -50,6 +53,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import RepeatedStratifiedKFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils import check_random_state
 from sklearn.utils.parallel import Parallel, delayed
 
 from src import (
@@ -64,6 +68,7 @@ from src.analysis.clinical_feature_associations import (
 )
 from src.analysis.control_vs_disease_ml_report import run_control_vs_disease_ml_report
 from src.analysis.io_utils import write_csv_atomic, write_json_atomic, write_parquet_atomic
+from src.analysis.paired_lipid._backend import _single_thread_blas
 from src.analysis.pls_regression import _calculate_vip
 from src.analysis.sklearn_utils import fit_with_convergence_capture, l1_logistic_model
 from src.analysis.statistics import fdr_correction
@@ -508,8 +513,20 @@ def _scaled_inner_folds(
     """Scale each inner training/test pair once and share it across a model grid."""
     scaled: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
     for tr_idx, te_idx in folds:
-        scaler = StandardScaler()
+        scaler = StandardScaler(copy=False)
         scaled.append((tr_idx, te_idx, scaler.fit_transform(X_train[tr_idx]), scaler.transform(X_train[te_idx])))
+    return scaled
+
+
+def _scale_outer_folds(
+    X: np.ndarray,
+    outer_cv: Sequence[tuple[np.ndarray, np.ndarray]],
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Pre-scale fixed outer train/test splits once for permutation runs."""
+    scaled: list[tuple[np.ndarray, np.ndarray]] = []
+    for train_idx, test_idx in outer_cv:
+        scaler = StandardScaler(copy=False)
+        scaled.append((scaler.fit_transform(X[train_idx]), scaler.transform(X[test_idx])))
     return scaled
 
 
@@ -539,32 +556,70 @@ def _fit_pls_da(
     random_state: int,
     n_jobs: int,
     groups: np.ndarray | None = None,
+    inner_folds: Sequence[tuple[np.ndarray, np.ndarray]] | None = None,
+    outer_scaled_train: np.ndarray | None = None,
 ) -> _ModelFit:
     component_grid = _pls_component_grid(ml_cfg)
-    folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state, groups=groups)
+    folds = inner_folds if inner_folds is not None else _inner_cv_folds(
+        X_train, y_train, n_inner_splits, random_state, groups=groups
+    )
     best_n_comp, best_threshold, best_score = component_grid[0], 0.5, -np.inf
 
     if folds is not None:
         scaled_folds = _scaled_inner_folds(X_train, folds)
         max_valid_comp = min(min(len(tr_idx) for tr_idx, _ in folds), X_train.shape[1])
         valid_grid = [c for c in component_grid if 1 <= c <= max_valid_comp] or [1]
-        for n_comp in valid_grid:
+        unique_valid = list(dict.fromkeys(valid_grid))
+        if len(unique_valid) == 1:
+            n_comp = unique_valid[0]
             oof_scores = np.zeros(len(y_train), dtype=float)
             for tr_idx, te_idx, X_tr, X_te in scaled_folds:
-                pls = PLSRegression(n_components=n_comp, scale=False)
+                pls = PLSRegression(n_components=n_comp, scale=False, copy=False)
                 pls.fit(X_tr, y_train[tr_idx])
                 oof_scores[te_idx] = pls.predict(X_te).ravel()
-            threshold, score = _tune_threshold_and_score(y_train, oof_scores, threshold_metric)
-            if score > best_score:
-                best_score, best_n_comp, best_threshold = score, n_comp, threshold
+            best_threshold, best_score = _tune_threshold_and_score(y_train, oof_scores, threshold_metric)
+            best_n_comp = n_comp
+        else:
+            max_comp = max(unique_valid)
+            oof_by_comp = {c: np.zeros(len(y_train), dtype=float) for c in unique_valid}
+            for tr_idx, te_idx, X_tr, X_te in scaled_folds:
+                pls = PLSRegression(n_components=max_comp, scale=False, copy=False)
+                pls.fit(X_tr, y_train[tr_idx])
+                W = pls.x_weights_
+                P = pls.x_loadings_
+                Q = pls.y_loadings_
+                X_te_c = X_te - pls._x_mean
+                y_mean = pls._y_mean
+                for n_comp in unique_valid:
+                    rot_c = np.dot(
+                        W[:, :n_comp],
+                        pinv(np.dot(P[:, :n_comp].T, W[:, :n_comp]), check_finite=False),
+                    )
+                    coef_c = np.dot(rot_c, Q[:, :n_comp].T)
+                    oof_by_comp[n_comp][te_idx] = (X_te_c @ coef_c + y_mean).ravel()
+            for n_comp in valid_grid:
+                threshold, score = _tune_threshold_and_score(y_train, oof_by_comp[n_comp], threshold_metric)
+                if score > best_score:
+                    best_score, best_n_comp, best_threshold = score, n_comp, threshold
 
     final_n_comp = max(1, min(best_n_comp, min(X_train.shape[0] - 2, X_train.shape[1])))
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_train)
-    model = PLSRegression(n_components=final_n_comp, scale=False)
+    if outer_scaled_train is None:
+        scaler: StandardScaler | None = StandardScaler()
+        X_scaled = scaler.fit_transform(X_train)
+        pls_copy = False
+    else:
+        scaler = None
+        X_scaled = outer_scaled_train
+        pls_copy = True
+    model = PLSRegression(n_components=final_n_comp, scale=False, copy=pls_copy)
     model.fit(X_scaled, y_train)
+    predict_fn = (
+        (lambda X: model.predict(scaler.transform(X)).ravel())
+        if scaler is not None
+        else (lambda X: model.predict(X).ravel())
+    )
     return _ModelFit(
-        predict_proba=lambda X: model.predict(scaler.transform(X)).ravel(),
+        predict_proba=predict_fn,
         threshold=best_threshold,
         estimator=model,
         scaler=scaler,
@@ -580,9 +635,13 @@ def _fit_l1_logistic(
     random_state: int,
     n_jobs: int,
     groups: np.ndarray | None = None,
+    inner_folds: Sequence[tuple[np.ndarray, np.ndarray]] | None = None,
+    outer_scaled_train: np.ndarray | None = None,
 ) -> _ModelFit:
     c_grid = _logistic_c_grid(ml_cfg)
-    folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state, groups=groups)
+    folds = inner_folds if inner_folds is not None else _inner_cv_folds(
+        X_train, y_train, n_inner_splits, random_state, groups=groups
+    )
     best_c, best_threshold, best_score = c_grid[0], 0.5, -np.inf
 
     if folds is not None:
@@ -597,12 +656,21 @@ def _fit_l1_logistic(
             if score > best_score:
                 best_score, best_c, best_threshold = score, c, threshold
 
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_train)
+    if outer_scaled_train is None:
+        scaler: StandardScaler | None = StandardScaler()
+        X_scaled = scaler.fit_transform(X_train)
+    else:
+        scaler = None
+        X_scaled = outer_scaled_train
     model = l1_logistic_model(c=best_c, random_state=random_state)
     fit_with_convergence_capture(model, X_scaled, y_train, context="cvd_ml logistic final")
+    predict_fn = (
+        (lambda X: model.predict_proba(scaler.transform(X))[:, 1])
+        if scaler is not None
+        else (lambda X: model.predict_proba(X)[:, 1])
+    )
     return _ModelFit(
-        predict_proba=lambda X: model.predict_proba(scaler.transform(X))[:, 1],
+        predict_proba=predict_fn,
         threshold=best_threshold,
         estimator=model,
         scaler=scaler,
@@ -618,10 +686,13 @@ def _fit_random_forest(
     random_state: int,
     n_jobs: int,
     groups: np.ndarray | None = None,
+    inner_folds: Sequence[tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> _ModelFit:
     n_estimators_grid = _rf_n_estimators_grid(ml_cfg)
     max_depth_grid = _rf_max_depth_grid(ml_cfg)
-    folds = _inner_cv_folds(X_train, y_train, n_inner_splits, random_state, groups=groups)
+    folds = inner_folds if inner_folds is not None else _inner_cv_folds(
+        X_train, y_train, n_inner_splits, random_state, groups=groups
+    )
     best_params, best_threshold, best_score = (n_estimators_grid[0], max_depth_grid[0]), 0.5, -np.inf
 
     if folds is not None:
@@ -633,6 +704,9 @@ def _fit_random_forest(
         }
         for max_depth in max_depth_grid:
             for tr_idx, te_idx in folds:
+                X_tr_fold = X_train[tr_idx]
+                y_tr_fold = y_train[tr_idx]
+                X_te_fold = X_train[te_idx]
                 model: RandomForestClassifier | None = None
                 for n_estimators in unique_estimators:
                     if model is None:
@@ -654,8 +728,8 @@ def _fit_random_forest(
                             message='class_weight presets "balanced" or "balanced_subsample" are not recommended for warm_start.*',
                             category=UserWarning,
                         )
-                        model.fit(X_train[tr_idx], y_train[tr_idx])
-                    oof_by_params[(n_estimators, max_depth)][te_idx] = model.predict_proba(X_train[te_idx])[:, 1]
+                        model.fit(X_tr_fold, y_tr_fold)
+                    oof_by_params[(n_estimators, max_depth)][te_idx] = model.predict_proba(X_te_fold)[:, 1]
 
         # Preserve configured grid order for deterministic tie breaking.
         for n_estimators in n_estimators_grid:
@@ -700,6 +774,8 @@ def _fit_tuned_model(
     random_state: int,
     n_jobs: int,
     groups: np.ndarray | None = None,
+    inner_folds: Sequence[tuple[np.ndarray, np.ndarray]] | None = None,
+    outer_scaled_train: np.ndarray | None = None,
 ) -> _ModelFit:
     """Tune hyperparameters + decision threshold on inner CV; fit final model on all of X_train.
 
@@ -711,15 +787,270 @@ def _fit_tuned_model(
     fitter = _MODEL_FITTERS.get(model_name)
     if fitter is None:
         raise ValueError(f"Unknown model '{model_name}'")
+    kwargs: dict[str, Any] = {}
     if groups is not None:
-        return fitter(X_train, y_train, ml_cfg, n_inner_splits, threshold_metric, random_state, n_jobs, groups=groups)
-    return fitter(X_train, y_train, ml_cfg, n_inner_splits, threshold_metric, random_state, n_jobs)
+        kwargs["groups"] = groups
+    if inner_folds is not None:
+        kwargs["inner_folds"] = inner_folds
+    if outer_scaled_train is not None and model_name in ("pls_da", "l1_logistic"):
+        kwargs["outer_scaled_train"] = outer_scaled_train
+    return fitter(X_train, y_train, ml_cfg, n_inner_splits, threshold_metric, random_state, n_jobs, **kwargs)
 
 
 # ---------------------------------------------------------------------------
 # Nested CV — one implementation shared by repeated-CV point estimates and the
 # single-split permutation workhorse.
 # ---------------------------------------------------------------------------
+
+
+def _resolve_parallel_workers(n_tasks: int, n_jobs: int | None) -> int:
+    """Resolve effective worker count while preventing nested-pool oversubscription."""
+    if n_tasks <= 1 or n_jobs == 0 or n_jobs == 1:
+        return 1
+    if os.environ.get("_PAIRED_LIPID_IN_BOOTSTRAP_WORKER") == "1":
+        return 1
+    if multiprocessing.parent_process() is not None:
+        return 1
+    try:
+        import joblib.parallel
+
+        active_backend, _ = joblib.parallel.get_active_backend()
+        if getattr(active_backend, "nesting_level", 0) > 0:
+            return 1
+    except Exception:
+        pass
+    cpu_cnt = os.cpu_count() or 1
+    if n_jobs is None or int(n_jobs) == -1:
+        raw = cpu_cnt
+    elif int(n_jobs) < -1:
+        raw = max(1, cpu_cnt + 1 + int(n_jobs))
+    else:
+        raw = int(n_jobs)
+    if raw <= 1:
+        return 1
+    return min(raw, n_tasks)
+
+
+def _rf_inner_chain_task(
+    outer_key: int,
+    max_depth: int | None,
+    X: np.ndarray,
+    y: np.ndarray,
+    global_tr_idx: np.ndarray,
+    global_te_idx: np.ndarray,
+    te_idx: np.ndarray,
+    unique_estimators: list[int],
+    fold_random_state: int,
+    single_thread_blas: bool = True,
+) -> tuple[int, int | None, np.ndarray, dict[int, np.ndarray]]:
+    """Run one warm-start RandomForest chain across n_estimators for one inner fold."""
+    with _single_thread_blas() if single_thread_blas else nullcontext():
+        X_tr_fold = X[global_tr_idx]
+        y_tr_fold = y[global_tr_idx]
+        X_te_fold = X[global_te_idx]
+        model: RandomForestClassifier | None = None
+        scores_by_est: dict[int, np.ndarray] = {}
+        for n_estimators in unique_estimators:
+            if model is None:
+                model = RandomForestClassifier(
+                    n_estimators=n_estimators,
+                    max_depth=max_depth,
+                    class_weight="balanced_subsample",
+                    random_state=fold_random_state,
+                    n_jobs=1,
+                    warm_start=True,
+                )
+            else:
+                model.set_params(n_estimators=n_estimators)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message='class_weight presets "balanced" or "balanced_subsample" are not recommended for warm_start.*',
+                    category=UserWarning,
+                )
+                model.fit(X_tr_fold, y_tr_fold)
+            scores_by_est[n_estimators] = model.predict_proba(X_te_fold)[:, 1]
+        return outer_key, max_depth, te_idx, scores_by_est
+
+
+def _rf_outer_final_task(
+    outer_key: int,
+    X: np.ndarray,
+    y: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    best_params: tuple[int, int | None],
+    best_threshold: float,
+    fold_random_state: int,
+    ml_cfg: dict[str, Any],
+    repeat_index: int,
+    fold_index: int,
+    feature_names: list[str] | None,
+    include_predictions: bool,
+    include_importance: bool,
+    single_thread_blas: bool = True,
+) -> tuple[int, tuple[np.ndarray, np.ndarray, np.ndarray] | None, pd.DataFrame | None]:
+    """Fit one outer RandomForest model and return predictions and/or importance."""
+    with _single_thread_blas() if single_thread_blas else nullcontext():
+        final_model = RandomForestClassifier(
+            n_estimators=best_params[0],
+            max_depth=best_params[1],
+            class_weight="balanced_subsample",
+            random_state=fold_random_state,
+            n_jobs=1,
+        )
+        final_model.fit(X[train_idx], y[train_idx])
+        pred_tuple: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        if include_predictions:
+            scores = final_model.predict_proba(X[test_idx])[:, 1]
+            pred_tuple = (test_idx, (scores >= best_threshold).astype(int), scores)
+        imp_frame: pd.DataFrame | None = None
+        if include_importance:
+            assert feature_names is not None
+            fit = _ModelFit(
+                predict_proba=lambda X_in: final_model.predict_proba(X_in)[:, 1],
+                threshold=best_threshold,
+                estimator=final_model,
+                scaler=None,
+            )
+            imp_frame = _outer_fold_importance_frame_from_fit(
+                "random_forest",
+                fit,
+                X[test_idx],
+                y[test_idx],
+                feature_names,
+                ml_cfg=ml_cfg,
+                repeat_index=repeat_index,
+                fold_index=fold_index,
+                n_train=len(train_idx),
+            )
+        return outer_key, pred_tuple, imp_frame
+
+
+def _run_rf_parallel_folds(
+    X: np.ndarray,
+    y: np.ndarray,
+    fold_specs: Sequence[tuple[int, int, np.ndarray, np.ndarray, int]],
+    *,
+    ml_cfg: dict[str, Any],
+    n_inner_splits: int,
+    threshold_metric: str,
+    n_jobs: int,
+    feature_names: list[str] | None = None,
+    include_predictions: bool = True,
+    include_importance: bool = False,
+    fold_callback: Callable[[], None] | None = None,
+) -> tuple[dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]], dict[int, pd.DataFrame]]:
+    """Flatten RF inner warm-start chains and outer refits across all available workers."""
+    if not fold_specs:
+        return {}, {}
+
+    n_estimators_grid = _rf_n_estimators_grid(ml_cfg)
+    max_depth_grid = _rf_max_depth_grid(ml_cfg)
+    unique_estimators = sorted(set(n_estimators_grid))
+    unique_depths = list(dict.fromkeys(max_depth_grid))
+    default_params = (n_estimators_grid[0], max_depth_grid[0])
+
+    y_train_by_fold: dict[int, np.ndarray] = {}
+    oof_by_params_by_fold: dict[int, dict[tuple[int, int | None], np.ndarray]] = {}
+    best_params_by_fold: dict[int, tuple[int, int | None]] = {}
+    best_threshold_by_fold: dict[int, float] = {}
+    phase1_tasks: list[tuple[int, int | None, np.ndarray, np.ndarray, np.ndarray, int]] = []
+
+    for outer_key, (_repeat_index, _fold_index, train_idx, _test_idx, fold_random_state) in enumerate(fold_specs):
+        y_tr_outer = y[train_idx]
+        inner_folds = _inner_cv_folds(X[train_idx], y_tr_outer, n_inner_splits, fold_random_state)
+        if inner_folds is None:
+            best_params_by_fold[outer_key] = default_params
+            best_threshold_by_fold[outer_key] = 0.5
+            continue
+        y_train_by_fold[outer_key] = y_tr_outer
+        oof_by_params_by_fold[outer_key] = {
+            (n_estimators, max_depth): np.zeros(len(y_tr_outer), dtype=float)
+            for n_estimators in unique_estimators
+            for max_depth in unique_depths
+        }
+        for max_depth in unique_depths:
+            for tr_idx, te_idx in inner_folds:
+                phase1_tasks.append(
+                    (
+                        outer_key,
+                        max_depth,
+                        train_idx[tr_idx],
+                        train_idx[te_idx],
+                        te_idx,
+                        fold_random_state,
+                    )
+                )
+
+    workers = _resolve_parallel_workers(max(len(phase1_tasks), len(fold_specs)), n_jobs)
+    preds_by_fold: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    imp_by_fold: dict[int, pd.DataFrame] = {}
+
+    with Parallel(n_jobs=workers, return_as="list") as parallel:
+        if phase1_tasks:
+            phase1_results = parallel(
+                delayed(_rf_inner_chain_task)(
+                    outer_key,
+                    max_depth,
+                    X,
+                    y,
+                    global_tr_idx,
+                    global_te_idx,
+                    te_idx,
+                    unique_estimators,
+                    fold_random_state,
+                    workers > 1,
+                )
+                for outer_key, max_depth, global_tr_idx, global_te_idx, te_idx, fold_random_state in phase1_tasks
+            )
+            for outer_key, max_depth, te_idx, scores_by_est in phase1_results:
+                fold_oof = oof_by_params_by_fold[outer_key]
+                for n_estimators, scores in scores_by_est.items():
+                    fold_oof[(n_estimators, max_depth)][te_idx] = scores
+
+            for outer_key, y_tr_outer in y_train_by_fold.items():
+                fold_oof = oof_by_params_by_fold[outer_key]
+                best_params, best_threshold, best_score = default_params, 0.5, -np.inf
+                for n_estimators in n_estimators_grid:
+                    for max_depth in max_depth_grid:
+                        threshold, score = _tune_threshold_and_score(
+                            y_tr_outer, fold_oof[(n_estimators, max_depth)], threshold_metric
+                        )
+                        if score > best_score:
+                            best_score, best_params, best_threshold = score, (n_estimators, max_depth), threshold
+                best_params_by_fold[outer_key] = best_params
+                best_threshold_by_fold[outer_key] = best_threshold
+
+        phase2_results = parallel(
+            delayed(_rf_outer_final_task)(
+                outer_key,
+                X,
+                y,
+                train_idx,
+                test_idx,
+                best_params_by_fold[outer_key],
+                best_threshold_by_fold[outer_key],
+                fold_random_state,
+                ml_cfg,
+                repeat_index,
+                fold_index,
+                feature_names,
+                include_predictions,
+                include_importance,
+                workers > 1,
+            )
+            for outer_key, (repeat_index, fold_index, train_idx, test_idx, fold_random_state) in enumerate(fold_specs)
+        )
+        for outer_key, pred_tuple, imp_frame in phase2_results:
+            if pred_tuple is not None:
+                preds_by_fold[outer_key] = pred_tuple
+            if imp_frame is not None:
+                imp_by_fold[outer_key] = imp_frame
+            if fold_callback is not None:
+                fold_callback()
+
+    return preds_by_fold, imp_by_fold
 
 
 def _fit_outer_fold_prediction(
@@ -733,8 +1064,25 @@ def _fit_outer_fold_prediction(
     threshold_metric: str,
     random_state: int,
     estimator_n_jobs: int,
+    outer_scaled_fold: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Fit one outer fold and return its held-out predictions."""
+    if outer_scaled_fold is not None and model_name in ("pls_da", "l1_logistic"):
+        X_outer_tr_scaled, X_outer_te_scaled = outer_scaled_fold
+        fit = _fit_tuned_model(
+            model_name,
+            X[train_idx],
+            y[train_idx],
+            ml_cfg=ml_cfg,
+            n_inner_splits=n_inner_splits,
+            threshold_metric=threshold_metric,
+            random_state=random_state,
+            n_jobs=estimator_n_jobs,
+            outer_scaled_train=X_outer_tr_scaled,
+        )
+        scores = fit.predict_proba(X_outer_te_scaled)
+        return test_idx, (scores >= fit.threshold).astype(int), scores
+
     fit = _fit_tuned_model(
         model_name,
         X[train_idx],
@@ -761,43 +1109,38 @@ def _cv_predict(
     random_state: int,
     n_jobs: int,
     fold_callback: Callable[[], None] | None = None,
+    outer_scaled_folds: Sequence[tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fit+predict across one set of outer folds. Returns (y_pred, y_score) out-of-fold arrays."""
     y_pred = np.zeros_like(y, dtype=int)
     y_score = np.zeros_like(y, dtype=float)
-    if model_name == "random_forest" and n_jobs != 1 and len(outer_cv) > 1:
-        # Parallelize independent outer folds rather than nesting joblib pools.
-        # The data splits, random seeds, and candidate selection are unchanged.
-        calls = [
-            (
-                fold_index,
-                (
-                    model_name,
-                    X,
-                    y,
-                    train_idx,
-                    test_idx,
-                    ml_cfg,
-                    n_inner_splits,
-                    threshold_metric,
-                    random_state,
-                    1,
-                ),
+    if model_name == "random_forest" and len(outer_cv) > 0:
+        n_rf_tasks = len(outer_cv) * max(1, len(_rf_max_depth_grid(ml_cfg)) * n_inner_splits)
+        if _resolve_parallel_workers(n_rf_tasks, n_jobs) > 1:
+            fold_specs = [
+                (0, fold_index, train_idx, test_idx, random_state)
+                for fold_index, (train_idx, test_idx) in enumerate(outer_cv)
+            ]
+            preds_by_fold, _ = _run_rf_parallel_folds(
+                X,
+                y,
+                fold_specs,
+                ml_cfg=ml_cfg,
+                n_inner_splits=n_inner_splits,
+                threshold_metric=threshold_metric,
+                n_jobs=n_jobs,
+                include_predictions=True,
+                include_importance=False,
+                fold_callback=fold_callback,
             )
-            for fold_index, (train_idx, test_idx) in enumerate(outer_cv)
-        ]
+            for fold_index in range(len(fold_specs)):
+                test_idx, fold_pred, fold_score = preds_by_fold[fold_index]
+                y_pred[test_idx] = fold_pred
+                y_score[test_idx] = fold_score
+            return y_pred, y_score
 
-        def on_result(_fold_index: int, result: tuple[np.ndarray, np.ndarray, np.ndarray]) -> None:
-            test_idx, fold_pred, fold_score = result
-            y_pred[test_idx] = fold_pred
-            y_score[test_idx] = fold_score
-            if fold_callback is not None:
-                fold_callback()
-
-        _stream_parallel(n_jobs, _fit_outer_fold_prediction, calls, on_result)
-        return y_pred, y_score
-
-    for train_idx, test_idx in outer_cv:
+    for fold_index, (train_idx, test_idx) in enumerate(outer_cv):
+        scaled_fold = outer_scaled_folds[fold_index] if outer_scaled_folds is not None else None
         test_idx, fold_pred, fold_score = _fit_outer_fold_prediction(
             model_name,
             X,
@@ -808,7 +1151,8 @@ def _cv_predict(
             n_inner_splits,
             threshold_metric,
             random_state,
-            n_jobs,
+            1 if model_name == "random_forest" else n_jobs,
+            outer_scaled_fold=scaled_fold,
         )
         y_score[test_idx] = fold_score
         y_pred[test_idx] = fold_pred
@@ -874,7 +1218,96 @@ def _run_repeated_nested_cv(
         if len(split_plan) != n_outer_repeats:
             raise ValueError("Locked outer split plan repeat count does not match n_outer_repeats")
 
-    rows: list[dict[str, object]] = []
+    fold_specs = [
+        (repeat_index, fold_index, train_idx, test_idx, random_state + repeat_index)
+        for repeat_index, repeat_splits in enumerate(split_plan)
+        for fold_index, (train_idx, test_idx) in enumerate(repeat_splits)
+    ]
+
+    if model_name == "random_forest" and fold_specs:
+        n_rf_tasks = len(fold_specs) * max(1, len(_rf_max_depth_grid(ml_cfg)) * n_inner_splits)
+        if _resolve_parallel_workers(n_rf_tasks, n_jobs) > 1:
+            preds_by_fold, _ = _run_rf_parallel_folds(
+                X,
+                y,
+                fold_specs,
+                ml_cfg=ml_cfg,
+                n_inner_splits=n_inner_splits,
+                threshold_metric=threshold_metric,
+                n_jobs=n_jobs,
+                include_predictions=True,
+                include_importance=False,
+                fold_callback=fold_callback,
+            )
+            pred_by_repeat = {repeat_index: np.zeros_like(y, dtype=int) for repeat_index in range(len(split_plan))}
+            score_by_repeat = {repeat_index: np.zeros_like(y, dtype=float) for repeat_index in range(len(split_plan))}
+            for outer_key, (repeat_index, _fold_index, _train_idx, _test_idx, _rs) in enumerate(fold_specs):
+                test_idx, fold_pred, fold_score = preds_by_fold[outer_key]
+                pred_by_repeat[repeat_index][test_idx] = fold_pred
+                score_by_repeat[repeat_index][test_idx] = fold_score
+            rows: list[dict[str, object]] = []
+            for repeat_index in range(len(split_plan)):
+                y_pred = pred_by_repeat[repeat_index]
+                y_score = score_by_repeat[repeat_index]
+                rows.extend(
+                    {
+                        "repeat": repeat_index,
+                        "subject_index": subject_index,
+                        "y_true": int(y[subject_index]),
+                        "y_pred": int(y_pred[subject_index]),
+                        "y_score": float(y_score[subject_index]),
+                    }
+                    for subject_index in range(len(y))
+                )
+            return pd.DataFrame(rows)
+
+    rows = []
+    if _resolve_parallel_workers(len(fold_specs), n_jobs) > 1:
+        calls = [
+            (
+                outer_key,
+                (
+                    model_name,
+                    X,
+                    y,
+                    train_idx,
+                    test_idx,
+                    ml_cfg,
+                    n_inner_splits,
+                    threshold_metric,
+                    fold_random_state,
+                    1,
+                ),
+            )
+            for outer_key, (_repeat_index, _fold_index, train_idx, test_idx, fold_random_state) in enumerate(fold_specs)
+        ]
+        pred_by_repeat = {repeat_index: np.zeros_like(y, dtype=int) for repeat_index in range(len(split_plan))}
+        score_by_repeat = {repeat_index: np.zeros_like(y, dtype=float) for repeat_index in range(len(split_plan))}
+
+        def on_result(outer_key: int, result: tuple[np.ndarray, np.ndarray, np.ndarray]) -> None:
+            repeat_index = fold_specs[outer_key][0]
+            test_idx, fold_pred, fold_score = result
+            pred_by_repeat[repeat_index][test_idx] = fold_pred
+            score_by_repeat[repeat_index][test_idx] = fold_score
+            if fold_callback is not None:
+                fold_callback()
+
+        _stream_parallel(n_jobs, _fit_outer_fold_prediction, calls, on_result)
+        for repeat_index in range(len(split_plan)):
+            y_pred = pred_by_repeat[repeat_index]
+            y_score = score_by_repeat[repeat_index]
+            rows.extend(
+                {
+                    "repeat": repeat_index,
+                    "subject_index": subject_index,
+                    "y_true": int(y[subject_index]),
+                    "y_pred": int(y_pred[subject_index]),
+                    "y_score": float(y_score[subject_index]),
+                }
+                for subject_index in range(len(y))
+            )
+        return pd.DataFrame(rows)
+
     for repeat_index, repeat_splits in enumerate(split_plan):
         y_pred, y_score = _cv_predict(
             model_name,
@@ -909,6 +1342,7 @@ def _fixed_plan_balanced_accuracy(
     *,
     ml_cfg: dict[str, Any],
     outer_cv: Sequence[tuple[np.ndarray, np.ndarray]],
+    outer_scaled_folds: Sequence[tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> float:
     """Score one fixed locked outer plan for observed and permuted labels alike."""
     y_pred, _y_score = _cv_predict(
@@ -921,6 +1355,7 @@ def _fixed_plan_balanced_accuracy(
         threshold_metric=_threshold_metric(ml_cfg),
         random_state=_random_state(ml_cfg),
         n_jobs=1,
+        outer_scaled_folds=outer_scaled_folds,
     )
     return float(balanced_accuracy_score(y, y_pred))
 
@@ -960,11 +1395,21 @@ def _permuted_score(
     ml_cfg: dict[str, Any],
     seed: int,
     outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]],
+    outer_scaled_folds: Sequence[tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> float:
     rng = np.random.default_rng(seed)
     y_perm = _permute_labels(y, rng, strata)
     if len(np.unique(y_perm)) < 2:
         return np.nan
+    if outer_scaled_folds is not None:
+        return _fixed_plan_balanced_accuracy(
+            model_name,
+            X,
+            y_perm,
+            ml_cfg=ml_cfg,
+            outer_cv=outer_split_plan[0],
+            outer_scaled_folds=outer_scaled_folds,
+        )
     return _fixed_plan_balanced_accuracy(model_name, X, y_perm, ml_cfg=ml_cfg, outer_cv=outer_split_plan[0])
 
 
@@ -979,8 +1424,16 @@ def _load_checkpoint_rows(path: Path | None, *, resume: bool) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
-def _run_seeded_call(seed: int, func: Callable[..., Any], args: tuple[Any, ...]) -> tuple[int, Any]:
+def _run_seeded_call(
+    seed: int,
+    func: Callable[..., Any],
+    args: tuple[Any, ...],
+    single_thread_blas: bool = False,
+) -> tuple[int, Any]:
     """Return a draw's seed with its result so unordered workers remain traceable."""
+    if single_thread_blas:
+        with _single_thread_blas():
+            return seed, func(*args)
     return seed, func(*args)
 
 
@@ -991,13 +1444,14 @@ def _stream_parallel(
     on_result: Callable[[int, Any], None],
 ) -> None:
     """Yield completed deterministic jobs to parent process for progress/checkpointing."""
-    if n_jobs == 1 or len(calls) <= 1:
+    workers = _resolve_parallel_workers(len(calls), n_jobs)
+    if workers <= 1:
         for seed, args in calls:
             on_result(seed, func(*args))
         return
 
-    parallel = Parallel(n_jobs=n_jobs, return_as="generator_unordered")
-    results = parallel(delayed(_run_seeded_call)(seed, func, args) for seed, args in calls)
+    parallel = Parallel(n_jobs=workers, return_as="generator_unordered")
+    results = parallel(delayed(_run_seeded_call)(seed, func, args, True) for seed, args in calls)
     for seed, result in results:
         on_result(seed, result)
 
@@ -1020,18 +1474,27 @@ def _stream_parallel_chunked(
     bounded chunks and only starting the next chunk after a stopping check
     avoids that — no futures are ever cancelled, each chunk always completes.
     """
+    workers = _resolve_parallel_workers(len(calls), n_jobs)
     offset = 0
-    while offset < len(calls) and should_continue():
-        chunk = calls[offset : offset + chunk_size]
-        offset += chunk_size
-        if n_jobs == 1 or len(chunk) <= 1:
+    if workers <= 1:
+        while offset < len(calls) and should_continue():
+            chunk = calls[offset : offset + chunk_size]
+            offset += chunk_size
             for seed, args in chunk:
                 on_result(seed, func(*args))
-            continue
-        parallel = Parallel(n_jobs=n_jobs, return_as="list")
-        results = parallel(delayed(_run_seeded_call)(seed, func, args) for seed, args in chunk)
-        for seed, result in results:
-            on_result(seed, result)
+        return
+
+    with Parallel(n_jobs=workers, return_as="list") as parallel:
+        while offset < len(calls) and should_continue():
+            chunk = calls[offset : offset + chunk_size]
+            offset += chunk_size
+            if len(chunk) <= 1:
+                for seed, args in chunk:
+                    on_result(seed, func(*args))
+                continue
+            results = parallel(delayed(_run_seeded_call)(seed, func, args, True) for seed, args in chunk)
+            for seed, result in results:
+                on_result(seed, result)
 
 
 def run_permutation_test(
@@ -1080,8 +1543,20 @@ def run_permutation_test(
     }
     if not all(np.isfinite(score) for score in score_by_seed.values()):
         raise ValueError("Permutation checkpoint contains a non-finite score")
+
+    outer_cv = outer_split_plan[0] if outer_split_plan else ()
+    perm_plan = [outer_cv] if outer_split_plan else [[]]
+    outer_scaled_folds: list[tuple[np.ndarray, np.ndarray]] | None = None
+    if model_name in ("pls_da", "l1_logistic") and outer_cv:
+        outer_scaled_folds = _scale_outer_folds(X, outer_cv)
+
     pending = [
-        (int(seed), (model_name, X, y, strata, ml_cfg, int(seed), outer_split_plan))
+        (
+            int(seed),
+            (model_name, X, y, strata, ml_cfg, int(seed), perm_plan, outer_scaled_folds)
+            if outer_scaled_folds is not None
+            else (model_name, X, y, strata, ml_cfg, int(seed), perm_plan),
+        )
         for seed in seeds
         if int(seed) not in score_by_seed
     ]
@@ -1197,7 +1672,8 @@ def _bootstrap_metric_sample(
 
     n_inner_splits = _n_inner_splits(ml_cfg)
     threshold_metric = _threshold_metric(ml_cfg)
-    if _inner_cv_folds(X_in, y_in, n_inner_splits, seed, groups=in_bag_idx) is None:
+    inner_folds = _inner_cv_folds(X_in, y_in, n_inner_splits, seed, groups=in_bag_idx)
+    if inner_folds is None:
         return None
     fit = _fit_tuned_model(
         model_name,
@@ -1209,6 +1685,7 @@ def _bootstrap_metric_sample(
         random_state=seed,
         n_jobs=1,
         groups=in_bag_idx,
+        inner_folds=inner_folds,
     )
     scores = fit.predict_proba(X_out)
     y_pred = (scores >= fit.threshold).astype(int)
@@ -1342,6 +1819,179 @@ def run_univariate_band_screen(
 
 
 # ---------------------------------------------------------------------------
+
+
+def _rf_permutation_importance(
+    estimator: object,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    *,
+    n_repeats: int,
+    random_state: int,
+    n_jobs: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute balanced-accuracy permutation importance matching sklearn RNG order.
+
+    For fitted binary RandomForestClassifier estimators, exploits tree split
+    sparsity by evaluating only trees whose split features include the permuted
+    column across batched float32 test copies, falling back to exact forest
+    accumulation on near-tie probability margins.
+    """
+    if (
+        isinstance(estimator, RandomForestClassifier)
+        and estimator.n_outputs_ == 1
+        and estimator.n_classes_ == 2
+        and np.array_equal(estimator.classes_, np.array([0, 1]))
+        and len(X_test) > 0
+        and np.isfinite(X_test).all()
+    ):
+        pos_mask = y_test == 1
+        neg_mask = y_test == 0
+        n_pos = int(pos_mask.sum())
+        n_neg = int(neg_mask.sum())
+        if n_pos > 0 and n_neg > 0:
+            n_test, n_features = X_test.shape
+            rs = check_random_state(random_state)
+            seed_inner = int(rs.randint(np.iinfo(np.int32).max + 1))
+            rs_col = check_random_state(seed_inner)
+            shuffling_idx = np.arange(n_test)
+            cur_perm = np.arange(n_test)
+            perm_orders = np.empty((n_repeats, n_test), dtype=np.intp)
+            for r in range(n_repeats):
+                rs_col.shuffle(shuffling_idx)
+                cur_perm = cur_perm[shuffling_idx]
+                perm_orders[r] = cur_perm
+
+            X_t32 = np.ascontiguousarray(X_test, dtype=np.float32)
+            trees = estimator.estimators_
+            n_trees = len(trees)
+            base_tree_proba = np.array([est.predict_proba(X_t32, check_input=False) for est in trees])
+            base_sum = base_tree_proba.sum(axis=0)
+            base_pred = estimator.predict(X_t32)
+            base_ba = 0.5 * (
+                float((base_pred[pos_mask] == 1).sum()) / n_pos
+                + float((base_pred[neg_mask] == 0).sum()) / n_neg
+            )
+
+            trees_by_feat: list[list[int]] = [[] for _ in range(n_features)]
+            for t_idx, est in enumerate(trees):
+                feats = est.tree_.feature
+                for feat_idx in np.unique(feats[feats >= 0]):
+                    trees_by_feat[int(feat_idx)].append(t_idx)
+
+            X_perm_buf = np.tile(X_t32, (n_repeats, 1))
+            scores = np.full((n_features, n_repeats), base_ba, dtype=np.float64)
+            tie_tol = 1e-11 * n_trees
+            for col_idx in range(n_features):
+                t_list = trees_by_feat[col_idx]
+                if not t_list:
+                    continue
+                col_vals = X_t32[:, col_idx]
+                for r in range(n_repeats):
+                    X_perm_buf[r * n_test : (r + 1) * n_test, col_idx] = col_vals[perm_orders[r]]
+                p_sum = np.broadcast_to(base_sum, (n_repeats, n_test, 2)).copy()
+                for t_idx in t_list:
+                    p_new = trees[t_idx].predict_proba(X_perm_buf, check_input=False).reshape(n_repeats, n_test, 2)
+                    p_sum += p_new - base_tree_proba[t_idx][None, :, :]
+                if np.any(np.abs(p_sum[:, :, 0] - p_sum[:, :, 1]) <= tie_tol):
+                    p_exact = estimator.predict_proba(X_perm_buf).reshape(n_repeats, n_test, 2)
+                    preds = estimator.classes_.take(np.argmax(p_exact, axis=2), axis=0)
+                else:
+                    preds = estimator.classes_.take(np.argmax(p_sum, axis=2), axis=0)
+                for r in range(n_repeats):
+                    X_perm_buf[r * n_test : (r + 1) * n_test, col_idx] = col_vals
+                scores[col_idx, :] = 0.5 * (
+                    (preds[:, pos_mask] == 1).sum(axis=1) / n_pos
+                    + (preds[:, neg_mask] == 0).sum(axis=1) / n_neg
+                )
+
+            importances = base_ba - scores
+            return np.mean(importances, axis=1), np.std(importances, axis=1)
+
+    result = permutation_importance(
+        estimator,
+        X_test,
+        y_test,
+        n_repeats=n_repeats,
+        random_state=random_state,
+        n_jobs=n_jobs,
+        scoring="balanced_accuracy",
+    )
+    return result.importances_mean, result.importances_std
+
+
+def _outer_fold_importance_frame_from_fit(
+    model_name: str,
+    fit: _ModelFit,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    feature_names: list[str],
+    *,
+    ml_cfg: dict[str, Any],
+    repeat_index: int,
+    fold_index: int,
+    n_train: int,
+    estimator_n_jobs: int = 1,
+) -> pd.DataFrame:
+    """Build one outer fold's importance DataFrame from an already-fitted model."""
+    base = {
+        "feature_name": feature_names,
+        "repeat": repeat_index,
+        "fold": fold_index,
+        "n_train": n_train,
+        "n_test": len(X_test),
+        "estimation_scope": "outer_fold",
+    }
+    if model_name == "pls_da":
+        return pd.DataFrame({**base, "importance": _calculate_vip(fit.estimator), "importance_type": "vip_outer_train"})
+    if model_name == "l1_logistic":
+        return pd.DataFrame(
+            {
+                **base,
+                "importance": fit.estimator.coef_.ravel(),
+                "importance_type": "l1_logistic_coefficient_outer_train",
+            }
+        )
+
+    random_state = _random_state(ml_cfg)
+    importances_mean, importances_std = _rf_permutation_importance(
+        fit.estimator,
+        X_test,
+        y_test,
+        n_repeats=int(ml_cfg.get("importance_permutation_repeats", 5)),
+        random_state=random_state + repeat_index * 101 + fold_index,
+        n_jobs=estimator_n_jobs,
+    )
+    return pd.DataFrame(
+        {
+            **base,
+            "importance": importances_mean,
+            "importance_std": importances_std,
+            "importance_type": "permutation_importance_outer_test",
+        }
+    )
+
+
+def _summarize_importance_folds(rows: Sequence[pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Concatenate per-fold importance frames and compute outer-fold summary."""
+    long = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    if long.empty:
+        return long, long
+    summary = (
+        long.groupby(["feature_name", "importance_type"], as_index=False)
+        .agg(
+            importance_mean=("importance", "mean"),
+            importance_median=("importance", "median"),
+            importance_std_across_folds=("importance", "std"),
+            n_outer_folds=("importance", "count"),
+        )
+        .sort_values("importance_mean", key=np.abs, ascending=False, kind="mergesort")
+        .reset_index(drop=True)
+    )
+    summary["estimation_scope"] = "outer_fold_summary"
+    return long, summary
+
+
 def _outer_fold_importance_frame(
     model_name: str,
     X: np.ndarray,
@@ -1367,41 +2017,17 @@ def _outer_fold_importance_frame(
         random_state=random_state + repeat_index,
         n_jobs=estimator_n_jobs,
     )
-    base = {
-        "feature_name": feature_names,
-        "repeat": repeat_index,
-        "fold": fold_index,
-        "n_train": len(train_idx),
-        "n_test": len(test_idx),
-        "estimation_scope": "outer_fold",
-    }
-    if model_name == "pls_da":
-        return pd.DataFrame({**base, "importance": _calculate_vip(fit.estimator), "importance_type": "vip_outer_train"})
-    if model_name == "l1_logistic":
-        return pd.DataFrame(
-            {
-                **base,
-                "importance": fit.estimator.coef_.ravel(),
-                "importance_type": "l1_logistic_coefficient_outer_train",
-            }
-        )
-
-    result = permutation_importance(
-        fit.estimator,
+    return _outer_fold_importance_frame_from_fit(
+        model_name,
+        fit,
         X[test_idx],
         y[test_idx],
-        n_repeats=int(ml_cfg.get("importance_permutation_repeats", 5)),
-        random_state=random_state + repeat_index * 101 + fold_index,
-        n_jobs=estimator_n_jobs,
-        scoring="balanced_accuracy",
-    )
-    return pd.DataFrame(
-        {
-            **base,
-            "importance": result.importances_mean,
-            "importance_std": result.importances_std,
-            "importance_type": "permutation_importance_outer_test",
-        }
+        feature_names,
+        ml_cfg=ml_cfg,
+        repeat_index=repeat_index,
+        fold_index=fold_index,
+        n_train=len(train_idx),
+        estimator_n_jobs=estimator_n_jobs,
     )
 
 
@@ -1416,7 +2042,7 @@ def _outer_fold_importance_task(
     repeat_index: int,
     fold_index: int,
 ) -> pd.DataFrame:
-    """Process-safe wrapper for one single-threaded RF importance fold."""
+    """Process-safe wrapper for one single-threaded outer-fold importance task."""
     return _outer_fold_importance_frame(
         model_name,
         X,
@@ -1449,13 +2075,38 @@ def _outer_fold_feature_importance(
     outer test fold.  The long output exposes stability across all folds.
     """
     rows: list[pd.DataFrame] = []
+    fold_specs = [
+        (repeat_index, fold_index, train_idx, test_idx)
+        for repeat_index, repeat_splits in enumerate(outer_split_plan)
+        for fold_index, (train_idx, test_idx) in enumerate(repeat_splits)
+    ]
 
-    if model_name == "random_forest" and n_jobs != 1:
-        fold_specs = [
-            (repeat_index, fold_index, train_idx, test_idx)
-            for repeat_index, repeat_splits in enumerate(outer_split_plan)
-            for fold_index, (train_idx, test_idx) in enumerate(repeat_splits)
-        ]
+    if model_name == "random_forest" and fold_specs:
+        n_inner_splits = _n_inner_splits(ml_cfg)
+        n_rf_tasks = len(fold_specs) * max(1, len(_rf_max_depth_grid(ml_cfg)) * n_inner_splits)
+        if _resolve_parallel_workers(n_rf_tasks, n_jobs) > 1:
+            random_state = _random_state(ml_cfg)
+            rf_specs = [
+                (repeat_index, fold_index, train_idx, test_idx, random_state + repeat_index)
+                for repeat_index, fold_index, train_idx, test_idx in fold_specs
+            ]
+            _, imp_by_fold = _run_rf_parallel_folds(
+                X,
+                y,
+                rf_specs,
+                ml_cfg=ml_cfg,
+                n_inner_splits=n_inner_splits,
+                threshold_metric=_threshold_metric(ml_cfg),
+                n_jobs=n_jobs,
+                feature_names=feature_names,
+                include_predictions=False,
+                include_importance=True,
+                fold_callback=fold_callback,
+            )
+            rows = [imp_by_fold[outer_key] for outer_key in range(len(rf_specs))]
+            return _summarize_importance_folds(rows)
+
+    if _resolve_parallel_workers(len(fold_specs), n_jobs) > 1:
         calls = [
             (
                 fold_key,
@@ -1483,40 +2134,24 @@ def _outer_fold_feature_importance(
         _stream_parallel(n_jobs, _outer_fold_importance_task, calls, on_result)
         rows = [frames_by_fold[fold_key] for fold_key, _args in calls]
     else:
-        for repeat_index, repeat_splits in enumerate(outer_split_plan):
-            for fold_index, (train_idx, test_idx) in enumerate(repeat_splits):
-                rows.append(
-                    _outer_fold_importance_frame(
-                        model_name,
-                        X,
-                        y,
-                        feature_names,
-                        train_idx,
-                        test_idx,
-                        ml_cfg=ml_cfg,
-                        repeat_index=repeat_index,
-                        fold_index=fold_index,
-                        estimator_n_jobs=n_jobs,
-                    )
+        for repeat_index, fold_index, train_idx, test_idx in fold_specs:
+            rows.append(
+                _outer_fold_importance_frame(
+                    model_name,
+                    X,
+                    y,
+                    feature_names,
+                    train_idx,
+                    test_idx,
+                    ml_cfg=ml_cfg,
+                    repeat_index=repeat_index,
+                    fold_index=fold_index,
+                    estimator_n_jobs=1 if model_name == "random_forest" else n_jobs,
                 )
-                if fold_callback is not None:
-                    fold_callback()
-    long = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
-    if long.empty:
-        return long, long
-    summary = (
-        long.groupby(["feature_name", "importance_type"], as_index=False)
-        .agg(
-            importance_mean=("importance", "mean"),
-            importance_median=("importance", "median"),
-            importance_std_across_folds=("importance", "std"),
-            n_outer_folds=("importance", "count"),
-        )
-        .sort_values("importance_mean", key=np.abs, ascending=False, kind="mergesort")
-        .reset_index(drop=True)
-    )
-    summary["estimation_scope"] = "outer_fold_summary"
-    return long, summary
+            )
+            if fold_callback is not None:
+                fold_callback()
+    return _summarize_importance_folds(rows)
 
 
 # Sex-confound battery
@@ -1647,6 +2282,179 @@ def _append_null_distribution_rows(
     )
 
 
+def _observed_outer_fold_task(
+    model_name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: list[str],
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    ml_cfg: dict[str, Any],
+    repeat_index: int,
+    fold_index: int,
+    n_inner_splits: int,
+    threshold_metric: str,
+    fold_random_state: int,
+) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray], pd.DataFrame]:
+    """Fit one outer fold once and return both predictions and importance."""
+    fit = _fit_tuned_model(
+        model_name,
+        X[train_idx],
+        y[train_idx],
+        ml_cfg=ml_cfg,
+        n_inner_splits=n_inner_splits,
+        threshold_metric=threshold_metric,
+        random_state=fold_random_state,
+        n_jobs=1,
+    )
+    scores = fit.predict_proba(X[test_idx])
+    pred_tuple = (test_idx, (scores >= fit.threshold).astype(int), scores)
+    imp_frame = _outer_fold_importance_frame_from_fit(
+        model_name,
+        fit,
+        X[test_idx],
+        y[test_idx],
+        feature_names,
+        ml_cfg=ml_cfg,
+        repeat_index=repeat_index,
+        fold_index=fold_index,
+        n_train=len(train_idx),
+        estimator_n_jobs=1,
+    )
+    return pred_tuple, imp_frame
+
+
+def _run_repeated_nested_cv_with_importance(
+    model_name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: list[str],
+    *,
+    ml_cfg: dict[str, Any],
+    n_jobs: int,
+    outer_split_plan: Sequence[Sequence[tuple[np.ndarray, np.ndarray]]],
+    fold_callback: Callable[[], None] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Fit each outer fold once to produce OOF predictions and feature importances."""
+    n_outer_repeats = int(ml_cfg.get("n_outer_repeats", 10))
+    n_inner_splits = _n_inner_splits(ml_cfg)
+    threshold_metric = _threshold_metric(ml_cfg)
+    random_state = _random_state(ml_cfg)
+    split_plan = [list(repeat_splits) for repeat_splits in outer_split_plan]
+    if len(split_plan) != n_outer_repeats:
+        raise ValueError("Locked outer split plan repeat count does not match n_outer_repeats")
+
+    fold_specs = [
+        (repeat_index, fold_index, train_idx, test_idx, random_state + repeat_index)
+        for repeat_index, repeat_splits in enumerate(split_plan)
+        for fold_index, (train_idx, test_idx) in enumerate(repeat_splits)
+    ]
+
+    preds_by_fold: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    imp_by_fold: dict[int, pd.DataFrame] = {}
+
+    if (
+        model_name == "random_forest"
+        and fold_specs
+        and _resolve_parallel_workers(
+            len(fold_specs) * max(1, len(_rf_max_depth_grid(ml_cfg)) * n_inner_splits), n_jobs
+        )
+        > 1
+    ):
+        preds_by_fold, imp_by_fold = _run_rf_parallel_folds(
+            X,
+            y,
+            fold_specs,
+            ml_cfg=ml_cfg,
+            n_inner_splits=n_inner_splits,
+            threshold_metric=threshold_metric,
+            n_jobs=n_jobs,
+            feature_names=feature_names,
+            include_predictions=True,
+            include_importance=True,
+            fold_callback=fold_callback,
+        )
+    elif _resolve_parallel_workers(len(fold_specs), n_jobs) > 1:
+        calls = [
+            (
+                outer_key,
+                (
+                    model_name,
+                    X,
+                    y,
+                    feature_names,
+                    train_idx,
+                    test_idx,
+                    ml_cfg,
+                    repeat_index,
+                    fold_index,
+                    n_inner_splits,
+                    threshold_metric,
+                    fold_random_state,
+                ),
+            )
+            for outer_key, (repeat_index, fold_index, train_idx, test_idx, fold_random_state) in enumerate(fold_specs)
+        ]
+
+        def on_result(
+            outer_key: int,
+            result: tuple[tuple[np.ndarray, np.ndarray, np.ndarray], pd.DataFrame],
+        ) -> None:
+            pred_tuple, imp_frame = result
+            preds_by_fold[outer_key] = pred_tuple
+            imp_by_fold[outer_key] = imp_frame
+            if fold_callback is not None:
+                fold_callback()
+
+        _stream_parallel(n_jobs, _observed_outer_fold_task, calls, on_result)
+    else:
+        for outer_key, (repeat_index, fold_index, train_idx, test_idx, fold_random_state) in enumerate(fold_specs):
+            pred_tuple, imp_frame = _observed_outer_fold_task(
+                model_name,
+                X,
+                y,
+                feature_names,
+                train_idx,
+                test_idx,
+                ml_cfg,
+                repeat_index,
+                fold_index,
+                n_inner_splits,
+                threshold_metric,
+                fold_random_state,
+            )
+            preds_by_fold[outer_key] = pred_tuple
+            imp_by_fold[outer_key] = imp_frame
+            if fold_callback is not None:
+                fold_callback()
+
+    pred_by_repeat = {repeat_index: np.zeros_like(y, dtype=int) for repeat_index in range(len(split_plan))}
+    score_by_repeat = {repeat_index: np.zeros_like(y, dtype=float) for repeat_index in range(len(split_plan))}
+    for outer_key, (repeat_index, _fold_index, _train_idx, _test_idx, _rs) in enumerate(fold_specs):
+        test_idx, fold_pred, fold_score = preds_by_fold[outer_key]
+        pred_by_repeat[repeat_index][test_idx] = fold_pred
+        score_by_repeat[repeat_index][test_idx] = fold_score
+
+    oof_rows: list[dict[str, object]] = []
+    for repeat_index in range(len(split_plan)):
+        y_pred = pred_by_repeat[repeat_index]
+        y_score = score_by_repeat[repeat_index]
+        oof_rows.extend(
+            {
+                "repeat": repeat_index,
+                "subject_index": subject_index,
+                "y_true": int(y[subject_index]),
+                "y_pred": int(y_pred[subject_index]),
+                "y_score": float(y_score[subject_index]),
+            }
+            for subject_index in range(len(y))
+        )
+    oof = pd.DataFrame(oof_rows)
+    imp_rows = [imp_by_fold[outer_key] for outer_key in range(len(fold_specs))]
+    importance_folds, importance_df = _summarize_importance_folds(imp_rows)
+    return oof, importance_folds, importance_df
+
+
 def _run_observed_model_phase(
     *,
     model_name: str,
@@ -1681,13 +2489,14 @@ def _run_observed_model_phase(
         else:
             with _progress_task(
                 progress,
-                f"{model_name} ({representation}) nested folds",
+                f"{model_name} ({representation}) nested & importance folds",
                 sum(len(splits) for splits in outer_split_plan),
             ) as fold_task:
-                oof = _run_repeated_nested_cv(
+                oof, importance_folds, importance_df = _run_repeated_nested_cv_with_importance(
                     model_name,
                     X_valid,
                     y_valid,
+                    feature_names,
                     ml_cfg=ml_cfg,
                     n_jobs=n_jobs,
                     outer_split_plan=outer_split_plan,
@@ -1697,21 +2506,6 @@ def _run_observed_model_phase(
                 oof, cv_path, index=False
             )
             metrics = _aggregate_repeat_metrics(oof)
-            with _progress_task(
-                progress,
-                f"{model_name} ({representation}) importance folds",
-                sum(len(splits) for splits in outer_split_plan),
-            ) as importance_task:
-                importance_folds, importance_df = _outer_fold_feature_importance(
-                    model_name,
-                    X_valid,
-                    y_valid,
-                    feature_names,
-                    ml_cfg=ml_cfg,
-                    n_jobs=n_jobs,
-                    outer_split_plan=outer_split_plan,
-                    fold_callback=lambda: progress.advance(importance_task),
-                )
             outputs[f"{model_name}_{representation}_feature_importance_folds"] = write_csv_atomic(
                 importance_folds, importance_folds_path, index=False
             )

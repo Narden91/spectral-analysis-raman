@@ -21,7 +21,7 @@ from src.analysis.paired_lipid.models import (
     _symmetrize,
 )
 
-_MAX_DCONST_CACHE_ENTRIES = 64
+_MAX_DCONST_CACHE_ENTRIES = 256
 
 _HOST_DCONST_KEYS: frozenset[str] = frozenset(
     {
@@ -34,6 +34,7 @@ _HOST_DCONST_KEYS: frozenset[str] = frozenset(
         "dropped_cov_cols_base",
         "has_missing_div",
         "single_sample_downstream",
+        "Q0_comb_ratio",
     }
 )
 _DEVICE_INT_DCONST_KEYS: frozenset[str] = frozenset(
@@ -50,6 +51,25 @@ _DEVICE_BOOL_DCONST_KEYS: frozenset[str] = frozenset(
     {
         "X_fin_tr",
         "X_fin_val",
+    }
+)
+_MFA_SPECTRAL_DCONST_KEYS: frozenset[str] = frozenset(
+    {
+        "s_rel",
+        "pair_rel",
+        "p_pair_tr",
+        "m_i_div",
+        "Kp1_all_div",
+        "K1_div",
+        "Kp2_all_div",
+        "K2_div",
+        "Kp1_pair_div",
+        "Kp2_pair_div",
+        "DK1_pair_div",
+        "DK2_pair_div",
+        "Q0_1",
+        "Q0_2",
+        "Q0_comb",
     }
 )
 
@@ -195,10 +215,12 @@ def _precompute_division_constants(
     cfg: PairedLipidConfig,
     *,
     single_sample_downstream: bool = False,
+    spectral_only: bool = False,
+    skip_mfa_device_transfer: bool = False,
 ) -> dict[str, Any]:
     """Precompute division-specific Gram slices and warm-start bases outside the bootstrap loop."""
-    cpu_cache = gcache.get("dconst_cpu_cache")
-    if cpu_cache is None:
+    cpu_cache = None if spectral_only else gcache.get("dconst_cpu_cache")
+    if not spectral_only and cpu_cache is None:
         cpu_cache = OrderedDict()
         gcache["dconst_cpu_cache"] = cpu_cache
 
@@ -216,7 +238,7 @@ def _precompute_division_constants(
         float(cfg.rank_tolerance),
         single_flag,
     )
-    cpu_out = cpu_cache.get(cache_key)
+    cpu_out = None if cpu_cache is None else cpu_cache.get(cache_key)
     spec_entry = spec_cache.get(cache_key)
 
     if spec_entry is not None and (not need_q0_comb or spec_entry[1]):
@@ -283,6 +305,7 @@ def _precompute_division_constants(
         max_k = max(cfg.pca_dimensions)
         p_total = int(gcache.get("p_total", dataset.sample_1300.shape[1] + dataset.sample_2850.shape[1]))
         Q0_comb: np.ndarray | None = None
+        q0_comb_ratio: float | None = None
         G_comb_0 = G1_0 / max(float(ev1_0[-1]), 1e-12) + G2_0 / max(float(ev2_0[-1]), 1e-12)
         G_comb_0 = 0.5 * (G_comb_0 + G_comb_0.T)
         if need_q0_comb and n_s > 32 and max_k <= 24:
@@ -293,10 +316,8 @@ def _precompute_division_constants(
                 check_finite=False,
                 overwrite_a=True,
             )
-            # CheFSI (degree 4 x 3 cycles) requires a clear spectral decay ratio between mode max_k
-            # and mode 32; flat white-noise Marchenko-Pastur bulks route directly to exact eigh.
-            if float(ev_comb_0[-max_k]) / max(float(ev_comb_0[0]), 1e-15) >= 2.0:
-                Q0_comb = np.ascontiguousarray(U_comb_0 * inv_sw0)
+            q0_comb_ratio = float(ev_comb_0[-max_k]) / max(float(ev_comb_0[0]), 1e-15)
+            Q0_comb = np.ascontiguousarray(U_comb_0 * inv_sw0)
         else:
             k_check = min(n_s, max(32, max_k))
             ev_comb_0 = linalg.eigh(
@@ -367,6 +388,7 @@ def _precompute_division_constants(
             "Q0_1": Q0_1,
             "Q0_2": Q0_2,
             "Q0_comb": Q0_comb,
+            "Q0_comb_ratio": q0_comb_ratio,
             "base_comb_rank": base_comb_rank,
             "p_total": p_total,
             "p_pair_tr": np.ascontiguousarray(p_pair_tr, dtype=np.int64),
@@ -389,7 +411,9 @@ def _precompute_division_constants(
             spec_cache[cache_key] = (spec_out, need_q0_comb)
         cpu_out = None  # Refresh preset wrapper whenever spectral entry was newly created or upgraded.
 
-    if cpu_out is not None:
+    if spectral_only:
+        cpu_out = spec_out
+    elif cpu_out is not None:
         if isinstance(cpu_cache, OrderedDict):
             cpu_cache.move_to_end(cache_key)
     else:
@@ -495,7 +519,7 @@ def _precompute_division_constants(
             cpu_cache[cache_key] = cpu_out
             while len(cpu_cache) > _MAX_DCONST_CACHE_ENTRIES:
                 cpu_cache.popitem(last=False)
-        else:
+        elif cpu_cache is not None:
             if len(cpu_cache) >= _MAX_DCONST_CACHE_ENTRIES:
                 cpu_cache.pop(next(iter(cpu_cache)))
             cpu_cache[cache_key] = cpu_out
@@ -505,6 +529,8 @@ def _precompute_division_constants(
 
     out_dev: dict[str, Any] = {}
     for k, v in cpu_out.items():
+        if skip_mfa_device_transfer and k in _MFA_SPECTRAL_DCONST_KEYS:
+            continue
         if k in _HOST_DCONST_KEYS or v is None:
             out_dev[k] = v
         elif k in _DEVICE_INT_DCONST_KEYS:
