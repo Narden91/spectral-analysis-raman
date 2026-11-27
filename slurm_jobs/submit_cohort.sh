@@ -1,51 +1,21 @@
 #!/usr/bin/env bash
-# Submit readiness, then the three cohort outcome jobs after that audit succeeds.
-# Creating these scripts is not authorization. Pass --approve only after the
-# runbook readiness gates have been accepted.
+# All cohort stages at once: 01 readiness audit, then 03 and 04 with
+# --dependency=afterok on that audit. Equivalent to running submit_01, then
+# submit_03 and submit_04, with one preflight.
 #
-#   export MS_ML_PARTITION=cpu
-#   export MS_ML_ACCOUNT=project_account
-#   bash slurm_jobs/submit_cohort.sh --approve
+#   export SBATCH_ACCOUNT=project_2019570 SBATCH_PARTITION=small
+#   bash slurm_jobs/submit_cohort.sh --approve [--dry-run] [--force]
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/submit_lib.sh"
+ms_ml_parse_submit_args "bash slurm_jobs/submit_cohort.sh --approve [--dry-run] [--force]" "$@"
+ms_ml_require_approval
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=env.sh
-source "${SCRIPT_DIR}/env.sh"
-
-APPROVE=0
-for arg in "$@"; do
-  case "${arg}" in
-    --approve) APPROVE=1 ;;
-    -h|--help)
-      echo "Usage: bash slurm_jobs/submit_cohort.sh --approve"
-      exit 0
-      ;;
-    *)
-      echo "Unknown argument: ${arg}" >&2
-      exit 2
-      ;;
-  esac
-done
-
-if [[ "${APPROVE}" -ne 1 ]]; then
-  echo "Refusing to submit cohort jobs without --approve." >&2
-  echo "That flag is the authorization for --approve-cohort-evaluation. It is not implied by creating these scripts." >&2
-  exit 2
+bash "${MS_ML_JOB_DIR}/preflight.sh" --scope cohort --audit --require-scheduler
+ms_ml_submit_scripts 01_readiness_audit.sbatch
+mapfile -t outcome < <(ms_ml_stage_scripts 03; ms_ml_stage_scripts 04)
+dependency=$(ms_ml_readiness_dependency)
+if [[ -z "${dependency}" && "${MS_ML_DRY_RUN}" -eq 1 ]]; then
+  dependency="--dependency=afterok:<readiness job>"
 fi
-
-bash "${SCRIPT_DIR}/preflight.sh" --scope cohort --audit --require-scheduler
-mkdir -p "${MS_ML_LOG_DIR}"
-cd "${MS_ML_REPO_ROOT}"
-
-readiness_id=$(ms_ml_sbatch --parsable "${SCRIPT_DIR}/01_readiness_audit.sbatch")
-echo "submitted 01_readiness_audit.sbatch as job ${readiness_id}"
-
-for script_name in \
-  03_cohort_primary_point_estimate.sbatch \
-  03_cohort_primary_bootstrap_interval.sbatch \
-  04_cohort_sensitivity_and_secondary_endpoints.sbatch
-do
-  job_id=$(ms_ml_sbatch --parsable --dependency="afterok:${readiness_id}" "${SCRIPT_DIR}/${script_name}")
-  echo "submitted ${script_name} as job ${job_id} afterok:${readiness_id}"
-done
+ms_ml_submit_scripts ${dependency:+"${dependency}"} "${outcome[@]}"

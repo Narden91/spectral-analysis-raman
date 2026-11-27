@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Manuscript ML readiness audit. Does not fit outcome models.
 # Submit from the repository root after bash slurm_jobs/preflight.sh.
-# Partition and account are applied by the submit helper from MS_ML_PARTITION and MS_ML_ACCOUNT.
+# Partition and account come from SBATCH_PARTITION/SBATCH_ACCOUNT (or the submit helper).
 #SBATCH --job-name=readiness-audit
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

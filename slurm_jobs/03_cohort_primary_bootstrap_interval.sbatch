@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Manuscript ML primary complete-procedure bootstrap. Separate output directory from the point estimate.
 # Submit from the repository root after bash slurm_jobs/preflight.sh.
-# Partition and account are applied by the submit helper from MS_ML_PARTITION and MS_ML_ACCOUNT.
+# Partition and account come from SBATCH_PARTITION/SBATCH_ACCOUNT (or the submit helper).
 #SBATCH --job-name=cohort-primary-bootstrap-interval
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=128
-#SBATCH --mem=512G
+#SBATCH --mem=240G
 #SBATCH --time=12:00:00
 #SBATCH --output=Results_manuscript_ml/slurm_logs/%x-%j.out
 #SBATCH --error=Results_manuscript_ml/slurm_logs/%x-%j.err

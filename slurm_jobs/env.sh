@@ -2,7 +2,10 @@
 # Shared environment for manuscript ML cluster jobs.
 # Source this file; do not execute it.
 #
-# Override before submit, if the site requires them:
+# Set before submit. MS_ML_PARTITION/MS_ML_ACCOUNT default to the standard
+# SBATCH_PARTITION/SBATCH_ACCOUNT variables, which plain sbatch also reads:
+#   export SBATCH_ACCOUNT=project_2019570 SBATCH_PARTITION=small
+# Optional overrides:
 #   export MS_ML_PARTITION=cpu
 #   export MS_ML_ACCOUNT=project_account
 #   export MS_ML_MAIL_USER=name@university.edu
@@ -27,8 +30,8 @@ MS_ML_REPO_ROOT="$(cd "${MS_ML_JOB_DIR}/.." && pwd)"
 
 MS_ML_CONFIG="${MS_ML_CONFIG:-${MS_ML_REPO_ROOT}/config/manuscript_ml.yaml}"
 MS_ML_UV="${MS_ML_UV:-uv}"
-MS_ML_PARTITION="${MS_ML_PARTITION:-}"
-MS_ML_ACCOUNT="${MS_ML_ACCOUNT:-}"
+MS_ML_PARTITION="${MS_ML_PARTITION:-${SBATCH_PARTITION:-}}"
+MS_ML_ACCOUNT="${MS_ML_ACCOUNT:-${SBATCH_ACCOUNT:-}}"
 MS_ML_MAIL_USER="${MS_ML_MAIL_USER:-}"
 MS_ML_RESULTS_ROOT="${MS_ML_RESULTS_ROOT:-${MS_ML_REPO_ROOT}/Results_manuscript_ml}"
 MS_ML_LOG_DIR="${MS_ML_LOG_DIR:-${MS_ML_RESULTS_ROOT}/slurm_logs}"
@@ -52,6 +55,14 @@ ms_ml_n_jobs() {
   else
     echo 1
   fi
+}
+
+# Reps per checkpoint flush. Workers pull reps dynamically inside a chunk and
+# wait for the slowest one at its end, so a chunk of 8 rounds keeps the barrier
+# idle time small while losing at most ~8 rep-times of work on a kill.
+# Chunking does not change results: each rep has its own fixed seed.
+ms_ml_checkpoint_chunk() {
+  echo $(( $(ms_ml_n_jobs) * 8 ))
 }
 
 ms_ml_uv() {
@@ -103,7 +114,7 @@ ms_ml_run_simulation_scenario() {
     --no-gpu \
     --n-jobs "${n_jobs}" \
     --resume \
-    --checkpoint-chunk-size "${n_jobs}"
+    --checkpoint-chunk-size "$(ms_ml_checkpoint_chunk)"
 }
 
 # The runner has no skip-calibration flag. This job also writes a single-setting
@@ -131,7 +142,7 @@ ms_ml_run_mde_signal_curve() {
     --no-gpu \
     --n-jobs "${n_jobs}" \
     --resume \
-    --checkpoint-chunk-size "${n_jobs}"
+    --checkpoint-chunk-size "$(ms_ml_checkpoint_chunk)"
 }
 
 ms_ml_run_readiness_audit() {

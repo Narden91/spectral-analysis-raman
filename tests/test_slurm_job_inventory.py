@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from slurm_jobs.check_job_inventory import cohort_readiness_errors, validate_inventory
 from slurm_jobs.merge_simulation_reports import merge_simulation_reports
@@ -19,9 +20,13 @@ def test_slurm_scripts_match_locked_config() -> None:
     assert errors == []
 
 
-def test_submit_cohort_refuses_without_approval() -> None:
+@pytest.mark.parametrize(
+    "helper",
+    ["submit_cohort.sh", "submit_03_cohort_primary.sh", "submit_04_cohort_sensitivity.sh"],
+)
+def test_cohort_submit_helpers_refuse_without_approval(helper: str) -> None:
     result = subprocess.run(
-        ["bash", "slurm_jobs/submit_cohort.sh"],
+        ["bash", f"slurm_jobs/{helper}", "--dry-run"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

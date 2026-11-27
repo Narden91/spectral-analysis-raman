@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Manuscript ML simulation experiment 08: anchor_correlation_high. Config order is the canonical seed offset.
 # Submit from the repository root after bash slurm_jobs/preflight.sh.
-# Partition and account are applied by the submit helper from MS_ML_PARTITION and MS_ML_ACCOUNT.
+# Partition and account come from SBATCH_PARTITION/SBATCH_ACCOUNT (or the submit helper).
 #SBATCH --job-name=sim-08-anchor_correlation_high
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=128
-#SBATCH --mem=512G
-#SBATCH --time=48:00:00
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=32G
+#SBATCH --time=04:00:00
 #SBATCH --output=Results_manuscript_ml/slurm_logs/%x-%j.out
 #SBATCH --error=Results_manuscript_ml/slurm_logs/%x-%j.err
 #SBATCH --mail-type=FAIL,END,TIME_LIMIT

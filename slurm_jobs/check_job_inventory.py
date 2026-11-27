@@ -36,7 +36,7 @@ LOCKED_SCENARIO_FLAGS = (
     "--seed-set validation",
     "--no-gpu",
     "--resume",
-    '--checkpoint-chunk-size "${n_jobs}"',
+    '--checkpoint-chunk-size "$(ms_ml_checkpoint_chunk)"',
 )
 MDE_FLAGS = ("--skip-scenario-suite", "--run-mde-curve")
 COHORT_OUTPUTS = {
@@ -175,16 +175,18 @@ def validate_inventory(job_dir: Path = JOB_DIR, config_path: Path = CONFIG_PATH)
         if function_name != "ms_ml_run_readiness_audit" and "--no-gpu" not in body:
             errors.append(f"{function_name} is missing --no-gpu")
 
-    submit_sim_path = job_dir / "submit_simulation.sh"
-    submit_sim = submit_sim_path.read_text(encoding="utf-8") if submit_sim_path.is_file() else ""
-    if "02_simulation_*.sbatch" not in submit_sim:
-        errors.append("submit_simulation.sh must submit only 02_simulation_*.sbatch")
+    def _read(name: str) -> str:
+        path = job_dir / name
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    submit_sim = _read("submit_02_simulation.sh")
+    if "ms_ml_stage_scripts 02" not in submit_sim:
+        errors.append("submit_02_simulation.sh must submit only 02_simulation_*.sbatch")
     if "03_cohort_" in submit_sim or "04_cohort_" in submit_sim or "01_readiness" in submit_sim:
-        errors.append("submit_simulation.sh must not submit readiness or cohort jobs")
-    submit_cohort_path = job_dir / "submit_cohort.sh"
-    submit_cohort = submit_cohort_path.read_text(encoding="utf-8") if submit_cohort_path.is_file() else ""
-    if "--approve" not in submit_cohort:
-        errors.append("submit_cohort.sh must require an explicit --approve flag")
+        errors.append("submit_02_simulation.sh must not submit readiness or cohort jobs")
+    for name in ("submit_03_cohort_primary.sh", "submit_04_cohort_sensitivity.sh", "submit_cohort.sh"):
+        if "ms_ml_require_approval" not in _read(name):
+            errors.append(f"{name} must require an explicit --approve flag")
     return errors
 
 

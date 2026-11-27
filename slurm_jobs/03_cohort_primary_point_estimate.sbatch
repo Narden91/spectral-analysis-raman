@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Manuscript ML primary LDL-C point estimate. Requires submit_cohort.sh --approve.
 # Submit from the repository root after bash slurm_jobs/preflight.sh.
-# Partition and account are applied by the submit helper from MS_ML_PARTITION and MS_ML_ACCOUNT.
+# Partition and account come from SBATCH_PARTITION/SBATCH_ACCOUNT (or the submit helper).
 #SBATCH --job-name=cohort-primary-point-estimate
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --mem=30G
 #SBATCH --time=04:00:00
 #SBATCH --output=Results_manuscript_ml/slurm_logs/%x-%j.out
 #SBATCH --error=Results_manuscript_ml/slurm_logs/%x-%j.err
