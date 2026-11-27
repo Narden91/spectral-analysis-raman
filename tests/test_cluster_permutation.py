@@ -370,3 +370,74 @@ def test_spearman_cluster_maxima_sub_epsilon_alpha_matches_reference() -> None:
             dtype=float,
         )
         np.testing.assert_allclose(got, ref, atol=1e-12)
+
+
+def test_binary_cluster_permutation_coerces_non_string_groups_and_rejects_empty() -> None:
+    import numpy as np
+    import pytest
+
+    frame_int = pd.DataFrame(
+        {
+            "grp": pd.array([0] * 8 + [1] * 8 + [pd.NA], dtype="Int64"),
+            "1300__1000.0": np.r_[np.arange(8, dtype=float), np.arange(8, dtype=float) + 2.0, 5.0],
+            "1300__1001.0": np.r_[np.arange(8, dtype=float), np.arange(8, dtype=float) + 2.0, 5.0],
+        }
+    )
+    meta = feature_metadata(["1300__1000.0", "1300__1001.0"])
+    tests, _ = compute_binary_group_feature_tests(
+        frame_int,
+        meta,
+        group_column="grp",
+        ordered_groups=("0", "1"),
+        contrast_name="zero_vs_one",
+        min_subjects_per_group=5,
+        fdr_alpha=0.05,
+    )
+    frame_plain_int = frame_int.dropna(subset=["grp"]).copy()
+    frame_plain_int["grp"] = frame_plain_int["grp"].astype(int)
+    frame_str = frame_plain_int.copy()
+    frame_str["grp"] = frame_str["grp"].astype(str)
+
+    res_int_na = apply_binary_cluster_permutation(
+        tests,
+        frame_int,
+        group_column="grp",
+        ordered_groups=("0", "1"),
+        n_permutations=40,
+        cluster_alpha=0.5,
+        random_state=42,
+    )
+    res_plain_int = apply_binary_cluster_permutation(
+        tests,
+        frame_plain_int,
+        group_column="grp",
+        ordered_groups=("0", "1"),
+        n_permutations=40,
+        cluster_alpha=0.5,
+        random_state=42,
+    )
+    res_str = apply_binary_cluster_permutation(
+        tests,
+        frame_str,
+        group_column="grp",
+        ordered_groups=("0", "1"),
+        n_permutations=40,
+        cluster_alpha=0.5,
+        random_state=42,
+    )
+    assert res_int_na["cluster_p_value"].equals(res_str["cluster_p_value"])
+    assert res_plain_int["cluster_p_value"].equals(res_str["cluster_p_value"])
+    assert res_plain_int["cluster_mass"].equals(res_str["cluster_mass"])
+    assert float(res_plain_int["cluster_p_value"].iloc[0]) > 1.0 / 41.0
+
+    frame_one_group = frame_str.loc[frame_str["grp"] == "0"].copy()
+    with pytest.raises(ValueError, match="non-empty groups"):
+        apply_binary_cluster_permutation(
+            tests,
+            frame_one_group,
+            group_column="grp",
+            ordered_groups=("0", "1"),
+            n_permutations=10,
+            cluster_alpha=0.5,
+            random_state=42,
+        )

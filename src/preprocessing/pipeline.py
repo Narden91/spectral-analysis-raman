@@ -878,7 +878,18 @@ def interpolate_spectra(
     target_wavenumbers: Optional[np.ndarray] = None,
     cfg: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    if spectra.size == 0 or wavenumbers.size == 0:
+    if spectra.size == 0:
+        if target_wavenumbers is None:
+            return spectra, wavenumbers
+        wn_uniform = np.asarray(target_wavenumbers, dtype=float)
+        if wn_uniform.ndim != 1 or wn_uniform.size < 2 or not np.all(np.diff(wn_uniform) > 0):
+            raise ValueError("target_wavenumbers must be a strictly increasing one-dimensional axis")
+        if wavenumbers.size > 0 and (
+            wn_uniform[0] < wavenumbers[0] - 1e-8 or wn_uniform[-1] > wavenumbers[-1] + 1e-8
+        ):
+            raise ValueError("Frozen target axis extends outside the measured native axis; extrapolation is forbidden")
+        return np.empty((0, wn_uniform.size), dtype=float), wn_uniform
+    if wavenumbers.size == 0:
         return spectra, wavenumbers
     ip_cfg = _pre_cfg(cfg=cfg).get("interpolation", {})
     spacing = float(target_spacing if target_spacing is not None else ip_cfg.get("target_spacing", 1.0))
@@ -1447,7 +1458,7 @@ def run_preprocessing(
 
     result, wn = _apply_edge_trim(result, wn, trim=trim, trim_cm=trim_cm, cfg=cfg)
 
-    if interpolate and result.size > 0:
+    if interpolate and (result.size > 0 or target_wavenumbers is not None):
         result, wn = interpolate_spectra(result, wn, target_wavenumbers=target_wavenumbers, cfg=cfg)
 
     if correct_bl and result.size > 0:

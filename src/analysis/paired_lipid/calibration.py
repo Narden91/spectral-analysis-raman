@@ -112,6 +112,7 @@ def _eval_single_calibration_rep(
     interval_method: IntervalMethod = "studentized_t",
     *,
     single_thread_blas: bool = False,
+    bootstrap_n_jobs: int | None = None,
 ) -> _CalibrationRepResult:
     """Run one synthetic calibration replicate: bootstrap intervals and external target scores."""
     blas_ctx = _single_thread_blas() if single_thread_blas else contextlib.nullcontext()
@@ -129,6 +130,7 @@ def _eval_single_calibration_rep(
             bootstrap_seed=rep_seed + 1,
             use_gpu=use_gpu,
             interval_method=interval_method,
+            n_jobs=bootstrap_n_jobs,
         )
         ext_eval = score_external_primary_pair(ds, test_ds, cfg=cfg)
         ext_part_comp = ext_eval.get("external_participant_deltas_vs_comparator")
@@ -536,6 +538,7 @@ def evaluate_bootstrap_calibration(
                             compact_grid,
                             interval_method,
                             single_thread_blas=True,
+                            bootstrap_n_jobs=1,
                         )
                         for rep_idx in chunk_idxs
                     )
@@ -551,6 +554,7 @@ def evaluate_bootstrap_calibration(
                             prepared_test,
                             compact_grid,
                             interval_method,
+                            bootstrap_n_jobs=n_jobs,
                         )
                         for rep_idx in chunk_idxs
                     ]
@@ -625,7 +629,7 @@ def evaluate_bootstrap_calibration(
         "target_monte_carlo_se": prim["target_mc_se"],
         "target_test_cohort_se": prim["target_test_se"],
         "target_total_se": prim["target_total_se"],
-        "n_test_participants": n_test_participants,
+        "n_test_participants": int(n_ext),
         "compact_grid": compact_grid,
         "mean_point_estimate": prim["mean_point_estimate"],
         "empirical_sd_point_estimate": prim["empirical_sd_point_estimate"],
@@ -902,19 +906,25 @@ def run_synthetic_scenario_suite(
     base_seed: int = 1000,
     n_jobs: int = -1,
     cfg: PairedLipidConfig = PairedLipidConfig(),
+    scenario_offsets: Sequence[int] | None = None,
 ) -> pd.DataFrame:
     """Evaluate every configured synthetic scenario at every participant count across repetitions."""
+    offsets = list(range(len(scenarios))) if scenario_offsets is None else [int(o) for o in scenario_offsets]
+    if len(offsets) != len(scenarios):
+        raise ValueError(
+            f"scenario_offsets length ({len(offsets)}) must match scenarios length ({len(scenarios)})."
+        )
     tasks = [
         (
             s_idx,
             n_idx,
-            base_seed + 1_000_000 * n_idx + 10_000 * s_idx + rep,
+            base_seed + 1_000_000 * n_idx + 10_000 * seed_off + rep,
             int(n_participants_grid[n_idx]),
             dict(spec),
             replace(cfg, covariate_preset=str(spec["covariate_preset"])),
         )
         for n_idx in range(len(n_participants_grid))
-        for s_idx, spec in enumerate(scenarios)
+        for s_idx, (spec, seed_off) in enumerate(zip(scenarios, offsets))
         for rep in range(n_repetitions)
     ]
 

@@ -581,9 +581,18 @@ def apply_binary_cluster_permutation(
     out["cluster_p_value"] = np.nan
     rng = np.random.default_rng(random_state)
 
-    subset = frame.loc[frame[group_column].isin(ordered_groups)].copy()
+    ordered_str = (str(ordered_groups[0]), str(ordered_groups[1]))
+    subset = frame.loc[frame[group_column].notna()].copy()
     subset[group_column] = subset[group_column].astype(str)
-    labels = np.where(subset[group_column] == ordered_groups[0], 0, 1)
+    subset = subset.loc[subset[group_column].isin(ordered_str)]
+    labels = np.where(subset[group_column] == ordered_str[0], 0, 1)
+    n_left = int((labels == 0).sum())
+    n_right = len(labels) - n_left
+    if n_left == 0 or n_right == 0:
+        raise ValueError(
+            f"Binary cluster permutation requires non-empty groups {ordered_str!r} "
+            f"in '{group_column}' (got n_left={n_left}, n_right={n_right})"
+        )
 
     for block, block_df in out.groupby("spectral_block", sort=False):
         ordered = block_df.sort_values("wavenumber").reset_index()

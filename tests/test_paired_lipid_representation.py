@@ -5487,7 +5487,9 @@ def test_calibration_paired_only_n_ext_and_checkpoint_resume(
     assert ckpt_path.is_file()
     with np.load(ckpt_path, allow_pickle=False) as saved:
         assert int(np.sum(saved["completed"])) == 1
-        assert int(saved["ext_col_sum_mse"].size) < 20
+        n_ext_saved = int(saved["ext_col_sum_mse"].size)
+        assert n_ext_saved < 20
+    assert res_unckpt["n_test_participants"] == n_ext_saved
 
     calls_partial = 0
 
@@ -5522,9 +5524,528 @@ def test_calibration_paired_only_n_ext_and_checkpoint_resume(
     assert calls_done == 0
 
     for res in (res_partial, res_done):
+        assert res["n_test_participants"] == n_ext_saved
         for k in ("target_test_cohort_se", "target_total_se", "target_delta_mse"):
             assert np.isfinite(res[k])
             assert res[k] == pytest.approx(res_unckpt[k], abs=1e-12, rel=0.0)
+
+
+def test_calibration_serial_n_jobs_and_scenario_offsets_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.analysis.paired_lipid.batched as batched_mod
+    import src.analysis.paired_lipid.calibration as cal_mod
+
+    # P2: serial calibration branch forwards n_jobs=1 to run_multiplicity_bootstrap and avoids spawning workers.
+    cfg = PairedLipidConfig(pca_dimensions=(5, 10))
+    seen_n_jobs: list[object] = []
+    orig_boot = cal_mod.run_multiplicity_bootstrap
+
+    def _spy_boot(*args: object, **kwargs: object) -> object:
+        seen_n_jobs.append(kwargs.get("n_jobs", "<MISSING>"))
+        return orig_boot(*args, **kwargs)  # type: ignore[arg-type]
+
+    def _forbid_parallel(*args: object, **kwargs: object) -> object:
+        raise AssertionError("Parallel should not be invoked when n_jobs=1")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(cal_mod, "run_multiplicity_bootstrap", _spy_boot)
+        mp.setattr(batched_mod, "Parallel", _forbid_parallel)
+        cal_mod.evaluate_bootstrap_calibration(
+            n_repetitions=1,
+            n_bootstraps=2,
+            n_participants=36,
+            n_test_participants=40,
+            base_seed=451,
+            cfg=cfg,
+            n_jobs=1,
+            use_gpu=False,
+            compact_grid=True,
+        )
+    assert seen_n_jobs == [1]
+    assert batched_mod._resolve_cpu_bootstrap_workers(301, 1) == 1
+
+    # P3: run_synthetic_scenario_suite preserves canonical seed offsets when scenario_offsets is provided.
+    spec_a = {"scenario": "scen_a", "covariate_preset": "primary", "signal_strength": 0.85}
+    spec_b = {"scenario": "scen_b", "covariate_preset": "primary", "signal_strength": 0.85, "ab_shift_scale": 0.4}
+    df_full = cal_mod.run_synthetic_scenario_suite(
+        scenarios=[spec_a, spec_b],
+        n_participants_grid=[36],
+        n_repetitions=1,
+        compact_grid=True,
+        base_seed=1000,
+        n_jobs=1,
+        cfg=cfg,
+    )
+    df_sub = cal_mod.run_synthetic_scenario_suite(
+        scenarios=[spec_b],
+        n_participants_grid=[36],
+        n_repetitions=1,
+        compact_grid=True,
+        base_seed=1000,
+        n_jobs=1,
+        cfg=cfg,
+        scenario_offsets=[1],
+    )
+    row_full = df_full.loc[df_full["scenario"] == "scen_b"].iloc[0]
+    row_sub = df_sub.iloc[0]
+    assert float(row_sub["mean_delta_mse_paired"]) == float(row_full["mean_delta_mse_paired"])
+    assert float(row_sub["mean_recovery_r2_ldl_factor"]) == float(row_full["mean_recovery_r2_ldl_factor"])
+    with pytest.raises(ValueError, match="scenario_offsets length"):
+        cal_mod.run_synthetic_scenario_suite(
+            scenarios=[spec_b],
+            n_participants_grid=[36],
+            n_repetitions=1,
+            compact_grid=True,
+            n_jobs=1,
+            cfg=cfg,
+            scenario_offsets=[0, 1],
+        )
+
+
+def test_studentized_t_missing_outcome_se_scale_and_nonfinite_oof_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    import src.analysis.paired_lipid.nested_cv as ncv_mod
+    from src.analysis.paired_lipid.nested_cv import _summarize_bootstrap_contrast
+
+    # P5: unit checks on _summarize_bootstrap_contrast relative SE scaling and zero-weight failure handling.
+    draws = np.array([0.10, 0.25, 0.40, 0.55, 0.30, 0.20, 0.45, 0.35], dtype=float)
+    draw_sds = np.array([0.8, 0.9, 1.1, 1.0, 0.85, 0.95, 1.05, 0.75], dtype=float)
+    w_sums = np.array([40.0, 44.0, 48.0, 52.0, 46.0, 50.0, 42.0, 49.0], dtype=float)
+    n_obs = 48.0
+    sd_scale = np.sqrt(n_obs / w_sums)
+
+    res_none = _summarize_bootstrap_contrast(0.32, 0.9, draws, draw_sds, interval_method="studentized_t", valid=True)
+    res_unit = _summarize_bootstrap_contrast(
+        0.32, 0.9, draws, draw_sds, interval_method="studentized_t", valid=True, sd_scale=np.ones_like(draws)
+    )
+    assert res_none["ci"] == res_unit["ci"]
+
+    res_scaled = _summarize_bootstrap_contrast(
+        0.32, 0.9, draws, draw_sds, interval_method="studentized_t", valid=True, sd_scale=sd_scale
+    )
+    se_0 = 0.9 / np.sqrt(n_obs)
+    se_b = draw_sds / np.sqrt(w_sums)
+    t_explicit = (draws - float(np.mean(draws))) / se_b
+    exp_lo = 0.32 - float(np.percentile(t_explicit, 97.5)) * se_0
+    exp_hi = 0.32 - float(np.percentile(t_explicit, 2.5)) * se_0
+    assert res_scaled["ci"][0] == pytest.approx(exp_lo, abs=1e-14, rel=0.0)
+    assert res_scaled["ci"][1] == pytest.approx(exp_hi, abs=1e-14, rel=0.0)
+
+    bad_scale = sd_scale.copy()
+    bad_scale[0] = np.nan
+    res_bad = _summarize_bootstrap_contrast(
+        0.32, 0.9, draws, draw_sds, interval_method="studentized_t", valid=True, sd_scale=bad_scale
+    )
+    assert np.isnan(res_bad["ci"][0]) and np.isnan(res_bad["ci"][1])
+    assert res_bad["ci_percentile"] == res_none["ci_percentile"]
+
+    # P5 end-to-end with allow_missing_outcome=True.
+    cfg = PairedLipidConfig(pca_dimensions=(5, 10))
+    ds_base, _ = generate_synthetic_cohort(n_participants=60, seed=452, compact_grid=True)
+    y_miss = ds_base.outcomes["hdl_mmol_l"].copy()
+    y_miss[:10] = np.nan
+    ds_miss = replace(ds_base, outcomes={**ds_base.outcomes, "hdl_mmol_l": y_miss})
+    boot_miss = run_multiplicity_bootstrap(
+        ds_miss,
+        cfg=cfg,
+        endpoint="hdl_mmol_l",
+        n_bootstraps=6,
+        bootstrap_seed=453,
+        allow_missing_outcome=True,
+        use_gpu=False,
+        n_jobs=1,
+    )
+    assert boot_miss["interval_procedure_succeeded"]
+    rng_m = np.random.default_rng(453)
+    M_m = np.zeros((6, ds_miss.n_participants), dtype=np.float64)
+    drawn_m = rng_m.integers(0, ds_miss.n_participants, size=(6, ds_miss.n_participants))
+    np.add.at(M_m, (np.arange(6)[:, None], drawn_m), 1.0)
+    M_m *= np.isfinite(y_miss)[None, :]
+    n_obs_m = float(np.count_nonzero(np.isfinite(y_miss)))
+    se_0_m = float(boot_miss["oof_loss_diff_sd_delta_mse"]) / np.sqrt(n_obs_m)
+    se_b_m = boot_miss["bootstrap_oof_sds_delta_mse"] / np.sqrt(M_m.sum(axis=1))
+    d_m = boot_miss["bootstrap_draws_delta_mse"]
+    t_m = (d_m - float(np.mean(d_m))) / se_b_m
+    pt_m = float(boot_miss["point_estimate_delta_mse"])
+    assert boot_miss["ci_95_delta_mse"][0] == pytest.approx(pt_m - float(np.percentile(t_m, 97.5)) * se_0_m, abs=1e-14)
+    assert boot_miss["ci_95_delta_mse"][1] == pytest.approx(pt_m - float(np.percentile(t_m, 2.5)) * se_0_m, abs=1e-14)
+
+    # P7: non-finite prediction in strongest_comparator or covariate_ridge marks contrast non-estimable.
+    orig_fit_outer = ncv_mod._select_inner_models_and_fit_outer
+    for inject_key in ("strongest_comparator", "covariate_ridge"):
+        called = {"n": 0}
+
+        def _inject_nan(*args: object, _k: str = inject_key, _c: dict[str, int] = called, **kwargs: object) -> dict[str, object]:
+            out = orig_fit_outer(*args, **kwargs)  # type: ignore[arg-type]
+            if _c["n"] == 0:
+                preds = out["predictions"][_k].copy()
+                preds[0] = np.nan
+                out["predictions"][_k] = preds
+            _c["n"] += 1
+            return out
+
+        with monkeypatch.context() as mp:
+            mp.setattr(ncv_mod, "_select_inner_models_and_fit_outer", _inject_nan)
+            ev = evaluate_nested_cohort(ds_base, cfg=cfg, compute_diagnostics=False)
+        if inject_key == "strongest_comparator":
+            assert np.isnan(ev["paired_vs_strongest_comparator"]["delta_mse"])
+            assert np.isfinite(ev["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"])
+        else:
+            assert np.isnan(ev["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"])
+
+
+def test_batched_select_inner_settings_nonfinite_mse_routes_to_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.analysis.paired_lipid.batched as batched_mod
+    from src.analysis.paired_lipid.batched import _get_dataset_gram_cache, _run_batched_multiplicity_draws
+    from src.analysis.paired_lipid.splits import make_nested_splits
+
+    cfg = PairedLipidConfig(pca_dimensions=(5, 10))
+    ds, _ = generate_synthetic_cohort(n_participants=72, n_single_sample=2, seed=8101, compact_grid=True)
+    outer_sp, inner_sp = make_nested_splits(ds, cfg, cfg.primary_seed)
+    gcache = _get_dataset_gram_cache(ds, cfg)
+    y_all = np.asarray(ds.outcomes[cfg.primary_endpoint], dtype=float)
+
+    rng = np.random.default_rng(8102)
+    M_two = np.ones((2, ds.n_participants), dtype=np.float64)
+    M_two[1] = 0.0
+    np.add.at(M_two[1], rng.integers(0, ds.n_participants, size=ds.n_participants), 1.0)
+
+    orig_pca_sse = batched_mod.batched_pca_schur_sse
+
+    def _inject_nan(xp: object, div: dict[str, object], k_list: list[int], alphas_xp: object) -> object:
+        res = orig_pca_sse(xp, div, k_list, alphas_xp).copy()
+        res[0, 1, 0] = np.nan
+        return res
+
+    monkeypatch.setattr(batched_mod, "batched_pca_schur_sse", _inject_nan)
+    fb: set[int] = set()
+    res = _run_batched_multiplicity_draws(
+        ds,
+        y_all,
+        outer_sp,
+        inner_sp,
+        M_two,
+        cfg,
+        gcache,
+        use_gpu=False,
+        fallback_draws_out=fb,
+        return_oof_sd=True,
+    )
+    assert isinstance(res, dict)
+    assert fb == {0}
+    assert np.isnan(res["delta_pair"][0])
+    assert np.isnan(res["delta_comp"][0])
+
+    seq_ref = evaluate_nested_cohort(
+        ds,
+        cfg=cfg,
+        participant_multiplicities=M_two[1],
+        precomputed_splits=(outer_sp, inner_sp),
+        include_band_paired=True,
+        compute_diagnostics=False,
+    )
+    assert float(res["delta_pair"][1]) == pytest.approx(
+        float(seq_ref["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"]),
+        abs=1e-13,
+    )
+    assert float(res["delta_comp"][1]) == pytest.approx(
+        float(seq_ref["paired_vs_strongest_comparator"]["delta_mse"]),
+        abs=1e-13,
+    )
+
+
+def test_whitened_generalized_eigh_scale_invariant_parity_with_solve_directions() -> None:
+    from dataclasses import replace
+
+    from scipy import linalg
+
+    from src.analysis.paired_lipid._backend import _get_gpu_xp
+    from src.analysis.paired_lipid._eigensolvers import _whitened_generalized_eigh
+    from src.analysis.paired_lipid.batched import _get_dataset_gram_cache, _run_batched_multiplicity_draws
+    from src.analysis.paired_lipid.models import PairedMoments
+    from src.analysis.paired_lipid.splits import make_nested_splits
+
+    k = 5
+    W_ill = np.diag([1e4, 1e2, 1.0, 1e-4, 1e-12])
+    T_base = np.diag([1.0, 2.0, 3.0, 4.0, 5.0])
+    pm_ill = PairedMoments(
+        W_max=W_ill, T_max=T_base, mean_ab_shift=np.zeros(k), n_paired_multiplicity=20.0, n_paired_distinct=20
+    )
+    with pytest.raises(linalg.LinAlgError):
+        pm_ill.solve_directions(k, 0.0)
+
+    W_small = np.eye(k) * 1e-19
+    T_small = np.diag([5.0, 4.0, 3.0, 2.0, 1.0]) * 1e-19
+    pm_small = PairedMoments(
+        W_max=W_small, T_max=T_small, mean_ab_shift=np.zeros(k), n_paired_multiplicity=20.0, n_paired_distinct=20
+    )
+    ev_seq_sm, _, _ = pm_small.solve_directions(k, 0.01, eigenvalue_tolerance=1e-22)
+    assert np.all(np.isfinite(ev_seq_sm))
+
+    W_indef = np.diag([1.0, 1.0, 1.0, 1.0, -1e-15])
+    pm_indef = PairedMoments(
+        W_max=W_indef, T_max=T_base, mean_ab_shift=np.zeros(k), n_paired_multiplicity=20.0, n_paired_distinct=20
+    )
+    with pytest.raises(linalg.LinAlgError):
+        pm_indef.solve_directions(k, 5e-16)
+
+    cp = _get_gpu_xp()
+    backends = [np, cp] if cp is not None else [np]
+    for xp in backends:
+        for grid_mode in (True, False):
+            v_ill = _whitened_generalized_eigh(
+                xp, xp.asarray(W_ill[None]), xp.asarray(T_base[None]), xp.array([0.0]), grid_mode=grid_mode
+            )
+            assert not bool(xp.any(xp.isfinite(v_ill)))
+            v_sm = _whitened_generalized_eigh(
+                xp,
+                xp.asarray(W_small[None]),
+                xp.asarray(T_small[None]),
+                xp.array([0.01]),
+                grid_mode=grid_mode,
+                eigenvalue_tolerance=1e-22,
+            )
+            assert bool(xp.all(xp.isfinite(v_sm)))
+            v_ind = _whitened_generalized_eigh(
+                xp, xp.asarray(W_indef[None]), xp.asarray(T_base[None]), xp.array([5e-16]), grid_mode=grid_mode
+            )
+            assert not bool(xp.any(xp.isfinite(v_ind)))
+            lam_empty = xp.array([0.01]) if grid_mode else xp.zeros(0, dtype=xp.float64)
+            v_empty = _whitened_generalized_eigh(
+                xp, xp.zeros((0, k, k)), xp.zeros((0, k, k)), lam_empty, grid_mode=grid_mode
+            )
+            assert v_empty.shape[0] == 0
+
+    rng = np.random.default_rng(8201)
+    ds_l0, _ = generate_synthetic_cohort(
+        n_participants=80,
+        n_single_sample=0,
+        seed=8202,
+        compact_grid=True,
+        signal_strength=2.5,
+        ab_shift_scale=0.0,
+        bio_sample_noise=0.0,
+        nuisance_sample_scale=0.0,
+    )
+    X1_l0 = ds_l0.sample_1300.copy()
+    X2_l0 = ds_l0.sample_2850.copy()
+    ia, ib = ds_l0.pair_sample_a_indices, ds_l0.pair_sample_b_indices
+    X1_l0[ib] = X1_l0[ia] + 2e-6 * (X1_l0[ib] - X1_l0[ia])
+    X2_l0[ib] = X2_l0[ia] + 2e-6 * (X2_l0[ib] - X2_l0[ia])
+    v_dir = rng.normal(size=(1, X1_l0.shape[1]))
+    v_dir /= np.linalg.norm(v_dir)
+    X1_l0[ib] += (rng.normal(size=(ia.size, 1)) * 5.0) @ v_dir
+    ds_l0 = replace(ds_l0, sample_1300=X1_l0, sample_2850=X2_l0)
+
+    cfg_l0 = PairedLipidConfig(pca_dimensions=(5,), retained_directions=(1, 2, 3), lambda_grid=(0.0, 100.0))
+    outer_l0, inner_l0 = make_nested_splits(ds_l0, cfg_l0, cfg_l0.primary_seed)
+    gc_l0 = _get_dataset_gram_cache(ds_l0, cfg_l0)
+    y_l0 = np.asarray(ds_l0.outcomes[cfg_l0.primary_endpoint], dtype=float)
+    M_one = np.ones((1, ds_l0.n_participants), dtype=np.float64)
+
+    fb_l0: set[int] = set()
+    bat_l0 = _run_batched_multiplicity_draws(
+        ds_l0, y_l0, outer_l0, inner_l0, M_one, cfg_l0, gc_l0, use_gpu=False, fallback_draws_out=fb_l0, return_oof_sd=True
+    )
+    seq_l0 = evaluate_nested_cohort(
+        ds_l0, cfg=cfg_l0, precomputed_splits=(outer_l0, inner_l0), include_band_paired=True, compute_diagnostics=False
+    )
+    assert isinstance(bat_l0, dict)
+    assert fb_l0 == set()
+    assert float(bat_l0["delta_pair"][0]) == pytest.approx(
+        float(seq_l0["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"]),
+        abs=1e-13,
+    )
+
+    cfg_l0_only = PairedLipidConfig(pca_dimensions=(5,), retained_directions=(1, 2, 3), lambda_grid=(0.0,))
+    fb_only: set[int] = set()
+    bat_only = _run_batched_multiplicity_draws(
+        ds_l0,
+        y_l0,
+        outer_l0,
+        inner_l0,
+        M_one,
+        cfg_l0_only,
+        gc_l0,
+        use_gpu=False,
+        fallback_draws_out=fb_only,
+        return_oof_sd=True,
+    )
+    assert isinstance(bat_only, dict)
+    assert fb_only == {0}
+    assert np.isnan(bat_only["delta_pair"][0])
+
+
+def test_fast_top1_eigvalsh_from_gram_residual_fallback_and_16_nuisance_parity() -> None:
+    from scipy import linalg
+
+    from src.analysis.paired_lipid._backend import _get_gpu_xp
+    from src.analysis.paired_lipid._eigensolvers import _fast_top1_eigvalsh_from_gram
+    from src.analysis.paired_lipid.batched import (
+        _get_dataset_gram_cache,
+        _precompute_division_constants,
+        _run_batched_multiplicity_draws,
+    )
+    from src.analysis.paired_lipid.splits import make_nested_splits
+
+    cp = _get_gpu_xp()
+    rng = np.random.default_rng(8301)
+
+    def _assert_top1_exact(
+        K: np.ndarray, Q0: np.ndarray, sw: np.ndarray, k_mu: np.ndarray, mu_sq: np.ndarray
+    ) -> None:
+        G_all = (K[None, :, :] - k_mu[:, :, None] - k_mu[:, None, :] + mu_sq[:, None, None]) * (
+            sw[:, :, None] * sw[:, None, :]
+        )
+        G_all = 0.5 * (G_all + np.swapaxes(G_all, -1, -2))
+        ex_cpu = np.array([linalg.eigvalsh(G_all[b])[-1] for b in range(sw.shape[0])], dtype=np.float64)
+        est_cpu = _fast_top1_eigvalsh_from_gram(np, K, k_mu, mu_sq, sw, Q0)
+        rel_cpu = np.abs(est_cpu - ex_cpu) / np.maximum(np.abs(ex_cpu), 1e-15)
+        assert float(rel_cpu.max()) < 1e-13
+        if cp is not None:
+            ex_gpu = cp.asnumpy(cp.linalg.eigvalsh(cp.asarray(G_all))[:, -1])
+            est_gpu = cp.asnumpy(
+                _fast_top1_eigvalsh_from_gram(
+                    cp, cp.asarray(K), cp.asarray(k_mu), cp.asarray(mu_sq), cp.asarray(sw), cp.asarray(Q0)
+                )
+            )
+            rel_gpu_cp = np.abs(est_gpu - ex_gpu) / np.maximum(np.abs(ex_cpu), 1e-15)
+            rel_gpu_scipy = np.abs(est_gpu - ex_cpu) / np.maximum(np.abs(ex_cpu), 1e-15)
+            assert float(rel_gpu_cp.max()) < 1e-13
+            assert float(rel_gpu_scipy.max()) < 2e-13
+
+    # 1. Isotropic flat-spectrum random block.
+    n_s = 64
+    X_flat = rng.normal(size=(n_s, 200))
+    X_flat -= X_flat.mean(axis=0)
+    K_flat = 0.5 * (X_flat @ X_flat.T + (X_flat @ X_flat.T).T)
+    w0 = np.full(n_s, 1.0 / n_s)
+    sw0 = np.sqrt(w0 * n_s / (n_s - 1.0))
+    k0 = w0 @ K_flat
+    m0 = float(w0 @ k0)
+    G0 = (K_flat - k0[:, None] - k0[None, :] + m0) * (sw0[:, None] * sw0[None, :])
+    _, U0 = linalg.eigh(G0, subset_by_index=[n_s - 8, n_s - 1], driver="evr")
+    Q0_flat = U0 / sw0[:, None]
+    M_f = rng.multinomial(n_s, w0, size=24).astype(np.float64)
+    w_f = M_f / M_f.sum(axis=1, keepdims=True)
+    sw_f = np.sqrt(w_f * n_s / (n_s - 1.0))
+    k_f = w_f @ K_flat
+    m_f = np.sum(w_f * k_f, axis=1)
+    _assert_top1_exact(K_flat, Q0_flat, sw_f, k_f, m_f)
+
+    # 2. Near-degenerate lambda1 ~= lambda2 block (gap = 1e-8).
+    Q_orth, _ = np.linalg.qr(rng.normal(size=(60, 60)))
+    ev_deg = np.concatenate([[1.0, 1.0 - 1e-8, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05], np.linspace(0.04, 0.001, 52)])
+    K_deg = (Q_orth * ev_deg[None, :]) @ Q_orth.T
+    K_deg = 0.5 * (K_deg + K_deg.T)
+    w_d0 = np.full(60, 1.0 / 60.0)
+    sw_d0 = np.sqrt(w_d0 * 60.0 / 59.0)
+    k_d0 = w_d0 @ K_deg
+    m_d0 = float(w_d0 @ k_d0)
+    G_d0 = (K_deg - k_d0[:, None] - k_d0[None, :] + m_d0) * (sw_d0[:, None] * sw_d0[None, :])
+    _, U_d0 = linalg.eigh(G_d0, subset_by_index=[52, 59], driver="evr")
+    Q0_deg = U_d0 / sw_d0[:, None]
+    M_d = rng.multinomial(60, w_d0, size=16).astype(np.float64)
+    w_d = M_d / M_d.sum(axis=1, keepdims=True)
+    sw_d = np.sqrt(w_d * 60.0 / 59.0)
+    k_d = w_d @ K_deg
+    m_d = np.sum(w_d * k_d, axis=1)
+    _assert_top1_exact(K_deg, Q0_deg, sw_d, k_d, m_d)
+
+    # 3. Exact theta1 == theta2 zero-residual case (no 0/0 NaN).
+    C60 = np.eye(60) - np.full((60, 60), 1.0 / 60.0)
+    Q_c, _ = np.linalg.qr(C60 @ rng.normal(size=(60, 59)))
+    ev_eq = np.concatenate([[2.0, 2.0, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05], np.linspace(0.04, 0.001, 51)])
+    K_eq = (Q_c * ev_eq[None, :]) @ Q_c.T
+    K_eq = 0.5 * (K_eq + K_eq.T)
+    G_eq0 = K_eq * (sw_d0[:, None] * sw_d0[None, :])
+    _, U_eq0 = linalg.eigh(G_eq0, subset_by_index=[52, 59], driver="evr")
+    Q0_eq = U_eq0 / sw_d0[:, None]
+    _assert_top1_exact(K_eq, Q0_eq, sw_d0[None, :], np.zeros((1, 60)), np.zeros(1))
+
+    # 4. Edge cases: B=0, q=1, G=0, and single-slice NaN isolation.
+    for xp in ([np, cp] if cp is not None else [np]):
+        e_empty = _fast_top1_eigvalsh_from_gram(
+            xp, xp.eye(10), xp.zeros((0, 10)), xp.zeros(0), xp.zeros((0, 10)), xp.eye(10)[:, :4]
+        )
+        assert e_empty.shape == (0,)
+        e_q1 = _fast_top1_eigvalsh_from_gram(
+            xp, xp.eye(4), xp.zeros((2, 4)), xp.zeros(2), xp.ones((2, 4)) * 0.5, xp.ones((4, 1))
+        )
+        assert e_q1.shape == (2,) and bool(xp.all(xp.isfinite(e_q1)))
+        e_zero = _fast_top1_eigvalsh_from_gram(
+            xp, xp.zeros((6, 6)), xp.zeros((2, 6)), xp.zeros(2), xp.ones((2, 6)) * 0.5, xp.eye(6)[:, :4]
+        )
+        e_zero_np = cp.asnumpy(e_zero) if (cp is not None and xp is cp) else np.asarray(e_zero)
+        np.testing.assert_allclose(e_zero_np, 0.0, atol=1e-15)
+        sw_nan = np.ones((2, 6), dtype=np.float64) * 0.5
+        sw_nan[0] = np.nan
+        e_nan = _fast_top1_eigvalsh_from_gram(
+            xp, xp.eye(6), xp.zeros((2, 6)), xp.zeros(2), xp.asarray(sw_nan), xp.eye(6)[:, :4]
+        )
+        e_nan_np = cp.asnumpy(e_nan) if (cp is not None and xp is cp) else np.asarray(e_nan)
+        assert np.isnan(e_nan_np[0]) and np.isfinite(e_nan_np[1])
+
+    # 5. 16-nuisance synthetic block & B=8 end-to-end CPU parity vs sequential (include_band_paired=True).
+    cfg = PairedLipidConfig()
+    ds16, _ = generate_synthetic_cohort(
+        n_participants=92,
+        n_single_sample=4,
+        seed=8302,
+        compact_grid=True,
+        n_nuisance_modes=16,
+        nuisance_part_scale=1.0,
+        nuisance_sample_scale=0.5,
+        nuisance_decay=0.95,
+    )
+    gc16 = _get_dataset_gram_cache(ds16, cfg)
+    outer16, inner16 = make_nested_splits(ds16, cfg, cfg.primary_seed)
+    dc16 = _precompute_division_constants(
+        np, gc16, ds16, outer16[0][0][inner16[0][0][0]], outer16[0][0][inner16[0][0][1]], cfg
+    )
+    M24 = np.zeros((24, ds16.n_participants), dtype=np.float64)
+    np.add.at(M24, (np.arange(24)[:, None], rng.integers(0, ds16.n_participants, size=(24, ds16.n_participants))), 1.0)
+    M_tr16 = M24[:, dc16["tr_p"]]
+    w_s16 = M_tr16[:, dc16["s_rel"]] / (np.sum(M_tr16, axis=1, keepdims=True) * dc16["m_i_div"][None, :])
+    w_s16 /= np.maximum(np.sum(w_s16, axis=1, keepdims=True), 1e-12)
+    mt16 = np.sum(M_tr16[:, dc16["s_rel"]], axis=1)
+    sw16 = np.sqrt(w_s16 * (mt16 / np.maximum(mt16 - 1.0, 1.0))[:, None])
+    k16 = w_s16 @ dc16["K1_div"]
+    m16 = np.sum(w_s16 * k16, axis=1)
+    _assert_top1_exact(dc16["K1_div"], dc16["Q0_1"], sw16, k16, m16)
+
+    y16 = np.asarray(ds16.outcomes[cfg.primary_endpoint], dtype=float)
+    M8 = M24[:8]
+    fb16: set[int] = set()
+    bat16 = _run_batched_multiplicity_draws(
+        ds16, y16, outer16, inner16, M8, cfg, gc16, use_gpu=False, fallback_draws_out=fb16, return_oof_sd=True
+    )
+    assert isinstance(bat16, dict) and fb16 == set()
+    for b in range(8):
+        seq16 = evaluate_nested_cohort(
+            ds16,
+            cfg=cfg,
+            participant_multiplicities=M8[b],
+            precomputed_splits=(outer16, inner16),
+            include_band_paired=True,
+            compute_diagnostics=False,
+        )
+        assert float(bat16["delta_pair"][b]) == pytest.approx(
+            float(seq16["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"]),
+            abs=1e-13,
+        )
+        assert float(bat16["delta_comp"][b]) == pytest.approx(
+            float(seq16["paired_vs_strongest_comparator"]["delta_mse"]),
+            abs=1e-13,
+        )
+
+
 
 
 

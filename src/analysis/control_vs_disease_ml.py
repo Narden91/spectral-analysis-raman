@@ -1464,6 +1464,7 @@ def _stream_parallel_chunked(
     *,
     chunk_size: int,
     should_continue: Callable[[], bool],
+    initial_count: int = 0,
 ) -> None:
     """Run `calls` in fixed-size batches, checking `should_continue` between batches.
 
@@ -1474,20 +1475,27 @@ def _stream_parallel_chunked(
     bounded chunks and only starting the next chunk after a stopping check
     avoids that — no futures are ever cancelled, each chunk always completes.
     """
+    if not calls or not should_continue():
+        return
+    rem = initial_count % chunk_size
+    next_size = (chunk_size - rem) if rem else chunk_size
+
     workers = _resolve_parallel_workers(len(calls), n_jobs)
     offset = 0
     if workers <= 1:
         while offset < len(calls) and should_continue():
-            chunk = calls[offset : offset + chunk_size]
-            offset += chunk_size
+            chunk = calls[offset : offset + next_size]
+            offset += len(chunk)
+            next_size = chunk_size
             for seed, args in chunk:
                 on_result(seed, func(*args))
         return
 
     with Parallel(n_jobs=workers, return_as="list") as parallel:
         while offset < len(calls) and should_continue():
-            chunk = calls[offset : offset + chunk_size]
-            offset += chunk_size
+            chunk = calls[offset : offset + next_size]
+            offset += len(chunk)
+            next_size = chunk_size
             if len(chunk) <= 1:
                 for seed, args in chunk:
                     on_result(seed, func(*args))
@@ -1589,6 +1597,7 @@ def run_permutation_test(
             on_result,
             chunk_size=stopping.check_interval,
             should_continue=should_continue,
+            initial_count=len(score_by_seed),
         )
     finally:
         if checkpoint_path is not None:
@@ -2485,6 +2494,9 @@ def _run_observed_model_phase(
         ):
             oof = pd.read_csv(cv_path)
             metrics = _aggregate_repeat_metrics(oof)
+            outputs[f"{model_name}_{representation}_cv_predictions"] = cv_path
+            outputs[f"{model_name}_{representation}_feature_importance_folds"] = importance_folds_path
+            outputs[f"{model_name}_{representation}_feature_importance"] = importance_path
             logger.info("Reused checkpointed observed ML outputs for %s (%s)", model_name, representation)
         else:
             with _progress_task(
@@ -2534,10 +2546,11 @@ def _run_model_permutation_phase(
     phase: Callable[..., AbstractContextManager[None]],
     progress: Progress,
 ) -> tuple[float, float, int, int]:
+    stopping = resolve_sequential_stopping_config(ml_cfg, default_max=_n_permutations(ml_cfg))
     with _progress_task(
         progress,
         f"{model_name} ({representation}) unrestricted permutations",
-        _n_permutations(ml_cfg),
+        stopping.permutation_max,
     ) as unrestricted_task:
         with phase(f"{model_name}_{representation}_permutation", f"{model_name} ({representation}) permutation test (unrestricted)"):
             p_unrestricted, null_unrestricted = run_permutation_test(
@@ -2563,7 +2576,7 @@ def _run_model_permutation_phase(
         with _progress_task(
             progress,
             f"{model_name} ({representation}) sex-stratified permutations",
-            _n_permutations(ml_cfg),
+            stopping.permutation_max,
         ) as sex_task:
             with phase(f"{model_name}_{representation}_permutation_sex", f"{model_name} ({representation}) permutation test (sex-stratified)"):
                 p_sex_stratified, null_sex_stratified = run_permutation_test(
@@ -2595,7 +2608,7 @@ def _run_model_permutation_phase(
             null_type=null_type,
             random_state=null_seed,
             null_scores=null_scores,
-            n_permutations=_n_permutations(ml_cfg),
+            n_permutations=stopping.permutation_max,
             n_splits=len(outer_split_plan[0]),
         )
     return p_unrestricted, p_sex_stratified, len(null_unrestricted), len(null_sex_stratified)
@@ -2731,11 +2744,12 @@ def run_control_vs_disease_ml_pipeline(
                 n_outer_repeats=int(ml_cfg.get("n_outer_repeats", 10)),
                 random_state=random_state,
             )
-            permutation_outer_fits = 2 * _n_permutations(ml_cfg) * len(outer_split_plan[0])
+            perm_max = resolve_sequential_stopping_config(ml_cfg, default_max=_n_permutations(ml_cfg)).permutation_max
+            permutation_outer_fits = 2 * perm_max * len(outer_split_plan[0])
             workload_message = (
                 f"{representation}: subjects={len(y_valid)}, features={X_valid.shape[1]}, models={len(_MODEL_NAMES)}, "
                 f"workers={n_jobs}, permutation outer fits/model={permutation_outer_fits} "
-                f"({len(outer_split_plan[0])} locked folds × 2 reference distributions × {_n_permutations(ml_cfg)} draws)"
+                f"({len(outer_split_plan[0])} locked folds × 2 reference distributions × {perm_max} draws)"
             )
             logger.info("Control-vs-disease ML workload: %s", workload_message)
             progress.console.print(f"[cyan]ML workload:[/] {workload_message}")

@@ -144,6 +144,7 @@ def run_simulation_and_calibration(
             base_seed=int(seeds["scenario_base_seed"]),
             n_jobs=n_jobs,
             cfg=cfg,
+            scenario_offsets=scenario_offsets,
         )
         write_csv_atomic(scenarios_df, scenarios_path, index=False)
         outputs["simulation_scenarios_summary"] = scenarios_path

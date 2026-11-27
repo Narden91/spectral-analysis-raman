@@ -39,7 +39,6 @@ from src.analysis.paired_lipid.cohort import (  # noqa: E402
     PairedLipidConfig,
     SubsetMode,
     load_paired_cohort_from_store,
-    parse_sample_label,
 )
 from src.analysis.paired_lipid.nested_cv import INTERVAL_METHODS  # noqa: E402
 from src.analysis.paired_lipid.synthetic import generate_synthetic_cohort  # noqa: E402
@@ -424,23 +423,22 @@ def clear_dataset_cache() -> None:
     _resolve_experiment_dataset_cached.cache_clear()
 
 
+_default_paired_cfg = PairedLipidConfig()
+_DEFAULT_DATASET_CFG_KEY: tuple[str, tuple[str, ...], int] = (
+    _default_paired_cfg.primary_endpoint,
+    tuple(_default_paired_cfg.secondary_endpoints),
+    int(_default_paired_cfg.min_maps_per_block),
+)
+del _default_paired_cfg
+
+
 def _derive_subset_cohort_dataset(
     base_ds: CohortDataset,
     subset_mode: SubsetMode,
-    *,
-    recompute_labels_from_ids: bool,
 ) -> CohortDataset:
     """Derive ``paired_only`` or ``single_sample`` from an ``all_eligible`` CohortDataset."""
     if subset_mode == "single_sample":
-        sample_lbls = (
-            np.fromiter(
-                (parse_sample_label(s) for s in base_ds.sample_ids),
-                dtype=float,
-                count=base_ds.n_samples,
-            )
-            if recompute_labels_from_ids
-            else base_ds.sample_parsed_labels
-        )
+        sample_lbls = base_ds.sample_parsed_labels
         first_idx = np.cumsum(base_ds.participant_sample_counts) - base_ds.participant_sample_counts
         first_lbls = sample_lbls[first_idx]
         trend = np.where(np.isfinite(first_lbls), first_lbls, np.nan)
@@ -485,23 +483,7 @@ def _derive_subset_cohort_dataset(
 
     pair_a = np.arange(0, 2 * n_kept, 2, dtype=int)
     pair_b = pair_a + 1
-    if recompute_labels_from_ids:
-        sample_lbls = np.fromiter(
-            (parse_sample_label(s) for s in sample_ids),
-            dtype=float,
-            count=n_kept_samples,
-        )
-        lbl_a = sample_lbls[pair_a]
-        lbl_b = sample_lbls[pair_b]
-        fin_a = np.isfinite(lbl_a)
-        fin_b = np.isfinite(lbl_b)
-        cov_df["sample_label_trend"] = np.where(
-            fin_a & fin_b,
-            0.5 * (lbl_a + lbl_b),
-            np.where(fin_a, lbl_a, np.where(fin_b, lbl_b, np.nan)),
-        )
-    else:
-        sample_lbls = base_ds.sample_parsed_labels[keep_s]
+    sample_lbls = base_ds.sample_parsed_labels[keep_s]
 
     old_to_new = np.full(base_ds.n_participants, -1, dtype=int)
     old_to_new[keep_p] = np.arange(n_kept, dtype=int)
@@ -572,7 +554,8 @@ def _resolve_experiment_dataset_cached(
         min_maps_per_block=min_maps_per_block,
     )
     if subset_mode in ("paired_only", "single_sample") and (
-        not use_synthetic or synthetic_participants <= 900
+        not use_synthetic
+        or (synthetic_participants <= 900 and dataset_cfg_key == _DEFAULT_DATASET_CFG_KEY)
     ):
         base_ds, base_meta = _resolve_experiment_dataset_cached(
             use_synthetic,
@@ -586,11 +569,7 @@ def _resolve_experiment_dataset_cached(
             readiness_json,
         )
         return (
-            _derive_subset_cohort_dataset(
-                base_ds,
-                subset_mode,
-                recompute_labels_from_ids=use_synthetic,
-            ),
+            _derive_subset_cohort_dataset(base_ds, subset_mode),
             copy.deepcopy(base_meta),
         )
 

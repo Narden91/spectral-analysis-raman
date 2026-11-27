@@ -2018,9 +2018,11 @@ def evaluate_nested_cohort(
     # report the model non-estimable rather than silently dropping participants.
     comparisons: dict[str, dict[str, float]] = {}
     active_eval = observed & (mult > 0.0)
+    has_active = bool(np.any(active_eval))
     empty_arr = np.empty(0, dtype=float)
+    cov_finite = (not has_active) or bool(np.all(np.isfinite(oof_preds["covariate_ridge"][active_eval])))
     for m in model_names:
-        if np.any(active_eval) and not np.all(np.isfinite(oof_preds[m][active_eval])):
+        if has_active and not (cov_finite and bool(np.all(np.isfinite(oof_preds[m][active_eval])))):
             comparisons[m] = compute_endpoint_summary(empty_arr, empty_arr, empty_arr)
         else:
             comparisons[m] = compute_endpoint_summary(
@@ -2028,9 +2030,15 @@ def evaluate_nested_cohort(
             )
 
     # Also compute direct paired_linear_ridge vs strongest_comparator difference.
-    vs_strongest = compute_endpoint_summary(
-        y_all, oof_preds["strongest_comparator"], oof_preds["paired_linear_ridge"], weights=mult
-    )
+    if has_active and not (
+        bool(np.all(np.isfinite(oof_preds["strongest_comparator"][active_eval])))
+        and bool(np.all(np.isfinite(oof_preds["paired_linear_ridge"][active_eval])))
+    ):
+        vs_strongest = compute_endpoint_summary(empty_arr, empty_arr, empty_arr)
+    else:
+        vs_strongest = compute_endpoint_summary(
+            y_all, oof_preds["strongest_comparator"], oof_preds["paired_linear_ridge"], weights=mult
+        )
 
     if compute_diagnostics:
         angles_paired = compute_subspace_principal_angles(subspace_bases, model_name="paired_linear_ridge")
@@ -2117,6 +2125,7 @@ def _summarize_bootstrap_contrast(
     *,
     interval_method: IntervalMethod,
     valid: bool,
+    sd_scale: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Compute centered studentized-t or percentile 95% CI, bias, SD, and Maritz-Jarrett MC SEs."""
     nan_pair = (float("nan"), float("nan"))
@@ -2138,12 +2147,21 @@ def _summarize_bootstrap_contrast(
     boot_bias = float(boot_mean - point_est)
     mc_se_mean = float(boot_sd / math.sqrt(draws.size)) if draws.size > 1 else float("nan")
     if interval_method == "studentized_t":
+        scale_shape_ok = sd_scale is None or sd_scale.size == draws.size
+        draw_sds_eff = (
+            draw_sds
+            if (sd_scale is None or not scale_shape_ok or draw_sds.size != draws.size)
+            else draw_sds * sd_scale
+        )
         if (
             not np.isfinite(sd_0)
             or sd_0 <= 1e-12
             or draw_sds.size != draws.size
+            or not scale_shape_ok
             or not np.all(np.isfinite(draw_sds))
             or np.any(draw_sds <= 1e-12)
+            or not np.all(np.isfinite(draw_sds_eff))
+            or np.any(draw_sds_eff <= 0.0)
         ):
             return {
                 "ci": nan_pair,
@@ -2155,7 +2173,7 @@ def _summarize_bootstrap_contrast(
                 "mc_se_ci_high": float("nan"),
                 "pivot_quantiles": nan_pair,
             }
-        t_star = (draws - boot_mean) / draw_sds
+        t_star = (draws - boot_mean) / draw_sds_eff
         q_lo = float(np.percentile(t_star, 2.5))
         q_hi = float(np.percentile(t_star, 97.5))
         ci_lo = float(point_est - q_hi * sd_0)
@@ -2469,11 +2487,31 @@ def run_multiplicity_bootstrap(
     arr_sdc = np.asarray(sd_comp_arr[keep_mask], dtype=float)
     arr_sds = np.asarray(sd_strong_arr[keep_mask], dtype=float)
 
+    if observed.all():
+        sd_scale_kept: np.ndarray | None = None
+    else:
+        w_sum_kept = np.sum(M_all[keep_mask], axis=1)
+        sd_scale_kept = np.sqrt(
+            float(np.count_nonzero(observed)) / np.where(w_sum_kept > 0.0, w_sum_kept, np.nan)
+        )
+
     stat_p = _summarize_bootstrap_contrast(
-        point_est_delta, sd_0_delta, arr_p, arr_sdp, interval_method=interval_method, valid=interval_valid
+        point_est_delta,
+        sd_0_delta,
+        arr_p,
+        arr_sdp,
+        interval_method=interval_method,
+        valid=interval_valid,
+        sd_scale=sd_scale_kept,
     )
     stat_c = _summarize_bootstrap_contrast(
-        point_est_comp, sd_0_comp, arr_c, arr_sdc, interval_method=interval_method, valid=interval_valid
+        point_est_comp,
+        sd_0_comp,
+        arr_c,
+        arr_sdc,
+        interval_method=interval_method,
+        valid=interval_valid,
+        sd_scale=sd_scale_kept,
     )
     strong_valid = bool(
         interval_valid
@@ -2489,6 +2527,7 @@ def run_multiplicity_bootstrap(
         arr_sds,
         interval_method=interval_method,
         valid=strong_valid,
+        sd_scale=sd_scale_kept,
     )
 
     return {

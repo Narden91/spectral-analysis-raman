@@ -181,3 +181,18 @@ def test_new_e2e_files_contain_zero_prohibited_words() -> None:
         text = (root / rel).read_text(encoding="utf-8")
         hits = pattern.findall(text)
         assert not hits, f"Prohibited word(s) in {rel}: {hits}"
+
+
+def test_resource_monitor_stops_tracemalloc_on_exception_and_portable_default_dir() -> None:
+    """Verify portable DEFAULT_OUTPUT_DIR and tracemalloc cleanup when the monitored block raises."""
+    import tempfile
+    import tracemalloc
+
+    from scripts.verify_e2e_benchmarks import DEFAULT_OUTPUT_DIR
+
+    assert DEFAULT_OUTPUT_DIR == Path(tempfile.gettempdir()) / "spectral_analysis_e2e_bench"
+    with pytest.raises(RuntimeError, match="boom"):
+        with _ResourceMonitor(use_tracemalloc=True, probe_gpu=False, poll_interval_s=0.05):
+            assert tracemalloc.is_tracing()
+            raise RuntimeError("boom")
+    assert not tracemalloc.is_tracing()

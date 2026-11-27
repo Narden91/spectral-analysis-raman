@@ -309,7 +309,7 @@ def run_nmf_decomposition(
     subject_ids = clinical.loc[valid_rows, "subject_id"].astype(str).tolist()
 
     n_components_actual = min(n_components, X_clean.shape[0] - 1, X_clean.shape[1])
-    if X_clean.shape[0] < n_components_actual + 1:
+    if n_components_actual < 1:
         logger.warning("Phase N: too few subjects (%d) for NMF; skipping", X_clean.shape[0])
         return {}
 

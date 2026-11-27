@@ -8,6 +8,7 @@ files or reruns preprocessing.
 from __future__ import annotations
 
 import contextlib
+import gc
 import hashlib
 import logging
 import multiprocessing
@@ -15,6 +16,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -383,20 +385,17 @@ def _process_measurements(
     *,
     n_jobs: int | None = None,
 ) -> tuple[dict[str, np.ndarray], pd.DataFrame, pd.DataFrame]:
-    from src.data_preparation.dataset import IngestedRamanDataset
-    from src.data_preparation.store import DataSource
-
-    ingested = IngestedRamanDataset(
-        DataSource(source_name="parsed", source_path=parsed_dir, manifest=None, manifest_hash=None, was_built=False)
-    )
-    rows_by_id = measurements.set_index("measurement_id", drop=False)
-    pixel_groups = ingested._pixels()
+    pixels = pd.read_parquet(parsed_dir / "pixels.parquet")
+    pixel_groups = {
+        str(key): group.sort_values("pixel_index")
+        for key, group in pixels.groupby("measurement_id", sort=False)
+    }
 
     tasks: list[tuple[int, str, str, int, int, int, np.ndarray]] = []
     task_rows: list[pd.Series] = []
     present_codes: set[str] = set()
     total_pixels = 0
-    for pos, (_, m_row) in enumerate(ingested._measurements.iterrows()):
+    for pos, (_, m_row) in enumerate(measurements.iterrows()):
         mid = str(m_row["measurement_id"])
         code = str(m_row["spectral_range"])
         raw_start = int(m_row["raw_start"])
@@ -404,7 +403,7 @@ def _process_measurements(
         native_axis_row = int(m_row["native_axis_row"])
         coords = np.array(pixel_groups[mid][["x", "y"]].to_numpy(dtype=float), dtype=float, copy=True)
         tasks.append((pos, mid, code, raw_start, raw_stop, native_axis_row, coords))
-        task_rows.append(rows_by_id.loc[mid])
+        task_rows.append(m_row)
         present_codes.add(code)
         total_pixels += max(0, raw_stop - raw_start)
 
@@ -605,8 +604,20 @@ def _atomic_replace(store_dir: Path, writer: Callable[[Path], MaterializedStore]
     previous_store_moved = False
     try:
         output = writer(staging)
+        from src.data_preparation.loaders import clear_loader_caches
+
+        clear_loader_caches()
+        gc.collect()
         if store_dir.exists():
-            store_dir.replace(backup)
+            for attempt in range(5):
+                try:
+                    store_dir.replace(backup)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    gc.collect()
+                    time.sleep(0.05 * (attempt + 1))
             previous_store_moved = True
         staging.replace(store_dir)
         return output

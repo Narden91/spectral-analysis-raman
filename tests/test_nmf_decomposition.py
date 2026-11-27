@@ -169,3 +169,32 @@ def test_fit_nmf_multi_init_nested_pool_guard():
     )
     np.testing.assert_allclose(nested[0].best_error, serial.best_error, atol=1e-14)
     np.testing.assert_allclose(nested[0].H, serial.H, atol=1e-14)
+
+
+def test_run_nmf_decomposition_returns_empty_for_zero_or_one_disease_subject(tmp_path):
+    import pandas as pd
+
+    from src.analysis.nmf_decomposition import run_nmf_decomposition
+
+    cfg = {
+        "analysis": {
+            "nmf_decomposition": {"enabled": True},
+            "preregistered_panel": {
+                "nmf": {"n_components": 3, "sparsity_alpha": 0.1, "n_init": 2, "apply_to": "fingerprint"},
+                "endpoints": {"continuous": []},
+            },
+        }
+    }
+    cols = {f"1300__{800 + i}": [float(i + 1)] for i in range(8)}
+    for n_disease in (0, 1):
+        fm_path = tmp_path / f"nmf_{n_disease}.parquet"
+        frame = pd.DataFrame(
+            {
+                "subject_id": ["C1"] + ([f"D{i}" for i in range(n_disease)]),
+                "is_control": [True] + ([False] * n_disease),
+                **{k: v * (1 + n_disease) for k, v in cols.items()},
+            }
+        )
+        frame.to_parquet(fm_path, index=False)
+        out = run_nmf_decomposition(feature_matrix_path=fm_path, output_dir=tmp_path / f"out_{n_disease}", cfg=cfg)
+        assert out == {}

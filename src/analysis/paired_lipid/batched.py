@@ -685,6 +685,13 @@ def batched_select_inner_settings(
     best_r_idx, best_k_idx, best_pair_l_idx, best_pair_a = _select_paired_setting(pair_r_safe)
     best_pair_mse = pair_mses_5d[b_arange, best_r_idx, best_k_idx, best_pair_l_idx, best_pair_a]
 
+    mses_ok = (
+        np.all(np.isfinite(cov_mses), axis=1)
+        & np.all(np.isfinite(band_mses), axis=1)
+        & np.all(np.isfinite(pca_mses), axis=(1, 2))
+        & np.all(np.isfinite(pls_mses[:, pls_idx]), axis=1)
+    )
+
     out: dict[str, Any] = {
         "best_cov_a": best_cov_a,
         "best_cov_mse": best_cov_mse,
@@ -701,7 +708,7 @@ def batched_select_inner_settings(
         "best_pair_l_idx": best_pair_l_idx,
         "best_pair_a": best_pair_a,
         "best_pair_mse": best_pair_mse,
-        "rank_ok": rank_ok & pair_ok,
+        "rank_ok": rank_ok & pair_ok & mses_ok,
     }
     if compute_inner_diagnostics and inner_paired_counts:
         pair_stack = np.vstack(inner_paired_counts)

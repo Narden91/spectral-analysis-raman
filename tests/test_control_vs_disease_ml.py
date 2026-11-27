@@ -1733,3 +1733,217 @@ def test_loky_workers_enforce_single_thread_blas() -> None:
     for pool_threads in observed_chunked:
         assert pool_threads and all(count == 1 for count in pool_threads)
 
+
+def test_run_permutation_test_resume_aligns_nonmultiple_checkpoint_to_check_interval(tmp_path: Path) -> None:
+    """Resuming from a checkpoint not divisible by check_interval preserves exact curtailment and p-value."""
+    rng = np.random.default_rng(7)
+    X = rng.normal(size=(40, 12))
+    y = np.array([0] * 20 + [1] * 20, dtype=int)
+    sex = np.array(["female" if i % 2 == 0 else "male" for i in range(40)], dtype=object)
+    split_plan = _locked_joint_stratified_split_plan(y, sex, n_outer_splits=4, n_outer_repeats=1, random_state=42)
+    ml_cfg = {
+        "n_permutations": 120,
+        "permutation_min": 60,
+        "permutation_check_interval": 20,
+        "permutation_confidence": 0.90,
+        "permutation_alpha": 0.05,
+        "pls_components_grid": [1],
+        "n_inner_splits": 2,
+        "random_state": 42,
+    }
+    p_full, dist_full = run_permutation_test(
+        "pls_da",
+        X,
+        y,
+        observed_balanced_accuracy=0.99,
+        strata=sex,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=42,
+        outer_split_plan=split_plan,
+    )
+    assert len(dist_full) == 60
+
+    ckpt = tmp_path / "perm_unaligned.parquet"
+    ml_partial = {**ml_cfg, "n_permutations": 25, "permutation_min": 25, "permutation_check_interval": 25}
+    run_permutation_test(
+        "pls_da",
+        X,
+        y,
+        observed_balanced_accuracy=0.99,
+        strata=sex,
+        ml_cfg=ml_partial,
+        n_jobs=1,
+        random_state=42,
+        outer_split_plan=split_plan,
+        checkpoint_path=ckpt,
+        resume=False,
+    )
+    p_resumed, dist_resumed = run_permutation_test(
+        "pls_da",
+        X,
+        y,
+        observed_balanced_accuracy=0.99,
+        strata=sex,
+        ml_cfg=ml_cfg,
+        n_jobs=1,
+        random_state=42,
+        outer_split_plan=split_plan,
+        checkpoint_path=ckpt,
+        resume=True,
+    )
+    assert len(dist_resumed) == len(dist_full)
+    assert p_resumed == pytest.approx(p_full, abs=1e-15)
+    np.testing.assert_allclose(dist_resumed, dist_full, atol=1e-15)
+
+    # Already-resolved checkpoint must return before spawning a joblib worker pool.
+    with patch("src.analysis.control_vs_disease_ml.Parallel") as mock_parallel:
+        p_done, dist_done = run_permutation_test(
+            "pls_da",
+            X,
+            y,
+            observed_balanced_accuracy=0.99,
+            strata=sex,
+            ml_cfg=ml_cfg,
+            n_jobs=2,
+            random_state=42,
+            outer_split_plan=split_plan,
+            checkpoint_path=ckpt,
+            resume=True,
+        )
+    mock_parallel.assert_not_called()
+    assert p_done == pytest.approx(p_full, abs=1e-15)
+    np.testing.assert_allclose(dist_done, dist_full, atol=1e-15)
+
+
+def test_run_model_permutation_phase_uses_resolved_permutation_max(tmp_path: Path) -> None:
+    """permutation_max > n_permutations must use the resolved ceiling without raising RuntimeError."""
+    from contextlib import nullcontext
+
+    from rich.progress import Progress
+
+    from src.analysis.control_vs_disease_ml import _CheckpointStore, _run_model_permutation_phase
+
+    rng = np.random.default_rng(11)
+    X = rng.normal(size=(32, 10))
+    y = np.array([0] * 16 + [1] * 16, dtype=int)
+    sex = np.array(["female" if i % 2 == 0 else "male" for i in range(32)], dtype=object)
+    split_plan = _locked_joint_stratified_split_plan(y, sex, n_outer_splits=4, n_outer_repeats=1, random_state=42)
+    ml_cfg = {
+        "n_permutations": 4,
+        "permutation_max": 6,
+        "permutation_min": 6,
+        "permutation_check_interval": 6,
+        "pls_components_grid": [1],
+        "n_inner_splits": 2,
+        "random_state": 42,
+    }
+    fm_path = tmp_path / "fm.parquet"
+    pd.DataFrame({"a": [1]}).to_parquet(fm_path, index=False)
+    checkpoints = _CheckpointStore.create(
+        metadata_dir=tmp_path / "meta",
+        cfg_in={"analysis": {"control_vs_disease_ml": ml_cfg}},
+        feature_matrix_path=fm_path,
+        data_manifest_hash="test",
+        resume=False,
+    )
+    dist_rows: list[dict[str, object]] = []
+    with Progress(disable=True) as progress:
+        _p_un, _p_sx, n_un, n_sx = _run_model_permutation_phase(
+            model_name="pls_da",
+            representation="whole",
+            X_valid=X,
+            y_valid=y,
+            strata=sex,
+            permutation_observed_score=0.5,
+            ml_cfg=ml_cfg,
+            n_jobs=1,
+            random_state=42,
+            outer_split_plan=split_plan,
+            checkpoints=checkpoints,
+            resume=False,
+            null_distribution_rows=dist_rows,
+            phase=lambda *_a, **_k: nullcontext(),
+            progress=progress,
+        )
+    assert n_un == 6 and n_sx == 6
+    assert len(dist_rows) == 12
+
+
+def test_run_observed_model_phase_populates_outputs_on_resume(tmp_path: Path) -> None:
+    """Reusing a completed observed stage must populate the same output paths as a fresh run."""
+    from contextlib import nullcontext
+
+    from rich.progress import Progress
+
+    from src.analysis.control_vs_disease_ml import _CheckpointStore, _run_observed_model_phase
+
+    rng = np.random.default_rng(13)
+    X = rng.normal(size=(32, 8))
+    y = np.array([0] * 16 + [1] * 16, dtype=int)
+    sex = np.array(["female" if i % 2 == 0 else "male" for i in range(32)], dtype=object)
+    split_plan = _locked_joint_stratified_split_plan(y, sex, n_outer_splits=4, n_outer_repeats=1, random_state=42)
+    ml_cfg = {
+        "n_outer_splits": 4,
+        "n_outer_repeats": 1,
+        "n_inner_splits": 2,
+        "pls_components_grid": [1],
+        "random_state": 42,
+    }
+    cfg_in = {"analysis": {"control_vs_disease_ml": ml_cfg}}
+    fm_path = tmp_path / "fm.parquet"
+    pd.DataFrame({"a": [1]}).to_parquet(fm_path, index=False)
+    model_dir = tmp_path / "models"
+    fnames = [f"1300__{800 + i}" for i in range(X.shape[1])]
+
+    fresh_outputs: dict[str, Path] = {}
+    resumed_outputs: dict[str, Path] = {}
+    with Progress(disable=True) as progress:
+        ck_fresh = _CheckpointStore.create(
+            metadata_dir=tmp_path / "meta",
+            cfg_in=cfg_in,
+            feature_matrix_path=fm_path,
+            data_manifest_hash="test",
+            resume=False,
+        )
+        _run_observed_model_phase(
+            model_name="pls_da",
+            representation="whole",
+            X_valid=X,
+            y_valid=y,
+            feature_names=fnames,
+            ml_cfg=ml_cfg,
+            n_jobs=1,
+            outer_split_plan=split_plan,
+            checkpoints=ck_fresh,
+            model_dir=model_dir,
+            outputs=fresh_outputs,
+            phase=lambda *_a, **_k: nullcontext(),
+            progress=progress,
+        )
+        ck_resume = _CheckpointStore.create(
+            metadata_dir=tmp_path / "meta",
+            cfg_in=cfg_in,
+            feature_matrix_path=fm_path,
+            data_manifest_hash="test",
+            resume=True,
+        )
+        _run_observed_model_phase(
+            model_name="pls_da",
+            representation="whole",
+            X_valid=X,
+            y_valid=y,
+            feature_names=fnames,
+            ml_cfg=ml_cfg,
+            n_jobs=1,
+            outer_split_plan=split_plan,
+            checkpoints=ck_resume,
+            model_dir=model_dir,
+            outputs=resumed_outputs,
+            phase=lambda *_a, **_k: nullcontext(),
+            progress=progress,
+        )
+    assert resumed_outputs == fresh_outputs
+    assert len(resumed_outputs) == 3
+
+

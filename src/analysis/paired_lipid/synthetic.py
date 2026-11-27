@@ -870,6 +870,19 @@ def generate_synthetic_cohort(
             cfg=state.eff_cfg,
             subset_mode=subset_mode,
         )
+        # Preserve fixed-range label_scale = LABEL_RANGE / (2 * n_participants) across all subset
+        # modes so synthetic label covariates never extrapolate between training and test sizes.
+        label_scale = LABEL_RANGE / float(2 * n_participants)
+        scaled_lbls = np.ascontiguousarray(dataset.sample_parsed_labels * label_scale, dtype=np.float64)
+        scaled_lbls.setflags(write=False)
+        first_idx = np.cumsum(dataset.participant_sample_counts) - dataset.participant_sample_counts
+        scaled_trend = scaled_lbls[first_idx].copy()
+        if subset_mode != "single_sample" and dataset.paired_participant_indices.size > 0:
+            scaled_trend[dataset.paired_participant_indices] = 0.5 * (
+                scaled_lbls[dataset.pair_sample_a_indices] + scaled_lbls[dataset.pair_sample_b_indices]
+            )
+        dataset.sample_parsed_labels = scaled_lbls
+        dataset.covariate_frame["sample_label_trend"] = scaled_trend
         id_to_orig = {pid: idx for idx, pid in enumerate(state.p_ids.tolist())}
         kept_orig = np.asarray([id_to_orig[str(pid)] for pid in dataset.participant_ids], dtype=int)
         z_bio_out = state.z_bio[kept_orig]
@@ -1008,7 +1021,7 @@ def generate_synthetic_external_test_arrays(
         k_off = state.offsets[kept_orig]
         first_s = np.where(k_s0, k_off, np.minimum(k_off + 1, state.n_samples - 1))
         both_surv = k_s0 & k_s1
-        parsed_lbls = np.arange(1, state.n_samples + 1, dtype=np.float64)
+        parsed_lbls = state.sample_lbls
         mean_labels = parsed_lbls[first_s].copy()
         if subset_mode != "single_sample" and np.any(both_surv):
             both_idx = np.flatnonzero(both_surv)

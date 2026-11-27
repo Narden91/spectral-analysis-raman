@@ -580,3 +580,113 @@ def test_summarize_rows_edge_cases_and_non_float64_memmap(tmp_path: Path) -> Non
         mm_obj = getattr(mm_int, "_mmap", None)
         if mm_obj is not None:
             mm_obj.close()
+
+
+def test_process_measurements_reads_fresh_measurements_without_cache_clear(tmp_path: Path) -> None:
+    from src.data_preparation.materialize import _process_measurements
+
+    rng = np.random.default_rng(20261127)
+    fg = src.config["preprocessing"]["interpolation"]["frozen_grids"]
+    wn_1300 = np.linspace(fg["fingerprint"][0] - 40.0, fg["fingerprint"][1] + 40.0, 200)
+    wn_2850 = np.linspace(fg["ch_stretch"][0] - 40.0, fg["ch_stretch"][1] + 40.0, 150)
+    good_1300 = (
+        50.0
+        + 300.0 * np.exp(-0.5 * ((wn_1300 - 1005.0) / 10.0) ** 2)
+        + 250.0 * np.exp(-0.5 * ((wn_1300 - 1450.0) / 15.0) ** 2)
+        + rng.normal(0.0, 2.0, size=(5, 200))
+    )
+    good_2850 = (
+        50.0
+        + 300.0 * np.exp(-0.5 * ((wn_2850 - 2900.0) / 15.0) ** 2)
+        + rng.normal(0.0, 2.0, size=(5, 150))
+    )
+
+    pdir = tmp_path / "parsed"
+    pdir.mkdir()
+    np.save(pdir / "raw_spectra_1300.npy", good_1300)
+    np.save(pdir / "native_wavenumbers_1300.npy", wn_1300[None, :])
+    np.save(pdir / "raw_spectra_2850.npy", good_2850)
+    np.save(pdir / "native_wavenumbers_2850.npy", wn_2850[None, :])
+
+    meas1 = pd.DataFrame(
+        [
+            {
+                "measurement_id": "m1_1300", "file_id": "f1", "subject_id": "s1", "area_id": "a1",
+                "spectral_range": "1300", "slide_number": "1", "measurement_number": 1,
+                "acquisition_mode": None, "raw_start": 0, "raw_stop": 5, "native_axis_row": 0,
+            },
+            {
+                "measurement_id": "m1_2850", "file_id": "f2", "subject_id": "s1", "area_id": "a1",
+                "spectral_range": "2850", "slide_number": "1", "measurement_number": 1,
+                "acquisition_mode": None, "raw_start": 0, "raw_stop": 5, "native_axis_row": 0,
+            },
+        ]
+    )
+    meas1.to_parquet(pdir / "measurements.parquet", index=False)
+    pix1 = pd.DataFrame(
+        [
+            {"measurement_id": m, "spectral_range": sr, "pixel_index": i, "x": float(i), "y": 0.0, "raw_row": i}
+            for m, sr in [("m1_1300", "1300"), ("m1_2850", "2850")]
+            for i in range(5)
+        ]
+    )
+    pix1.to_parquet(pdir / "pixels.parquet", index=False)
+
+    cfg = deepcopy(src.config)
+    # Prime hashless loader cache and run v1 processing.
+    load_file_index(DataSource("parsed", pdir, None, None, False))
+    _, _, areas1 = _process_measurements(pdir, meas1, cfg, n_jobs=1)
+    assert len(areas1) == 2
+
+    # Overwrite parsed store with an additional measurement without clearing caches.
+    np.save(pdir / "raw_spectra_1300.npy", np.vstack([good_1300, good_1300]))
+    np.save(pdir / "native_wavenumbers_1300.npy", np.vstack([wn_1300, wn_1300]))
+    meas2 = pd.concat(
+        [
+            meas1,
+            pd.DataFrame(
+                [
+                    {
+                        "measurement_id": "m2_1300", "file_id": "f3", "subject_id": "s2", "area_id": "a2",
+                        "spectral_range": "1300", "slide_number": "1", "measurement_number": 1,
+                        "acquisition_mode": None, "raw_start": 5, "raw_stop": 10, "native_axis_row": 1,
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    meas2.to_parquet(pdir / "measurements.parquet", index=False)
+    pix2 = pd.DataFrame(
+        [
+            {"measurement_id": m, "spectral_range": sr, "pixel_index": i, "x": float(i), "y": 0.0, "raw_row": off + i}
+            for m, sr, off in [("m1_1300", "1300", 0), ("m2_1300", "1300", 5), ("m1_2850", "2850", 0)]
+            for i in range(5)
+        ]
+    )
+    pix2.to_parquet(pdir / "pixels.parquet", index=False)
+
+    _, _, areas2 = _process_measurements(pdir, meas2, cfg, n_jobs=1)
+    assert len(areas2) == len(meas2) == 3
+    assert set(areas2["measurement_id"]) == {"m1_1300", "m2_1300", "m1_2850"}
+
+
+def test_build_preprocessed_store_force_releases_cached_memmap_and_cycles(
+    configured_store_paths: dict[str, Path],
+) -> None:
+    first = build_preprocessed_store(src.config, force=True, n_jobs=1)
+    source = DataSource(
+        source_name="preprocessed",
+        source_path=first.path,
+        manifest=first.manifest,
+        manifest_hash=first.manifest.get("manifest_hash"),
+        was_built=False,
+    )
+    spec, ax = loaders_module._load_array(source, "1300", "normalized")
+    holder: list[object] = [spec, ax]
+    holder.append(holder)
+    del spec, ax, holder
+
+    rebuilt = build_preprocessed_store(src.config, force=True, n_jobs=1)
+    assert rebuilt.path == first.path
+    assert validate_store(rebuilt.path, "preprocessed", src.config, strict=True).is_valid

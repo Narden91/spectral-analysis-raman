@@ -71,9 +71,7 @@ ALL_SUITES: tuple[str, ...] = (
     "preprocessing_store",
 )
 
-DEFAULT_OUTPUT_DIR = Path(
-    r"C:\Users\emanu\.gemini\antigravity\scratch\teamwork_tmp\e2e_bench"
-)
+DEFAULT_OUTPUT_DIR = Path(tempfile.gettempdir()) / "spectral_analysis_e2e_bench"
 
 CSV_COLUMNS: list[str] = [
     "bench_id",
@@ -334,6 +332,8 @@ class _ResourceMonitor:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
+        if self.use_tracemalloc and tracemalloc.is_tracing():
+            tracemalloc.stop()
 
     def snapshot(self) -> ResourceSnapshot:
         ws_post, peak_ws, priv_post = _query_process_memory_mib(self._root_pid)
@@ -1586,14 +1586,36 @@ def _run_paired_lipid_checks(
 
     def _t2_02() -> tuple[float | None, str]:
         ds_ss, _ = generate_synthetic_cohort(n_participants=48, n_single_sample=4, seed=502, compact_grid=True, subset_mode="single_sample")
-        boot_f = run_multiplicity_bootstrap(ds_ss, cfg=cfg, n_bootstraps=4, bootstrap_seed=502, use_gpu=False, single_sample_downstream=False)
         splits_ss = make_nested_splits(ds_ss, cfg, cfg.primary_seed)
+        boot_f = run_multiplicity_bootstrap(ds_ss, cfg=cfg, n_bootstraps=4, bootstrap_seed=502, use_gpu=False, single_sample_downstream=False)
         seq_f = evaluate_nested_cohort(ds_ss, cfg=cfg, precomputed_splits=splits_ss, include_band_paired=True, single_sample_downstream=False, compute_diagnostics=False)
-        d = _assert_close(
+        seq_f_draws = _seq_draws_ref(ds_ss, 502, 4, single_sample_downstream=False)
+        d_f_pt = _assert_close(
             boot_f["point_estimate_delta_mse"],
             seq_f["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"],
             atol=1e-10,
-            label="T2-02 single_sample_downstream=False",
+            label="T2-02 single_sample_downstream=False point",
+        )
+        d_f_draws = _assert_close(
+            boot_f["bootstrap_draws_delta_mse"],
+            seq_f_draws,
+            atol=1e-10,
+            label="T2-02 single_sample_downstream=False draws",
+        )
+        boot_auto = run_multiplicity_bootstrap(ds_ss, cfg=cfg, n_bootstraps=4, bootstrap_seed=502, use_gpu=False, single_sample_downstream=None)
+        seq_auto = evaluate_nested_cohort(ds_ss, cfg=cfg, precomputed_splits=splits_ss, include_band_paired=True, single_sample_downstream=None, compute_diagnostics=False)
+        seq_auto_draws = _seq_draws_ref(ds_ss, 502, 4, single_sample_downstream=None)
+        d_a_pt = _assert_close(
+            boot_auto["point_estimate_delta_mse"],
+            seq_auto["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"],
+            atol=1e-10,
+            label="T2-02 single_sample_downstream=None point",
+        )
+        d_a_draws = _assert_close(
+            boot_auto["bootstrap_draws_delta_mse"],
+            seq_auto_draws,
+            atol=1e-10,
+            label="T2-02 single_sample_downstream=None draws",
         )
         ext_ds, _ = generate_synthetic_cohort(n_participants=48, n_single_sample=4, seed=503, compact_grid=True, subset_mode="single_sample")
         prep_false = PreparedExternalTest.from_dataset(ext_ds, cfg.primary_endpoint, single_sample_downstream=False, preset="primary")
@@ -1602,7 +1624,7 @@ def _run_paired_lipid_checks(
             raise AssertionError("Expected ValueError on mismatched single_sample_downstream")
         except ValueError as exc:
             assert "single_sample_downstream" in str(exc)
-        return d, "single_sample_downstream override & PreparedExternalTest mismatch guard verified"
+        return max(d_f_pt, d_f_draws, d_a_pt, d_a_draws), "single_sample_downstream=False/None resampled draws & PreparedExternalTest mismatch guard verified"
 
     def _t2_03() -> tuple[float | None, str, bool]:
         if not cp_avail:
@@ -2693,13 +2715,17 @@ def _run_cluster_permutation_checks(*, mode: str, profile: str) -> list[ParityCh
 
 def _run_control_vs_disease_ml_checks(*, mode: str, profile: str, tmp_dir: Path) -> list[ParityCheckResult]:
     from sklearn.cross_decomposition import PLSRegression
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.inspection import permutation_importance
     from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import balanced_accuracy_score
     from sklearn.model_selection import StratifiedKFold
     from sklearn.preprocessing import StandardScaler
 
     from src.analysis.control_vs_disease_ml import (
         _cv_predict,
         _locked_joint_stratified_split_plan,
+        _rf_permutation_importance,
         _run_repeated_nested_cv,
         run_control_vs_disease_ml_pipeline,
         run_permutation_test,
@@ -2875,11 +2901,24 @@ def _run_control_vs_disease_ml_checks(*, mode: str, profile: str, tmp_dir: Path)
     split_plan = _locked_joint_stratified_split_plan(y, sex, n_outer_splits=4, n_outer_repeats=1, random_state=42)
 
     def _t1_f1() -> tuple[float | None, str]:
-        df1 = _run_repeated_nested_cv("random_forest", X, y, ml_cfg=ml_cfg, n_jobs=1, outer_split_plan=split_plan)
-        df2 = _run_repeated_nested_cv("random_forest", X, y, ml_cfg=ml_cfg, n_jobs=2, outer_split_plan=split_plan)
+        ml_rf = {**ml_cfg, "rf_n_estimators_grid": [10, 20], "rf_max_depth_grid": [2, None]}
+        df1 = _run_repeated_nested_cv("random_forest", X, y, ml_cfg=ml_rf, n_jobs=1, outer_split_plan=split_plan)
+        df2 = _run_repeated_nested_cv("random_forest", X, y, ml_cfg=ml_rf, n_jobs=2, outer_split_plan=split_plan)
         assert np.array_equal(df1["y_pred"].to_numpy(), df2["y_pred"].to_numpy())
-        d = _assert_close(df1["y_score"], df2["y_score"], atol=1e-12, label="T1-F1 RF y_score")
-        return d, "random_forest n_jobs=2 matches n_jobs=1 exactly"
+        d_cv = _assert_close(df1["y_score"], df2["y_score"], atol=1e-12, label="T1-F1 RF y_score")
+        tr0, te0 = split_plan[0][0]
+        rf_est = RandomForestClassifier(
+            n_estimators=20, max_depth=None, class_weight="balanced_subsample", random_state=42, n_jobs=1
+        ).fit(X[tr0], y[tr0])
+        imp_mean, imp_std = _rf_permutation_importance(rf_est, X[te0], y[te0], n_repeats=5, random_state=42, n_jobs=1)
+        ref_imp = permutation_importance(
+            rf_est, X[te0], y[te0], n_repeats=5, random_state=42, n_jobs=1, scoring="balanced_accuracy"
+        )
+        d_imp = max(
+            _assert_close(imp_mean, ref_imp.importances_mean, atol=1e-12, label="T1-F1 RF perm imp mean"),
+            _assert_close(imp_std, ref_imp.importances_std, atol=1e-12, label="T1-F1 RF perm imp std"),
+        )
+        return max(d_cv, d_imp), "random_forest multi-grid n_jobs=2==1 & _rf_permutation_importance vs sklearn verified"
 
     def _t1_f2() -> tuple[float | None, str]:
         ml_f2 = {**ml_cfg, "n_permutations": 8, "permutation_min": 8, "permutation_check_interval": 8}
@@ -2914,7 +2953,7 @@ def _run_control_vs_disease_ml_checks(*, mode: str, profile: str, tmp_dir: Path)
         X_c[:, :4] += np.where(sex_c == "female", 2.0, 0.0)[:, None]
         sp_c = _locked_joint_stratified_split_plan(y_c, sex_c, n_outer_splits=3, n_outer_repeats=1, random_state=42)
         obs_df = _run_repeated_nested_cv("pls_da", X_c, y_c, ml_cfg=ml_cfg, n_jobs=1, outer_split_plan=sp_c)
-        obs_ba = float(np.mean(obs_df["y_pred"] == obs_df["y_true"]))
+        obs_ba = float(balanced_accuracy_score(obs_df["y_true"], obs_df["y_pred"]))
         ml_perm = {**ml_cfg, "n_permutations": 12, "permutation_min": 12, "permutation_check_interval": 12}
         pv, _ = run_permutation_test("pls_da", X_c, y_c, observed_balanced_accuracy=obs_ba, strata=sex_c, ml_cfg=ml_perm, n_jobs=1, random_state=42, outer_split_plan=sp_c)
         assert pv > 0.05, f"Expected sex-stratified p_value > 0.05 on sex-only signal, got {pv}"
@@ -3632,13 +3671,47 @@ def _execute_single_benchmark(
             )
 
         def _check_b123(res: Any) -> float:
-            seq = evaluate_nested_cohort(ds, cfg=cfg, include_band_paired=True, compute_diagnostics=False)
-            return _assert_close(
+            if want_gpu:
+                assert int(res["n_fallback_draws"]) == 0, (
+                    f"{spec.bench_id}: unexpected GPU fallback draws: {res['n_fallback_draws']}"
+                )
+            assert len(res["bootstrap_draws_delta_mse"]) == n_boot, (
+                f"{spec.bench_id}: expected {n_boot} bootstrap draws, got {len(res['bootstrap_draws_delta_mse'])}"
+            )
+            splits = make_nested_splits(ds, cfg, cfg.primary_seed)
+            seq = evaluate_nested_cohort(
+                ds, cfg=cfg, precomputed_splits=splits, include_band_paired=True, compute_diagnostics=False
+            )
+            max_d = _assert_close(
                 res["point_estimate_delta_mse"],
                 seq["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"],
                 atol=1e-11,
-                label=spec.bench_id,
+                label=f"{spec.bench_id} point",
             )
+            rng_ref = np.random.default_rng(20261106)
+            drawn_mat = rng_ref.integers(0, ds.n_participants, size=(n_boot, ds.n_participants))
+            check_indices = sorted({0, n_boot - 1}) if n_boot >= 2 else ([0] if n_boot == 1 else [])
+            for b_idx in check_indices:
+                mult = np.zeros(ds.n_participants, dtype=float)
+                np.add.at(mult, drawn_mat[b_idx], 1.0)
+                seq_b = evaluate_nested_cohort(
+                    ds,
+                    cfg=cfg,
+                    participant_multiplicities=mult,
+                    precomputed_splits=splits,
+                    include_band_paired=True,
+                    compute_diagnostics=False,
+                )
+                max_d = max(
+                    max_d,
+                    _assert_close(
+                        res["bootstrap_draws_delta_mse"][b_idx],
+                        seq_b["comparisons_vs_covariate_ridge"]["paired_linear_ridge"]["delta_mse"],
+                        atol=1e-10,
+                        label=f"{spec.bench_id} draw {b_idx}",
+                    ),
+                )
+            return max_d
 
         run_fn, check_fn = _run_b123, _check_b123
 

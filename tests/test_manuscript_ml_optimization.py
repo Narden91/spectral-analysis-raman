@@ -312,7 +312,7 @@ def test_derive_subset_zero_paired_participants_raises_value_error() -> None:
         exclusions=[],
     )
     with pytest.raises(ValueError, match="No eligible stroke participants remained after linkage and spectral checks."):
-        _derive_subset_cohort_dataset(single_only_ds, "paired_only", recompute_labels_from_ids=False)
+        _derive_subset_cohort_dataset(single_only_ds, "paired_only")
 
 
 @pytest.mark.parametrize("use_gpu", [False, True])
@@ -631,3 +631,75 @@ def test_sensitivity_primary_state_fail_closed_validation(tmp_path: Path) -> Non
                 output_dir=tmp_path / f"bad_{abs(hash(label))}",
                 primary_state=bad_state,
             )
+
+
+def test_synthetic_subset_label_scale_and_custom_cfg_parity() -> None:
+    from src.analysis.paired_lipid.nested_cv import PreparedExternalTest
+    from src.analysis.paired_lipid.synthetic import LABEL_RANGE, generate_synthetic_external_test
+
+    # P1: fixed-range label_scale holds across all subset modes for n != 92 and matches streaming external test.
+    for mode in SUBSET_MODES:
+        ds_tr, _ = generate_synthetic_cohort(
+            n_participants=40,
+            seed=21,
+            compact_grid=True,
+            subset_mode=mode,
+            label_drift_scale=0.35,
+        )
+        tr_lbl = ds_tr.covariate_frame["sample_label_trend"].to_numpy(dtype=float)
+        assert float(np.max(tr_lbl)) <= LABEL_RANGE + 1e-12
+        assert float(np.max(ds_tr.sample_parsed_labels)) <= LABEL_RANGE + 1e-12
+
+        ds_ext, _ = generate_synthetic_cohort(
+            n_participants=200,
+            seed=22,
+            compact_grid=True,
+            subset_mode=mode,
+            label_drift_scale=0.35,
+        )
+        prep_ref = PreparedExternalTest.from_dataset(ds_ext, "ldl_mmol_l", preset="primary")
+        prep_str = generate_synthetic_external_test(
+            n_participants=200,
+            seed=22,
+            compact_grid=True,
+            subset_mode=mode,
+            label_drift_scale=0.35,
+            endpoint="ldl_mmol_l",
+            preset="primary",
+        )
+        ext_lbl = prep_str.raw_cache["raw_cov_matrix__primary"][0][:, 3]
+        assert float(np.max(ext_lbl)) <= LABEL_RANGE + 1e-12
+        assert np.array_equal(
+            prep_str.raw_cache["raw_cov_matrix__primary"][0],
+            prep_ref.raw_cache["raw_cov_matrix__primary"][0],
+            equal_nan=True,
+        )
+
+    # n=92 preserves label_scale == 1.0 bitwise.
+    ds_92_p, _ = generate_synthetic_cohort(n_participants=92, seed=42, compact_grid=True, subset_mode="paired_only")
+    assert np.allclose(ds_92_p.sample_parsed_labels, np.round(ds_92_p.sample_parsed_labels), atol=0.0, rtol=0.0)
+
+    # P4: custom PairedLipidConfig bypasses synthetic subset-derivation shortcut and matches direct generation.
+    custom_cfg = PairedLipidConfig(min_maps_per_block=3, secondary_endpoints=("hdl_mmol_l",))
+    clear_dataset_cache()
+    try:
+        for mode in ("paired_only", "single_sample"):
+            ds_res, _ = resolve_experiment_dataset(
+                use_synthetic=True,
+                subset_mode=mode,  # type: ignore[arg-type]
+                synthetic_participants=32,
+                synthetic_seed=17,
+                compact_grid=True,
+                cfg=custom_cfg,
+            )
+            ds_ref, _ = generate_synthetic_cohort(
+                n_participants=32,
+                seed=17,
+                compact_grid=True,
+                subset_mode=mode,  # type: ignore[arg-type]
+                cfg=custom_cfg,
+            )
+            _assert_cohort_datasets_equal(ds_res, ds_ref)
+    finally:
+        clear_dataset_cache()
+

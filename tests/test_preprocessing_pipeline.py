@@ -576,3 +576,98 @@ def test_linear_interpolation_exact_interp1d_parity_and_adjacent_nan_knots() -> 
     pre_ref = bl_in_ref - bl_ref
     assert np.array_equal(res.stage_arrays["baseline_input"], bl_in_ref)
     assert np.array_equal(res.stage_arrays["pre_normalization"], pre_ref)
+
+
+def test_all_rejected_map_preserves_target_wavenumbers_and_materializes(tmp_path) -> None:
+    import pandas as pd
+
+    from src.data_preparation.materialize import _process_measurements
+
+    wn_small = np.linspace(710.0, 1815.0, 60)
+    tgt_small = np.linspace(734.0, 1788.0, 20)
+    empty_aligned, empty_axis = interpolate_spectra(
+        np.empty((0, wn_small.size), dtype=float),
+        wn_small,
+        method="linear",
+        target_wavenumbers=tgt_small,
+    )
+    assert empty_aligned.shape == (0, tgt_small.size)
+    assert np.array_equal(empty_axis, tgt_small)
+    with pytest.raises(ValueError):
+        interpolate_spectra(
+            np.empty((0, wn_small.size), dtype=float),
+            wn_small,
+            method="linear",
+            target_wavenumbers=np.linspace(700.0, 1788.0, 20),
+        )
+
+    cfg = deepcopy(src.config)
+    fg = cfg["preprocessing"]["interpolation"]["frozen_grids"]
+    wn_1300 = np.linspace(fg["fingerprint"][0] - 40.0, fg["fingerprint"][1] + 40.0, 200)
+    wn_2850 = np.linspace(fg["ch_stretch"][0] - 40.0, fg["ch_stretch"][1] + 40.0, 150)
+    tgt_1300 = np.arange(fg["fingerprint"][0], fg["fingerprint"][1] + 0.5, 1.0)
+
+    dead = np.ones((5, wn_1300.size), dtype=float)
+    res_dead = run_preprocessing(
+        dead,
+        wn_1300,
+        region="fingerprint",
+        interpolate=True,
+        target_wavenumbers=tgt_1300,
+        return_pre_normalization=True,
+        cfg=cfg,
+    )
+    assert res_dead.spectra.shape == (0, tgt_1300.size)
+    assert res_dead.stage_arrays["pre_normalization"].shape == (0, tgt_1300.size)
+    assert np.array_equal(res_dead.wavenumbers, tgt_1300)
+
+    rng = np.random.default_rng(20261127)
+    good_1300 = (
+        50.0
+        + 300.0 * np.exp(-0.5 * ((wn_1300 - 1005.0) / 10.0) ** 2)
+        + 250.0 * np.exp(-0.5 * ((wn_1300 - 1450.0) / 15.0) ** 2)
+        + rng.normal(0.0, 2.0, size=(5, wn_1300.size))
+    )
+    good_2850 = (
+        50.0
+        + 300.0 * np.exp(-0.5 * ((wn_2850 - 2900.0) / 15.0) ** 2)
+        + rng.normal(0.0, 2.0, size=(5, wn_2850.size))
+    )
+    pdir = tmp_path / "parsed"
+    pdir.mkdir()
+    np.save(pdir / "raw_spectra_1300.npy", np.vstack([good_1300, dead]))
+    np.save(pdir / "native_wavenumbers_1300.npy", np.vstack([wn_1300, wn_1300]))
+    np.save(pdir / "raw_spectra_2850.npy", good_2850)
+    np.save(pdir / "native_wavenumbers_2850.npy", wn_2850[None, :])
+    meas = pd.DataFrame(
+        [
+            {
+                "measurement_id": "m_good_1300", "file_id": "f1", "subject_id": "s1", "area_id": "a1",
+                "spectral_range": "1300", "slide_number": "1", "measurement_number": 1,
+                "acquisition_mode": None, "raw_start": 0, "raw_stop": 5, "native_axis_row": 0,
+            },
+            {
+                "measurement_id": "m_dead_1300", "file_id": "f2", "subject_id": "s2", "area_id": "a2",
+                "spectral_range": "1300", "slide_number": "1", "measurement_number": 1,
+                "acquisition_mode": None, "raw_start": 5, "raw_stop": 10, "native_axis_row": 1,
+            },
+            {
+                "measurement_id": "m_good_2850", "file_id": "f3", "subject_id": "s1", "area_id": "a1",
+                "spectral_range": "2850", "slide_number": "1", "measurement_number": 1,
+                "acquisition_mode": None, "raw_start": 0, "raw_stop": 5, "native_axis_row": 0,
+            },
+        ]
+    )
+    meas.to_parquet(pdir / "measurements.parquet", index=False)
+    pixels = pd.DataFrame(
+        [
+            {"measurement_id": mid, "spectral_range": sr, "pixel_index": i, "x": float(i), "y": 0.0, "raw_row": off + i}
+            for mid, sr, off in [("m_good_1300", "1300", 0), ("m_dead_1300", "1300", 5), ("m_good_2850", "2850", 0)]
+            for i in range(5)
+        ]
+    )
+    pixels.to_parquet(pdir / "pixels.parquet", index=False)
+
+    arrays, _qc, areas = _process_measurements(pdir, meas, cfg, n_jobs=1)
+    assert areas["valid_area"].tolist() == [True, False, True]
+    assert np.allclose(arrays["wavenumbers_1300"], tgt_1300, rtol=0.0, atol=1e-8)

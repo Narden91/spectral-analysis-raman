@@ -40,8 +40,10 @@ def _fast_top1_eigvalsh_from_gram(
     sw: Any,
     Q0: Any,
 ) -> Any:
-    """Matrix-free 2-step subspace Rayleigh-Ritz in contiguous (B, q, n_s) layout."""
+    """Matrix-free 2-step subspace Rayleigh-Ritz with residual verification and exact per-slice fallback."""
     B, n_s = sw.shape
+    if B == 0:
+        return xp.empty(0, dtype=xp.float64)
     q = int(Q0.shape[1])
     Q0_t = xp.ascontiguousarray(Q0.T)
 
@@ -58,7 +60,9 @@ def _fast_top1_eigvalsh_from_gram(
     Y_t = _apply_g_t(Y_t)
     YtY = Y_t @ xp.swapaxes(Y_t, -1, -2)
     YtY = 0.5 * (YtY + xp.swapaxes(YtY, -1, -2))
-    d, V = xp.linalg.eigh(YtY)
+    eye_q = xp.eye(q, dtype=xp.float64)[None, :, :]
+    yt_fin = xp.all(xp.isfinite(YtY), axis=(-2, -1))
+    d, V = xp.linalg.eigh(xp.where(yt_fin[:, None, None], YtY, eye_q))
     d_max = xp.maximum(d[:, -1:], 1e-24)
     valid = d > (1e-18 * d_max)
     inv_s = xp.where(valid, 1.0 / xp.sqrt(xp.maximum(d, 1e-30)), 0.0)
@@ -66,7 +70,98 @@ def _fast_top1_eigvalsh_from_gram(
     GQ_t = _apply_g_t(Q_t)
     H = Q_t @ xp.swapaxes(GQ_t, -1, -2)
     H = 0.5 * (H + xp.swapaxes(H, -1, -2))
-    return xp.linalg.eigvalsh(H)[:, -1]
+    h_fin = yt_fin & xp.all(xp.isfinite(H), axis=(-2, -1))
+    evals_h, evecs_h = xp.linalg.eigh(xp.where(h_fin[:, None, None], H, eye_q))
+    theta1 = evals_h[:, -1]
+    w_top = evecs_h[:, :, -1]
+    u1 = (w_top[:, None, :] @ Q_t)[:, 0, :]
+    Gu1 = (w_top[:, None, :] @ GQ_t)[:, 0, :]
+    diff = Gu1 - theta1[:, None] * u1
+    r_norm = xp.sqrt(xp.sum(diff * diff, axis=1))
+    theta_ok = h_fin & xp.isfinite(theta1) & (theta1 > 0.0) & xp.isfinite(r_norm)
+    theta1_safe = xp.where(theta_ok, theta1, 1.0)
+    lin_bound = r_norm / theta1_safe
+    if q >= 2:
+        gap = theta1 - evals_h[:, -2]
+        gap_pos = theta_ok & xp.isfinite(gap) & (gap > 0.0)
+        denom_quad = xp.where(gap_pos, theta1_safe * gap, 1.0)
+        quad_bound = xp.where(gap_pos, (r_norm * r_norm) / denom_quad, xp.inf)
+        err_bound = xp.fmin(lin_bound, quad_bound)
+    else:
+        err_bound = lin_bound
+
+    bad_mask = (~theta_ok) | (~xp.isfinite(err_bound)) | (err_bound > 1e-14)
+    bad_host = np.flatnonzero(_to_np(xp, bad_mask) > 0.5)
+    if bad_host.size == 0:
+        return theta1
+
+    out = theta1.copy()
+    if xp is np:
+        for b in bad_host:
+            if not (np.all(np.isfinite(sw[b])) and np.all(np.isfinite(k_mu[b])) and np.isfinite(mu_sq[b])):
+                out[b] = np.nan
+                continue
+            act = np.flatnonzero(sw[b] > 0.0)
+            na = int(act.size)
+            if na == 0:
+                out[b] = 0.0
+                continue
+            sw_a = sw[b, act]
+            km_a = k_mu[b, act]
+            G_sub = K_div[np.ix_(act, act)]
+            G_sub -= km_a[:, None]
+            G_sub -= km_a[None, :]
+            G_sub += mu_sq[b]
+            G_sub *= sw_a[:, None]
+            G_sub *= sw_a[None, :]
+            G_sub = 0.5 * (G_sub + G_sub.T)
+            if not np.all(np.isfinite(G_sub)):
+                out[b] = np.nan
+                continue
+            out[b] = float(
+                linalg.eigvalsh(
+                    G_sub,
+                    subset_by_index=[na - 1, na - 1],
+                    driver="evr",
+                    check_finite=False,
+                    overwrite_a=True,
+                )[-1]
+            )
+        return out
+
+    bad_xp = xp.asarray(bad_host)
+    sw_b = sw[bad_xp]
+    k_mu_b = k_mu[bad_xp]
+    mu_sq_b = mu_sq[bad_xp]
+    G_bad = K_div[None, :, :] - k_mu_b[:, :, None] - k_mu_b[:, None, :] + mu_sq_b[:, None, None]
+    G_bad *= sw_b[:, :, None]
+    G_bad *= sw_b[:, None, :]
+    G_bad = 0.5 * (G_bad + xp.swapaxes(G_bad, -1, -2))
+    active_b = sw_b > 0.0
+    n_act_b = _to_np(xp, xp.sum(active_b, axis=1)).astype(int)
+    pos = xp.arange(n_s)[None, :]
+    order = xp.argsort(xp.where(active_b, pos, n_s + pos), axis=1)
+    bucket_step = 32 if bad_host.size <= 256 else 16
+    sizes = np.minimum(-(-n_act_b // bucket_step) * bucket_step, n_s)
+    ev_bad = xp.zeros(bad_host.size, dtype=xp.float64)
+    for m in np.unique(sizes):
+        if int(m) == 0:
+            continue
+        loc = xp.asarray(np.flatnonzero(sizes == m))
+        idx = order[loc, :m]
+        G_sub = xp.take_along_axis(G_bad[loc], idx[:, :, None], axis=1)
+        G_sub = xp.take_along_axis(G_sub, idx[:, None, :], axis=2)
+        ev_sub = xp.linalg.eigvalsh(G_sub)
+        ev_bad[loc] = ev_sub[:, -1]
+        del G_sub, ev_sub
+    fin_b = (
+        xp.all(xp.isfinite(sw_b), axis=1)
+        & xp.all(xp.isfinite(k_mu_b), axis=1)
+        & xp.isfinite(mu_sq_b)
+    )
+    out[bad_xp] = xp.where(fin_b, ev_bad, xp.nan)
+    del G_bad
+    return out
 
 
 def _orthonormalize_eigh(xp: Any, Yn: Any, YtY: Any) -> Any:
@@ -408,10 +503,11 @@ def _whitened_generalized_eigh(
     inputs_finite = xp.all(xp.isfinite(W_k), axis=(-2, -1)) & xp.all(xp.isfinite(T_k), axis=(-2, -1))
     eye_k = xp.eye(k, dtype=xp.float64)
     W_safe = xp.where(inputs_finite[:, None, None], W_k, eye_k[None, :, :])
+    W_safe = 0.5 * (W_safe + xp.swapaxes(W_safe, -1, -2))
     T_safe = xp.where(inputs_finite[:, None, None], T_k, eye_k[None, :, :])
+    T_safe = 0.5 * (T_safe + xp.swapaxes(T_safe, -1, -2))
 
     d_w, q_w = xp.linalg.eigh(W_safe)
-    d_w = xp.maximum(d_w, 0.0)
     tau_raw = xp.diagonal(T_safe, axis1=-2, axis2=-1).sum(axis=-1) / float(k)
     tau_valid = inputs_finite & xp.isfinite(tau_raw) & (tau_raw > float(eigenvalue_tolerance))
     tau_safe = xp.where(tau_valid, tau_raw, 1.0)
@@ -420,9 +516,14 @@ def _whitened_generalized_eigh(
     T_tilde = 0.5 * (T_tilde + xp.swapaxes(T_tilde, -1, -2))
     if grid_mode:
         denom = d_w[:, None, :] + lam[None, :, None] * tau_safe[:, None, None]
-        denom_ok = xp.all(xp.isfinite(denom) & (denom > 1e-18), axis=-1)
+        max_denom = xp.max(denom, axis=-1, keepdims=True)
+        denom_ok = xp.all(
+            xp.isfinite(denom) & (denom > 0.0) & (denom > (1e-14 * max_denom)),
+            axis=-1,
+        )
         valid_out = tau_valid[:, None] & denom_ok
-        inv_sqrt = 1.0 / xp.sqrt(xp.maximum(denom, 1e-18))
+        denom_safe = xp.where(xp.isfinite(denom) & (denom > 0.0), denom, 1.0)
+        inv_sqrt = xp.where(denom_ok[:, :, None], 1.0 / xp.sqrt(denom_safe), 0.0)
         M_batch = T_tilde[:, None, :, :] * (inv_sqrt[:, :, :, None] * inv_sqrt[:, :, None, :])
         M_batch = 0.5 * (M_batch + xp.swapaxes(M_batch, -1, -2))
         _, U_batch = xp.linalg.eigh(M_batch)
@@ -430,9 +531,14 @@ def _whitened_generalized_eigh(
         return xp.where(valid_out[:, :, None, None], vecs, xp.nan)
 
     denom = d_w + (lam * tau_safe)[:, None]
-    denom_ok = xp.all(xp.isfinite(denom) & (denom > 1e-18), axis=-1)
+    max_denom = xp.max(denom, axis=-1, keepdims=True)
+    denom_ok = xp.all(
+        xp.isfinite(denom) & (denom > 0.0) & (denom > (1e-14 * max_denom)),
+        axis=-1,
+    )
     valid_out = tau_valid & denom_ok
-    inv_sqrt = 1.0 / xp.sqrt(xp.maximum(denom, 1e-18))
+    denom_safe = xp.where(xp.isfinite(denom) & (denom > 0.0), denom, 1.0)
+    inv_sqrt = xp.where(denom_ok[:, None], 1.0 / xp.sqrt(denom_safe), 0.0)
     M_mat = T_tilde * (inv_sqrt[:, :, None] * inv_sqrt[:, None, :])
     M_mat = 0.5 * (M_mat + xp.swapaxes(M_mat, -1, -2))
     _, U_mat = xp.linalg.eigh(M_mat)
