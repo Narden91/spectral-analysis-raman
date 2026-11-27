@@ -13,7 +13,9 @@ export MS_ML_PARTITION=small
 export MS_ML_ACCOUNT=project_2019570
 ```
 
-Each script emails `emanuele.nardone@uef.fi` on failure, time limit, and finish. The running job `3513084` was updated to use the same notification.
+Each script emails `emanuele.nardone@uef.fi` on failure, time limit, and finish.
+
+Heavy jobs request 128 CPUs and 512G. Changing a script does not resize a job that is already running. Cancel it and submit the same script again; `--resume` continues its output directory.
 
 - [ ] Simulation preflight passes
 

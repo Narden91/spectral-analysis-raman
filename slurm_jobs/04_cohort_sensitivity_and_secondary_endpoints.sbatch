@@ -5,8 +5,8 @@
 #SBATCH --job-name=cohort-sensitivity-secondary-endpoints
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=128
+#SBATCH --mem=512G
 #SBATCH --time=48:00:00
 #SBATCH --output=Results_manuscript_ml/slurm_logs/%x-%j.out
 #SBATCH --error=Results_manuscript_ml/slurm_logs/%x-%j.err

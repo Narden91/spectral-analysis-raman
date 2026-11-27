@@ -103,7 +103,7 @@ ms_ml_run_simulation_scenario() {
     --no-gpu \
     --n-jobs "${n_jobs}" \
     --resume \
-    --checkpoint-chunk-size 25
+    --checkpoint-chunk-size "${n_jobs}"
 }
 
 # The runner has no skip-calibration flag. This job also writes a single-setting
@@ -131,7 +131,7 @@ ms_ml_run_mde_signal_curve() {
     --no-gpu \
     --n-jobs "${n_jobs}" \
     --resume \
-    --checkpoint-chunk-size 25
+    --checkpoint-chunk-size "${n_jobs}"
 }
 
 ms_ml_run_readiness_audit() {

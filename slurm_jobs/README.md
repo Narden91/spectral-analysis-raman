@@ -27,7 +27,7 @@ Optional:
 
 `MS_ML_UV_EXTRAS="--group gpu"` installs CuPy and is slower for calibration. Do not set it on a CPU partition.
 
-On this cluster, `small` is the correct partition: one node, up to 3 days, and it accepts the 16-CPU / 64G / 48-hour requests. `medium` rejects them because its limit is 36 hours (`1-12:00:00`). Use `longrun` only if a resubmit is not enough; it requires the `longrun` QoS.
+On this cluster, `small` is the correct partition: one node, up to 3 days, 384 CPUs, and either about 745 GiB or 1.5 TiB of RAM. The 128-CPU / 512G / 48-hour requests fit every `small` node. A full 384-CPU node usually waits behind fragmentation, so do not request one unless the queue is empty. `medium` rejects these jobs because its limit is 36 hours (`1-12:00:00`). Use `longrun` only if a resubmit is not enough; it requires the `longrun` QoS.
 
 ## Check
 
@@ -108,10 +108,10 @@ Resources in the `.sbatch` files:
 | Jobs | CPUs | Memory | Wall time |
 |---|---|---|---|
 | Readiness | 2 | 16G | 30 minutes |
-| Primary point estimate | 8 | 32G | 4 hours |
-| Simulation, MDE, primary bootstrap, sensitivity | 16 | 64G | 48 hours, except primary bootstrap at 12 hours |
+| Primary point estimate | 16 | 64G | 4 hours |
+| Simulation, MDE, primary bootstrap, sensitivity | 128 | 512G | 48 hours, except primary bootstrap at 12 hours |
 
-`n_jobs` is `$SLURM_CPUS_PER_TASK`. BLAS threads are pinned to 1 so workers do not oversubscribe the node.
+`n_jobs` is `$SLURM_CPUS_PER_TASK`. The simulation checkpoint chunk is the same count: a smaller chunk would leave the extra cores idle. BLAS threads are pinned to 1 so workers do not oversubscribe the node. 512G is about 4 GiB per worker and still fits the smaller `small` nodes. If a job is killed for memory, lower the CPU request rather than asking for more than 700G.
 
 ## Change the configuration
 

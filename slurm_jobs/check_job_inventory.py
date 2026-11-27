@@ -36,7 +36,7 @@ LOCKED_SCENARIO_FLAGS = (
     "--seed-set validation",
     "--no-gpu",
     "--resume",
-    "--checkpoint-chunk-size 25",
+    '--checkpoint-chunk-size "${n_jobs}"',
 )
 MDE_FLAGS = ("--skip-scenario-suite", "--run-mde-curve")
 COHORT_OUTPUTS = {
