@@ -1,8 +1,12 @@
 \documentclass[preprint,12pt]{elsarticle}
 
-\usepackage{amssymb} \usepackage{amsmath} \usepackage{lineno} \usepackage{subcaption} \usepackage{hyperref} \usepackage{cleveref} \usepackage{booktabs} \usepackage{tabularx} \usepackage{array} \usepackage{siunitx} \usepackage{xcolor}
+\usepackage{amssymb} \usepackage{amsmath} \usepackage{lineno} \usepackage{subcaption} \usepackage{hyperref} \usepackage{cleveref} \usepackage{booktabs} \usepackage{tabularx} \usepackage{array} \usepackage{siunitx} \usepackage{xcolor} \usepackage{placeins}
 
 \emergencystretch=2em
+\renewcommand{\topfraction}{0.85}
+\renewcommand{\bottomfraction}{0.7}
+\renewcommand{\textfraction}{0.12}
+\renewcommand{\floatpagefraction}{0.75}
 
 \renewcommand\thesubfigure{\Alph{subfigure}}
 \captionsetup[subfigure]{labelformat=simple, labelsep=space, labelfont=bf,
@@ -123,9 +127,7 @@
 }
 
 \begin{abstract}
-Raman spectroscopy provides a label-free vibrational profile of extracellular-vesicle (EV)-enriched biofluid fractions. Participant-level Raman profiles were obtained from 97 participants with ischemic stroke and 50 controls. After quality control and region-specific normalization, spectra acquired at individual spatial sampling locations were aggregated into a single median spectrum per participant in the fingerprint (734--1788~\si{\per\centi\metre}) and C--H stretching (2451--3197~\si{\per\centi\metre}) regions, so that inference was carried out at the participant rather than the measurement level. The objectives were to characterize participant-level spectral variation, assess exploratory case-control separation, and examine associations with clinical outcomes within the stroke cohort. Participant-level spectra showed 21 reproducible Raman bands and shoulder features associated with lipids, proteins, nucleic acids, and carotenoids.
-Lipid-associated regions accounted for most of the normalized spectral variance (fingerprint PC1, 75.8\%; C--H PC1, 67.1\%), a pattern that persisted when PCA was repeated using only spectra from participants with ischemic stroke.
-All 21 features differed between stroke and control participants after false-discovery-rate correction, with increases and decreases distributed across multiple correlated Raman domains. The primary whole-spectrum partial least-squares discriminant analysis (PLS-DA) model gave modest discrimination (balanced accuracy 0.655, 95\% CI 0.538--0.771; ROC--AUC 0.711, 95\% CI 0.550--0.823; sex-stratified permutation $p=0.005$). Within the stroke cohort, no whole-spectrum association survived correction for multiplicity, and Montreal Cognitive Assessment (MoCA) scores gave negative cross-validated $R^2$, so the spectra did not support the prediction of cognitive outcome. Participant-level Raman spectroscopy, therefore, identifies reproducible biochemical differences within compositionally complex EV-enriched fractions and identifies lipid-, protein-, nucleic acid-, and carotenoid-associated regions for molecular follow-up in larger, balanced cohorts.
+Raman spectroscopy provides a label-free vibrational profile of extracellular-vesicle (EV)-enriched biofluid fractions. However, bulk biofluid isolates are compositionally heterogeneous, and analyzing spatial spectra as independent observations inflates apparent precision and conflates group separation with individual clinical prediction. We obtained participant-level Raman profiles from 97 participants with ischemic stroke and 50 controls by aggregating quality-controlled, region-normalized spectra into one median spectrum per participant in the fingerprint (734--1788~\si{\per\centi\metre}) and C--H stretching (2451--3197~\si{\per\centi\metre}) regions. Participant-level spectra exhibited 21 reproducible Raman bands and shoulders assigned tentatively to lipids, proteins, carbohydrates, nucleic acids, and carotenoids. Lipid-associated regions dominated normalized inter-participant variance in principal component analysis (PCA; fingerprint PC1, 75.8\%; C--H PC1, 67.1\%), both across the full cohort and within the stroke cohort alone. All 21 windows differed between stroke and control participants after false-discovery-rate correction ($|r|=0.202$--0.465, all $q\le 0.045$), reflecting correlated increases and decreases across normalized domains. In this unmatched, sex-imbalanced cohort, the primary whole-spectrum partial least-squares discriminant analysis (PLS-DA) model achieved modest separation (balanced accuracy 0.655, 95\% confidence interval [CI] 0.538--0.771; receiver operating characteristic area under the curve [ROC--AUC] 0.711, 95\% CI 0.550--0.823; sex-stratified permutation $p=0.005$). Within the stroke cohort, no spectral feature survived multiplicity correction for clinical outcomes, and PLS regression yielded negative cross-validated $R^2$ ($-0.403$ to $-0.067$) for Montreal Cognitive Assessment endpoints. Participant-level Raman spectroscopy therefore detects distributed spectral differences in EV-enriched fractions and narrows candidate biochemical regions for orthogonal validation in larger, age- and sex-balanced cohorts.
 \end{abstract}
 
 \begin{keyword} Raman spectroscopy \sep extracellular-vesicle-enriched fractions \sep ischemic stroke \sep participant-level inference \sep chemometrics \sep clinical prediction \end{keyword}
@@ -135,15 +137,15 @@ All 21 features differed between stroke and control participants after false-dis
 \section{Introduction} 
 \label{sec:introduction}
 
-EVs carry lipids, proteins, and nucleic acids from their cells of origin, making them candidate minimally invasive indicators of physiological and pathological states. Raman spectroscopy is well-suited to EV analysis because it yields a label-free vibrational fingerprint that captures contributions from multiple biochemical classes simultaneously \cite{liu2025}. Raman-based investigations of EV preparations now include Raman imaging of vesicle preparations \cite{horgan2020}, surface-enhanced approaches applied to isolates that also carry co-purified lipoproteins \cite{koster2021}, and machine-learning-assisted classification and identification \cite{lee2020, jensen2024}. Reported applications span neurological and renal disease \cite{imanbekova2021, kaminska2022} as well as reproductive and cardiovascular contexts \cite{zhang2020, buchan2025}. Together, these studies establish that EV Raman spectroscopy is feasible.
+Extracellular vesicles (EVs) carry lipids, proteins, and nucleic acids from their cells of origin, making them candidate minimally invasive indicators of physiological and pathological states. Raman spectroscopy is well-suited to EV analysis because it yields a label-free vibrational fingerprint that captures contributions from multiple biochemical classes simultaneously \cite{liu2025}. Raman-based investigations of EV preparations now include Raman imaging of vesicle preparations \cite{horgan2020}, surface-enhanced approaches applied to isolates that also carry co-purified lipoproteins \cite{koster2021}, and machine-learning-assisted classification and identification \cite{lee2020, jensen2024}. Reported applications span neurological and renal disease \cite{imanbekova2021, kaminska2022} as well as reproductive and cardiovascular contexts \cite{zhang2020, buchan2025}. Together, these studies establish that EV Raman spectroscopy is feasible.
 
-Despite this progress, several challenges complicate the interpretation of Raman spectra acquired from biological EV preparations. First, bulk EV isolates are chemically heterogeneous and may contain lipoproteins and other co-isolated particles. Raman spectroscopy has itself been proposed as a tool for assessing EV preparation purity \cite{gualerzi2019}. Spectra obtained from SEC-derived EV-enriched fractions should therefore be read as composite signals originating from complex particle populations rather than from a single vesicle class. Second, Raman bands in biological samples often overlap, making biochemical assignments inherently non-unique. Lipid-, protein-, nucleic-acid-, and carotenoid-associated bands can occupy overlapping spectral regions, and preprocessing or normalization procedures may alter their relative intensities. Raman band assignments therefore support biochemical hypotheses rather than direct molecular identification \cite{czamara2015, dreier2019, hobro2007}.
+Despite this progress, several challenges complicate the interpretation of Raman spectra acquired from biological EV preparations. First, bulk EV isolates are chemically heterogeneous and may contain lipoproteins and other co-isolated particles. Raman spectroscopy has itself been proposed as a tool for assessing EV preparation purity \cite{gualerzi2019}. Spectra obtained from size-exclusion chromatography (SEC)-derived EV-enriched fractions should therefore be read as composite signals originating from complex particle populations rather than from a single vesicle class. Second, Raman bands in biological samples often overlap, making biochemical assignments inherently non-unique. Lipid-, protein-, nucleic-acid-, and carotenoid-associated bands can occupy overlapping spectral regions, and preprocessing or normalization procedures may alter their relative intensities. Raman band assignments therefore support biochemical hypotheses rather than direct molecular identification \cite{czamara2015, dreier2019, hobro2007}.
 
 A third challenge relates to statistical inference. Spectral-imaging studies typically acquire many spectra from multiple map positions and physical areas within the same biological sample. These measurements are technically distinct but biologically related. Treating them as independent observations inflates the effective sample size and can lead to overly optimistic estimates of precision and classification performance, a problem widely recognized as pseudoreplication \cite{hurlbert1984, lazic2010, lazic2018}. Although Raman-based classification of EVs is now well established, particularly in cancer and single-vesicle applications \cite{lee2020,jensen2024}, relatively few studies explicitly distinguish between technical spectra and independent biological observations. Reported classification performance is therefore hard to compare across studies when the inferential unit is unclear.
 
-Interpretation is further complicated by the distinction between cohort-level discrimination and individual-level prediction. Spectral differences observed between unmatched clinical groups do not necessarily translate into prognostic information for individual patients. Confounding variables, cohort imbalance, and optimistic validation procedures may all contribute to apparent group separation that does not reflect clinically actionable biological information. Particularly in neurological applications, only a limited number of studies have examined relationships between EV Raman signatures and longitudinal clinical outcomes. For example, carotenoid-associated Raman features have been linked to rehabilitation recovery in Parkinson's disease \cite{gualerzi2025}, suggesting that Raman-derived biomarkers may potentially provide information beyond simple case-control discrimination.
+Interpretation is further complicated by the distinction between cohort-level discrimination and individual-level prediction. Spectral differences observed between unmatched clinical groups do not necessarily translate into prognostic information for individual patients. Confounding variables, cohort imbalance, and optimistic validation procedures may all contribute to apparent group separation that does not reflect clinically actionable biological information. Particularly in neurological applications, only a limited number of studies have examined relationships between EV Raman signatures and longitudinal clinical outcomes. For example, carotenoid-associated Raman features have been linked to rehabilitation recovery in Parkinson's disease \cite{gualerzi2025}, suggesting that Raman-derived features may provide information beyond simple case-control discrimination.
 
-In the present study, we investigate the Raman spectra of SEC-isolated, circulating EV-enriched fractions obtained from participants with ischemic stroke and controls. Unlike many previous studies, all spectra acquired from a participant were aggregated before statistical analysis, ensuring that inference was performed at the participant rather than the measurement level. The objectives were threefold: (i) to characterize the dominant participant-level Raman variation in circulating EV-enriched fractions, (ii) to assess exploratory case-control separation between ischemic stroke participants and controls under participant-level validation, and (iii) to determine whether Raman profiles are associated with or predictive of cognitive and clinical outcomes within the stroke cohort. Particular attention was given to the distinction between group-level spectral differences and clinically meaningful prediction. The study is intended as a methodological and exploratory contribution that identifies spectral domains of interest in stroke-associated EV-enriched fractions rather than as a validated diagnostic or prognostic platform.
+In the present study, we investigate the Raman spectra of SEC-isolated, circulating EV-enriched fractions obtained from participants with ischemic stroke and controls. To avoid measurement-level pseudoreplication, we aggregated all spectra acquired from each participant before statistical analysis, ensuring that inference was performed at the participant rather than the measurement level. We aimed to (i) characterize the dominant participant-level Raman variation in circulating EV-enriched fractions, (ii) assess exploratory case-control separation between ischemic stroke participants and controls under participant-level validation, and (iii) determine whether Raman profiles are associated with or predictive of cognitive and clinical outcomes within the stroke cohort. We paid particular attention to the distinction between group-level spectral differences and clinically meaningful prediction. The study is intended as a methodological and exploratory contribution that identifies spectral domains of interest in stroke-associated EV-enriched fractions rather than as a validated diagnostic or prognostic platform.
 
 
 \section{Materials and Methods} 
@@ -151,22 +153,22 @@ In the present study, we investigate the Raman spectra of SEC-isolated, circulat
 
 \subsection{Study design, objectives, and inferential scope} \label{subsec:design}
 
-This study employed a single-cohort observational spectroscopy design, integrating a cross-sectional case-control analysis with within-stroke clinical analyses. In all analyses, each participant was treated as a single independent observation. Multiple spectra acquired from the same participant were aggregated before statistical analysis. The classification and outcome-prediction analyses are reported in accordance with the TRIPOD+AI recommendations \cite{collins2024}, while remaining exploratory rather than intended for clinical use.
+This study employed a single-cohort observational spectroscopy design, integrating a cross-sectional case-control analysis with within-stroke clinical analyses. In all analyses, each participant was treated as a single independent observation. Multiple spectra acquired from the same participant were aggregated before statistical analysis. The classification and outcome-prediction analyses are guided by relevant TRIPOD+AI reporting principles \cite{collins2024}, while remaining exploratory rather than intended for clinical use.
 
 \subsection{Study cohort, outcomes, and ethics} 
 \label{subsec:cohort}
 
-The spectral cohort included 97 participants with ischemic stroke (45 female, 52 male) and 50 controls (40 female, 10 male).
+The spectral cohort comprised 147 participants: 97 with acute ischemic stroke (45 female, 52 male; median age 67.0 years, IQR 59.0--74.0) and 50 controls (40 female, 10 male).
 
 Stroke participants were drawn from the IBioStroke study (Identification and Clinical Validation of Biomarkers for Long-Term Outcome After Cerebral Ischemia). The parent cohort prospectively enrolled patients with acute ischemic stroke admitted to the Comprehensive Stroke Center at the University Hospital in Krakow, Poland, between July 18, 2020, and December 14, 2022. Demographic, clinical, and laboratory data were collected prospectively \cite{deccwiek2025}.
 
 Eligibility for the parent stroke cohort required age $\geq 18$ years, ischemic stroke meeting the World Health Organization definition, and signed consent to participate. Exclusion criteria were a pre-stroke modified Rankin Scale score $>2$; a pre-stroke diagnosis of dementia or depression, established from patient or caregiver reports and/or available clinical documentation; and a concomitant chronic neurodegenerative disorder, chronic autoimmune disorder, or cancer.
 
-The distribution of males and females differed significantly between the stroke and control cohorts (45/97 \textit{vs}. 40/50 females, $\chi^2 = 13.9$, $p < 0.001$), indicating that sex may act as a confounding factor in subsequent spectroscopic analyses. Age data were available for all stroke participants but for only one control, which prevented an age-adjusted case-control analysis. MoCA scores were recorded at admission and three months after stroke; change was defined as $\Delta\mathrm{MoCA}=\mathrm{MoCA}_{3\mathrm{m}}- \mathrm{MoCA}_{\mathrm{baseline}}$.
+The distribution of males and females differed significantly between the stroke and control cohorts (45/97 \textit{vs}. 40/50 females, $\chi^2 = 13.9$, $p < 0.001$), indicating that sex may act as a confounding factor in subsequent spectroscopic analyses. Age data were available in the linked analysis dataset for all stroke participants but for only one control, which prevented an age-adjusted case-control analysis. Montreal Cognitive Assessment (MoCA) scores were recorded at admission and three months after stroke; change was defined as $\Delta\mathrm{MoCA}=\mathrm{MoCA}_{3\mathrm{m}}- \mathrm{MoCA}_{\mathrm{baseline}}$.
 
-In addition to MoCA scores, cognitive performance was assessed using the Repeatable Battery for the Assessment of Neuropsychological Status (RBANS), and stroke severity was characterized using the Alberta Stroke Program Early Computed Tomography Score (ASPECTS). Analyses included only participants for whom the relevant clinical measurement was available. Missing values were not estimated, so the number of participants differed between analyses.
+In addition to MoCA scores, cognitive performance at three months was assessed using the Repeatable Battery for the Assessment of Neuropsychological Status (RBANS), and acute stroke severity was characterized using the Alberta Stroke Program Early Computed Tomography Score (ASPECTS). Clinical analyses were restricted to complete cases for each endpoint (\cref{tab:cohortA} and Table~S1), without imputation of missing clinical measurements.
 
-Because some clinical measurements were unavailable for all participants, we compared participants with and without available outcome data, using Mann-Whitney tests for age and Fisher exact tests for sex and lesion side (\Cref{tab:cohortA} and Table~S1). This analysis was intended to identify potential biases caused by missing observations rather than to evaluate Raman spectral differences between groups. Missing cognitive outcomes were disproportionately associated with left-sided strokes, suggesting that missingness was related to clinical characteristics rather than occurring at random; the resulting selection effect is discussed in \cref{subsec:limitations}.
+To assess potential selection bias from incomplete clinical follow-up, we compared stroke participants with and without observed outcome data using two-sided Mann--Whitney $U$ tests for age and Fisher exact tests for sex and lesion side (\cref{tab:cohortA} and Table~S1); these comparisons evaluated outcome availability rather than spectral differences.
 
 \input{table_cohortA}
 
@@ -179,7 +181,7 @@ Blood was collected longitudinally from stroke patients at two predefined time p
 
 Clarified supernatant (0.5~mL) was applied onto a qEVoriginal/35~nm column (cat.\ no.\ ICO-35-100; Izon Science) previously equilibrated with $0.2\,\mu\text{m}$-filtered Dulbecco's Phosphate-Buffered Saline (DPBS; cat.\ no.\ D8537; Sigma-Aldrich). Following passage of the 2.0~mL void volume with DPBS, sequential 0.4~mL fractions were collected. Fractions 2--4 were pooled, transferred to an Amicon Ultra-4 centrifugal filter unit (10~kDa molecular weight cut-off; cat.\ no.\ UFC8010; MilliporeSigma), and concentrated at $4{,}000 \times g$ for 40~min at room temperature. The concentrated EV fraction was adjusted to a final volume of $100\,\mu\text{L}$ with DPBS and stored at $-80\,^\circ\text{C}$.
 
-Particle size distribution and concentration were quantified using a NanoSight NS300 instrument (Malvern Panalytical) operating NTA software v3.2. Samples were diluted in $0.2\,\mu\text{m}$-filtered DPBS to achieve an optimal target concentration of 20--60 particles/frame. Three 30-s videos were recorded per sample at $25\,^\circ\text{C}$ under constant syringe-pump flow, with a fixed camera level of 14 and a detection threshold of 4. Blood collection, processing, storage, and isolation parameters were reported in accordance with the MIBlood-EV guidelines  \cite{lucien2023}.
+Particle size distribution and concentration were monitored during fraction preparation using nanoparticle tracking analysis (NTA) on a NanoSight NS300 instrument (Malvern Panalytical) operating NTA software v3.2; NTA measurements served as routine preparation checks and were not analyzed as cohort-level endpoints. Samples were diluted in $0.2\,\mu\text{m}$-filtered DPBS to achieve an optimal target concentration of 20--60 particles/frame. Three 30-s videos were recorded per sample at $25\,^\circ\text{C}$ under constant syringe-pump flow, with a fixed camera level of 14 and a detection threshold of 4. Available blood collection, processing, storage, and isolation parameters are reported to the extent available under the MIBlood-EV framework \cite{lucien2023}.
 Because SEC isolation and particle counting do not exclude lipoproteins or other co-isolates, the samples are referred to as EV-enriched fractions, following MISEV2023 guidance on nomenclature for incompletely characterized preparations \cite{welsh2024}. Spectral features cannot be attributed exclusively to EVs or to brain-derived EV populations.
 
 \subsection{Raman acquisition} 
@@ -194,73 +196,53 @@ After edge trimming, the frozen analytical grids comprised 734--1788~\si{\per\ce
 
 \subsection{Preprocessing and participant-level representation} \label{subsec:preprocessing}
 
-Spectra were subjected to artifact removal, interpolation onto fixed spectral grids, baseline correction, smoothing, and block-specific normalization (\cref{tab:preprocessing_params}). Retained spectra were first aggregated by median within each mapped area, then within each participant, yielding one fingerprint and one C--H spectrum per participant. This approach prevented technical spectra from being treated as independent biological observations. Controls contributed three measurements per block, while most stroke participants contributed six. The potential impact of this acquisition imbalance is discussed in Section~S8 of the Supporting Information (SI).
+Spectra were subjected to artifact removal, interpolation onto fixed spectral grids, baseline correction, smoothing, and block-specific normalization (\cref{tab:preprocessing_params}). Retained spectra were first aggregated by median within each mapped area, then within each participant, yielding one fingerprint and one C--H spectrum per participant. This approach prevented technical spectra from being treated as independent biological observations. Controls contributed three mapped areas per block (one sample), whereas most stroke participants contributed six mapped areas (two samples). The potential impact of this acquisition imbalance is discussed in \cref{subsec:interpretation,subsec:limitations} and Section~S8 of the Supporting Information (SI).
 
 
 \begin{table}[ht]
 \centering
-\caption{Frozen preprocessing parameters. Steps are listed in execution order.}
+\caption{Frozen preprocessing parameters, listed in execution order. Wavenumbers are in \si{\per\centi\metre}. arPLS: asymmetrically reweighted penalized least squares \cite{baek2015}; SD: standard deviation; SNR: signal-to-noise ratio; SNV: standard normal variate.}
 \label{tab:preprocessing_params}
-\small
-\renewcommand{\arraystretch}{0.6}
-\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.31\textwidth} >{\raggedright\arraybackslash}X@{}}
+\scriptsize
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}l>{\raggedright\arraybackslash}X@{}}
 \toprule
-Step & Parameter \\
+Step & Parameters \\
 \midrule
-Dead/saturated pixel screen & Minimum spectral SD: 1.0 \\
-                            & Saturation threshold: 65\,000 \\
-\addlinespace
-Positive cosmic-ray correction & Spatial-neighbor $z$ threshold: 8 \\
-                               & Maximum event width: 3 channels \\
-                               & Neighbors: 8 \\
-                               & Half-window: 10 \\
-                               & Maximum corrected fraction: 0.02 \\
-\addlinespace
-Edge trimming & Approximately 15~\si{\per\centi\metre} at each boundary \\
-\addlinespace
-Frozen-grid interpolation & Linear, no extrapolation \\
-                          & Spacing: 1~\si{\per\centi\metre} \\
-                          & Ranges: 734--1788 and 2451--3197~\si{\per\centi\metre} \\
-\addlinespace
-arPLS baseline correction & $\lambda = 10^6$ \\
-                          & $p = 0.01$ \\
-                          & Maximum iterations: 100 \\
-                          & Convergence ratio: 0.001 \\
-\addlinespace
-Signal-to-noise gate & Minimum SNR: 5 in region-specific anchor windows \\
-\addlinespace
-Savitzky-Golay smoothing & Fingerprint: 7-channel window, order 2 \\
-                         & C-H: 9-channel window, order 2 \\
-\addlinespace
-Block normalization & Fingerprint: SNV \\
-                    & C-H: Trapezoidal area normalization \\
-\addlinespace
-Minimum retention & At least 4 positions per area \\
-                  & At least 10 positions per participant \\
+Dead/saturated pixel screen      & Minimum spectral SD 1.0; saturation threshold \num{65000} \\
+Cosmic-ray correction (positive) & Spatial-neighbor $z$ threshold 8; 8 neighbors; half-window 10; maximum event width 3 channels; maximum corrected fraction 0.02 \\
+Edge trimming                    & ${\approx}15$ at each boundary \\
+Frozen-grid interpolation        & Linear, no extrapolation; spacing 1; ranges 734--1788 and 2451--3197 \\
+arPLS baseline correction        & $\lambda = 10^{6}$; maximum 100 iterations; convergence ratio 0.001 \\
+SNR gate                         & Minimum SNR 5 (peak $\pm 5$ channels within anchor windows vs.\ SD of 20 trailing channels); fingerprint anchors 995--1015, 1435--1470 and 1630--1680; C--H anchor 2840--2975 \\
+Savitzky--Golay smoothing        & Order 2; window 7 channels (fingerprint), 9 channels (C--H) \\
+Block normalization              & SNV (fingerprint); trapezoidal area normalization (C--H) \\
+Minimum retention                & ${\geq}4$ positions per area; ${\geq}10$ positions per participant \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\subsection{Subject-level PCA and block fusion} 
+\subsection{Participant-level PCA and block fusion} 
 \label{subsec:biopca}
 
-Principal component analysis (PCA) was applied separately to the participant-level fingerprint and C--H spectral matrices. A combined analysis incorporating both spectral regions was performed using multiple-factor analysis weighting to balance block contributions. The first three principal components were examined, and high-loading spectral intervals were used to identify the regions contributing most strongly to between-participant variation; the interval definition is given in Section~S2 of the SI. A measurement-count-matched downsampling analysis was performed as a sensitivity check and is described in Section~S8.
+Principal component analysis (PCA) was applied separately to the participant-level fingerprint and C--H spectral matrices. A combined analysis incorporating both spectral regions was performed using multiple-factor analysis (MFA) block weighting, dividing each block by the square root of its leading eigenvalue to balance block contributions. The first three principal components were examined, and high-loading spectral intervals were used to identify the regions contributing most strongly to between-participant variation; the interval definition is given in Section~S2 of the SI. A measurement-count-matched downsampling analysis was performed as a sensitivity check for PC1 stability and is described in Section~S8.
 
 
 \subsection{Raman band comparison between cohorts} 
 \label{subsec:band_analysis}
 
-To compare stroke and control samples at the level of individual spectral features, 21 Raman windows were defined around all reproducibly observed bands and shoulders in the participant-level spectra (\cref{tab:raman_bands}). Window boundaries were selected to cover each spectral feature while minimizing overlap with neighboring bands. Each window was subsequently represented by its mean normalized intensity (SNV values for fingerprint bands and area-normalized values for C--H bands). Because analyses were performed on normalized spectra, the resulting values reflect relative spectral intensities rather than absolute molecular concentrations.
+To compare stroke and control samples at the level of individual spectral features, 21 Raman windows were curated around all reproducibly observed bands and shoulders in the participant-level spectra (\cref{tab:raman_bands}). Window boundaries were selected to cover each spectral feature while minimizing overlap with neighboring bands. Each window was subsequently represented by its mean normalized intensity (standard normal variate [SNV] values for fingerprint bands and area-normalized values for C--H bands). Because analyses were performed on normalized spectra, the resulting values reflect relative spectral intensities subject to block-level normalization constraints rather than absolute molecular concentrations.
 
-Differences between the stroke and control groups were assessed using Mann-Whitney tests. Effect sizes were expressed as rank-biserial correlations, where positive values indicate higher relative intensities in the stroke group. $P$-values were adjusted for multiple comparisons using the Benjamini-Hochberg procedure.
+Differences between the stroke and control groups were assessed using two-sided Mann--Whitney $U$ tests. Effect sizes were expressed as rank-biserial correlations ($r$), where positive values indicate higher relative intensities in the stroke group, with 95\% confidence intervals obtained from 2,000 participant-level bootstrap resamples. $P$-values were adjusted for multiple comparisons using the Benjamini--Hochberg procedure.
 
-Because neighboring Raman bands overlap and many spectral regions are chemically related, the 21 windows should not be considered independent measurements. Instead, they were used as a descriptive panel of spectral domains associated with group differences.
+Because neighboring Raman bands overlap, many spectral regions are chemically related, and SNV and area normalization couple relative intensities across channels, the 21 windows are not independent measurements. Instead, they serve as an unadjusted descriptive panel of spectral domains associated with group differences.
 
 
-\begin{table}[ht!]
+\begin{table}[htbp]
 \centering
 \scriptsize
-\caption{Raman band assignments for EV spectra.}
+\caption{Raman band assignments for EV-enriched fraction spectra.}
 \label{tab:raman_bands}
 \renewcommand{\arraystretch}{1.05}
 \begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.3\textwidth} >{\raggedright\arraybackslash}p{0.25\textwidth}X c c@{}}
@@ -268,14 +250,14 @@ Because neighboring Raman bands overlap and many spectral regions are chemically
 Vibration & Biochemical assignment & Peak / \si{\per\centi\metre} & Range / \si{\per\centi\metre} & Reference \\
 \midrule
 Cytosine/uracil breathing/stretching modes & nucleic acids & 786 & 773--796 & \citenum{hobro2007} \\
-O-P-O stretch & nucleic acids & 821 & 812--832 & \citenum{buchan2025, ferrara2015} \\
+O--P--O stretch & nucleic acids & 821 & 812--832 & \citenum{buchan2025, ferrara2015} \\
 Tyrosine doublet/glycan signature & proteins/glycans & 851 & 836--874 & \citenum{gualerzi2017, grenier2025, buchan2025} \\
-C-O-C stretch in sugars & nucleic acids & 925 & 900--938 & \citenum{zhou2026} \\
-C-C stretch $\beta$-sheet & proteins & 980 & 965--995 & \citenum{grenier2025} \\
-C-O/C-N stretch & proteins & 1060 & 1044--1078 & \citenum{gualerzi2017} \\
-C-C stretch & lipids & 1089 & 1082--1098 & \citenum{potcoava2021} \\
-PO$_2^-$ stretch/C-N stretch & nucleic acids/proteins & 1112 & 1105--1120 & \citenum{gualerzi2019, grenier2025} \\
-C-C stretch carotene & carotenoids & 1156 & 1145--1165 & \citenum{grenier2025} \\
+C--O--C / C--C skeletal stretch & carbohydrates, proteins, nucleic acids & 925 & 900--938 & \citenum{talari2015} \\
+C--C stretch $\beta$-sheet & proteins & 980 & 965--995 & \citenum{grenier2025} \\
+C--O/C--N stretch & proteins & 1060 & 1044--1078 & \citenum{gualerzi2017} \\
+C--C stretch & lipids & 1089 & 1082--1098 & \citenum{potcoava2021} \\
+PO$_2^-$ stretch/C--N stretch & nucleic acids/proteins & 1112 & 1105--1120 & \citenum{gualerzi2019, grenier2025} \\
+C--C stretch carotene & carotenoids & 1156 & 1145--1165 & \citenum{grenier2025} \\
 CH bend/amide III & lipids/proteins & 1258 & 1240--1280 & \citenum{potcoava2021, grenier2025} \\
 CH$_2$ twist & lipids & 1301 & 1290--1325 & \citenum{grenier2025} \\
 CH$_2$/CH$_3$ scissor deformation & lipids & 1440 & 1430--1445 & \citenum{czamara2015} \\
@@ -284,7 +266,7 @@ $-$C=C$-$ stretch carotene & carotenoids & 1525 & 1510--1535 & \citenum{gualerzi
 Tryptophan signature & proteins & 1555 & 1550--1560 & \citenum{gualerzi2017} \\
 C=C stretch/amide I & lipids/proteins & 1657 & 1640--1675 & \citenum{gualerzi2019, potcoava2021} \\
 C=O stretch (hydrogen bonded) & lipids & 1721 & 1710--1730 & \citenum{dreier2019} \\
-C=O stretch & lipids & 1744 & 1735--1755 & \citenum{grenier2025, potcoava2021} \\
+C=O stretch (ester / weakly hydrogen bonded) & lipids & 1744 & 1735--1755 & \citenum{grenier2025, potcoava2021} \\
 CH$_2$ symmetric stretch & lipids & 2853 & 2845--2860 & \citenum{czamara2015, gualerzi2017} \\
 CH$_2$ asymmetric stretch & lipids/proteins & 2890 & 2870--2910 & \citenum{czamara2015, gualerzi2017} \\
 CH$_3$ asymmetric stretch (overlapping with CH$_2$ modes) & lipids/proteins & 2937 & 2925--2945 & \citenum{czamara2015, gualerzi2017} \\
@@ -294,22 +276,24 @@ CH$_3$ asymmetric stretch (overlapping with CH$_2$ modes) & lipids/proteins & 29
 
 \subsection{Case-control classification and confound checks} \label{subsec:cvd_ml_methods}
 
-Whole-spectrum and band-based classification models were developed using PLS-DA as the primary approach, with random forest and $L_1$-penalized logistic regression used as secondary models. Model optimization and evaluation were performed within a nested cross-validation framework to minimize overfitting and to avoid leakage between model selection and performance estimation \cite{kapoor2023}. Performance was assessed using balanced accuracy, ROC--AUC, sensitivity, specificity, and Matthews correlation coefficient. Statistical significance was evaluated using permutation testing. Further details can be found in Section~S3 of the SI.
+Whole-spectrum and 21-window classification models were developed using PLS-DA as the pre-specified primary approach, with random forest and $L_1$-penalized logistic regression as secondary comparators. Scaling, hyperparameter tuning, and threshold selection were confined to training folds within a nested cross-validation framework (five outer folds repeated ten times; four inner folds) to prevent leakage between model selection and performance estimation \cite{kapoor2023}. Performance was assessed using balanced accuracy, ROC--AUC, sensitivity, specificity, and Matthews correlation coefficient, with percentile 95\% CIs derived from 1,000 participant-level out-of-bag bootstrap fits. Statistical significance was evaluated on a single locked five-fold partition via sequential Monte Carlo permutation testing \cite{besag1991} (200--1,000 draws; 99\% Clopper--Pearson stopping interval), using sex-stratified label permutations as the primary test, unrestricted permutations as a secondary check, and Benjamini--Hochberg adjustment across the six model--representation pairs.
+
+To evaluate sex confounding, we fitted a female-only PLS-DA model (45 stroke, 40 control), benchmarked against a sex-only logistic regression baseline on the full cohort, and performed a descriptive full-cohort geometric comparison of disease- and sex-discriminant PLS directions (cosine similarity and in-sample residualization). Further details are provided in Section~S3 of the SI.
 
 
 \subsection{Within-stroke associations and prediction} \label{subsec:clinical_methods}
 
-Associations between participant-level Raman spectra and clinical variables (baseline MoCA, 3-month MoCA, $\Delta$MoCA, RBANS, ASPECTS, and age) were evaluated using Spearman correlation. Multiple-testing correction was applied to account for the large number of spectral channels examined.
+Associations between participant-level Raman spectra (1,802 normalized channels) and clinical variables (baseline MoCA, 3-month MoCA, $\Delta$MoCA, 3-month RBANS, ASPECTS, and age) were evaluated using channel-wise Spearman correlation. Multiplicity was controlled by combining Benjamini--Hochberg false-discovery-rate (FDR) correction within each endpoint--block family with a 1,000-permutation maximum cluster-mass test over contiguous channels ($p<0.05$); both channel-wise FDR and cluster-level support were required to declare a supported region.
 
-The predictive value of Raman profiles for baseline MoCA, 3-month MoCA, and $\Delta$MoCA was assessed using partial least squares (PLS) regression with nested cross-validation. Model performance was evaluated using cross-validated $R^2$, RMSE, and MAE. Statistical significance was assessed by permutation testing.
+The predictive value of whole-spectrum Raman profiles for baseline MoCA, 3-month MoCA, and $\Delta$MoCA was assessed using partial least squares (PLS) regression (1--5 components) within five-fold nested cross-validation. Model performance was evaluated using cross-validated $R^2$, RMSE, and MAE, with endpoint-label sequential Monte Carlo permutation testing (200--1,000 draws) and Holm adjustment across the three MoCA endpoints.
 
-In addition, exploratory biochemical-panel and unsupervised-descriptor analyses were performed as hypothesis-generating assessments. Additional methodological details are provided in Section~S4 of the SI.
+In addition, we performed post hoc exploratory checks using a 10-feature tentatively assigned spectral panel (including a designated age- and sex-adjusted partial Spearman test of the 1525/1721~\si{\per\centi\metre} carotenoid-to-carbonyl ratio against $\Delta$MoCA) and unsupervised descriptors derived from three-component non-negative matrix factorization (NMF) and per-participant Shannon spectral entropy. Additional methodological details are provided in Section~S4 of the SI.
 
 
 \subsection{Software and reproducibility}
 \label{subsec:software}
 
-Data processing and statistical analyses were performed in Python~3.12 using NumPy, SciPy, pandas, scikit-learn, and statsmodels. The workflow was executed using fixed preprocessing and analysis parameters to ensure reproducibility. Randomized procedures, including cross-validation, bootstrapping, and permutation testing, were performed with predefined random seeds. Additional implementation details are provided in Section~S5 of the SI.
+Data processing and statistical analyses were performed in Python~3.12 using NumPy, SciPy, pandas, scikit-learn, statsmodels, and pybaselines. The workflow was executed using fixed preprocessing and analysis parameters to ensure reproducibility. Randomized procedures, including cross-validation, bootstrapping, and permutation testing, were performed with predefined random seeds. Additional implementation details are provided in Section~S5 of the SI.
 
 
 \section{Results and Discussion} 
@@ -317,12 +301,12 @@ Data processing and statistical analyses were performed in Python~3.12 using Num
 
 \subsection{Study cohort}
 
-Following preprocessing and spectral aggregation, participant-level Raman profiles were available for all 147 participants (97 stroke and 50 control). Clinical outcome analyses were conducted on smaller subsets because some clinical measurements were unavailable for all participants (Table~S1).
+Following quality control, 17,725 of 18,150 acquired fingerprint spectra (97.7\%) and 17,201 of 18,150 C--H spectra (94.8\%) were retained across 726 mapped areas, yielding participant-level Raman profiles for all 147 participants (97 stroke and 50 control; \cref{tab:cohortA}). Within the stroke cohort, complete-case sample sizes varied by clinical endpoint ($n=72$ for baseline MoCA, $n=92$ for 3-month MoCA, $n=71$ for $\Delta$MoCA, $n=62$ for 3-month RBANS, and $n=87$ for ASPECTS; \cref{tab:cohortA} and Table~S1). Missing baseline MoCA and $\Delta$MoCA scores were disproportionately associated with left-sided lesions (76\% and 73\% left-sided among missing \textit{vs}.\ 31\% among observed; both $p<0.001$), whereas missingness in 3-month MoCA ($p=0.159$), RBANS ($p=0.671$), and ASPECTS ($p=0.183$) did not differ significantly by lesion side (Table~S1).
 
 
 \subsection{Raman spectral characteristics of EV-enriched fractions}
 
-\Cref{fig:subject_spectra} presents the group means of the 147 participant-level median spectra. The spectra exhibit the vibrational profile of a complex, lipid- and protein-rich biological matrix, with bands attributable to nucleic acids, proteins, lipids, and carotenoids. Both groups exhibit similar broad spectral features, with differences distributed across multiple regions.
+Group-mean participant-level spectra exhibited the vibrational profile of a complex, lipid- and protein-rich biological matrix containing bands attributable to nucleic acids, proteins, carbohydrates, lipids, and carotenoids (\cref{fig:subject_spectra}). Both cohorts shared similar broad spectral features, with relative intensity differences distributed across multiple regions.
 
 
 \begin{figure}[htbp] 
@@ -340,16 +324,16 @@ Following preprocessing and spectral aggregation, participant-level Raman profil
 \subcaption{C--H stretching block}
 \label{fig:spectra_ch}
 \end{subfigure}
-\caption{Participant-level mean Raman profiles of circulating EV-enriched fractions (control, $n=50$; ischemic stroke, $n=97$). Each line represents the group mean of one median spectrum per participant, following the two-stage aggregation described in \cref{subsec:preprocessing}, rather than averaging over all measured spectra. Shaded vertical bands mark the curated Raman windows of \cref{tab:raman_bands}, colored by biochemical category; annotated maxima are peak-detection labels rather than fitted band positions. The two blocks were normalized by different procedures, so each is standardized separately for display, and the intensity axis is left unlabelled: values are relative within a block and cannot be compared between blocks.}
+\caption{Participant-level mean Raman profiles of circulating EV-enriched fractions (control, $n=50$; ischemic stroke, $n=97$). Each line represents the group mean of one median spectrum per participant, following the two-stage aggregation described in \cref{subsec:preprocessing}, rather than averaging over all measured spectra. Shaded vertical bands mark the curated Raman windows of \cref{tab:raman_bands}, colored by biochemical category (gray denotes mixed multi-class assignments); annotated maxima are peak-detection labels rather than fitted band positions. Because the two blocks were normalized by different procedures, each is standardized separately for display and numerical tick labels on the normalized intensity axis are omitted: values are relative within a block and cannot be compared between blocks.}
 \label{fig:subject_spectra} 
 \end{figure}
 
 
-The relative contributions of individual Raman bands differed from those frequently reported for EVs in the literature \cite{imanbekova2021, kaminska2022, gualerzi2019, buchan2025}. Plasma-derived EV-enriched fractions contain mixtures of vesicles and co-isolates. To provide a structured description of the observed spectra, we defined 21 Raman windows covering all reproducibly observed bands and shoulders. These windows and their tentative biochemical assignments are summarized in \cref{tab:raman_bands} and form the basis for subsequent analyses.
+Relative band intensities differed from those commonly reported for purer cellular EV preparations \cite{imanbekova2021, kaminska2022, gualerzi2019, buchan2025}, displaying prominent low-wavenumber features (851 and 1060~\si{\per\centi\metre}) and strong lipid CH deformation and stretching bands relative to typical aromatic protein peaks. Because plasma-derived EV-enriched fractions contain mixtures of vesicles and co-isolates, we curated 21 Raman windows covering all reproducibly observed bands and shoulders (\cref{tab:raman_bands}) as a structured basis for subsequent analyses.
 
-The spectra contain contributions from several major biomolecular classes. In brief, nucleic-acid-associated bands are observed at 786, 821, and 925~\si{\per\centi\metre}, together with a PO$_2^-$-related feature at 1112~\si{\per\centi\metre}. Protein-associated features include the $\beta$-sheet-related band at 980~\si{\per\centi\metre}, the amide~III region around 1258~\si{\per\centi\metre}, aromatic amino-acid signatures, and the amide~I band at 1657~\si{\per\centi\metre}. Many of these features partially overlap with lipid-associated vibrations, reflecting the compositional complexity of the measured fractions.
+The spectra contained contributions from several major biomolecular classes. Nucleic-acid-associated bands were observed at 786 and 821~\si{\per\centi\metre}, alongside a mixed carbohydrate, protein, and nucleic-acid feature at 925~\si{\per\centi\metre} and a PO$_2^-$/C--N feature at 1112~\si{\per\centi\metre}. Protein-associated features included the $\beta$-sheet-related band at 980~\si{\per\centi\metre}, the amide~III region around 1258~\si{\per\centi\metre}, aromatic amino-acid signatures (851 and 1555~\si{\per\centi\metre}), and the C=C/amide~I band at 1657~\si{\per\centi\metre}. Many of these features partially overlapped with lipid-associated vibrations, reflecting the compositional complexity of the measured fractions.
 
-Lipid-associated contributions are particularly prominent and include CH$_2$ twisting (1301~\si{\per\centi\metre}), CH$_2$/CH$_3$ deformation bands (1440 and 1465~\si{\per\centi\metre}), carbonyl stretching vibrations (1721 and 1744~\si{\per\centi\metre}; tentatively assigned to more and less hydrogen-bonded C=O groups, respectively), and intense CH stretching modes in the high-wavenumber region. The strong CH deformation and stretching bands at 1465 and 2853~\si{\per\centi\metre} are consistent with a meaningful lipid contribution to the Raman spectra of the EV-enriched fractions. In addition, carotenoid-associated bands were observed at 1156 and 1525~\si{\per\centi\metre}, corresponding to C--C and conjugated C=C stretching vibrations, respectively.
+Lipid-associated contributions were particularly prominent and included CH$_2$ twisting (1301~\si{\per\centi\metre}), CH$_2$/CH$_3$ deformation bands (1440 and 1465~\si{\per\centi\metre}), carbonyl stretching vibrations (1721 and 1744~\si{\per\centi\metre}; tentatively assigned to hydrogen-bonded and ester or weakly hydrogen-bonded C=O groups, respectively), and intense C--H stretching modes in the high-wavenumber region. The strong CH deformation and stretching bands at 1465 and 2853~\si{\per\centi\metre} were consistent with a major lipid contribution to the Raman spectra of the EV-enriched fractions. In addition, carotenoid-associated bands were observed at 1156 and 1525~\si{\per\centi\metre}, corresponding to C--C and conjugated C=C stretching vibrations, respectively.
 
 Peak positions were largely unchanged between cohorts, whereas relative band intensities differed across multiple spectral regions. These differences are examined quantitatively in the following sections.
 
@@ -357,11 +341,11 @@ Peak positions were largely unchanged between cohorts, whereas relative band int
 \subsection{Principal sources of spectral variation}
 \label{subsec:biopca_results}
 
-To identify the spectral regions that contribute most strongly to inter-participant variability, PCA was applied to participant-level spectra. PCA revealed that a small number of components captured most participant-level spectral variation. In the fingerprint region, PC1 and PC2 accounted for 75.8\% and 11.1\% of the variance, respectively, whereas in the C--H region, the corresponding values were 67.1\% and 29.6\%. Following MFA block weighting, the first three joint components accounted for 62.5\%, 25.4\%, and 4.1\% of the variance (92.0\% in total; \cref{fig:biopca}).
+Participant-level PCA showed that a small number of components captured most inter-participant spectral variance. In the fingerprint region, PC1 and PC2 accounted for 75.8\% and 11.1\% of the variance, respectively, whereas in the C--H region, the corresponding values were 67.1\% and 29.6\%. Following MFA block weighting, the first three joint components accounted for 62.5\%, 25.4\%, and 4.1\% of the variance (92.0\% in total; \cref{fig:biopca}).
 
-PCA of the stroke cohort alone produced a similar loading structure, with PC1 accounting for 63.5\% of variance in the fingerprint region, 75.7\% in the C--H region, and 54.1\% after MFA fusion. This consistency suggests that the dominant spectral variance observed in the full cohort is largely preserved within the stroke subgroup.
+PCA of the stroke cohort alone produced a similar loading structure, with PC1 accounting for 63.5\% of variance in the fingerprint region, 75.7\% in the C--H region, and 54.1\% after MFA fusion. This consistency indicates that the dominant spectral variance observed in the full cohort was largely preserved within the stroke subgroup. Downsampling every participant to two mapped areas per block across 500 seeded draws likewise preserved PC1 variance and loadings across all three models (PC1 loading cosine similarity 0.992--1.000; Section~S8).
 
-The largest loadings fell on CH$_2$/CH$_3$ deformation and stretching bands and on a carbonyl-associated band (\cref{fig:biopca}). PC1 loaded with the same sign on the CH$_2$ twisting (1301~\si{\per\centi\metre}), CH$_2$/CH$_3$ deformation (1439~\si{\per\centi\metre}), C=C/amide~I (1657~\si{\per\centi\metre}), and CH$_2$ symmetric stretching (2851~\si{\per\centi\metre}) bands, so these bands varied together across participants. PC2 contrasted the broad C--H stretching region around 2946~\si{\per\centi\metre} with the 1305 and 1439~\si{\per\centi\metre} deformation bands, and the largest PC3 loading lay at the hydrogen-bonded carbonyl band (1721~\si{\per\centi\metre}). Lipid-associated spectral variation was therefore a dominant source of inter-participant variability.
+The largest loadings fell on CH$_2$/CH$_3$ deformation and stretching bands and on a carbonyl-associated band (\cref{fig:biopca}; peak labels indicate loading-extremum wavenumbers corresponding to the curated windows in \cref{tab:raman_bands}). PC1 loaded with the same sign on CH$_2$ twisting (1301~\si{\per\centi\metre}), CH$_2$/CH$_3$ deformation (1439~\si{\per\centi\metre}), C=C/amide~I (1657~\si{\per\centi\metre}), and CH$_2$ symmetric stretching (2851~\si{\per\centi\metre}), contrasted against an opposite-sign loading in the 1051~\si{\per\centi\metre} C--O/C--N region, mirroring the sign structure of the cohort comparison below. PC2 contrasted the broad C--H stretching region around 2946~\si{\per\centi\metre} with the 1305 and 1439~\si{\per\centi\metre} deformation bands, and the largest PC3 loading lay at the hydrogen-bonded carbonyl band (1721~\si{\per\centi\metre}). Lipid-associated spectral variation was therefore the dominant source of inter-participant variability.
 
 
 \begin{figure}[htbp]
@@ -375,13 +359,13 @@ The largest loadings fell on CH$_2$/CH$_3$ deformation and stretching bands and 
 \subsection{Cohort-dependent differences in Raman bands}
 \label{subsec:band_results}
 
-All 21 observed Raman bands and shoulder features showed significant differences between stroke and control participants after correcting for multiple comparisons (\cref{fig:band_effects}). Effect sizes were generally modest to moderate, indicating broad but not extreme spectral differences between cohorts.
+All 21 observed Raman bands and shoulder features differed significantly between stroke and control participants after Benjamini--Hochberg correction ($|r|=0.202$--0.465, all $q\le 0.045$; \cref{fig:band_effects}), with 11 windows higher in stroke (up to $r=+0.465$, $q=5.3\times 10^{-5}$ at 980~\si{\per\centi\metre}) and 10 lower (down to $r=-0.460$, $q=5.3\times 10^{-5}$ at 2853~\si{\per\centi\metre}).
 
-The largest increases in stroke were observed in regions tentatively assigned to $\beta$-sheet-associated vibrations, C--O/C--N modes, PO$_2^-$/C--N vibrations, and carbohydrate-associated C--O--C vibrations. Lower relative intensities were observed in the CH$_2$ symmetric stretching region, the CH$_2$/CH$_3$ scissoring region, the amide I band, and CH$_2$ twisting modes, and in both carotenoid-associated windows (1156 and 1525~\si{\per\centi\metre}).
+The largest increases in stroke were observed in regions tentatively assigned to $\beta$-sheet-associated vibrations (980~\si{\per\centi\metre}), C--O/C--N modes (1060~\si{\per\centi\metre}), PO$_2^-$/C--N vibrations (1112~\si{\per\centi\metre}), and mixed carbohydrate, protein, and nucleic-acid skeletal modes (925~\si{\per\centi\metre}). Lower relative intensities were observed in the CH$_2$ symmetric stretching region (2853~\si{\per\centi\metre}), the CH$_2$/CH$_3$ scissoring region (1440~\si{\per\centi\metre}), the C=C/amide~I region (1657~\si{\per\centi\metre}), CH$_2$ twisting modes (1301~\si{\per\centi\metre}), and both carotenoid-associated windows (1156 and 1525~\si{\per\centi\metre}).
 
-The observed pattern was not consistent with a uniform increase or decrease in lipid-associated signals. Whereas the lipid C--C and carbonyl-associated regions showed higher relative intensities in stroke participants, several CH$_2$- and ester-associated regions showed lower values.
+The observed pattern was not consistent with a uniform increase or decrease across all lipid-assigned bands. Whereas the lipid C--C (1089~\si{\per\centi\metre}) and hydrogen-bonded carbonyl (1721~\si{\per\centi\metre}) regions showed higher relative intensities in stroke participants, several CH$_2$- and ester-associated carbonyl (1744~\si{\per\centi\metre}) regions showed lower values.
 
-Stroke-control separation, therefore, reflects compositional differences spread over multiple overlapping Raman domains rather than a change in a single molecular component. Because the 21 spectral features were derived from broad, chemically overlapping bands and shoulders observed directly in the participant-level spectra, they represent correlated aspects of the same underlying spectral structure rather than independent biological markers.
+Two methodological constraints govern the interpretation of this 21-window profile. First, because SNV normalization (zero mean, unit variance) and area normalization (unit integral) impose closure constraints across each block, a shift in one dominant spectral component (such as lower relative lipid CH$_2$ and C=C intensity) mathematically induces compensating opposite-sign relative shifts across remaining windows; thus, statistical significance across all 21 windows reflects correlated whole-spectrum redistribution rather than 21 independent molecular changes. Second, these univariate Mann--Whitney comparisons are unadjusted for sex, age, and clinical covariates and therefore describe overall cohort contrast rather than covariate-independent disease effects.
 
 
 \begin{figure}[htbp]
@@ -394,12 +378,12 @@ Stroke-control separation, therefore, reflects compositional differences spread 
 \subsection{Case-control classification} 
 \label{subsec:cvd_ml}
 
-Whole-spectrum and window-based classifiers showed broadly similar performance in distinguishing stroke and control participants. The primary whole-spectrum PLS-DA model achieved a balanced accuracy of 0.655 (95\% CI 0.538--0.771) and a ROC-AUC of 0.711 (95\% CI 0.550--0.823). Random-forest models produced somewhat higher point estimates, whereas $L_1$-regularized logistic regression yielded slightly lower performance. However, the confidence intervals largely overlapped, and no formal comparison demonstrated the superiority of any individual classifier. Detailed classification metrics are provided in Section~S6.1 of the SI.
+Whole-spectrum and 21-window classifiers showed broadly similar performance in distinguishing stroke and control participants. The primary whole-spectrum PLS-DA model achieved a balanced accuracy of 0.655 (95\% CI 0.538--0.771) and a ROC--AUC of 0.711 (95\% CI 0.550--0.823). Whole-spectrum random forest yielded higher point estimates (balanced accuracy 0.729, 95\% CI 0.586--0.835; ROC--AUC 0.818, 95\% CI 0.701--0.911), whereas $L_1$-penalized logistic regression yielded lower performance (balanced accuracy 0.626, 95\% CI 0.500--0.738; ROC--AUC 0.667, 95\% CI 0.482--0.782) and shifted across the 0.05 significance threshold under sex-stratified versus unrestricted permutation ($p=0.066$ \textit{vs}.\ $p=0.040$). Confidence intervals largely overlapped, and no paired test established superiority of any individual classifier. Detailed metrics for all six model--representation combinations are provided in Section~S6.1 and Table~S2 of the SI.
 
-Permutation testing indicated that the observed discrimination exceeded that expected by chance (Table~S2; \cref{fig:cvd_classifier_performance}). Whole-spectrum and 21-window models produced comparable results, suggesting that the information supporting case-control separation is distributed across the broader spectral profile rather than confined to a small number of isolated Raman bands.
+Sex-stratified permutation testing indicated that discrimination by the primary PLS-DA model exceeded chance on the locked five-fold partition (balanced accuracy 0.656, $p=0.005$, $q=0.0075$, $B=200$ draws; Table~S2 and \cref{fig:cvd_classifier_performance}). Whole-spectrum and 21-window models produced comparable results, consistent with case-control information being distributed across the broader spectral profile rather than confined to isolated bands; however, the 21-window models reused the same participants and do not provide independent validation.
 
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
@@ -414,79 +398,78 @@ Permutation testing indicated that the observed discrimination exceeded that exp
 \subcaption{Permutation distribution}
 \label{fig:cvd_permutation_null}
 \end{subfigure}
-\caption{Case-control classification evidence for the whole-spectrum representation ($n=147$). \subref{fig:cvd_roc} repeat-averaged ROC curves for the three whole-spectrum classifiers; \subref{fig:cvd_permutation_null} sex-stratified permutation distribution for the primary PLS-DA model, with the repeated-cross-validation balanced accuracy marked.}
+\caption{Case-control classification evidence for the whole-spectrum representation ($n=147$). \subref{fig:cvd_roc} repeat-averaged ROC curves for the three whole-spectrum classifiers; shading around PLS-DA shows $\pm 1.96$ standard errors across the 10 cross-validation repeats (describing split variation rather than a participant-level confidence interval). \subref{fig:cvd_permutation_null} sex-stratified permutation distribution ($B=200$ draws) for the primary PLS-DA model; the vertical line marks the 10-repeat mean balanced accuracy (0.655), whereas $p=0.005$ evaluates the locked-partition statistic (0.656; Section~S6.1).}
 \label{fig:cvd_classifier_performance}
 \end{figure}
 
 
-The observed discrimination should nevertheless be interpreted cautiously. The ROC--AUC confidence interval of the primary model remained relatively wide, indicating uncertainty in the precise magnitude of the effect. The findings support a modest but reproducible spectral difference between stroke and control participants.
+The observed discrimination should nevertheless be interpreted cautiously. The ROC--AUC confidence interval of the primary model remained wide (0.550--0.823), indicating substantial uncertainty in the precise magnitude of separation.
 
-
-Sex distribution differed between cohorts and, therefore, represented a potential confounding factor. To assess its influence, additional analyses were performed using only female participants and via sex-stratified permutation testing. The female-only PLS-DA model (45 stroke, 40 control) achieved a balanced accuracy of 0.645 and a ROC--AUC of 0.712, indicating that the spectral signal remained detectable when sex was held constant. Additional geometric analyses of the disease- and sex-discriminant directions further suggested that sex contributed to, but did not fully account for, the observed case-control separation. Residual confounding, therefore, remains possible but is unlikely to fully explain the classification performance. Additional confound diagnostics are provided in Section~S6.2 of the SI.
+Because sex distribution differed strongly between cohorts, we compared the primary model against female-only modeling, a sex-only baseline, and directional overlap diagnostics. The female-only PLS-DA model (45 stroke, 40 control) achieved a balanced accuracy of 0.645 and a ROC--AUC of 0.712, whereas a sex-only logistic regression baseline on the full cohort reached a balanced accuracy of 0.668 and a ROC--AUC of 0.634 (a male-only model was not fitted because only 10 male controls were available). Thus, sex alone matched or slightly exceeded the primary model's balanced accuracy, whereas the spectral model retained higher rank discrimination overall and within female participants and passed sex-stratified permutation testing ($p=0.005$). Descriptive full-cohort comparison of disease- and sex-discriminant PLS directions showed partial overlap (cosine similarity 0.40; Section~S6.2) without bounding residual confounding. Additional confound diagnostics are provided in Section~S6.2 of the SI.
 
 
 \subsection{Clinical association and prediction analyses} \label{subsec:clinical_results}
 
-To determine whether the observed Raman signatures carried clinically relevant information, we investigated associations between participant-level spectra and measures of cognitive performance, stroke severity, and age. Across the fingerprint and C--H stretching regions, no spectral feature showed a statistically significant association with any clinical endpoint after correction for multiple comparisons. No spectral region was supported simultaneously by the channel-wise and cluster-based analyses.
+To determine whether the observed Raman signatures carried clinically relevant information, we investigated associations between participant-level spectra and measures of cognitive performance, stroke severity, and age. Across the fingerprint and C--H stretching regions, no spectral feature showed a statistically significant association with any clinical endpoint or with age after correction for multiple comparisons, and no spectral region was supported simultaneously by the channel-wise FDR and cluster-mass permutation analyses.
 
-Visual inspection of the channel-wise correlation maps revealed diffuse, low-magnitude associations distributed across the spectrum rather than coherent endpoint-specific Raman signatures (\cref{fig:clinical_candidates,fig:clinical_channelwise}). Although age showed the most structured spectral pattern, it also failed to survive multiplicity correction. Raman spectroscopy thus detected biochemical differences between the stroke and control cohorts but identified no spectral feature associated with a clinical outcome measure after multiple-testing correction within the stroke cohort.
+Visual inspection of the channel-wise correlation maps revealed diffuse, low-magnitude associations distributed across the spectrum rather than coherent endpoint-specific Raman signatures (\cref{fig:clinical_candidates,fig:clinical_channelwise}). Raman spectroscopy thus detected cohort-level differences between stroke and control groups but identified no spectral feature associated with clinical outcomes or age after multiple-testing correction within the stroke cohort.
 
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
-\begin{subfigure}[t]{0.48\textwidth}
+\begin{subfigure}[t]{0.45\textwidth}
 \centering
 \includegraphics[width=\linewidth]{figures/clinical_null_candidates.pdf}
 \subcaption{Candidate regions}
 \label{fig:clinical_candidates}
 \end{subfigure}%
 \hspace{0.02\textwidth}%
-\begin{subfigure}[t]{0.48\textwidth}
+\begin{subfigure}[t]{0.45\textwidth}
 \centering
 \includegraphics[width=\linewidth]{figures/clinical_null_channelwise.pdf}
 \subcaption{Channel-wise correlation}
 \label{fig:clinical_channelwise}
 \end{subfigure}
 
-\vspace{0.7em}
+\vspace{0.4em}
 
-\begin{subfigure}[t]{0.48\textwidth}
+\begin{subfigure}[t]{0.45\textwidth}
 \centering
 \includegraphics[width=\linewidth]{figures/clinical_null_moca.pdf}
 \subcaption{MoCA prediction versus permutations}
 \label{fig:clinical_moca}
 \end{subfigure}%
 \hspace{0.02\textwidth}%
-\begin{subfigure}[t]{0.48\textwidth}
+\begin{subfigure}[t]{0.45\textwidth}
 \centering
 \includegraphics[width=\linewidth]{figures/clinical_null_entropy.pdf}
 \subcaption{Spectral entropy}
 \label{fig:clinical_entropy}
 \end{subfigure}
-\caption{Within-stroke clinical association and prediction analyses. \subref{fig:clinical_candidates} maximum absolute uncorrected effect size per candidate region; \subref{fig:clinical_channelwise} uncorrected channel-wise Spearman $\rho$, fingerprint block; \subref{fig:clinical_moca} observed cross-validated $R^2$ against each endpoint's permuted-label distribution; \subref{fig:clinical_entropy} per-participant spectral-entropy distribution, fingerprint block.}
+\caption{Within-stroke clinical association and prediction analyses. \subref{fig:clinical_candidates} maximum absolute uncorrected effect size per fallback candidate region across all six endpoints (1300 block: fingerprint; 2850 block: C--H stretch; none survived multiplicity correction); \subref{fig:clinical_channelwise} uncorrected channel-wise Spearman $\rho$, fingerprint block; \subref{fig:clinical_moca} observed cross-validated $R^2$ against each endpoint's permuted-label distribution; \subref{fig:clinical_entropy} per-participant spectral-entropy distribution, fingerprint block (no endpoint association survived multiplicity correction).}
 \label{fig:clinical_null}
 \end{figure}
 
 
 For completeness, a descriptive comparison of participant-level spectra from participants at the mild and severe extremes of the stroke-severity distribution is presented in Section~S7.1 of the SI; however, no statistically supported severity-associated spectral pattern was identified.
 
-\Cref{fig:clinical_moca} compares the observed cross-validated $R^2$ values with distributions obtained by permuting endpoint labels. For all three MoCA endpoints, the observed values fell within the range obtained after permutation, consistent with the non-significant tests in Table~S3. Negative $R^2$ values indicate worse held-out prediction than an outcome-mean reference. The models did not support prediction of cognitive outcome in this cohort; these results do not establish that clinical associations are absent.
+\Cref{fig:clinical_moca} compares the observed cross-validated $R^2$ values with distributions obtained by permuting endpoint labels. Cross-validated $R^2$ was negative for all three MoCA endpoints (baseline MoCA: $R^2=-0.335$, $n=72$, $p_{\mathrm{Holm}}=1.000$; 3-month MoCA: $R^2=-0.067$, $n=92$, $p_{\mathrm{Holm}}=0.642$; $\Delta$MoCA: $R^2=-0.403$, $n=71$, $p_{\mathrm{Holm}}=1.000$; Table~S3), falling within the permuted-label distributions and indicating worse held-out prediction than an outcome-mean reference. These models did not support prediction of cognitive outcome in this cohort, although negative findings do not establish that clinical associations are absent.
 
-The lack of within-cohort associations after multiple-testing correction contrasts with the reproducible case-control differences described above. This suggests that Raman spectroscopy is sensitive to biochemical differences between groups but, in its present form and within the limitations of the available cohort, does not provide a clinically useful prediction of cognitive outcome. Together with the case-control results, these findings indicate that the observed Raman differences primarily reflect broad biochemical variation between cohorts rather than spectral signatures directly linked to stroke severity or cognitive recovery. Further studies using larger cohorts and complementary molecular techniques may help determine whether the spectral differences identified in this work contain clinically relevant information beyond that detectable in the present dataset.
+The absence of corrected within-stroke associations contrasts with the cohort-level case-control differences described above: within the available sample sizes and measurement protocol, Raman differences primarily captured broad group-level variation rather than individual stroke severity or cognitive trajectory.
 
-A post hoc analysis of 10 biochemically motivated spectral descriptors likewise did not identify any significant associations with clinical outcomes, as all 95\% confidence intervals included zero (Section~S7.3 of the SI).
+A post hoc analysis of 10 tentatively assigned spectral descriptors likewise identified no supported association with clinical outcomes, with all 95\% bootstrap confidence intervals including zero; the designated 1525/1721~\si{\per\centi\metre} carotenoid-to-carbonyl ratio showed no association with $\Delta$MoCA (age- and sex-adjusted partial Spearman $\rho=0.005$, 95\% CI $[-0.255,\,0.277]$, $p=0.965$, $n=71$; Section~S7.3 of the SI).
 
-We also examined unsupervised spectral descriptors derived using non-negative matrix factorization (NMF) and spectral entropy. Neither approach yielded significant associations with clinical outcomes after multiple-testing correction. These findings agree with the channel-wise, PLS-based, and biochemical-panel analyses, but use the same participants and do not provide independent replication. Section~S7.4 of the SI gives details.
+We also examined unsupervised spectral descriptors derived using NMF and Shannon spectral entropy (\cref{fig:clinical_entropy}). Neither approach yielded significant associations with clinical outcomes after multiple-testing correction (NMF max $|\rho|=0.102$, $q=0.883$; entropy and Gini dispersion max $|\rho|=0.093$, all $q>0.94$). These checks agree with the channel-wise, PLS-based, and fixed-panel analyses, but reuse the same participants and do not provide independent replication (Section~S7.4 of the SI).
 
 
 \subsection{Integrated interpretation} 
 \label{subsec:interpretation}
 
-The main findings concern participant-level inference and spectral differences between cohorts. By treating the participant, rather than individual spectra, as the inferential unit, broad lipid-associated variation and modest case-control differences were detected without artificially inflating the apparent sample size through pseudoreplication. The observed case-control signal was distributed across multiple correlated Raman domains, with directionality varying even among lipid-associated regions. The data therefore support a participant-level spectral pattern rather than implicating a single molecular pathway or a uniform change in lipid, protein, or carotenoid content.
+The main findings concern participant-level inference and spectral differences between cohorts. By treating the participant, rather than individual spectra, as the inferential unit, broad lipid-associated variation and modest case-control differences were detected without artificially inflating the apparent sample size through pseudoreplication. The observed case-control signal was distributed across multiple correlated Raman domains, with directionality varying even among lipid-associated regions. Because block normalization couples relative band intensities, the data support a correlated participant-level spectral pattern rather than implicating a single molecular pathway or a uniform change in lipid, protein, or carotenoid content.
 
-The observed gap between the random forest and the pre-specified primary PLS-DA model in \cref{fig:cvd_classifier_performance} further supports this interpretation. A higher-capacity model can more readily exploit combinations of disease signal and residual confounding present in an unmatched, sex-imbalanced cohort; therefore, a larger AUC does not necessarily indicate a stronger or more specific biological signal.
+The observed gap between random forest and the pre-specified primary PLS-DA model in \cref{fig:cvd_classifier_performance} further supports a cautious interpretation. A higher-capacity nonlinear model can more readily exploit combinations of disease signal, residual confounding in an unmatched, sex-imbalanced cohort, and unequal technical-noise variance arising from the six-versus-three mapped-area imbalance; therefore, a larger ROC--AUC does not necessarily indicate a stronger or more specific biological signal.
 
-The lack of predictive power for within-stroke clinical outcomes is similarly informative. A spectral signature that distinguishes unmatched groups does not necessarily reflect variation in cognitive status or recovery among patients. One possible explanation is that circulating EV-enriched fractions represent heterogeneous mixtures of vesicles and co-isolates, potentially diluting minor brain-derived contributions \cite{liu2025}. Additional factors may include limited endpoint-specific sample sizes, missing data, biological variability, and residual confounding. The current data do not permit discrimination among these possibilities; therefore, brain origin, systemic response, oxidative stress, platelet activation, and endothelial turnover remain hypotheses rather than established conclusions.
+The lack of predictive power for within-stroke clinical outcomes is similarly informative. A spectral signature that distinguishes unmatched groups does not necessarily reflect variation in cognitive status or recovery among patients. One possible explanation is that circulating EV-enriched fractions represent heterogeneous mixtures of vesicles and co-isolates, potentially diluting minor brain-derived contributions \cite{liu2025}. Additional factors include limited endpoint-specific sample sizes ($n=62$--92 across 1,802 channels, restricting power for small-to-moderate effects), missing data, biological variability, and residual confounding. The current data do not permit discrimination among these possibilities; therefore, brain origin, systemic response, oxidative stress, platelet activation, and endothelial turnover remain hypotheses rather than established conclusions.
 
 
 \subsection{Limitations} 
@@ -494,25 +477,25 @@ The lack of predictive power for within-stroke clinical outcomes is similarly in
 
 Several limitations should be considered when interpreting the present findings. First, this was a single-cohort observational study without an external validation set; therefore, the observed classification performance cannot establish diagnostic generalizability.
 
-Second, the cohort was not matched, with significant sex imbalance and largely unavailable age information for the control group. Although female-only and sex-stratified analyses suggested that sex does not fully account for the observed spectral differences, residual confounding cannot be ruled out.
+Second, the cohort was not matched, with significant sex imbalance and largely unavailable age information for controls in the linked analysis dataset. Although female-only and sex-stratified analyses indicated that sex alone does not account for all rank discrimination, a sex-only baseline matched the primary model's balanced accuracy, and residual confounding cannot be ruled out. In addition, acute clinical and pre-analytical factors (including fasting status, acute-phase inflammation, hospitalization, chronic or acute medications such as statins and antithrombotics, and vascular comorbidities) likely differed between acute stroke patients and controls and were not adjusted for. Moreover, limited control availability prevented consistent cohort and sex balance across Raman measurement sessions (\cref{subsec:acquisition}), leaving session-level instrument drift unmodeled.
 
-Third, SEC isolation and particle counting do not establish EV identity, purity, or cellular origin. Contributions from lipoproteins and other co-isolated particles, therefore, remain plausible, and the recovery-purity balance of SEC depends strongly on column resin pore size \cite{bracht2024}. In addition, Raman bands are broad and chemically overlapping, and spectral normalization renders all window comparisons relative rather than absolute. Spectra were acquired from the coffee-ring region of dried droplets, where drying-driven segregation can enrich some components relative to others; ring composition may therefore differ from that of the bulk fraction, and sample-to-sample differences in drying behavior may contribute to spectral variance. Molecular interpretations should therefore be regarded as tentative and require validation using complementary analytical techniques.
+Third, SEC isolation and particle counting do not establish EV identity, purity, or cellular origin. Contributions from lipoproteins and other co-isolated particles, therefore, remain plausible, and the recovery-purity balance of SEC depends strongly on column resin pore size \cite{bracht2024}. In addition, Raman bands are broad and chemically overlapping, and SNV and area normalization render all window comparisons relative rather than absolute while coupling intensities across windows through variance and area constraints. Spectra were acquired from the coffee-ring region of dried droplets, where drying-driven segregation can enrich some components relative to others; ring composition may therefore differ from that of the bulk fraction, and sample-to-sample differences in drying behavior may contribute to spectral variance. Molecular interpretations should therefore be regarded as tentative and require validation using complementary analytical techniques.
 
-Finally, the clinical analyses were limited by endpoint-specific missing data and relatively small sample sizes. Missing cognitive outcomes were disproportionately associated with left-hemisphere lesions (Table~S1), consistent with aphasia preventing administration of verbally based cognitive assessments. As a result, the within-stroke analyses may underrepresent participants with language-dominant injury, potentially obscuring clinically relevant spectral variation.
+Finally, the clinical analyses were limited by endpoint-specific missing data and modest complete-case sample sizes ($n=62$--92), which limit power to detect small-to-moderate associations. Missing baseline MoCA ($25/97$) and $\Delta$MoCA ($26/97$) scores, though not RBANS ($p=0.671$) or 3-month MoCA ($p=0.159$), were disproportionately associated with left-hemisphere lesions (Table~S1), consistent with aphasia preventing administration of verbally based acute cognitive assessments. As a result, the baseline and longitudinal MoCA analyses underrepresent participants with language-dominant injury, potentially obscuring clinically relevant spectral variation.
 
-Additional sensitivity analyses addressing measurement-count imbalance are provided in Section~S8 of the SI.
+Sensitivity analyses addressing measurement-count imbalance confirmed PC1 stability under two-area downsampling (Section~S8 of the SI), but did not extend to classification models, univariate band comparisons, or clinical analyses.
 
 
 \section{Conclusions} 
 \label{sec:conclusions}
 
-Participant-level Raman spectroscopy of circulating EV-enriched fractions revealed reproducible spectral differences between ischemic stroke participants and controls despite the use of a heterogeneous clinical cohort, SEC-derived EV-enriched fractions, and a rapid, accessible, label-free measurement approach. These differences were distributed across multiple correlated Raman domains rather than being driven by a single dominant spectral feature. Lipid-associated regions accounted for a large proportion of the observed inter-participant variance, while protein-, nucleic-acid-, and carotenoid-associated features also contributed to the overall spectral profile. The persistence of these patterns despite cohort imbalance, incomplete clinical information, and the compositional complexity of SEC-derived fractions suggests that Raman spectroscopy can detect biologically meaningful variation in complex circulating particle populations even in the absence of highly specific molecular characterization.
+Participant-level Raman spectroscopy of circulating EV-enriched fractions detected consistent within-cohort spectral differences between ischemic stroke participants and controls using SEC-derived EV-enriched fractions and a rapid, label-free measurement approach. These differences were distributed across multiple correlated Raman domains rather than driven by a single isolated spectral feature. Lipid-associated regions accounted for most inter-participant spectral variance, while protein-, carbohydrate-, nucleic-acid-, and carotenoid-associated features also contributed to the overall spectral profile. Because group-level differences persisted under sex-stratified permutation testing and female-only modeling, yet remain vulnerable to unmeasured age, clinical, and session-level confounding, these results show that participant-level Raman spectroscopy captures systematic compositional variation in SEC-derived fractions while requiring validation in balanced cohorts before attributing disease specificity.
 
-Although a primary PLS-DA model achieved modest separation between stroke and control participants, cohort imbalance, residual confounding, and the absence of external validation preclude diagnostic interpretation. Within the stroke cohort, no associations between Raman profiles and cognitive outcomes survived multiple-testing correction, and predictive models did not demonstrate clinically useful prognostic capability.
+Although the primary PLS-DA model achieved modest separation between stroke and control participants, cohort imbalance, residual confounding, and the absence of external validation preclude diagnostic interpretation. Within the stroke cohort, no associations between Raman profiles and clinical or cognitive outcomes survived multiple-testing correction, and predictive models did not support cognitive prognosis.
 
-The reproducible spectral differences in lipid-, protein-, nucleic acid-, and carotenoid-associated regions nonetheless provide a defined starting point for future work. Rather than establishing biomarkers, this study restricts the set of spectral domains that merit validation by orthogonal molecular approaches.
+The observed spectral differences in lipid-, protein-, carbohydrate-, nucleic-acid-, and carotenoid-associated regions nonetheless provide a defined starting point for future work. Rather than establishing biomarkers, this study narrows the set of spectral domains that merit validation by orthogonal molecular approaches.
 
-Future studies should evaluate whether the spectral differences identified here can be reproduced in age- and sex-balanced cohorts and validated across independent sites and instrument platforms. Establishing biological specificity will require orthogonal characterization of EV-enriched fractions, molecular profiling, and targeted biochemical validation of the tentative Raman assignments. Because large longitudinal cohorts, balanced recruitment, and complete molecular profiling are costly and slow, Raman spectroscopy may be useful upstream to identify candidate biochemical targets before more resource-intensive investigations are undertaken. Such studies will be required to determine whether the participant-level spectral patterns observed here contain reproducible source-specific, prognostic, or clinically relevant information beyond that detectable in the present dataset.
+Future studies should evaluate whether the spectral patterns identified here reproduce in age- and sex-balanced cohorts matched for pre-analytical and clinical covariates and validate across independent sites and instrument platforms. Establishing biological specificity will require orthogonal characterization of EV-enriched fractions, molecular profiling, and targeted biochemical validation of the tentative Raman assignments. Once validated in balanced cohorts, label-free Raman spectroscopy may serve as an upstream screening tool to prioritize candidate biochemical domains for targeted molecular assays and to test whether these participant-level profiles carry source-specific or prognostic information beyond that detectable in the present dataset.
 
 \section*{Data Availability}
 
@@ -534,9 +517,10 @@ The Jagiellonian University Ethical Committee approved the IBioStroke protocol (
 \textbf{Data curation:} Emanuele Nardone and Tuomas Kilpeläinen;
 \textbf{Visualization:} Emanuele Nardone and Nikita Belko;
 \textbf{Writing---original draft:} Emanuele Nardone and Nikita Belko;
-\textbf{Writing---review and editing:} Emanuele Nardone, Nikita Belko, Emma Gribchenko, Pia Damlin, and Polina Kuzhir;
+\textbf{Writing---review and editing:} Emanuele Nardone, Nikita Belko, Aurel Popa-Wagner, Emma Gribchenko, Pia Damlin, and Polina Kuzhir;
 \textbf{Resources:} Clinical plasma samples were collected at the clinic of Agnieszka Słowik;
-\textbf{Sample preparation and experimental support:} Olga Neustroeva, Nikolaus Plesnila, Saara Zini, Pia Damlin, and Emma Gribchenko;
+\textbf{Participant recruitment:} Aurel Popa-Wagner;
+\textbf{Sample preparation and experimental support:} Olga Neustroeva, Nikolaus Plesnila, Aurel Popa-Wagner, Saara Zini, Pia Damlin, and Emma Gribchenko;
 \textbf{Supervision:} Tarja Malm and Polina Kuzhir.
 
 
@@ -549,6 +533,7 @@ The authors declare no competing interests.
 This work was supported by the Research Council of Finland (PREIN Flagship no. 368653) and the Academy of Finland flagship GeneCellNano (project no. 323669).
 
 
+\FloatBarrier
 \bibliographystyle{elsarticle-num} \bibliography{cas-refs}
 
 \end{document}
